@@ -1,0 +1,165 @@
+{
+  "version": 1,
+  "skills": {
+    "animate": {
+      "source": "emilkowalski/skills",
+      "sourceType": "github",
+      "skillPath": "skills/animate/SKILL.md",
+      "computedHash": "f76ddd3d4446c3c56a143ea98650c370b3e8f88e6203d1e22082d2082bf1eed7"
+    },
+    "automotive-battery-bms-engineer": {
+      "source": "dubgyd/automotive-antigravity-agents",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/automotive-battery-bms-engineer/SKILL.md",
+      "computedHash": "b9496ecbd955b4f0cfac2f8ef8e411ddf366cf8b23b0fe627bf2fd904fd2e3b7",
+      "installMode": "copy"
+    },
+    "automotive-battery-charging-engineer": {
+      "source": "dubgyd/automotive-antigravity-agents",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/automotive-battery-charging-engineer/SKILL.md",
+      "computedHash": "740ca92798b239e2759bb9b47df12bf6d836603a7839e9f8e114dc315aa22d4e",
+      "installMode": "copy"
+    },
+    "automotive-embedded-skills": {
+      "source": "Washabii14/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/automotive-embedded-skills/SKILL.md",
+      "computedHash": "addc4d8cb28bfcc9d7a730f27d3fe54947e3d566c9041dfd2dea5ed2df19f1e8",
+      "installMode": "copy"
+    },
+    "automotive-ev-systems-charging-infrastructure-engineer": {
+      "source": "dubgyd/automotive-antigravity-agents",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/automotive-ev-systems-charging-infrastructure-engineer/SKILL.md",
+      "computedHash": "10f35d8339e4c909475a6d343bada90eb0c8e377c71ac0142d3b704b043267ca",
+      "installMode": "copy"
+    },
+    "automotive-testing-hil-test-engineer": {
+      "source": "dubgyd/automotive-antigravity-agents",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/automotive-testing-hil-test-engineer/SKILL.md",
+      "computedHash": "bf7eabe4fbce0222f82fdb0e7fa28992f889b38eacee01c8c328da07bdaa2886",
+      "installMode": "copy"
+    },
+    "can-bus-industrial": {
+      "source": "rahulbachina/robotics-skills",
+      "sourceType": "github",
+      "skillPath": "skills/hardware-pro/can-bus-industrial/SKILL.md",
+      "computedHash": "3a0ec3acb9cd3a34e60b47f44ae1d9e46453cb477431868e6d9a8af1e7dc3d57",
+      "installMode": "copy"
+    },
+    "canbus-integration": {
+      "source": "easyzoom/aix-skills",
+      "sourceType": "github",
+      "skillPath": "skills/canbus-integration/SKILL.md",
+      "computedHash": "a078ff1826c1fc60e3f1620533410e343cb194d44e265b854cd8a991f9364119",
+      "installMode": "copy"
+    },
+    "canopen-integration": {
+      "source": "easyzoom/aix-skills",
+      "sourceType": "github",
+      "skillPath": "skills/canopen-integration/SKILL.md",
+      "computedHash": "ac2f8ae8ed0b0fa97c63295cdf28c3f7df438b7021d8e0ddb4fd0833b4fd30f5",
+      "installMode": "copy"
+    },
+    "cansub-knowledge": {
+      "source": "CSS-Electronics/can-bus-reverse-engineering-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/cansub-knowledge/SKILL.md",
+      "computedHash": "3290ab06b4191baf0430211776fdb9892bd0794b1cade8efef098ad6dee7feef",
+      "installMode": "copy"
+    },
+    "cansub-reverse-engineering": {
+      "source": "CSS-Electronics/can-bus-reverse-engineering-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/cansub-reverse-engineering/SKILL.md",
+      "computedHash": "57f14f81d1734a15f15fedc62f3d5c10ee360025c9d721263571768b49d8fe1e",
+      "installMode": "copy"
+    },
+    "combine-dbc": {
+      "source": "CSS-Electronics/can-bus-reverse-engineering-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/combine-dbc/SKILL.md",
+      "computedHash": "f6f6214cba5a1cfe28c423820604edeff996a4625b9cb159f024c5a4693f6836",
+      "installMode": "copy"
+    },
+    "connectivity-usb-can": {
+      "source": "beriberikix/zephyr-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/connectivity-usb-can/SKILL.md",
+      "computedHash": "25428c0db64a7d7a8c93cc8821ceb59111796341bed49b1a129a9e3195dac8af",
+      "installMode": "copy"
+    },
+    "matlab-import-export-vehicle-data": {
+      "source": "matlab/matlab-agentic-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills-catalog/test-and-measurement/matlab-import-export-vehicle-data/SKILL.md",
+      "computedHash": "297966afb03a258f70dcd2939d22dd82c3fee0f3a0214852e4fa1c2da53733ff",
+      "installMode": "copy"
+    },
+    "matlab-use-vehicle-network": {
+      "source": "matlab/matlab-agentic-toolkit",
+      "sourceType": "github",
+      "skillPath": "skills-catalog/test-and-measurement/matlab-use-vehicle-network/SKILL.md",
+      "computedHash": "09953d714ea262d342db915484185ae3c106ceba15aabdf8d95d5cb13fb68944",
+      "installMode": "copy"
+    },
+    "re-automotive": {
+      "source": "dslsdzc/rev-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/re-automotive/SKILL.md",
+      "computedHash": "6ea9ba96031e24622849d3eb5fbc8e1a004d6d32f317da8a07f8addef239955b",
+      "installMode": "copy"
+    },
+    "rust-concurrency": {
+      "source": "huiali/rust-skills",
+      "sourceType": "github",
+      "skillPath": "skills/rust-concurrency/SKILL.md",
+      "computedHash": "8239e1de8f06e7843071e5627f2ca826df381ee47fd389a17419361aec658306",
+      "installMode": "copy"
+    },
+    "rust-skill": {
+      "source": "huiali/rust-skills",
+      "sourceType": "github",
+      "skillPath": "skills/rust-skill/SKILL.md",
+      "computedHash": "e0be188fc2f56505702e5e81205bf1dcd3a726a7c8c2fe1d6acca869b1a938ec",
+      "installMode": "copy"
+    },
+    "tauri": {
+      "source": "full-stack-skills/tauri-skills",
+      "sourceType": "github",
+      "skillPath": "skills/tauri/SKILL.md",
+      "computedHash": "e63ccff10ceaabf72506a2613b86c1c3e310152c1548b34b6614a7eb539c6f3a",
+      "installMode": "copy"
+    },
+    "tauri-build": {
+      "source": "full-stack-skills/tauri-skills",
+      "sourceType": "github",
+      "skillPath": "skills/tauri-build/SKILL.md",
+      "computedHash": "8132c960bdf93a247b297edc6a2dc16408670339d3bc3326489558d0d6f66bec",
+      "installMode": "copy"
+    },
+    "tauri-ipc": {
+      "source": "full-stack-skills/tauri-skills",
+      "sourceType": "github",
+      "skillPath": "skills/tauri-ipc/SKILL.md",
+      "computedHash": "1de5fcef985c56df5bcd21e147281d34211dc061ca7e17b171900fd7573a4243",
+      "installMode": "copy"
+    },
+    "tauri-security": {
+      "source": "full-stack-skills/tauri-skills",
+      "sourceType": "github",
+      "skillPath": "skills/tauri-security/SKILL.md",
+      "computedHash": "ae6038bc9ddf61328e85928143318c463b12644012091fc5f7f2d91211a7bb06",
+      "installMode": "copy"
+    },
+    "tauri-v2": {
+      "source": "nodnarbnitram/claude-code-extensions",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/tauri-v2/SKILL.md",
+      "computedHash": "377c61c46cf48c35b942042bc8abb9a039049a47f37d7f12b4f491d012777490",
+      "installMode": "copy"
+    }
+  }
+}

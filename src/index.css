@@ -1,0 +1,473 @@
+@import "tailwindcss";
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-app: #131518;
+  --bg-panel: #171A1E;
+  --bg-header: #1D2126;
+  --bg-toolbar: #1B1E23;
+  --bg-strip: #1E2228;
+  --bg-row-alt: #1A1D22;
+  --bg-row-signal: #15181C;
+  --bg-row-hover: #22272E;
+  --bg-row-selected: #1F2D3D;
+  --bg-input: #121417;
+  --border-grid: #242930;
+  --border-strong: #313741;
+  --text-primary: #D8DEE6;
+  --text-secondary: #9099A6;
+  --text-muted: #636C78;
+  --bg-changed: rgba(46, 160, 67, 0.18);
+  --text-changed: #8CE09A;
+  --tag-cc-bg: transparent;
+  --tag-cc-text: #9099A6;
+  --tag-cc-border: #2C323B;
+  --tag-fd-bg: rgba(56, 139, 253, 0.10);
+  --tag-fd-text: #6CB6FF;
+  --tag-fd-border: rgba(56, 139, 253, 0.28);
+  --tag-j1939-bg: rgba(210, 153, 34, 0.10);
+  --tag-j1939-text: #E3B341;
+  --tag-j1939-border: rgba(210, 153, 34, 0.28);
+  --scrollbar-track: #131518;
+  --scrollbar-thumb: #2D333B;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* Shared NexusCANCloud Simulation & Instrument Design Tokens (1:1 Match) */
+  --bg-canvas: #121417;
+  --bg-surface: #16191e;
+  --bg-elevated: #1b1f25;
+  --bg-hover: #21262e;
+  --bg-scrim: rgba(10, 12, 15, 0.8);
+  --border-hairline: #262b33;
+  --text-ink: #dce2ea;
+  --text-subtle: #5d6673;
+
+  --status-nominal: #2ea043;
+  --status-nominal-bg: rgba(46, 160, 67, 0.12);
+  --status-nominal-border: rgba(46, 160, 67, 0.34);
+
+  --status-focus: #0e8ac8;
+  --status-focus-bg: rgba(14, 138, 200, 0.13);
+  --status-focus-border: rgba(14, 138, 200, 0.36);
+
+  --status-warn: #d29922;
+  --status-warn-bg: rgba(210, 153, 34, 0.12);
+  --status-warn-border: rgba(210, 153, 34, 0.35);
+
+  --status-critical: #e5534b;
+  --status-critical-bg: rgba(229, 83, 75, 0.13);
+  --status-critical-border: rgba(229, 83, 75, 0.36);
+
+  --canvas-grid: rgba(139, 148, 160, 0.12);
+  --canvas-axis: #8b94a0;
+  --canvas-crosshair: rgba(220, 226, 234, 0.45);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --bg-app: #F2F4F7;
+  --bg-panel: #FAFAFB;
+  --bg-header: #E6E9EF;
+  --bg-toolbar: #ECEFF4;
+  --bg-strip: #E2E6ED;
+  --bg-row-alt: #F4F6F9;
+  --bg-row-signal: #EFF2F6;
+  --bg-row-hover: #E8EEF5;
+  --bg-row-selected: #D4E4F7;
+  --bg-input: #FFFFFF;
+  --border-grid: #D8DCE3;
+  --border-strong: #B8C0CC;
+  --text-primary: #1F2328;
+  --text-secondary: #57606A;
+  --text-muted: #6E7781;
+  --bg-changed: rgba(46, 160, 67, 0.18);
+  --text-changed: #116329;
+  --tag-cc-bg: transparent;
+  --tag-cc-text: #57606A;
+  --tag-cc-border: #D0D7DE;
+  --tag-fd-bg: rgba(9, 105, 218, 0.08);
+  --tag-fd-text: #0969DA;
+  --tag-fd-border: rgba(9, 105, 218, 0.25);
+  --tag-j1939-bg: rgba(154, 103, 0, 0.08);
+  --tag-j1939-text: #9A6700;
+  --tag-j1939-border: rgba(154, 103, 0, 0.25);
+  --scrollbar-track: #F2F4F7;
+  --scrollbar-thumb: #C6CDD6;
+
+  /* Shared NexusCANCloud Simulation & Instrument Design Tokens (1:1 Match) */
+  --bg-canvas: #f2f4f7;
+  --bg-surface: #fafbfc;
+  --bg-elevated: #eceff4;
+  --bg-hover: #e3e7ee;
+  --bg-scrim: rgba(27, 31, 36, 0.48);
+  --border-hairline: #d4d9e1;
+  --text-ink: #1b1f24;
+  --text-subtle: #6e7781;
+
+  --status-nominal: #1a7f37;
+  --status-nominal-bg: rgba(26, 127, 55, 0.1);
+  --status-nominal-border: rgba(26, 127, 55, 0.3);
+
+  --status-focus: #0969da;
+  --status-focus-bg: rgba(9, 105, 218, 0.1);
+  --status-focus-border: rgba(9, 105, 218, 0.3);
+
+  --status-warn: #9a6700;
+  --status-warn-bg: rgba(154, 103, 0, 0.1);
+  --status-warn-border: rgba(154, 103, 0, 0.3);
+
+  --status-critical: #cf222e;
+  --status-critical-bg: rgba(207, 34, 46, 0.1);
+  --status-critical-border: rgba(207, 34, 46, 0.3);
+
+  --canvas-grid: rgba(87, 96, 106, 0.14);
+  --canvas-axis: #57606a;
+  --canvas-crosshair: rgba(27, 31, 36, 0.4);
+}
+
+@theme inline {
+  --color-canvas: var(--bg-canvas);
+  --color-surface: var(--bg-surface);
+  --color-elevated: var(--bg-elevated);
+  --color-hover: var(--bg-hover);
+  --color-hairline: var(--border-hairline);
+  --color-strong: var(--border-strong);
+  --color-ink: var(--text-ink);
+  --color-muted: var(--text-muted);
+  --color-subtle: var(--text-subtle);
+  --color-nominal: var(--status-nominal);
+  --color-focus: var(--status-focus);
+  --color-warn: var(--status-warn);
+  --color-critical: var(--status-critical);
+}
+
+@layer base {
+  body {
+    background-color: var(--bg-app);
+    color: var(--text-primary);
+    font-family: "Segoe UI", Inter, -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+    font-size: 12px;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: Consolas, "Cascadia Mono", "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+}
+
+/* Crisp C++/Qt style native scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* PCAN-Explorer 7 fixed-layout, locked 26px row-height engineering grid */
+.pcan-grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.pcan-grid-fixed {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.pcan-grid th {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  height: 25px;
+  padding: 0 6px;
+  background-color: var(--bg-header);
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 11px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--border-strong);
+  border-right: 1px solid var(--border-grid);
+  user-select: none;
+}
+
+.pcan-grid tr {
+  height: 26px;
+}
+
+.pcan-grid td {
+  height: 26px;
+  min-height: 26px;
+  max-height: 26px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border-grid);
+  border-right: 1px solid var(--border-grid);
+  color: var(--text-primary);
+  vertical-align: middle;
+  overflow: hidden;
+}
+
+/* Locked 26px inner cell wrapper preventing any row height expansion or shift */
+.pcan-cell {
+  height: 26px;
+  min-height: 26px;
+  max-height: 26px;
+  line-height: 26px;
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pcan-cell-right {
+  justify-content: flex-end;
+}
+
+.pcan-cell-center {
+  justify-content: center;
+}
+
+.pcan-byte {
+  display: inline-block;
+  width: 2.3ch;
+  text-align: center;
+  padding: 0;
+  margin: 0;
+  border-radius: 2px;
+  box-sizing: border-box;
+  font-weight: 400;
+  background-color: transparent;
+}
+
+.pcan-byte-changed {
+  background-color: var(--bg-changed);
+  color: var(--text-changed);
+  box-shadow: inset 0 -1px 0 rgba(140, 224, 154, 0.45);
+}
+
+.pcan-sig-val {
+  display: inline-block;
+  padding: 0 3px;
+  border-radius: 2px;
+  box-sizing: border-box;
+  font-weight: 600;
+  background-color: transparent;
+}
+
+.pcan-sig-val-changed {
+  background-color: var(--bg-changed);
+  color: var(--text-changed);
+}
+
+.pcan-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 15px;
+  padding: 0 3px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  border-width: 1px;
+  border-style: solid;
+}
+
+.pcan-tag-cc {
+  background-color: var(--tag-cc-bg);
+  color: var(--tag-cc-text);
+  border-color: var(--tag-cc-border);
+}
+
+.pcan-tag-fd {
+  background-color: var(--tag-fd-bg);
+  color: var(--tag-fd-text);
+  border-color: var(--tag-fd-border);
+}
+
+.pcan-tag-j1939 {
+  background-color: var(--tag-j1939-bg);
+  color: var(--tag-j1939-text);
+  border-color: var(--tag-j1939-border);
+}
+
+/* Rotated -90deg side label strip ("Receive" / "Transmit") */
+.pcan-side-strip {
+  width: 22px;
+  flex-shrink: 0;
+  background-color: var(--bg-strip);
+  border-right: 1px solid var(--border-strong);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+.pcan-side-strip-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* ========================================================================== */
+/* NEXUSCAN HERO INDUSTRIAL ANIMATION SUITE (EMIL KOWALSKI SPEC)               */
+/* ========================================================================== */
+@keyframes nexusBeamFlow {
+  0% {
+    stroke-dashoffset: 100;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes nexusLaserSweep {
+  0% {
+    transform: translateY(-4px);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(220px);
+    opacity: 0;
+  }
+}
+
+@keyframes nexusDrawPath {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes nexusCarrierPulse {
+  0% {
+    stroke-dashoffset: 100;
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 2px #00D8FF);
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0.6;
+  }
+}
+
+@keyframes nexusBarReveal {
+  from {
+    clip-path: inset(0 100% 0 0);
+    opacity: 0.4;
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+    opacity: 1;
+  }
+}
+
+@keyframes nexusLockRingExpand {
+  0% {
+    transform: scale(0.92);
+    opacity: 0;
+  }
+  30% {
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(1.24);
+    opacity: 0;
+  }
+}
+
+@keyframes nexusShimmerSweep {
+  0% {
+    clip-path: inset(0 100% 0 0);
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes nexusSignalPulse {
+  0%, 100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.nexus-beam-dash {
+  stroke-dasharray: 8 16;
+  animation: nexusBeamFlow 1.6s linear infinite;
+}
+
+.nexus-laser-line {
+  animation: nexusLaserSweep 1.8s var(--ease-out) infinite;
+}
+
+.nexus-shimmer-reveal {
+  animation: nexusShimmerSweep 0.6s var(--ease-out) forwards;
+}
+
+.nexus-pulse-slow {
+  animation: nexusSignalPulse 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nexus-beam-dash,
+  .nexus-laser-line,
+  .nexus-shimmer-reveal,
+  .nexus-pulse-slow {
+    animation: none !important;
+    stroke-dashoffset: 0 !important;
+    clip-path: inset(0 0 0 0) !important;
+  }
+}

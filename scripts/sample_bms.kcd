@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<NetworkDefinition xmlns="http://kayak.2codeornot2code.org/1.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Document name="NexusCAN EV Multi-Bank BMS Internal Network"
+            version="1.0"
+            author="NexusCAN Industrial QA &amp; HIL Engineering"
+            company="NexusCAN"
+            date="2026-11-05">
+    Golden Kayak (.kcd) XML reference database for EV Battery Pack Cell Monitoring Controllers (CMC)
+    and Thermal Loop Control. Message IDs (0x301, 0x302, 0x303, 0x18F00900) are partitioned cleanly
+    from sample_vehicle.dbc (0x101, 0x105, 0x201, 0x18FF50E5) for zero-collision multi-DB bus merge;
+    for optional multi-DB ID overlap/override verification in QA tests, pair with a synthetic overlay
+    redefining 0x301 or 0x101 on the same logical bus.
+  </Document>
+
+  <Node id="1" name="BMS_Master"/>
+  <Node id="2" name="CMC_Front"/>
+  <Node id="3" name="CMC_Rear"/>
+  <Node id="4" name="ThermalCtrl"/>
+
+  <Bus name="BMS_Internal" baudrate="500000">
+
+    <!-- 0x301: 16-Cell Multiplexed Voltage & Bank NTC Telemetry across 4 MuxGroups (0..3) -->
+    <Message id="0x301" name="CMC_CellVoltagesMux" length="8" interval="25" format="standard">
+      <Notes>25ms 4-bank multiplexed cell monitor frame (16 Li-NMC cells + 4 NTC sensors). Ideal fixture for testing StateTable Retained Mux State across banks 0..3.</Notes>
+      <Producer>
+        <NodeRef id="2"/>
+      </Producer>
+
+      <Multiplex name="CellBankSelector" offset="0" length="4" endianess="little">
+        <Notes>Selects active 4-cell measurement bank (0..3) within the 16-cell front module.</Notes>
+        <Consumer>
+          <NodeRef id="1"/>
+        </Consumer>
+        <Value type="unsigned" slope="1" intercept="0" min="0" max="3"/>
+        <LabelSet>
+          <Label name="Bank0_Cells01_04" value="0"/>
+          <Label name="Bank1_Cells05_08" value="1"/>
+          <Label name="Bank2_Cells09_12" value="2"/>
+          <Label name="Bank3_Cells13_16" value="3"/>
+          <LabelGroup name="ReservedMuxBanks" from="4" to="15" type="error"/>
+        </LabelSet>
+
+        <MuxGroup count="0">
+          <Signal name="Cell01VoltageV" offset="8" length="12" endianess="little">
+            <Notes>Cell 01 terminal voltage (0.5 mV/lsb, +2.5 V offset).</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Cell02VoltageV" offset="20" length="12" endianess="little">
+            <Notes>Cell 02 terminal voltage (crosses bytes 2..3).</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Cell03VoltageV" offset="32" length="12" endianess="little">
+            <Notes>Cell 03 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Cell04VoltageV" offset="44" length="12" endianess="little">
+            <Notes>Cell 04 terminal voltage (crosses bytes 5..6).</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Bank0NtcTempDegC" offset="56" length="8" endianess="little">
+            <Notes>Bank 0 module NTC temperature sensor (signed 8-bit, 0.5 degC/lsb, +25.0 degC intercept).</Notes>
+            <Consumer><NodeRef id="1"/><NodeRef id="4"/></Consumer>
+            <Value type="signed" slope="0.5" intercept="25.0" unit="degC" min="-39.0" max="88.5"/>
+          </Signal>
+        </MuxGroup>
+
+        <MuxGroup count="1">
+          <Signal name="Cell05VoltageV" offset="8" length="12" endianess="little">
+            <Notes>Cell 05 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Cell06VoltageV" offset="20" length="12" endianess="little">
+            <Notes>Cell 06 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Cell07VoltageV" offset="32" length="12" endianess="little">
+            <Notes>Cell 07 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Cell08VoltageV" offset="44" length="12" endianess="little">
+            <Notes>Cell 08 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Bank1NtcTempDegC" offset="56" length="8" endianess="little">
+            <Notes>Bank 1 module NTC temperature sensor.</Notes>
+            <Consumer><NodeRef id="1"/><NodeRef id="4"/></Consumer>
+            <Value type="signed" slope="0.5" intercept="25.0" unit="degC" min="-39.0" max="88.5"/>
+          </Signal>
+        </MuxGroup>
+
+        <MuxGroup count="2">
+          <Signal name="Cell09VoltageV" offset="8" length="12" endianess="little">
+            <Notes>Cell 09 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Cell10VoltageV" offset="20" length="12" endianess="little">
+            <Notes>Cell 10 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Cell11VoltageV" offset="32" length="12" endianess="little">
+            <Notes>Cell 11 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Cell12VoltageV" offset="44" length="12" endianess="little">
+            <Notes>Cell 12 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Bank2NtcTempDegC" offset="56" length="8" endianess="little">
+            <Notes>Bank 2 module NTC temperature sensor.</Notes>
+            <Consumer><NodeRef id="1"/><NodeRef id="4"/></Consumer>
+            <Value type="signed" slope="0.5" intercept="25.0" unit="degC" min="-39.0" max="88.5"/>
+          </Signal>
+        </MuxGroup>
+
+        <MuxGroup count="3">
+          <Signal name="Cell13VoltageV" offset="8" length="12" endianess="little">
+            <Notes>Cell 13 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Cell14VoltageV" offset="20" length="12" endianess="little">
+            <Notes>Cell 14 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Cell15VoltageV" offset="32" length="12" endianess="little">
+            <Notes>Cell 15 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Cell16VoltageV" offset="44" length="12" endianess="little">
+            <Notes>Cell 16 terminal voltage.</Notes>
+            <Consumer><NodeRef id="1"/></Consumer>
+            <Value type="unsigned" slope="0.0005" intercept="2.5" unit="V" min="2.5" max="4.5"/>
+          </Signal>
+          <Signal name="Bank3NtcTempDegC" offset="56" length="8" endianess="little">
+            <Notes>Bank 3 module NTC temperature sensor.</Notes>
+            <Consumer><NodeRef id="1"/><NodeRef id="4"/></Consumer>
+            <Value type="signed" slope="0.5" intercept="25.0" unit="degC" min="-39.0" max="88.5"/>
+          </Signal>
+        </MuxGroup>
+      </Multiplex>
+
+      <Signal name="CmcBalanceActiveFlag" offset="4" length="1" endianess="little">
+        <Notes>Indicates passive cell bleed resistors are currently active on this CMC.</Notes>
+        <Consumer><NodeRef id="1"/></Consumer>
+        <Value type="unsigned" slope="1" intercept="0" min="0" max="1"/>
+        <LabelSet>
+          <Label name="Idle" value="0"/>
+          <Label name="BalancingActive" value="1"/>
+        </LabelSet>
+      </Signal>
+
+      <Signal name="CmcRollingCounter" offset="5" length="3" endianess="little">
+        <Notes>3-bit cyclic alive counter incremented every frame (0..7).</Notes>
+        <Consumer><NodeRef id="1"/></Consumer>
+        <Value type="unsigned" slope="1" intercept="0" min="0" max="7"/>
+      </Signal>
+    </Message>
+
+    <!-- 0x302: Big-Endian (Sawtooth MSB) + Little-Endian Pack Current & Dynamic Limits -->
+    <Message id="0x302" name="BMS_PackPowerAndLimits" length="8" interval="20" format="standard">
+      <Notes>20ms BMS Master current &amp; dynamic charge/discharge envelope. Mixes big-endian (sawtooth MSB bit offset) signed/unsigned cross-byte signals with little-endian status enums.</Notes>
+      <Producer>
+        <NodeRef id="1"/>
+      </Producer>
+
+      <Signal name="PackCurrentAmp" offset="7" length="16" endianess="big">
+        <Notes>Signed HV pack current (negative = regenerative/charging, positive = traction discharge). Sawtooth MSB at bit 7 spanning bytes 0..1.</Notes>
+        <Consumer><NodeRef id="2"/><NodeRef id="3"/><NodeRef id="4"/></Consumer>
+        <Value type="signed" slope="0.1" intercept="0" unit="A" min="-800" max="800"/>
+      </Signal>
+
+      <Signal name="MaxDischargeCurrentLimA" offset="23" length="12" endianess="big">
+        <Notes>10s peak discharge current limit. Big-endian 12-bit cross-byte starting at sawtooth MSB bit 23 (byte 2 bits 7..0 + byte 3 bits 7..4).</Notes>
+        <Consumer><NodeRef id="4"/></Consumer>
+        <Value type="unsigned" slope="0.25" intercept="0" unit="A" min="0" max="1000"/>
+      </Signal>
+
+      <Signal name="MaxRegenCurrentLimA" offset="27" length="12" endianess="big">
+        <Notes>10s peak regenerative charge current limit. Big-endian 12-bit cross-byte starting at sawtooth MSB bit 27 (byte 3 bits 3..0 + byte 4 bits 7..0).</Notes>
+        <Consumer><NodeRef id="4"/></Consumer>
+        <Value type="unsigned" slope="0.25" intercept="0" unit="A" min="0" max="1000"/>
+      </Signal>
+
+      <Signal name="BmsThermalState" offset="40" length="4" endianess="little">
+        <Notes>Requested thermal loop operating mode.</Notes>
+        <Consumer><NodeRef id="4"/></Consumer>
+        <Value type="unsigned" slope="1" intercept="0" min="0" max="15"/>
+        <LabelSet>
+          <Label name="Idle" value="0"/>
+          <Label name="PassiveRadiator" value="1"/>
+          <Label name="ActiveChiller" value="2"/>
+          <Label name="PtcPackHeating" value="3"/>
+          <LabelGroup name="ReservedThermalModes" from="4" to="14" type="value"/>
+          <Label name="ThermalRunawayEmergency" value="15"/>
+        </LabelSet>
+      </Signal>
+
+      <Signal name="PackHealthStatus" offset="44" length="4" endianess="little">
+        <Notes>Pack diagnostic health summary nibble.</Notes>
+        <Consumer><NodeRef id="2"/><NodeRef id="3"/><NodeRef id="4"/></Consumer>
+        <Value type="unsigned" slope="1" intercept="0" min="0" max="15"/>
+        <LabelSet>
+          <Label name="Healthy" value="0"/>
+          <Label name="CellImbalanceWarn" value="1"/>
+          <Label name="TempDerating" value="2"/>
+          <LabelGroup name="UnusedWarnCodes" from="3" to="7" type="value"/>
+          <LabelGroup name="CriticalLatchFaults" from="8" to="15" type="error"/>
+        </LabelSet>
+      </Signal>
+
+      <Signal name="CellVoltageSpreadMv" offset="48" length="16" endianess="little">
+        <Notes>Instantaneous delta (Vmax - Vmin) across all pack cells.</Notes>
+        <Consumer><NodeRef id="4"/></Consumer>
+        <Value type="unsigned" slope="0.1" intercept="0" unit="mV" min="0" max="1000"/>
+      </Signal>
+    </Message>
+
+    <!-- 0x303: IEEE-754 Single-Precision (32-bit float) Thermal Loop Telemetry -->
+    <Message id="0x303" name="Thermal_CoolantFloatMetrics" length="8" interval="50" format="standard">
+      <Notes>50ms thermal management loop IEEE-754 single-precision float telemetry.</Notes>
+      <Producer>
+        <NodeRef id="4"/>
+      </Producer>
+
+      <Signal name="CoolantFlowRateLpm" offset="0" length="32" endianess="little">
+        <Notes>Glycol coolant volumetric flow rate (IEEE-754 single float).</Notes>
+        <Consumer><NodeRef id="1"/></Consumer>
+        <Value type="single" slope="1" intercept="0" unit="L/min" min="0" max="50"/>
+      </Signal>
+
+      <Signal name="ChillerCompressorPowerKw" offset="32" length="32" endianess="little">
+        <Notes>HV refrigerant compressor electrical power draw (IEEE-754 single float).</Notes>
+        <Consumer><NodeRef id="1"/></Consumer>
+        <Value type="single" slope="1" intercept="0" unit="kW" min="0" max="15"/>
+      </Signal>
+    </Message>
+
+    <!-- 0x18F00900: Extended 29-bit IEEE-754 Double-Precision (64-bit float) Lifetime Energy -->
+    <Message id="0x18F00900" name="BMS_AccumulatedEnergyExt" length="8" interval="200" format="extended">
+      <Notes>200ms Extended 29-bit frame carrying IEEE-754 double-precision lifetime pack throughput.</Notes>
+      <Producer>
+        <NodeRef id="1"/>
+      </Producer>
+
+      <Signal name="LifetimeDischargedEnergyKwh" offset="0" length="64" endianess="little">
+        <Notes>Total cumulative HV battery energy discharged over pack life (IEEE-754 64-bit double).</Notes>
+        <Consumer><NodeRef id="2"/><NodeRef id="3"/><NodeRef id="4"/></Consumer>
+        <Value type="double" slope="1" intercept="0" unit="kWh" min="0" max="2000000"/>
+      </Signal>
+    </Message>
+
+  </Bus>
+</NetworkDefinition>

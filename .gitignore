@@ -1,0 +1,30 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# Node / Frontend / Vite
+/node_modules/
+/dist/
+/dist-ssr/
+*.local
+.eslintcache
+
+# Tauri v2 Generated / Bundles
+/src-tauri/target/
+/src-tauri/WixTools/
+
+# Temporary CAN Trace Dumps & Captures (keep sample scripts/ fixtures tracked!)
+/*.blf
+/*.mf4
+/*.mdf
+/*.asc
+/*.candump
+/captures/
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json

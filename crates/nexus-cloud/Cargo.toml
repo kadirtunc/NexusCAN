@@ -1,0 +1,21 @@
+[package]
+name = "nexus-cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Non-blocking Read-Only Cloud Telemetry Bridge, Two-Plane SHA-256 Schema Handshake, and NXC-XXXX-XXXX Pairing Client for NexusCAN"
+
+[dependencies]
+nexus-core = { workspace = true }
+nexus-netdb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
+
+[lints]
+workspace = true
