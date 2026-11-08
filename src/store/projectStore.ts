@@ -34,6 +34,12 @@ import { DEFAULT_CHRONO_BUFFER_ROWS, telemetryStore } from './telemetryStore';
 import { type TxListEntry, transmitStore } from './transmitStore';
 import type { SimulationPanelDto } from '../types/simulation';
 import {
+  type EngineeringToolpackId,
+  DEFAULT_ENABLED_TOOLPACKS,
+  isToolpackEnabled,
+  normalizeEnabledToolpacks,
+} from '../types/toolpacks';
+import {
   LAST_ACTIVE_PROJECT_KEY,
   clearActiveProjectFromLocalDb,
   loadActiveProjectFromLocalDb,
@@ -76,6 +82,7 @@ export interface NexusProjectFileV1 {
     activeDocTab: ActiveDocumentTab;
     theme: UiTheme;
     expandedRxKeys: string[];
+    enabledToolpacks?: EngineeringToolpackId[];
   };
   cloudBinding?: CloudProjectBindingV1 | null;
 }
@@ -90,6 +97,9 @@ export interface ProjectStoreState {
   dirty: boolean;
   savedProjects: readonly ProjectSummaryDto[];
   modalOpen: boolean;
+  toolpacksModalOpen: boolean;
+  acknowledgmentsModalOpen: boolean;
+  enabledToolpacks: readonly EngineeringToolpackId[];
   cloudBinding: CloudProjectBindingV1 | null;
 }
 
@@ -114,6 +124,9 @@ let currentState: ProjectStoreState = {
   dirty: false,
   savedProjects: [],
   modalOpen: false,
+  toolpacksModalOpen: false,
+  acknowledgmentsModalOpen: false,
+  enabledToolpacks: [...DEFAULT_ENABLED_TOOLPACKS],
   cloudBinding: null,
 };
 
@@ -176,6 +189,64 @@ export const projectStore = {
     if (currentState.modalOpen === open) return;
     currentState = { ...currentState, modalOpen: open };
     emitChange();
+  },
+
+  setToolpacksModalOpen(open: boolean): void {
+    if (currentState.toolpacksModalOpen === open) return;
+    currentState = { ...currentState, toolpacksModalOpen: open };
+    emitChange();
+  },
+
+  setAcknowledgmentsModalOpen(open: boolean): void {
+    if (currentState.acknowledgmentsModalOpen === open) return;
+    currentState = { ...currentState, acknowledgmentsModalOpen: open };
+    emitChange();
+  },
+
+  setEnabledToolpacks(
+    ids: readonly (EngineeringToolpackId | string)[] | undefined | null,
+    quickBarState?: QuickBarConnectionState,
+  ): void {
+    const normalized = normalizeEnabledToolpacks(ids);
+    const wasSimEnabled = isToolpackEnabled(currentState.enabledToolpacks, 'simulation_replay');
+    const isSimNowEnabled = isToolpackEnabled(normalized, 'simulation_replay');
+
+    // 0 CPU Rule: If simulation is disabled, shut down any running stimulus loop
+    if (wasSimEnabled && !isSimNowEnabled) {
+      if (simulationPanelStore.getState().editorMode === 'RUN') {
+        simulationPanelStore.setEditorMode('DESIGN');
+      }
+      simulationPanelStore.stopAllPeriodicStimulusJobs();
+
+      if (databaseStore.getState().activeDocTab === 'panels') {
+        databaseStore.setActiveDocTab('rxtx');
+      }
+    }
+
+    currentState = {
+      ...currentState,
+      enabledToolpacks: normalized,
+      dirty: true,
+    };
+    emitChange();
+
+    if (currentState.hasActiveWorkspace) {
+      projectStore.scheduleAutoSave(quickBarState);
+    }
+  },
+
+  toggleToolpack(
+    id: EngineeringToolpackId,
+    quickBarState?: QuickBarConnectionState,
+  ): void {
+    if (id === 'core') return; // Core pack is immutable and permanently active
+    const current = new Set(currentState.enabledToolpacks);
+    if (current.has(id)) {
+      current.delete(id);
+    } else {
+      current.add(id);
+    }
+    projectStore.setEnabledToolpacks(Array.from(current), quickBarState);
   },
 
   setProjectMetadata(name: string, notes?: string): void {
@@ -276,6 +347,7 @@ export const projectStore = {
         activeDocTab: db.activeDocTab,
         theme: db.theme,
         expandedRxKeys: [...db.expandedRxKeys],
+        enabledToolpacks: normalizeEnabledToolpacks(currentState.enabledToolpacks),
       },
       cloudBinding: currentState.cloudBinding ?? null,
     };
@@ -532,6 +604,15 @@ export const projectStore = {
       simulationPanelStore.restoreFromProject(project.simulationPanels ?? []);
 
       const ws = project.workspace;
+      const normalizedToolpacks = normalizeEnabledToolpacks(ws?.enabledToolpacks);
+      const isSimEnabled = isToolpackEnabled(normalizedToolpacks, 'simulation_replay');
+      if (!isSimEnabled) {
+        if (simulationPanelStore.getState().editorMode === 'RUN') {
+          simulationPanelStore.setEditorMode('DESIGN');
+        }
+        simulationPanelStore.stopAllPeriodicStimulusJobs();
+      }
+
       if (ws) {
         telemetryStore.setMaxChronoBufferRows(
           ws.traceMaxBufferRows ?? DEFAULT_CHRONO_BUFFER_ROWS,
@@ -550,23 +631,17 @@ export const projectStore = {
           'panels',
           'cloud',
         ];
-        if (isReload) {
-          if (ws.activeDocTab && validTabs.includes(ws.activeDocTab)) {
-            databaseStore.setActiveDocTab(ws.activeDocTab);
-          } else {
-            databaseStore.setActiveDocTab('rxtx');
-          }
-        } else {
-          if (
-            ws.activeDocTab &&
-            ws.activeDocTab !== 'start' &&
-            validTabs.includes(ws.activeDocTab)
-          ) {
-            databaseStore.setActiveDocTab(ws.activeDocTab);
-          } else {
-            databaseStore.setActiveDocTab('rxtx');
-          }
+        let targetTab = ws.activeDocTab;
+        if (!validTabs.includes(targetTab)) {
+          targetTab = 'rxtx';
         }
+        if (!isReload && targetTab === 'start') {
+          targetTab = 'rxtx';
+        }
+        if (targetTab === 'panels' && !isSimEnabled) {
+          targetTab = 'rxtx';
+        }
+        databaseStore.setActiveDocTab(targetTab);
       } else {
         databaseStore.setActiveDocTab('rxtx');
       }
@@ -616,6 +691,7 @@ export const projectStore = {
         updatedAt: project.updatedAt || new Date().toISOString(),
         notes: project.notes ?? '',
         dirty: false,
+        enabledToolpacks: normalizedToolpacks,
         cloudBinding: project.cloudBinding ?? null,
       };
 
@@ -733,6 +809,7 @@ export const projectStore = {
       updatedAt: nowIso,
       notes: '',
       dirty: false,
+      enabledToolpacks: [...DEFAULT_ENABLED_TOOLPACKS],
       cloudBinding: null,
     };
     emitChange();
@@ -803,6 +880,7 @@ export const projectStore = {
       updatedAt: null,
       notes: '',
       dirty: false,
+      enabledToolpacks: [...DEFAULT_ENABLED_TOOLPACKS],
       cloudBinding: null,
     };
     emitChange();

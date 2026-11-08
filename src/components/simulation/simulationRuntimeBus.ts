@@ -38,6 +38,37 @@ export class SimulationRuntimeBus {
 
   private keyListeners = new Map<string, Set<() => void>>();
   private frameListeners = new Set<() => void>();
+  private buttonHotkeyHandlers = new Map<
+    string,
+    { onKeyDown: () => void; onKeyUp: () => void }
+  >();
+
+  public registerButtonHotkeyHandler(
+    widgetId: string,
+    handlers: { onKeyDown: () => void; onKeyUp: () => void }
+  ): () => void {
+    this.buttonHotkeyHandlers.set(widgetId, handlers);
+    return () => {
+      const existing = this.buttonHotkeyHandlers.get(widgetId);
+      if (existing === handlers) {
+        this.buttonHotkeyHandlers.delete(widgetId);
+      }
+    };
+  }
+
+  public triggerButtonHotkeyDown(widgetId: string): boolean {
+    const handler = this.buttonHotkeyHandlers.get(widgetId);
+    if (!handler) return false;
+    handler.onKeyDown();
+    return true;
+  }
+
+  public triggerButtonHotkeyUp(widgetId: string): boolean {
+    const handler = this.buttonHotkeyHandlers.get(widgetId);
+    if (!handler) return false;
+    handler.onKeyUp();
+    return true;
+  }
 
   public reset(initialBindings: readonly SimulationSignalBindingDto[] = [], schema: DatabaseSchemaDto | null = null): void {
     this.values.clear();

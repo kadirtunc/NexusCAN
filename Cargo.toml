@@ -17,11 +17,14 @@ repository = "https://github.com/NexusCAN/NexusCAN"
 nexus-core = { path = "crates/nexus-core" }
 nexus-netdb = { path = "crates/nexus-netdb" }
 nexus-hal = { path = "crates/nexus-hal" }
+nexus-cloud = { path = "crates/nexus-cloud" }
 
 # Serialization & Core Utilities
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 base64 = "0.22"
+flate2 = "1.1"
 thiserror = "2.0"
 rustc-hash = "2.1"
 indexmap = { version = "2.7", features = ["serde"] }

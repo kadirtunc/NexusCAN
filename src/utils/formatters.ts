@@ -1,7 +1,7 @@
 import type { MessageSchemaDto, SignalSchemaDto } from '../types/netdb';
 
 /**
- * Formats CAN-ID in clean PCAN-Explorer uppercase hex without '0x' prefix
+ * Formats CAN-ID in clean uppercase hex without '0x' prefix
  * (e.g. `101`, `620`, `18FF50E5`).
  */
 export function formatPcanIdHex(arbId: number, isExtended: boolean): string {
@@ -128,7 +128,7 @@ export async function fileToBase64(file: File): Promise<string> {
 }
 
 /**
- * Formats relative timestamp in PCAN-Explorer Trace style `SSS.mmmm` (seconds with 0.1ms precision).
+ * Formats relative timestamp in Industrial Trace style `SSS.mmmm` (seconds with 0.1ms precision).
  */
 export function formatRelativeTimeSec(timestampUs: number, originUs = 0): string {
   const relUs = Math.max(0, timestampUs - originUs);

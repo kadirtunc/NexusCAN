@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
-import type { DatabaseSchemaDto, SignalSchemaDto } from '../types/netdb';
-import type { FrameTelemetryDto } from '../types/telemetry';
+import type { DatabaseSchemaDto, MessageSchemaDto, SignalSchemaDto } from '../types/netdb';
+import type { ChronologicalFrameDto, FrameTelemetryDto } from '../types/telemetry';
+import { decodeTraceFrame } from '../utils/traceDecoder';
 
 /**
  * 18,000 samples = 300 seconds (5 minutes) of full 60Hz signal history per series
@@ -11,7 +12,7 @@ export const PLOT_MIN_SPAN_SEC = 0.05; // 50 ms micro-zoom
 export const PLOT_MAX_SPAN_SEC = 300; // 300 s (5 min) deep history
 const MAX_ZOOM_HISTORY = 32;
 
-export type PlotLayoutMode = 'combined' | 'split';
+export type PlotLayoutMode = 'combined' | 'compactSplit' | 'split';
 export type PlotYScaleMode = 'multiAxis' | 'normalized' | 'shared';
 export type PlotTimeWindowPresetSec = 5 | 10 | 30 | 60 | 120 | 300;
 export type PlotDragTool = 'pan' | 'boxZoom';
@@ -65,6 +66,7 @@ export interface PlotSeriesEntry {
   pendingVal: number;
   pendingTsUs: number;
   hasPending: boolean;
+  lastSampleFrameTsUs: number;
 }
 
 export interface SavedPlotSignalSpec {
@@ -139,7 +141,13 @@ export interface PlotStoreState {
   deltaCursorsEnabled: boolean;
   zoomHistoryDepth: number;
   paused: boolean;
+  isStaticTraceLoaded: boolean;
   configRev: number;
+  // Picker combobox & filter state preserved across tab navigations:
+  pickerBusId: number;
+  pickerUserSelectedBus: boolean;
+  pickerFilter: string;
+  pickerOpen: boolean;
 }
 
 export function clampPlotSpan(spanSec: number): number {
@@ -288,6 +296,7 @@ function createFreshSeriesEntry(spec: SavedPlotSignalSpec): PlotSeriesEntry {
     pendingVal: 0,
     pendingTsUs: -1,
     hasPending: false,
+    lastSampleFrameTsUs: -1,
   };
 }
 
@@ -329,7 +338,12 @@ let currentState: PlotStoreState = {
   deltaCursorsEnabled: false,
   zoomHistoryDepth: 0,
   paused: false,
+  isStaticTraceLoaded: false,
   configRev: 0,
+  pickerBusId: 0,
+  pickerUserSelectedBus: false,
+  pickerFilter: '',
+  pickerOpen: true,
 };
 
 const listeners = new Set<() => void>();
@@ -425,6 +439,7 @@ function resetRingDataInPlace(entry: PlotSeriesEntry): void {
   entry.minObserved = Number.POSITIVE_INFINITY;
   entry.maxObserved = Number.NEGATIVE_INFINITY;
   entry.sampleCount = 0;
+  entry.lastSampleFrameTsUs = -1;
   const stickyInit = computeInitialStickyFromSchema(entry.schemaMin, entry.schemaMax);
   entry.initializedAutoY = stickyInit.initialized;
   entry.stickyAutoYMin = stickyInit.yMin;
@@ -544,15 +559,64 @@ export const plotStore = {
    * `liveFollow === false` (history pan/inspection mode) so zero samples are lost!
    */
   ingestFrameSignals(timestampUs: number, frames: readonly FrameTelemetryDto[]): void {
-    if (currentState.paused || seriesMap.size === 0) {
+    if (currentState.paused || currentState.isStaticTraceLoaded || seriesMap.size === 0) {
       return;
     }
 
+    // 1. Scan frames and aggregate best sample per watched signal (largest lastTimestampUs)
+    // Multiple mux rows (e.g. 0x105 m0.m0..m2) coexist in snap.frames; this ensures exactly 1 sample/tick!
+    let anyNewSample = false;
+    let earliestPendingTsUs = Number.POSITIVE_INFINITY;
+
+    for (let i = 0; i < frames.length; i++) {
+      const f = frames[i];
+      const sigs = f.signals;
+      for (let j = 0; j < sigs.length; j++) {
+        const s = sigs[j];
+        const entry = seriesMap.get(`${f.busId}:${s.signalId}`);
+        if (!entry) continue;
+
+        // Signal must be active in last frame, and frame timestamp must be strictly newer than last processed sample
+        if (s.activeInLastFrame === false) continue;
+        if (f.lastTimestampUs <= entry.lastSampleFrameTsUs) continue;
+
+        const val = s.physicalValue;
+        if (!Number.isFinite(val)) continue;
+
+        // When a signal was newly added to the plot (lastSampleFrameTsUs < 0),
+        // if the frame in StateTable is stale (>250ms old — e.g. from a previously stopped Replay or stopped bus traffic),
+        // record its last timestamp & latest value so future frames can be detected, but do NOT push a stale sample!
+        if (entry.lastSampleFrameTsUs < 0 && timestampUs - f.lastTimestampUs > 250_000) {
+          entry.lastSampleFrameTsUs = f.lastTimestampUs;
+          entry.latestValue = val;
+          continue;
+        }
+
+        if (!entry.hasPending || f.lastTimestampUs > entry.pendingTsUs) {
+          entry.hasPending = true;
+          entry.pendingTsUs = f.lastTimestampUs;
+          entry.pendingVal = val;
+          anyNewSample = true;
+          if (f.lastTimestampUs < earliestPendingTsUs) {
+            earliestPendingTsUs = f.lastTimestampUs;
+          }
+        }
+      }
+    }
+
+    // If no watched signal received a fresh CAN frame, DO NOT initialize originTimestampUs or advance latestTimeSec!
+    if (!anyNewSample) {
+      return;
+    }
+
+    // 2. Initialize or reset timeline if this is the very first sample or a major time rollback occurred
     if (
       originTimestampUs === 0 ||
       (lastIngestedTimestampUs > 0 && timestampUs < lastIngestedTimestampUs - 1_000_000)
     ) {
-      originTimestampUs = timestampUs;
+      originTimestampUs = Number.isFinite(earliestPendingTsUs)
+        ? earliestPendingTsUs
+        : timestampUs;
       latestTimeSec = 0;
       viewport.liveFollow = true;
       viewport.viewRightTimeSec = viewport.viewSpanSec;
@@ -563,39 +627,20 @@ export const plotStore = {
     }
     lastIngestedTimestampUs = timestampUs;
 
-    const tSec = Math.max(0, (timestampUs - originTimestampUs) / 1_000_000);
-    latestTimeSec = tSec;
-
     let sharedDirty = false;
 
-    if (seriesMap.size === 0) return;
-
-    // Scan frames and aggregate best sample per watched signal (largest lastTimestampUs)
-    // Multiple mux rows (e.g. 0x105 m0.m0..m2) coexist in snap.frames; this ensures exactly 1 sample/tick!
-    for (let i = 0; i < frames.length; i++) {
-      const f = frames[i];
-      const sigs = f.signals;
-      for (let j = 0; j < sigs.length; j++) {
-        const s = sigs[j];
-        const entry = seriesMap.get(`${f.busId}:${s.signalId}`);
-        if (!entry) continue;
-
-        const val = s.physicalValue;
-        if (!Number.isFinite(val)) continue;
-
-        if (!entry.hasPending || f.lastTimestampUs > entry.pendingTsUs) {
-          entry.hasPending = true;
-          entry.pendingTsUs = f.lastTimestampUs;
-          entry.pendingVal = val;
-        }
-      }
-    }
-
-    // Now push exactly ONE authoritative sample per watched series entry per tick!
+    // 3. Now push exactly ONE authoritative sample per watched series entry per tick!
     for (const entry of seriesMap.values()) {
       if (!entry.hasPending) continue;
       entry.hasPending = false;
       const val = entry.pendingVal;
+      const sampleTsUs = entry.pendingTsUs;
+      entry.lastSampleFrameTsUs = sampleTsUs;
+
+      const tSec = Math.max(0, (sampleTsUs - originTimestampUs) / 1_000_000);
+      if (tSec > latestTimeSec) {
+        latestTimeSec = tSec;
+      }
 
       const wp = entry.writePos;
       entry.timestamps[wp] = tSec;
@@ -684,6 +729,9 @@ export const plotStore = {
       customYMax: hasSpan ? sig.max : 100,
     });
     seriesMap.set(key, entry);
+    if (currentState.paused && !currentState.isStaticTraceLoaded) {
+      currentState = { ...currentState, paused: false };
+    }
     syncSnapshotAndEmit(true);
   },
 
@@ -741,6 +789,9 @@ export const plotStore = {
       }
     }
     if (changed) {
+      if (plotted && currentState.paused && !currentState.isStaticTraceLoaded) {
+        currentState = { ...currentState, paused: false };
+      }
       syncSnapshotAndEmit(true);
     }
   },
@@ -1131,6 +1182,33 @@ export const plotStore = {
     syncSnapshotAndEmit(false);
   },
 
+  setPickerBusId(busId: number, isUserSelection = true): void {
+    if (
+      currentState.pickerBusId === busId &&
+      currentState.pickerUserSelectedBus === isUserSelection
+    ) {
+      return;
+    }
+    currentState = {
+      ...currentState,
+      pickerBusId: busId,
+      pickerUserSelectedBus: isUserSelection,
+    };
+    syncSnapshotAndEmit(false);
+  },
+
+  setPickerFilter(filter: string): void {
+    if (currentState.pickerFilter === filter) return;
+    currentState = { ...currentState, pickerFilter: filter };
+    syncSnapshotAndEmit(false);
+  },
+
+  setPickerOpen(open: boolean): void {
+    if (currentState.pickerOpen === open) return;
+    currentState = { ...currentState, pickerOpen: open };
+    syncSnapshotAndEmit(false);
+  },
+
   setYScaleMode(yScaleMode: PlotYScaleMode): void {
     if (currentState.yScaleMode === yScaleMode) return;
     viewport.combinedYAuto = true;
@@ -1142,6 +1220,12 @@ export const plotStore = {
   setPaused(paused: boolean): void {
     if (currentState.paused === paused) return;
     currentState = { ...currentState, paused };
+    syncSnapshotAndEmit(false);
+  },
+
+  setIsStaticTraceLoaded(loaded: boolean): void {
+    if (currentState.isStaticTraceLoaded === loaded) return;
+    currentState = { ...currentState, isStaticTraceLoaded: loaded };
     syncSnapshotAndEmit(false);
   },
 
@@ -1157,9 +1241,12 @@ export const plotStore = {
     viewport.liveFollow = true;
     viewport.viewRightTimeSec = viewport.viewSpanSec;
     for (const entry of seriesMap.values()) {
+      entry.hasPending = false;
+      entry.pendingTsUs = -1;
       resetRingDataInPlace(entry);
     }
     recomputeStickySharedBounds();
+    currentState = { ...currentState, isStaticTraceLoaded: false };
     syncSnapshotAndEmit(false);
   },
 
@@ -1171,6 +1258,7 @@ export const plotStore = {
     zoomHistory = [];
     viewport.liveFollow = true;
     viewport.combinedYAuto = true;
+    currentState = { ...currentState, isStaticTraceLoaded: false };
     syncSnapshotAndEmit(true);
   },
 
@@ -1294,16 +1382,313 @@ export const plotStore = {
         ? state.yScaleMode
         : 'multiAxis';
 
+    const resolvedLayout: PlotLayoutMode =
+      state.layoutMode === 'split'
+        ? 'split'
+        : state.layoutMode === 'compactSplit'
+          ? 'compactSplit'
+          : 'combined';
+
     currentState = {
       ...currentState,
-      layoutMode: state.layoutMode === 'split' ? 'split' : 'combined',
+      layoutMode: resolvedLayout,
       yScaleMode: resolvedYScale,
       splitRowHeight: resolvedHeight,
       paused: false,
     };
     syncSnapshotAndEmit(true);
   },
+
+  /**
+   * One-click instant waveform loader for historical / recorded Trace frames.
+   * Decodes signals from `frames` (up to 18,000 samples per series with uniform stride if larger),
+   * auto-discovers up to 6 numeric signals if no series are currently watched,
+   * auto-fits all sticky Y bounds to the recorded range, fits viewport to full duration,
+   * and pauses live 60Hz stream.
+   *
+   * @returns number of samples/frames successfully processed.
+   */
+  loadFromTraceFrames(
+    frames: readonly ChronologicalFrameDto[],
+    schemaSource: PlotSchemaSource,
+    options?: { autoSelectSignals?: boolean },
+  ): number {
+    if (!frames || frames.length === 0) return 0;
+
+    // 1. Auto-discover signals if series is empty or autoSelectSignals is requested
+    const shouldAutoSelect =
+      (options?.autoSelectSignals ?? true) && seriesMap.size === 0;
+    if (shouldAutoSelect) {
+      const addedKeys = new Set<string>();
+      const scanLimit = Math.min(frames.length, 2500);
+      for (let i = 0; i < scanLimit && seriesMap.size < 6; i++) {
+        const f = frames[i];
+        const busSchema = resolvePlotSchema(schemaSource, f.busId);
+        if (!busSchema) continue;
+
+        const msgSchema = busSchema.messages.find(
+          (m) =>
+            m.messageKey === f.messageKey ||
+            (m.arbId === f.arbId && m.isExtended === f.isExtended),
+        );
+        if (!msgSchema) continue;
+
+        const decoded = decodeTraceFrame(f.rawBytes, msgSchema, busSchema.signals);
+        for (let j = 0; j < decoded.length && seriesMap.size < 6; j++) {
+          const d = decoded[j];
+          const k = makePlotSeriesKey(f.busId, d.signal.signalId);
+          if (addedKeys.has(k)) continue;
+          addedKeys.add(k);
+          plotStore.addSignal(f.busId, d.signal);
+        }
+      }
+    }
+
+    if (seriesMap.size === 0) return 0;
+
+    // 2. Pause live stream so static waveform remains stably in view
+    currentState = { ...currentState, paused: true, isStaticTraceLoaded: true };
+
+    // 3. Clear data buffers for all watched series
+    for (const entry of seriesMap.values()) {
+      resetRingDataInPlace(entry);
+    }
+
+    const firstTsUs = frames[0].timestampUs;
+    const lastTsUs = frames[frames.length - 1].timestampUs;
+    originTimestampUs = firstTsUs;
+    lastIngestedTimestampUs = lastTsUs;
+    const durationSec = Math.max(0.05, (lastTsUs - firstTsUs) / 1_000_000);
+    latestTimeSec = durationSec;
+
+    // 4. Uniform stride sampling if frame count exceeds ring buffer capacity (18,000)
+    const stride =
+      frames.length > PLOT_RING_CAPACITY
+        ? Math.ceil(frames.length / PLOT_RING_CAPACITY)
+        : 1;
+
+    let processedCount = 0;
+
+    // Cache message schema lookups per (busId, arbId, isExtended) to avoid repeated array searches
+    const schemaLookupCache = new Map<
+      string,
+      {
+        msg: MessageSchemaDto;
+        signals: readonly (SignalSchemaDto | undefined)[];
+      } | null
+    >();
+
+    for (let i = 0; i < frames.length; i += stride) {
+      const f = frames[i];
+      const cacheKey = `${f.busId}:${f.arbId}:${f.isExtended ? 1 : 0}`;
+      let cached = schemaLookupCache.get(cacheKey);
+
+      if (cached === undefined) {
+        const busSchema = resolvePlotSchema(schemaSource, f.busId);
+        if (!busSchema) {
+          schemaLookupCache.set(cacheKey, null);
+          continue;
+        }
+        const msg = busSchema.messages.find(
+          (m) =>
+            m.messageKey === f.messageKey ||
+            (m.arbId === f.arbId && m.isExtended === f.isExtended),
+        );
+        if (!msg) {
+          schemaLookupCache.set(cacheKey, null);
+          continue;
+        }
+        cached = { msg, signals: busSchema.signals };
+        schemaLookupCache.set(cacheKey, cached);
+      }
+
+      if (!cached) continue;
+
+      const decoded = decodeTraceFrame(f.rawBytes, cached.msg, cached.signals);
+      if (decoded.length === 0) continue;
+
+      const tSec = Math.max(0, (f.timestampUs - originTimestampUs) / 1_000_000);
+
+      for (let j = 0; j < decoded.length; j++) {
+        const d = decoded[j];
+        const entry = seriesMap.get(
+          makePlotSeriesKey(f.busId, d.signal.signalId),
+        );
+        if (!entry) continue;
+
+        const val = d.physicalValue;
+        if (!Number.isFinite(val)) continue;
+
+        const wp = entry.writePos;
+        entry.timestamps[wp] = tSec;
+        entry.values[wp] = val;
+        entry.writePos = (wp + 1) % PLOT_RING_CAPACITY;
+        if (entry.count < PLOT_RING_CAPACITY) {
+          entry.count += 1;
+        }
+        entry.latestValue = val;
+        if (val < entry.minObserved) entry.minObserved = val;
+        if (val > entry.maxObserved) entry.maxObserved = val;
+        entry.sampleCount += 1;
+      }
+      processedCount++;
+    }
+
+    // 5. Fit each series' sticky auto-Y bounds across the full duration
+    for (const entry of seriesMap.values()) {
+      fitEntryStickyYToWindow(entry, 0, durationSec);
+    }
+
+    // 6. Viewport setup: display full duration with a small 4% right margin
+    const targetSpan = clampPlotSpan(Math.max(5, durationSec * 1.04));
+    viewport.liveFollow = false;
+    viewport.viewSpanSec = targetSpan;
+    viewport.viewRightTimeSec = targetSpan;
+    viewport.combinedYAuto = true;
+    viewport.cursorATimeSec = durationSec * 0.25;
+    viewport.cursorBTimeSec = durationSec * 0.75;
+
+    recomputeStickySharedBounds();
+    syncSnapshotAndEmit(true);
+
+    return processedCount;
+  },
+
+  /**
+   * Deterministically exports all visible watched series samples into a RFC-4180 compliant,
+   * time-aligned (Zero-Order Hold) CSV dataset with microsecond precision `offset_s` header.
+   */
+  exportWatchedSignalsToCsv(): { csv: string; rowCount: number; seriesCount: number } | null {
+    let targets = Array.from(seriesMap.values()).filter((e) => e.visible && e.count > 0);
+    if (targets.length === 0) {
+      targets = Array.from(seriesMap.values()).filter((e) => e.count > 0);
+    }
+    if (targets.length === 0) {
+      return null;
+    }
+
+    // Disambiguate duplicate signal names across different messages/buses
+    const nameCounts = new Map<string, number>();
+    for (const e of targets) {
+      nameCounts.set(e.signalName, (nameCounts.get(e.signalName) ?? 0) + 1);
+    }
+
+    const colHeaders: string[] = [];
+    for (const e of targets) {
+      const hasDuplicate = (nameCounts.get(e.signalName) ?? 0) > 1;
+      const baseName = hasDuplicate
+        ? `${e.busId > 0 ? `B${e.busId + 1}.` : ''}${e.messageKey}.${e.signalName}`
+        : e.signalName;
+      colHeaders.push(e.unit ? `${baseName} [${e.unit}]` : baseName);
+    }
+
+    const escapeCsv = (str: string): string => {
+      if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    // Extract ordered samples per series and collect all unique microsecond timestamps
+    const seriesSamples = targets.map((e) => extractOrderedSeries(e));
+    const timeSet = new Set<number>();
+    for (const samples of seriesSamples) {
+      for (let i = 0; i < samples.length; i++) {
+        const rounded = Math.round(samples[i].t * 1e6) / 1e6;
+        timeSet.add(rounded);
+      }
+    }
+
+    const sortedTimes = Array.from(timeSet).sort((a, b) => a - b);
+    if (sortedTimes.length === 0) {
+      return null;
+    }
+
+    // Build CSV lines with Zero-Order Hold (ZOH) alignment
+    const lines: string[] = [];
+    lines.push(['offset_s', ...colHeaders.map(escapeCsv)].join(','));
+
+    // Pointers and last-known values per series for linear O(T * S) sweep
+    const pointers = new Int32Array(targets.length);
+    const lastKnown = new Float64Array(targets.length);
+    const hasStarted = new Uint8Array(targets.length);
+
+    for (let tIdx = 0; tIdx < sortedTimes.length; tIdx++) {
+      const t = sortedTimes[tIdx];
+      const rowCols: string[] = [t.toFixed(6)];
+
+      for (let sIdx = 0; sIdx < targets.length; sIdx++) {
+        const samples = seriesSamples[sIdx];
+        const sLen = samples.length;
+        let p = pointers[sIdx];
+
+        while (p < sLen && Math.round(samples[p].t * 1e6) / 1e6 <= t + 1e-7) {
+          lastKnown[sIdx] = samples[p].v;
+          hasStarted[sIdx] = 1;
+          p++;
+        }
+        pointers[sIdx] = p;
+
+        if (hasStarted[sIdx] === 0) {
+          rowCols.push('');
+        } else {
+          const val = lastKnown[sIdx];
+          rowCols.push(Number.isInteger(val) ? String(val) : cleanFloat(val).toString());
+        }
+      }
+
+      lines.push(rowCols.join(','));
+    }
+
+    return {
+      csv: lines.join('\r\n'),
+      rowCount: sortedTimes.length,
+      seriesCount: targets.length,
+    };
+  },
+
+  downloadWatchedSignalsCsv(): boolean {
+    const result = plotStore.exportWatchedSignalsToCsv();
+    if (!result) return false;
+    downloadPlotCsv(result.csv);
+    return true;
+  },
 };
+
+export interface OrderedSeriesSample {
+  t: number;
+  v: number;
+}
+
+export function extractOrderedSeries(entry: PlotSeriesEntry): OrderedSeriesSample[] {
+  const result: OrderedSeriesSample[] = [];
+  const count = entry.count;
+  if (count === 0) return result;
+  const startPos = (entry.writePos - count + PLOT_RING_CAPACITY) % PLOT_RING_CAPACITY;
+  for (let i = 0; i < count; i++) {
+    const idx = (startPos + i) % PLOT_RING_CAPACITY;
+    result.push({
+      t: entry.timestamps[idx],
+      v: entry.values[idx],
+    });
+  }
+  return result;
+}
+
+export function downloadPlotCsv(csvContent: string): void {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const filename = `nexus-plot-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.csv`;
+  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 export function usePlotStore(): PlotStoreState {
   return useSyncExternalStore(

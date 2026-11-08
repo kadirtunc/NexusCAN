@@ -8,13 +8,16 @@ import {
   Plus,
   RotateCcw,
   Send,
-  Settings,
   Trash2,
   Unlock,
+  Unplug,
   X,
 } from 'lucide-react';
+import { useI18n, type TranslationKey } from '../i18n';
 import {
   apiArmActiveBus,
+  apiConnectBus,
+  apiDisconnectAllBuses,
   apiDisconnectBus,
   apiListPeriodicTx,
   apiResetTelemetry,
@@ -24,6 +27,8 @@ import {
   apiTransmitSignalFrame,
 } from '../services/ipcClient';
 import {
+  type SavedConnectionProfile,
+  buildChannelConfigForProfile,
   connectionStore,
   useConnectionStore,
 } from '../store/connectionStore';
@@ -41,7 +46,9 @@ import {
   transmitStore,
   useTransmitStore,
 } from '../store/transmitStore';
-import type { DeviceDescriptorDto } from '../types/hal';
+import { workbenchStore, useWorkbenchStore } from '../store/workbenchStore';
+import { ensureMockPresetDatabasesLoaded, syncAllBusDatabasesWithBackend } from '../utils/busDatabaseSync';
+import type { BusHealthDto, DeviceDescriptorDto } from '../types/hal';
 import type { MessageSchemaDto, SignalSchemaDto } from '../types/netdb';
 import type { FrameTelemetryDto, LiveSignalDto } from '../types/telemetry';
 import {
@@ -155,37 +162,37 @@ export const DEFAULT_TX_COLUMN_WIDTHS: Readonly<Record<TxColumnId, number | null
   comment: 190,
 };
 
-const RX_COLUMN_DEFS: Record<
+const RX_COLUMN_KEYS: Record<
   RxColumnId,
-  { label: string; align: 'left' | 'right'; font?: 'font-sans' | 'font-mono' }
+  { labelKey: TranslationKey; align: 'left' | 'right'; font?: 'font-sans' | 'font-mono' }
 > = {
-  bus: { label: 'Bus', align: 'left' },
-  type: { label: 'Type', align: 'left' },
-  id: { label: 'ID', align: 'left' },
-  idDec: { label: 'ID Dec', align: 'right' },
-  pgn: { label: 'PGN', align: 'left' },
-  sa: { label: 'SA', align: 'left' },
-  dlc: { label: 'DLC', align: 'right' },
-  symbol: { label: 'Symbol', align: 'left', font: 'font-sans' },
-  data: { label: 'Data', align: 'left' },
-  cycle: { label: 'Cycle', align: 'right' },
-  count: { label: 'Count', align: 'right' },
+  bus: { labelKey: 'rxtx.col.bus', align: 'left' },
+  type: { labelKey: 'rxtx.col.type', align: 'left' },
+  id: { labelKey: 'rxtx.col.id', align: 'left' },
+  idDec: { labelKey: 'rxtx.col.idDec', align: 'right' },
+  pgn: { labelKey: 'rxtx.col.pgn', align: 'left' },
+  sa: { labelKey: 'rxtx.col.sa', align: 'left' },
+  dlc: { labelKey: 'rxtx.col.dlc', align: 'right' },
+  symbol: { labelKey: 'rxtx.col.symbol', align: 'left', font: 'font-sans' },
+  data: { labelKey: 'rxtx.col.data', align: 'left' },
+  cycle: { labelKey: 'rxtx.col.cycle', align: 'right' },
+  count: { labelKey: 'rxtx.col.count', align: 'right' },
 };
 
-const TX_COLUMN_DEFS: Record<
+const TX_COLUMN_KEYS: Record<
   TxColumnId,
-  { label: string; align: 'left' | 'right'; font?: 'font-sans' | 'font-mono' }
+  { labelKey: TranslationKey; align: 'left' | 'right'; font?: 'font-sans' | 'font-mono' }
 > = {
-  bus: { label: 'Bus', align: 'left' },
-  type: { label: 'Type', align: 'left' },
-  id: { label: 'ID', align: 'left' },
-  dlc: { label: 'DLC', align: 'right' },
-  symbol: { label: 'Symbol', align: 'left', font: 'font-sans' },
-  data: { label: 'Data', align: 'left' },
-  cycle: { label: 'Cycle', align: 'right' },
-  count: { label: 'Count', align: 'right' },
-  trigger: { label: 'Trigger', align: 'left', font: 'font-sans' },
-  comment: { label: 'Comment', align: 'left', font: 'font-sans' },
+  bus: { labelKey: 'rxtx.col.bus', align: 'left' },
+  type: { labelKey: 'rxtx.col.type', align: 'left' },
+  id: { labelKey: 'rxtx.col.id', align: 'left' },
+  dlc: { labelKey: 'rxtx.col.dlc', align: 'right' },
+  symbol: { labelKey: 'rxtx.col.symbol', align: 'left', font: 'font-sans' },
+  data: { labelKey: 'rxtx.col.data', align: 'left' },
+  cycle: { labelKey: 'rxtx.col.cycle', align: 'right' },
+  count: { labelKey: 'rxtx.col.count', align: 'right' },
+  trigger: { labelKey: 'rxtx.col.trigger', align: 'left', font: 'font-sans' },
+  comment: { labelKey: 'rxtx.col.comment', align: 'left', font: 'font-sans' },
 };
 
 const COLUMN_STORAGE_KEY = 'nexuscan:rxtxColumnLayout:v1';
@@ -284,11 +291,17 @@ function savePersistedColumnLayout(partial: Partial<PersistedColumnLayout>): voi
   }
 }
 
-function getColumnLabel(table: 'rx' | 'tx', colId: string): string {
+function getColumnLabel(
+  table: 'rx' | 'tx',
+  colId: string,
+  translate: (k: TranslationKey) => string,
+): string {
   if (table === 'rx') {
-    return RX_COLUMN_DEFS[colId as RxColumnId]?.label ?? colId;
+    const def = RX_COLUMN_KEYS[colId as RxColumnId];
+    return def ? translate(def.labelKey) : colId;
   }
-  return TX_COLUMN_DEFS[colId as TxColumnId]?.label ?? colId;
+  const def = TX_COLUMN_KEYS[colId as TxColumnId];
+  return def ? translate(def.labelKey) : colId;
 }
 
 function getFrameTypeTag(
@@ -357,6 +370,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
   onSwitchToActiveTx,
   panicCounter,
 }) => {
+  const { t } = useI18n();
   const dbState = useDatabaseStore();
   const header = useTelemetryHeader();
   const framesSlice = useTelemetryFrames();
@@ -414,6 +428,31 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
   }, [rxColumnOrder, rxColumnMode]);
 
   const visibleTxCols = txColumnOrder;
+
+  // Cached translated column labels to eliminate string allocation in table loops (60 FPS discipline)
+  const rxColLabels = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const c of visibleRxCols) {
+      map[c] = t(RX_COLUMN_KEYS[c].labelKey);
+    }
+    return map;
+  }, [visibleRxCols, t]);
+
+  const txColLabels = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const c of visibleTxCols) {
+      map[c] = t(TX_COLUMN_KEYS[c].labelKey);
+    }
+    return map;
+  }, [visibleTxCols, t]);
+
+  // Static loop text constants resolved outside rows
+  const strWait = t('rxtx.common.wait');
+  const strManual = t('rxtx.tx.manual');
+  const strPeriodic = t('rxtx.tx.periodic');
+  const strPaused = t('rxtx.tx.paused');
+  const strSend = t('rxtx.common.send');
+  const strCustomRaw = t('rxtx.tx.customRaw');
 
   const isRxLayoutModified = useMemo(() => {
     if (rxColumnOrder.length !== DEFAULT_RX_COLUMN_ORDER.length) return true;
@@ -809,14 +848,19 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
       if (!busHealth) {
         onStatusMessage({
           kind: 'error',
-          message: `Cannot transmit: Bus ${entry.busId + 1} is disconnected. Click "Switch to Active TX" first.`,
+          message: t('rxtx.status.cannotTxDisconnected', { bus: entry.busId + 1 }),
         });
         return;
       }
       if (busHealth.listenOnly || !busHealth.txArmed) {
         onStatusMessage({
           kind: 'error',
-          message: `TX Locked on Bus ${entry.busId + 1} (${busHealth.listenOnly ? 'Listen-Only' : 'Disarmed'}). Click "Switch to Active TX" in the Transmit toolbar.`,
+          message: t('rxtx.status.txLocked', {
+            bus: entry.busId + 1,
+            mode: busHealth.listenOnly
+              ? t('rxtx.busBadge.listenOnly')
+              : t('rxtx.busBadge.txDisarmed'),
+          }),
         });
         return;
       }
@@ -875,7 +919,9 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
       } catch (err) {
         onStatusMessage({
           kind: 'error',
-          message: `TX failed: ${err instanceof Error ? err.message : String(err)}`,
+          message: t('rxtx.status.txFailed', {
+            error: err instanceof Error ? err.message : String(err),
+          }),
         });
       } finally {
         setBusyTxIds((prev) => {
@@ -885,7 +931,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
         });
       }
     },
-    [header.buses, onStatusMessage],
+    [header.buses, onStatusMessage, t],
   );
 
   const handleTogglePeriodicCheckbox = async (entry: TxListEntry): Promise<void> => {
@@ -942,7 +988,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     transmitStore.markAllPaused();
     onStatusMessage({
       kind: 'info',
-      message: `Paused ${activeEntries.length} periodic transmit message(s).`,
+      message: t('rxtx.status.pausedPeriodic', { count: activeEntries.length }),
     });
   };
 
@@ -965,7 +1011,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     transmitStore.resetCounters();
     onStatusMessage({
       kind: 'info',
-      message: 'Cleared Receive, Trace & frame counters.',
+      message: t('rxtx.status.clearedRx'),
     });
   };
 
@@ -973,7 +1019,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     transmitStore.resetCounters();
     onStatusMessage({
       kind: 'info',
-      message: 'Reset Transmit message counters.',
+      message: t('rxtx.status.resetTxCounts'),
     });
   };
 
@@ -993,7 +1039,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     transmitStore.clearAllEntries();
     onStatusMessage({
       kind: 'info',
-      message: 'Cleared Transmit message list.',
+      message: t('rxtx.status.clearedTxList'),
     });
   };
 
@@ -1026,7 +1072,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     setModalState({ open: false, editing: null });
   };
 
-  // Spacebar single-shot trigger for selected TX row (PCAN-Explorer standard!)
+  // Spacebar single-shot trigger for selected TX row (Industrial CAN standard)
   useEffect(() => {
     const onKeyDown = (ev: KeyboardEvent): void => {
       if (modalState.open) return;
@@ -1065,45 +1111,49 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
         >
           {/* Left 22px Rotated "Receive" Strip */}
           <div className="pcan-side-strip">
-            <span className="pcan-side-strip-label">Receive</span>
+            <span className="pcan-side-strip-label">{t('rxtx.section.receive')}</span>
           </div>
 
           <div className="flex flex-col flex-1 min-w-0 min-h-0">
-            {/* Slim 26px Receive Sub-Toolbar */}
+            {/* Slim Receive Sub-Toolbar (Scaled & Responsive) */}
             <div
               style={{
                 backgroundColor: 'var(--bg-toolbar)',
                 borderBottom: '1px solid var(--border-strong)',
               }}
-              className="shrink-0 h-[26px] px-2 flex items-center justify-between gap-2 text-[11px]"
+              className="shrink-0 min-h-[38px] py-1 px-3 flex items-center justify-between gap-2 text-[12px] flex-wrap"
             >
-              <div className="flex items-center gap-2">
-                <span className="text-[var(--text-secondary)]">Filter:</span>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[var(--text-secondary)] font-medium">
+                  {t('rxtx.rx.filterLabel')}
+                </span>
                 <div className="relative flex items-center">
                   <input
                     type="text"
                     value={rxFilter}
                     onChange={(e) => setRxFilter(e.target.value)}
-                    placeholder="ID, Symbol, Signal..."
+                    placeholder={t('rxtx.rx.filterPlaceholder')}
                     style={{
                       backgroundColor: 'var(--bg-input)',
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-primary)',
                     }}
-                    className="h-[20px] w-44 px-1.5 pr-5 border text-[11px] focus:outline-none"
+                    className="h-[28px] w-40 sm:w-52 xl:w-64 px-2 pr-6 border text-[12px] focus:outline-none"
                   />
                   {rxFilter && (
                     <button
                       type="button"
                       onClick={() => setRxFilter('')}
-                      className="absolute right-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                      className="absolute right-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
                     >
-                      <X className="w-3 h-3" />
+                      <X className="w-3.5 h-3.5" />
                     </button>
                   )}
                 </div>
 
-                <span className="text-[var(--text-secondary)] ml-1">Columns:</span>
+                <span className="text-[var(--text-secondary)] ml-1 font-medium">
+                  {t('rxtx.rx.columnsLabel')}
+                </span>
                 <select
                   aria-label="Receive Table Columns Profile"
                   value={rxColumnMode}
@@ -1113,11 +1163,11 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="h-[20px] px-1.5 border text-[11px] focus:outline-none"
+                  className="h-[28px] px-2 border text-[12px] focus:outline-none"
                 >
-                  <option value="CAN">CAN (Hex)</option>
-                  <option value="CAN_DEC">CAN (Hex + Dec)</option>
-                  <option value="J1939">J1939</option>
+                  <option value="CAN">{t('rxtx.rx.colOptCan')}</option>
+                  <option value="CAN_DEC">{t('rxtx.rx.colOptCanDec')}</option>
+                  <option value="J1939">{t('rxtx.rx.colOptJ1939')}</option>
                 </select>
 
                 {isRxLayoutModified && (
@@ -1129,15 +1179,15 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-secondary)',
                     }}
-                    className="h-[20px] px-1.5 border text-[10px] hover:text-[var(--text-primary)] cursor-pointer"
-                    title="Reset Receive column widths and order to default"
+                    className="h-[28px] px-2.5 border text-[11.5px] hover:text-[var(--text-primary)] cursor-pointer"
+                    title={t('rxtx.rx.resetLayoutTooltip')}
                   >
-                    Reset Columns
+                    {t('rxtx.rx.resetColumns')}
                   </button>
                 )}
               </div>
 
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <button
                   type="button"
                   onClick={() => void handleClearReceive()}
@@ -1146,13 +1196,13 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="h-[20px] px-2 border flex items-center gap-1 font-medium hover:border-[var(--text-secondary)] cursor-pointer"
-                  title="Clear Receive list, Trace buffer & RX/TX frame counters (Esc)"
+                  className="h-[28px] px-2.5 border flex items-center gap-1.5 font-medium hover:border-[var(--text-secondary)] cursor-pointer"
+                  title={t('rxtx.rx.clearTooltip')}
                 >
-                  <RotateCcw className="w-3 h-3 text-[var(--text-secondary)]" />
-                  <span>Clear (Esc)</span>
+                  <RotateCcw className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>{t('rxtx.rx.clear')}</span>
                 </button>
-                <div className="h-3.5 w-[1px] bg-[var(--border-strong)] mx-0.5" />
+                <div className="h-4 w-[1px] bg-[var(--border-strong)] mx-1" />
                 <button
                   type="button"
                   onClick={() =>
@@ -1165,9 +1215,9 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     borderColor: 'var(--border-grid)',
                     color: 'var(--text-secondary)',
                   }}
-                  className="h-[20px] px-2 border hover:text-[var(--text-primary)] cursor-pointer"
+                  className="h-[28px] px-2.5 border hover:text-[var(--text-primary)] cursor-pointer"
                 >
-                  Expand All
+                  {t('rxtx.rx.expandAll')}
                 </button>
                 <button
                   type="button"
@@ -1177,9 +1227,9 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     borderColor: 'var(--border-grid)',
                     color: 'var(--text-secondary)',
                   }}
-                  className="h-[20px] px-2 border hover:text-[var(--text-primary)] cursor-pointer"
+                  className="h-[28px] px-2.5 border hover:text-[var(--text-primary)] cursor-pointer"
                 >
-                  Collapse All
+                  {t('rxtx.rx.collapseAll')}
                 </button>
               </div>
             </div>
@@ -1203,7 +1253,8 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                   <tr>
                     <th className="text-center" style={{ width: '26px' }} />
                     {visibleRxCols.map((colId) => {
-                      const def = RX_COLUMN_DEFS[colId];
+                      const def = RX_COLUMN_KEYS[colId];
+                      const label = rxColLabels[colId] ?? colId;
                       const isDropTarget = activeDrag?.table === 'rx' && activeDrag.overCol === colId;
                       const isDraggingThis = activeDrag?.table === 'rx' && activeDrag.sourceCol === colId;
 
@@ -1213,7 +1264,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                           data-rx-col={colId}
                           onPointerDown={(e) => handleHeaderPointerDown(e, 'rx', colId)}
                           className={`${def.align === 'right' ? 'text-right' : 'text-left'} select-none cursor-grab active:cursor-grabbing ${def.font ?? ''} ${isDraggingThis ? 'opacity-40' : ''}`}
-                          title={`${def.label} (Drag to reorder · Double-click right edge to reset width)`}
+                          title={t('rxtx.col.headerTooltip', { label })}
                         >
                           {isDropTarget && (
                             <span
@@ -1222,13 +1273,13 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                               }`}
                             />
                           )}
-                          <span className="truncate block pr-1.5">{def.label}</span>
+                          <span className="truncate block pr-1.5">{label}</span>
                           <span
                             data-resize-handle
                             onPointerDown={(e) => handleResizePointerDown(e, 'rx', colId)}
                             onDoubleClick={(e) => handleResetColumnWidth(e, 'rx', colId)}
                             className="absolute top-0 right-0 bottom-0 w-[6px] cursor-col-resize hover:bg-[#58A6FF]/40 z-10"
-                            title="Drag to resize column · Double-click to auto-fit"
+                            title={t('rxtx.col.resizeTooltip')}
                           />
                         </th>
                       );
@@ -1260,8 +1311,11 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                       const switchEntries = Object.entries(frame.activeMuxSwitches);
                       const muxTooltip = msgSchema
                         ? switchEntries.length > 0
-                          ? `${muxSym.fullSymbol} (${switchEntries.map(([k, v]) => `${k}=${v}`).join(', ')}) · Double-click for Bit Layout`
-                          : `${msgSchema.name} (Double-click for Bit Layout)`
+                          ? t('rxtx.rx.muxTooltipWithEntries', {
+                              symbol: muxSym.fullSymbol,
+                              entries: switchEntries.map(([k, v]) => `${k}=${v}`).join(', '),
+                            })
+                          : t('rxtx.rx.muxTooltipPlain', { name: msgSchema.name })
                         : undefined;
 
                       return (
@@ -1316,7 +1370,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                                         className="pcan-cell"
                                         title={
                                           frame.isTx
-                                            ? 'Self-transmitted loopback frame (from Transmit list)'
+                                            ? t('rxtx.rx.loopbackTooltip')
                                             : undefined
                                         }
                                       >
@@ -1513,19 +1567,19 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
         >
           {/* Left 22px Rotated "Transmit" Strip */}
           <div className="pcan-side-strip">
-            <span className="pcan-side-strip-label">Transmit</span>
+            <span className="pcan-side-strip-label">{t('rxtx.section.transmit')}</span>
           </div>
 
           <div className="flex flex-col flex-1 min-w-0 min-h-0">
-            {/* Slim 26px Transmit Sub-Toolbar */}
+            {/* Slim Transmit Sub-Toolbar (Scaled & Responsive) */}
             <div
               style={{
                 backgroundColor: 'var(--bg-toolbar)',
                 borderBottom: '1px solid var(--border-strong)',
               }}
-              className="shrink-0 h-[26px] px-2 flex items-center justify-between gap-2 text-[11px]"
+              className="shrink-0 min-h-[38px] py-1 px-3 flex items-center justify-between gap-2 text-[12px] flex-wrap"
             >
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <button
                   type="button"
                   onClick={() => setModalState({ open: true, editing: null })}
@@ -1534,10 +1588,10 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="h-[20px] px-2 border flex items-center gap-1 font-medium hover:border-[var(--text-secondary)] cursor-pointer"
+                  className="h-[28px] px-2.5 border flex items-center gap-1.5 font-medium hover:border-[var(--text-secondary)] cursor-pointer"
                 >
-                  <Plus className="w-3 h-3 text-[var(--text-secondary)]" />
-                  <span>New Message...</span>
+                  <Plus className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>{t('rxtx.tx.newMessage')}</span>
                 </button>
 
                 <button
@@ -1553,10 +1607,10 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="h-[20px] px-2 border flex items-center gap-1 hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
+                  className="h-[28px] px-2.5 border flex items-center gap-1.5 hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
                 >
-                  <Edit3 className="w-3 h-3 text-[var(--text-secondary)]" />
-                  <span>Edit...</span>
+                  <Edit3 className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>{t('rxtx.tx.editMessage')}</span>
                 </button>
 
                 <button
@@ -1568,13 +1622,13 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="h-[20px] px-2 border flex items-center gap-1 hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
+                  className="h-[28px] px-2.5 border flex items-center gap-1.5 hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
                 >
-                  <Trash2 className="w-3 h-3 text-[var(--text-secondary)]" />
-                  <span>Delete</span>
+                  <Trash2 className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>{t('rxtx.tx.delete')}</span>
                 </button>
 
-                <div className="h-3.5 w-[1px] bg-[var(--border-strong)] mx-0.5" />
+                <div className="h-4 w-[1px] bg-[var(--border-strong)] mx-1" />
 
                 <button
                   type="button"
@@ -1589,11 +1643,11 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="h-[20px] px-2 border flex items-center gap-1 font-semibold hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
-                  title="Transmit selected frame once immediately (Space)"
+                  className="h-[28px] px-3 border flex items-center gap-1.5 font-semibold hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer text-emerald-400"
+                  title={t('rxtx.tx.sendTooltip')}
                 >
-                  <Send className="w-3 h-3 text-[var(--text-secondary)]" />
-                  <span>Send (Space)</span>
+                  <Send className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>{t('rxtx.tx.sendSpace')}</span>
                 </button>
 
                 <button
@@ -1605,13 +1659,13 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="h-[20px] px-2 border flex items-center gap-1 hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
+                  className="h-[28px] px-2.5 border flex items-center gap-1.5 hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
                 >
-                  <Pause className="w-3 h-3 text-[var(--text-secondary)]" />
-                  <span>Pause All</span>
+                  <Pause className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>{t('rxtx.tx.pauseAll')}</span>
                 </button>
 
-                <div className="h-3.5 w-[1px] bg-[var(--border-strong)] mx-0.5" />
+                <div className="h-4 w-[1px] bg-[var(--border-strong)] mx-1" />
 
                 <button
                   type="button"
@@ -1622,11 +1676,11 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="h-[20px] px-2 border flex items-center gap-1 hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
-                  title="Zero sent counters on all Transmit entries"
+                  className="h-[28px] px-2.5 border flex items-center gap-1.5 hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
+                  title={t('rxtx.tx.resetCountsTooltip')}
                 >
-                  <RotateCcw className="w-3 h-3 text-[var(--text-secondary)]" />
-                  <span>Reset Counts</span>
+                  <RotateCcw className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>{t('rxtx.tx.resetCounts')}</span>
                 </button>
 
                 <button
@@ -1638,11 +1692,11 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="h-[20px] px-2 border flex items-center gap-1 hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
-                  title="Stop active periodic TX jobs and clear all entries from the Transmit list"
+                  className="h-[28px] px-2.5 border flex items-center gap-1.5 hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
+                  title={t('rxtx.tx.clearListTooltip')}
                 >
-                  <Trash2 className="w-3 h-3 text-[var(--text-secondary)]" />
-                  <span>Clear List</span>
+                  <Trash2 className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>{t('rxtx.tx.clearList')}</span>
                 </button>
 
                 {isTxLayoutModified && (
@@ -1654,10 +1708,10 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-secondary)',
                     }}
-                    className="h-[20px] px-1.5 border text-[10px] hover:text-[var(--text-primary)] cursor-pointer"
-                    title="Reset Transmit column widths and order to default"
+                    className="h-[28px] px-2.5 border text-[11.5px] hover:text-[var(--text-primary)] cursor-pointer"
+                    title={t('rxtx.tx.resetLayoutTooltip')}
                   >
-                    Reset Columns
+                    {t('rxtx.tx.resetColumns')}
                   </button>
                 )}
               </div>
@@ -1675,8 +1729,8 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
 
                 if (targetBusId === null || !targetBus) {
                   return (
-                    <div className="flex items-center gap-1.5 text-[10px] font-mono text-[var(--text-muted)]">
-                      <span>No Active Bus</span>
+                    <div className="flex items-center gap-1.5 text-[11px] font-mono text-[var(--text-muted)]">
+                      <span>{t('rxtx.tx.noActiveBus')}</span>
                     </div>
                   );
                 }
@@ -1685,18 +1739,18 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
 
                 return (
                   <div className="flex items-center gap-2">
-                    <span className="font-mono text-[10px] text-[var(--text-secondary)]">
+                    <span className="font-mono text-[11.5px] text-[var(--text-secondary)]">
                       Bus {targetBus.busId + 1} ({targetBus.channelName}):
                     </span>
                     {isReady ? (
-                      <span className="flex items-center gap-1.5 text-amber-400 font-medium">
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                        <span>TX Armed</span>
+                      <span className="flex items-center gap-1.5 text-amber-400 font-medium text-[12px]">
+                        <span className="w-2 h-2 rounded-full bg-amber-400" />
+                        <span>{t('rxtx.tx.txArmed')}</span>
                       </span>
                     ) : (
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[var(--text-muted)]">
-                          {targetBus.listenOnly ? 'Listen-Only' : 'TX Disarmed'}
+                      <div className="flex items-center gap-2">
+                        <span className="text-[var(--text-muted)] text-[11.5px]">
+                          {targetBus.listenOnly ? t('rxtx.tx.listenOnly') : t('rxtx.tx.txDisarmed')}
                         </span>
                         <button
                           type="button"
@@ -1706,11 +1760,14 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                             borderColor: 'rgba(217, 155, 38, 0.55)',
                             color: '#E3B341',
                           }}
-                          className="h-[20px] px-2 border hover:border-amber-400 flex items-center gap-1 font-medium cursor-pointer"
-                          title={`Switch Bus ${targetBus.busId + 1} (${targetBus.channelName}) to Active TX Armed`}
+                          className="h-[28px] px-2.5 border hover:border-amber-400 flex items-center gap-1.5 font-medium cursor-pointer text-[12px]"
+                          title={t('rxtx.tx.enableActiveTxTooltip', {
+                            bus: targetBus.busId + 1,
+                            name: targetBus.channelName,
+                          })}
                         >
-                          <Unlock className="w-3 h-3" />
-                          <span>Enable Active TX</span>
+                          <Unlock className="w-3.5 h-3.5" />
+                          <span>{t('rxtx.tx.enableActiveTx')}</span>
                         </button>
                       </div>
                     )}
@@ -1736,9 +1793,12 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                 </colgroup>
                 <thead>
                   <tr>
-                    <th className="text-center" style={{ width: '48px' }}>On</th>
+                    <th className="text-center" style={{ width: '48px' }}>
+                      {t('rxtx.tx.colOn')}
+                    </th>
                     {visibleTxCols.map((colId) => {
-                      const def = TX_COLUMN_DEFS[colId];
+                      const def = TX_COLUMN_KEYS[colId];
+                      const label = txColLabels[colId] ?? colId;
                       const isDropTarget = activeDrag?.table === 'tx' && activeDrag.overCol === colId;
                       const isDraggingThis = activeDrag?.table === 'tx' && activeDrag.sourceCol === colId;
 
@@ -1748,7 +1808,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                           data-tx-col={colId}
                           onPointerDown={(e) => handleHeaderPointerDown(e, 'tx', colId)}
                           className={`${def.align === 'right' ? 'text-right' : 'text-left'} select-none cursor-grab active:cursor-grabbing ${def.font ?? ''} ${isDraggingThis ? 'opacity-40' : ''}`}
-                          title={`${def.label} (Drag to reorder · Double-click right edge to reset width)`}
+                          title={t('rxtx.col.headerTooltip', { label })}
                         >
                           {isDropTarget && (
                             <span
@@ -1757,13 +1817,13 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                               }`}
                             />
                           )}
-                          <span className="truncate block pr-1.5">{def.label}</span>
+                          <span className="truncate block pr-1.5">{label}</span>
                           <span
                             data-resize-handle
                             onPointerDown={(e) => handleResizePointerDown(e, 'tx', colId)}
                             onDoubleClick={(e) => handleResetColumnWidth(e, 'tx', colId)}
                             className="absolute top-0 right-0 bottom-0 w-[6px] cursor-col-resize hover:bg-[#58A6FF]/40 z-10"
-                            title="Drag to resize column · Double-click to auto-fit"
+                            title={t('rxtx.col.resizeTooltip')}
                           />
                         </th>
                       );
@@ -1775,7 +1835,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     <tr>
                       <td colSpan={1 + visibleTxCols.length}>
                         <div className="pcan-cell pcan-cell-center font-sans text-[var(--text-muted)]">
-                          No transmit entries
+                          {t('rxtx.tx.noEntries')}
                         </div>
                       </td>
                     </tr>
@@ -1834,8 +1894,8 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                                   onChange={() => void handleTogglePeriodicCheckbox(entry)}
                                   title={
                                     entry.cycleTimeMs > 0
-                                      ? `Enable/Stop ${entry.cycleTimeMs} ms periodic transmission`
-                                      : 'Start 100 ms periodic transmission (or click [Send] for manual shot)'
+                                      ? t('rxtx.tx.periodicToggleStop', { ms: entry.cycleTimeMs })
+                                      : t('rxtx.tx.periodicToggleStart')
                                   }
                                   className="accent-emerald-600 cursor-pointer shrink-0"
                                 />
@@ -1908,7 +1968,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                                         title={
                                           txMuxInfo
                                             ? txMuxInfo.formatted.fullSymbol
-                                            : entry.symbolName || 'Custom Raw'
+                                            : entry.symbolName || strCustomRaw
                                         }
                                       >
                                         {txMuxInfo ? (
@@ -1927,7 +1987,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                                           </span>
                                         ) : (
                                           <span className="truncate">
-                                            {entry.symbolName || 'Custom Raw'}
+                                            {entry.symbolName || strCustomRaw}
                                           </span>
                                         )}
                                       </div>
@@ -1959,7 +2019,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                                     <td key="cycle">
                                       <div className="pcan-cell pcan-cell-right font-sans">
                                         {entry.cycleTimeMs === 0 ? (
-                                          <span className="text-[var(--text-secondary)]">Wait</span>
+                                          <span className="text-[var(--text-secondary)]">{strWait}</span>
                                         ) : (
                                           <span className="font-mono">
                                             {entry.cycleTimeMs.toFixed(1)}
@@ -1988,10 +2048,10 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                                           }`}
                                         >
                                           {entry.cycleTimeMs === 0
-                                            ? 'Manual'
+                                            ? strManual
                                             : entry.periodicEnabled
-                                              ? 'Periodic'
-                                              : 'Paused'}
+                                              ? strPeriodic
+                                              : strPaused}
                                         </span>
                                         <button
                                           type="button"
@@ -2002,9 +2062,9 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                                             borderColor: 'var(--border-strong)',
                                           }}
                                           className="px-1.5 h-[17px] leading-none border text-[10px] hover:border-sky-500 cursor-pointer shrink-0"
-                                          title="Send frame once now"
+                                          title={t('rxtx.tx.sendBtnTooltip')}
                                         >
-                                          Send
+                                          {strSend}
                                         </button>
                                       </div>
                                     </td>
@@ -2068,7 +2128,6 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
         />
       )}
 
-
       {onboardingNewConnModalOpen && (
         <NewConnectionModal
           devices={devices}
@@ -2089,7 +2148,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
           className="px-2 py-1 bg-[#1F242C] border border-[#58A6FF] rounded text-[11px] font-mono text-white shadow-lg flex items-center gap-1.5"
         >
           <span className="w-1.5 h-1.5 rounded-full bg-[#58A6FF]" />
-          <span>{getColumnLabel(activeDrag.table, activeDrag.sourceCol)}</span>
+          <span>{getColumnLabel(activeDrag.table, activeDrag.sourceCol, t)}</span>
         </div>
       )}
     </div>
@@ -2127,6 +2186,8 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
   onCreateProject,
   onOpenProject,
 }) => {
+  const { t } = useI18n();
+
   return (
     <div className="p-6 flex flex-col items-center justify-center text-center font-sans">
       {!hasActiveWorkspace && (
@@ -2139,10 +2200,10 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
         >
           <div>
             <span className="text-[12px] font-semibold text-sky-400">
-              No project workspace initialized
+              {t('rxtx.onboarding.noProjectTitle')}
             </span>
             <p className="text-[11px] text-[var(--text-secondary)]">
-              Create a named project or open an existing one to persist symbols, connections & plot setups.
+              {t('rxtx.onboarding.noProjectDesc')}
             </p>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
@@ -2156,7 +2217,7 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
               }}
               className="h-[22px] px-2.5 border text-[10px] font-semibold cursor-pointer hover:opacity-90"
             >
-              New Project
+              {t('rxtx.onboarding.newProject')}
             </button>
             <button
               type="button"
@@ -2167,7 +2228,7 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
               }}
               className="h-[22px] px-2.5 border text-[10px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
             >
-              Open...
+              {t('rxtx.onboarding.openProject')}
             </button>
           </div>
         </div>
@@ -2175,9 +2236,9 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
 
       <div className="max-w-[760px] w-full text-left">
         <div className="text-[12px] font-bold text-[var(--text-primary)] mb-1 flex items-center gap-2">
-          <span>Telemetry Pipeline Standby</span>
+          <span>{t('rxtx.onboarding.standbyTitle')}</span>
           <span className="text-[10px] font-mono text-[var(--text-muted)] font-normal">
-            (Follow steps below to start live data capture)
+            {t('rxtx.onboarding.standbyDesc')}
           </span>
         </div>
 
@@ -2193,21 +2254,21 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
             <div>
               <div className="flex items-center justify-between gap-1 mb-1.5">
                 <span className="text-[11px] font-bold text-[var(--text-primary)]">
-                  Step 1 · Interface
+                  {t('rxtx.onboarding.step1Title')}
                 </span>
                 {anyBusConnected ? (
                   <span className="text-[9px] font-mono font-bold text-emerald-400 bg-emerald-500/15 px-1 py-0.5 border border-emerald-500/30 rounded-xs flex items-center gap-1">
                     <CheckCircle2 className="w-2.5 h-2.5" />
-                    <span>Connected</span>
+                    <span>{t('rxtx.onboarding.connected')}</span>
                   </span>
                 ) : (
                   <span className="text-[9px] font-mono text-[var(--text-muted)] bg-[var(--bg-panel)] px-1 py-0.5 border border-[var(--border-grid)] rounded-xs">
-                    Offline
+                    {t('rxtx.onboarding.offline')}
                   </span>
                 )}
               </div>
               <p className="text-[10px] text-[var(--text-secondary)] leading-relaxed">
-                Enable a saved interface in Connections or add a new adapter (SocketCAN, SLCAN, PCAN, Kvaser, mock0).
+                {t('rxtx.onboarding.step1Desc')}
               </p>
             </div>
 
@@ -2222,7 +2283,7 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
                 }}
                 className="h-[22px] px-2 border text-[10px] font-semibold hover:opacity-90 cursor-pointer"
               >
-                + New Connection
+                {t('rxtx.onboarding.newConn')}
               </button>
               <button
                 type="button"
@@ -2233,7 +2294,7 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
                 }}
                 className="h-[22px] px-2 border text-[10px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
               >
-                Connections →
+                {t('rxtx.onboarding.toConn')}
               </button>
             </div>
           </div>
@@ -2249,7 +2310,7 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
             <div>
               <div className="flex items-center justify-between gap-1 mb-1.5">
                 <span className="text-[11px] font-bold text-[var(--text-primary)]">
-                  Step 2 · Symbol DB
+                  {t('rxtx.onboarding.step2Title')}
                 </span>
                 {hasSchema ? (
                   <span className="text-[9px] font-mono font-bold text-emerald-400 bg-emerald-500/15 px-1 py-0.5 border border-emerald-500/30 rounded-xs flex items-center gap-1 truncate max-w-[110px]" title={schemaName}>
@@ -2258,12 +2319,12 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
                   </span>
                 ) : (
                   <span className="text-[9px] font-mono text-[var(--text-muted)] bg-[var(--bg-panel)] px-1 py-0.5 border border-[var(--border-grid)] rounded-xs">
-                    Raw Mode
+                    {t('rxtx.onboarding.rawMode')}
                   </span>
                 )}
               </div>
               <p className="text-[10px] text-[var(--text-secondary)] leading-relaxed">
-                Add .dbc / .kcd files to the Databases catalog, then bind them per connection (Bus) for physical signal decoding.
+                {t('rxtx.onboarding.step2Desc')}
               </p>
             </div>
 
@@ -2277,7 +2338,7 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
                 }}
                 className="h-[22px] px-2 border text-[10px] font-medium text-[var(--text-primary)] hover:border-[var(--text-secondary)] cursor-pointer"
               >
-                Databases →
+                {t('rxtx.onboarding.toDb')}
               </button>
               <button
                 type="button"
@@ -2288,7 +2349,7 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
                 }}
                 className="h-[22px] px-1.5 border text-[10px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
               >
-                Bağlantıya Bağla →
+                {t('rxtx.onboarding.bindToConn')}
               </button>
             </div>
           </div>
@@ -2304,14 +2365,14 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
             <div>
               <div className="flex items-center justify-between gap-1 mb-1.5">
                 <span className="text-[11px] font-bold text-[var(--text-primary)]">
-                  Step 3 · TX & Trace
+                  {t('rxtx.onboarding.step3Title')}
                 </span>
                 <span className="text-[9px] font-mono text-sky-400 bg-sky-500/15 px-1 py-0.5 border border-sky-500/30 rounded-xs">
-                  Ready
+                  {t('rxtx.onboarding.ready')}
                 </span>
               </div>
               <p className="text-[10px] text-[var(--text-secondary)] leading-relaxed">
-                Once connected, live bus frames stream here automatically. Compose single-shot or periodic frames in Transmit.
+                {t('rxtx.onboarding.step3Desc')}
               </p>
             </div>
 
@@ -2326,7 +2387,7 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
                 className="h-[22px] px-2 border text-[10px] font-semibold text-[var(--text-primary)] hover:border-[var(--text-secondary)] cursor-pointer flex items-center gap-1"
               >
                 <Plus className="w-2.5 h-2.5 text-emerald-400" />
-                <span>Add TX Message...</span>
+                <span>{t('rxtx.onboarding.addTxMsg')}</span>
               </button>
             </div>
           </div>
@@ -2355,6 +2416,7 @@ const RxSignalTreeRows: React.FC<RxSignalTreeRowsProps> = ({
   recentlyChangedSignals,
   visibleCols,
 }) => {
+  const { t } = useI18n();
   const visibleSignals: readonly LiveSignalDto[] = useMemo(() => {
     return [...frame.signals].sort((a, b) => a.signalId - b.signalId);
   }, [frame.signals]);
@@ -2365,7 +2427,7 @@ const RxSignalTreeRows: React.FC<RxSignalTreeRowsProps> = ({
         <td className="px-0" />
         <td colSpan={visibleCols.length}>
           <div className="pcan-cell pl-3 border-l-2 border-[var(--border-strong)] font-sans text-[12px] text-[var(--text-muted)]">
-            No decoded signals
+            {t('rxtx.rx.noDecodedSignals')}
           </div>
         </td>
       </tr>
@@ -2438,7 +2500,7 @@ const RxSignalTreeRows: React.FC<RxSignalTreeRowsProps> = ({
             </span>
             {sig.outOfRange && (
               <span className="text-red-500 ml-2 font-sans text-[11px] font-semibold shrink-0">
-                [Out of Range]
+                {t('rxtx.common.outOfRange')}
               </span>
             )}
           </div>
@@ -2619,19 +2681,58 @@ interface BottomConnectionsDockProps {
 }
 
 const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
-  devices,
-  statusBanner,
   onStatusMessage,
 }) => {
+  const { t } = useI18n();
   const header = useTelemetryHeader();
   const connState = useConnectionStore();
+  const workbench = useWorkbenchStore();
 
-  const [newConnModalOpen, setNewConnModalOpen] = useState<boolean>(false);
   const [busyBusIds, setBusyBusIds] = useState<Set<number>>(() => new Set());
 
-  // STRICT INVARIANT (RULE 4): ONLY actively connected buses appear here!
-  const connectedBuses = header.buses.filter((b) => b.connected);
-  const connectedCount = connectedBuses.length;
+  const connectedBusMap = useMemo(() => {
+    const map = new Map<number, BusHealthDto>();
+    for (const b of header.buses) {
+      if (b.connected) {
+        map.set(b.busId, b);
+      }
+    }
+    return map;
+  }, [header.buses]);
+
+  interface ConnectionRowItem {
+    key: string;
+    busId: number;
+    profile: SavedConnectionProfile | null;
+    busHealth: BusHealthDto | null;
+    isConnected: boolean;
+  }
+
+  const allRows: ConnectionRowItem[] = useMemo(() => {
+    const list: ConnectionRowItem[] = connState.profiles.map((prof) => ({
+      key: `prof-${prof.id}`,
+      busId: prof.busId,
+      profile: prof,
+      busHealth: connectedBusMap.get(prof.busId) ?? null,
+      isConnected: connectedBusMap.has(prof.busId),
+    }));
+
+    for (const [busId, busHealth] of connectedBusMap) {
+      if (!list.some((r) => r.busId === busId)) {
+        list.push({
+          key: `bus-${busId}`,
+          busId,
+          profile: null,
+          busHealth,
+          isConnected: true,
+        });
+      }
+    }
+    list.sort((a, b) => a.busId - b.busId);
+    return list;
+  }, [connState.profiles, connectedBusMap]);
+
+  const connectedCount = connectedBusMap.size;
 
   const handleDisconnectBus = async (busId: number): Promise<void> => {
     setBusyBusIds((prev) => new Set(prev).add(busId));
@@ -2640,18 +2741,77 @@ const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
       telemetryStore.removeBusHealth(busId);
       onStatusMessage({
         kind: 'info',
-        message: `Disconnected Bus ${busId + 1}.`,
+        message: t('rxtx.dock.busDisconnected', { bus: busId + 1 }),
       });
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: `Disconnect error: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('rxtx.dock.disconnectError', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
       });
     } finally {
       setBusyBusIds((prev) => {
         const next = new Set(prev);
         next.delete(busId);
         return next;
+      });
+    }
+  };
+
+  const handleConnectProfile = async (prof: SavedConnectionProfile): Promise<void> => {
+    setBusyBusIds((prev) => new Set(prev).add(prof.busId));
+    try {
+      let effectiveProfile = prof;
+      if (prof.driverFamily === 'mock' && prof.databaseIds.length === 0) {
+        const presetIds = await ensureMockPresetDatabasesLoaded();
+        connectionStore.setProfileDatabases(prof.id, presetIds);
+        effectiveProfile = { ...prof, databaseIds: presetIds };
+        await syncAllBusDatabasesWithBackend();
+      }
+
+      const { deviceId, config } = buildChannelConfigForProfile(effectiveProfile);
+      const health = await apiConnectBus(deviceId, config);
+      telemetryStore.upsertBusHealth(health);
+      onStatusMessage({
+        kind: 'success',
+        message: t('rxtx.dock.busConnected', {
+          bus: prof.busId + 1,
+          channel: health.channelName,
+          mode: health.listenOnly ? 'Listen-Only' : 'Active CAN',
+        }),
+      });
+    } catch (err) {
+      onStatusMessage({
+        kind: 'error',
+        message: t('rxtx.dock.connectError', {
+          name: prof.name,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      });
+    } finally {
+      setBusyBusIds((prev) => {
+        const next = new Set(prev);
+        next.delete(prof.busId);
+        return next;
+      });
+    }
+  };
+
+  const handleDisconnectAll = async (): Promise<void> => {
+    try {
+      const count = await apiDisconnectAllBuses();
+      telemetryStore.clearAllBuses();
+      onStatusMessage({
+        kind: 'info',
+        message: t('rxtx.dock.allBusesDisconnected', { count }),
+      });
+    } catch (err) {
+      onStatusMessage({
+        kind: 'error',
+        message: t('rxtx.dock.disconnectAllError', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
       });
     }
   };
@@ -2664,13 +2824,15 @@ const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
       onStatusMessage({
         kind: !currentArmed ? 'success' : 'info',
         message: !currentArmed
-          ? `TX Armed on Bus ${busId + 1} (${updated.channelName}).`
-          : `TX Disarmed on Bus ${busId + 1} (${updated.channelName}).`,
+          ? t('rxtx.dock.txArmedMsg', { bus: busId + 1, channel: updated.channelName })
+          : t('rxtx.dock.txDisarmedMsg', { bus: busId + 1, channel: updated.channelName }),
       });
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: `Arm TX error: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('rxtx.dock.armTxError', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
       });
     } finally {
       setBusyBusIds((prev) => {
@@ -2692,12 +2854,14 @@ const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
       }
       onStatusMessage({
         kind: 'success',
-        message: `Bus ${busId + 1} (${armed.channelName}) switched to Active TX Armed.`,
+        message: t('rxtx.dock.switchedActiveTx', { bus: busId + 1, channel: armed.channelName }),
       });
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: `Switch to Active TX failed: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('rxtx.dock.switchToActiveTxError', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
       });
     } finally {
       setBusyBusIds((prev) => {
@@ -2708,392 +2872,377 @@ const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
     }
   };
 
-  // If no buses are connected, render a clean, slim 24px bar (Zero clutter!)
-  if (connectedCount === 0) {
+  // If collapsed, render slim 28px bar
+  if (workbench.bottomConnectionsCollapsed) {
     return (
       <footer
         style={{
-          backgroundColor: 'var(--bg-panel)',
+          backgroundColor: 'var(--bg-toolbar)',
           borderTop: '1px solid var(--border-strong)',
+          color: 'var(--text-secondary)',
         }}
-        className="shrink-0 select-none"
+        className="shrink-0 h-[28px] px-2.5 flex items-center justify-between text-[12px] font-sans select-none"
       >
-        <div
-          style={{
-            backgroundColor: 'var(--bg-toolbar)',
-            color: 'var(--text-secondary)',
-          }}
-          className="h-[24px] px-2.5 flex items-center justify-between text-[11px] font-sans"
-        >
-          <div className="flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-[var(--text-muted)]" />
-            <span className="font-medium text-[var(--text-muted)]">
-              Active Connections (0) — No active CAN bus
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setNewConnModalOpen(true)}
-              style={{
-                backgroundColor: 'var(--bg-panel)',
-                borderColor: 'var(--border-strong)',
-                color: 'var(--text-primary)',
-              }}
-              className="h-[18px] px-2 border flex items-center gap-1 text-[10px] font-semibold hover:border-[var(--text-secondary)] cursor-pointer"
-            >
-              <Plus className="w-2.5 h-2.5 text-emerald-400" />
-              <span>+ New Connection</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => databaseStore.setActiveDocTab('connections')}
-              className="text-[10px] text-sky-400 hover:underline cursor-pointer"
-            >
-              Open Connections ({connState.profiles.length} configured)...
-            </button>
-          </div>
-        </div>
-
-        {/* Bottom 22px Classic Status Strip */}
-        <div
-          style={{
-            backgroundColor: 'var(--bg-toolbar)',
-            borderTop: '1px solid var(--border-grid)',
-            color: 'var(--text-secondary)',
-          }}
-          className="h-[22px] px-2 flex items-center justify-between text-[11px] font-mono tabular-nums"
-        >
-          <span className="truncate font-sans text-[var(--text-muted)]">
-            {statusBanner ? statusBanner.message : 'Ready'}
-          </span>
-          <div className="flex items-center shrink-0 text-[var(--text-muted)]">
-            <span className="inline-flex items-center justify-between w-[144px] pr-2.5">
-              <span>Rx Total:</span>
-              <span className="text-right text-[var(--text-secondary)]">
-                {header.totalFramesRx.toLocaleString('en-US')}
-              </span>
-            </span>
-            <span className="inline-flex items-center justify-between w-[144px] pl-2.5 border-l border-[var(--border-grid)]">
-              <span>Tx Total:</span>
-              <span className="text-right text-[var(--text-secondary)]">
-                {header.totalFramesTx.toLocaleString('en-US')}
-              </span>
-            </span>
-          </div>
-        </div>
-
-        {newConnModalOpen && (
-          <NewConnectionModal
-            devices={devices}
-            onClose={() => setNewConnModalOpen(false)}
-            onStatusMessage={onStatusMessage}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => workbenchStore.toggleBottomConnectionsCollapsed()}
+            className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+            title={t('rxtx.dock.expandTooltip')}
+          >
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+          <span
+            className={`w-2 h-2 rounded-full ${
+              connectedCount > 0 ? 'bg-emerald-500' : 'bg-slate-500'
+            }`}
           />
-        )}
+          <span className="font-semibold text-[var(--text-primary)]">
+            {t('rxtx.dock.titleWithCount', { online: connectedCount, total: allRows.length })}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => workbenchStore.setNewConnectionModalOpen(true)}
+            className="h-[22px] px-2.5 border border-[var(--border-strong)] bg-[var(--bg-panel)] text-[11px] hover:border-[var(--text-secondary)] cursor-pointer rounded-[2px]"
+          >
+            {t('rxtx.dock.addConn')}
+          </button>
+        </div>
       </footer>
     );
   }
 
-  // When buses ARE connected, render compact table strictly with active buses!
+  // Expanded Industrial Connections Dock
   return (
     <footer
       style={{
         backgroundColor: 'var(--bg-panel)',
         borderTop: '1px solid var(--border-strong)',
       }}
-      className="shrink-0 select-none"
+      className="shrink-0 select-none flex"
     >
-      {/* Active Buses Header (24px) */}
-      <div
-        style={{
-          backgroundColor: 'var(--bg-toolbar)',
-          borderBottom: '1px solid var(--border-strong)',
-        }}
-        className="h-[24px] px-2 flex items-center justify-between text-[11px]"
-      >
-        <div className="flex items-center gap-2">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]" />
-          <span className="font-semibold text-[var(--text-primary)]">
-            Active Connections ({connectedCount})
-          </span>
-        </div>
-
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setNewConnModalOpen(true)}
-            style={{
-              backgroundColor: 'var(--bg-panel)',
-              borderColor: 'var(--border-strong)',
-              color: 'var(--text-primary)',
-            }}
-            className="h-[18px] px-2 border flex items-center gap-1 text-[10px] font-semibold hover:border-[var(--text-secondary)] cursor-pointer"
-          >
-            <Plus className="w-2.5 h-2.5 text-emerald-400" />
-            <span>+ Add Connection</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => databaseStore.setActiveDocTab('connections')}
-            style={{
-              backgroundColor: 'var(--bg-panel)',
-              borderColor: 'var(--border-strong)',
-              color: 'var(--text-secondary)',
-            }}
-            className="h-[18px] px-2 border flex items-center gap-1 text-[10px] hover:text-[var(--text-primary)] cursor-pointer"
-            title="Open Advanced Connections Workspace"
-          >
-            <Settings className="w-2.5 h-2.5" />
-            <span>Manage All...</span>
-          </button>
-        </div>
+      {/* Left 26px Rotated "Connections" Strip */}
+      <div className="pcan-side-strip">
+        <span className="pcan-side-strip-label">{t('rxtx.section.connections')}</span>
       </div>
 
-      {/* Active Connected Buses Grid */}
-      <div className="max-h-[115px] overflow-y-auto">
-        <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums">
-          <colgroup>
-            <col style={{ width: '38px' }} />
-            <col style={{ width: '56px' }} />
-            <col />
-            <col style={{ width: '150px' }} />
-            <col style={{ width: '120px' }} />
-            <col style={{ width: '115px' }} />
-            <col style={{ width: '76px' }} />
-            <col style={{ width: '76px' }} />
-            <col style={{ width: '76px' }} />
-            <col style={{ width: '60px' }} />
-            <col style={{ width: '32px' }} />
-          </colgroup>
-          <thead>
-            <tr>
-              <th className="text-center font-sans" title="Connected Toggle (Uncheck to disconnect)">On</th>
-              <th>Bus</th>
-              <th className="font-sans">Connection / Hardware</th>
-              <th className="font-sans">Bit Rate</th>
-              <th className="font-sans">Mode</th>
-              <th className="font-sans">Bus State</th>
-              <th className="text-right">Rx/s</th>
-              <th className="text-right">Tx/s</th>
-              <th className="text-right">Load</th>
-              <th className="text-right">Ovr</th>
-              <th className="text-center font-sans" title="Configure">⚙</th>
-            </tr>
-          </thead>
-          <tbody>
-            {connectedBuses.map((bus) => {
-              const prof = connState.profiles.find((p) => p.busId === bus.busId);
-              const dev = devices.find((d) => d.deviceId === bus.deviceId);
-              const isBusy = busyBusIds.has(bus.busId);
-              const isMock = bus.channelName.toLowerCase().includes('mock');
+      <div className="flex flex-col flex-1 min-w-0 min-h-0">
+        {/* Upper 34px Toolbar */}
+        <div
+          style={{
+            backgroundColor: 'var(--bg-toolbar)',
+            borderBottom: '1px solid var(--border-strong)',
+          }}
+          className="min-h-[34px] py-1 px-2.5 flex items-center justify-between text-[12px] flex-wrap gap-2"
+        >
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => workbenchStore.toggleBottomConnectionsCollapsed()}
+              className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+              title={t('rxtx.dock.collapseTooltip')}
+            >
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
+            <span
+              className={`w-2 h-2 rounded-full ${
+                connectedCount > 0
+                  ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]'
+                  : 'bg-slate-500'
+              }`}
+            />
+            <span className="font-semibold text-[var(--text-primary)]">
+              {t('rxtx.dock.titleWithCount', { online: connectedCount, total: allRows.length })}
+            </span>
 
-              const bitRateLabel = isMock
-                ? prof?.mockFpsPreset === null
-                  ? '500k/2M FD · 16 msg/s'
-                  : `500k/2M FD · ${prof?.mockFpsPreset} msg/s`
-                : prof?.enableFd
-                  ? `${Math.round((prof.bitrate ?? 500000) / 1000)}k/${Math.round((prof.dataBitrate ?? 2000000) / 1000000)}M FD`
-                  : `${Math.round((prof?.bitrate ?? 500000) / 1000)}k CC`;
+            <button
+              type="button"
+              onClick={() => workbenchStore.setNewConnectionModalOpen(true)}
+              className="h-[24px] px-2 border border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 text-[11.5px] font-semibold flex items-center gap-1 cursor-pointer rounded-[2px]"
+            >
+              <Plus className="w-3 h-3" />
+              <span>{t('rxtx.dock.addConn')}</span>
+            </button>
 
-              return (
-                <tr key={bus.busId} className="hover:!bg-[var(--bg-row-hover)] cursor-default text-[11px]">
-                  {/* 1. Connected Checkbox */}
-                  <td onClick={(e) => e.stopPropagation()}>
-                    <div className="pcan-cell pcan-cell-center">
-                      <input
-                        type="checkbox"
-                        checked={true}
-                        disabled={isBusy}
-                        onChange={() => void handleDisconnectBus(bus.busId)}
-                        className="accent-emerald-600 cursor-pointer"
-                        title={`Bus ${bus.busId + 1} (${bus.channelName}) is connected. Uncheck to Disconnect.`}
-                      />
-                    </div>
-                  </td>
+            {connectedCount > 0 && (
+              <button
+                type="button"
+                onClick={() => void handleDisconnectAll()}
+                className="h-[24px] px-2 border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 text-[11.5px] font-medium flex items-center gap-1 cursor-pointer rounded-[2px]"
+                title={t('rxtx.dock.disconnectAllTooltip')}
+              >
+                <Unplug className="w-3 h-3" />
+                <span>{t('rxtx.dock.disconnectAll')}</span>
+              </button>
+            )}
+          </div>
 
-                  {/* 2. Bus */}
-                  <td>
-                    <div className="pcan-cell font-semibold">Bus {bus.busId + 1}</div>
-                  </td>
+          <div className="flex items-center gap-2 text-[11px] text-[var(--text-muted)] font-mono">
+            <span>{t('rxtx.dock.inspectHint')}</span>
+          </div>
+        </div>
 
-                  {/* 3. Name & Hardware */}
-                  <td>
-                    <div className="pcan-cell font-sans font-medium" title={prof?.name ?? bus.channelName}>
-                      <span className="truncate">{prof?.name ?? dev?.displayName ?? bus.channelName}</span>
-                    </div>
-                  </td>
+        {/* Multi-Bus Connections Grid (max-h-[150px] overflow-y-auto) */}
+        <div className="max-h-[150px] overflow-y-auto">
+          <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums">
+            <colgroup>
+              <col style={{ width: '36px' }} />
+              <col style={{ width: '56px' }} />
+              <col style={{ width: '150px' }} />
+              <col />
+              <col style={{ width: '130px' }} />
+              <col style={{ width: '70px' }} />
+              <col style={{ width: '100px' }} />
+              <col style={{ width: '115px' }} />
+              <col style={{ width: '50px' }} />
+              <col style={{ width: '120px' }} />
+            </colgroup>
+            <thead>
+              <tr>
+                <th className="text-center font-sans" title="On / Off">
+                  {t('rxtx.dock.colOn')}
+                </th>
+                <th>{t('rxtx.dock.colBus')}</th>
+                <th className="font-sans">{t('rxtx.dock.colName')}</th>
+                <th className="font-sans">{t('rxtx.dock.colHardware')}</th>
+                <th className="font-sans">{t('rxtx.dock.colBitRate')}</th>
+                <th className="font-sans text-center">{t('rxtx.dock.colDatabases')}</th>
+                <th className="font-sans">{t('rxtx.dock.colMode')}</th>
+                <th className="font-sans">{t('rxtx.dock.colStatus')}</th>
+                <th className="text-right">{t('rxtx.dock.colOvr')}</th>
+                <th className="font-sans">{t('rxtx.dock.colBusLoad')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {allRows.map((row) => {
+                const isBusy = busyBusIds.has(row.busId);
+                const prof = row.profile;
+                const bus = row.busHealth;
+                const isMock =
+                  prof?.driverFamily === 'mock' ||
+                  bus?.channelName.toLowerCase().includes('mock');
 
-                  {/* 4. Bit Rate */}
-                  <td>
-                    <div className="pcan-cell text-[10px]">
-                      <span className="truncate">{bitRateLabel}</span>
-                    </div>
-                  </td>
+                const bitRateLabel = isMock
+                  ? prof?.mockFpsPreset === null
+                    ? '500k/2M FD · 16 msg/s'
+                    : `500k/2M FD · ${prof?.mockFpsPreset} msg/s`
+                  : prof?.enableFd
+                    ? `${Math.round((prof.bitrate ?? 500000) / 1000)}k/${Math.round((prof.dataBitrate ?? 2000000) / 1000000)}M FD`
+                    : `${Math.round((prof?.bitrate ?? 500000) / 1000)}k CC`;
 
-                  {/* 5. Mode / TX Toggle */}
-                  <td>
-                    <div className="pcan-cell font-sans">
-                      {bus.listenOnly ? (
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => void handleSwitchToActiveTx(bus.busId)}
-                          style={{
-                            backgroundColor: 'rgba(217, 155, 38, 0.12)',
-                            borderColor: 'rgba(217, 155, 38, 0.50)',
-                            color: '#E3B341',
+                const hardwareLabel = prof
+                  ? `${prof.driverFamily.toUpperCase()} · ${prof.adapterChannel || prof.serialPort || 'Ch0'}`
+                  : bus?.channelName ?? 'CAN Channel';
+
+                const busLoadPct = row.isConnected ? header.estimatedBusLoadPct : 0;
+                const dbCount = prof?.databaseIds.length ?? 0;
+
+                return (
+                  <tr
+                    key={row.key}
+                    onClick={() => {
+                      if (prof) {
+                        connectionStore.selectProfile(prof.id);
+                        workbenchStore.setSelection({ kind: 'connection', profileId: prof.id });
+                      }
+                    }}
+                    className={`hover:!bg-[var(--bg-row-hover)] cursor-pointer text-[11px] ${
+                      row.isConnected ? '' : 'opacity-70'
+                    }`}
+                  >
+                    {/* 1. On / Off Checkbox */}
+                    <td onClick={(e) => e.stopPropagation()}>
+                      <div className="pcan-cell pcan-cell-center">
+                        <input
+                          type="checkbox"
+                          checked={row.isConnected}
+                          disabled={isBusy || (!row.isConnected && !prof)}
+                          onChange={() => {
+                            if (row.isConnected) {
+                              void handleDisconnectBus(row.busId);
+                            } else if (prof) {
+                              void handleConnectProfile(prof);
+                            }
                           }}
-                          className="h-[18px] px-1.5 border text-[10px] font-semibold hover:border-amber-400 cursor-pointer"
-                          title="Click to Switch to Active TX Armed"
-                        >
-                          Switch to TX
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() => void handleToggleArmTx(bus.busId, Boolean(bus.txArmed))}
-                          style={{
-                            backgroundColor: bus.txArmed
-                              ? 'rgba(217, 155, 38, 0.22)'
-                              : 'var(--bg-panel)',
-                            borderColor: bus.txArmed ? '#E3B341' : 'var(--border-strong)',
-                            color: bus.txArmed ? '#E3B341' : 'var(--text-muted)',
-                          }}
-                          className="h-[18px] px-1.5 border text-[10px] font-semibold cursor-pointer"
-                          title="Click to toggle TX Armed / Disarmed"
-                        >
-                          {bus.txArmed ? 'TX Armed' : 'Disarmed'}
-                        </button>
-                      )}
-                    </div>
-                  </td>
+                          className="accent-emerald-600 cursor-pointer"
+                          title={
+                            row.isConnected
+                              ? t('rxtx.dock.connectedTooltip', { bus: row.busId + 1 })
+                              : t('rxtx.dock.offlineTooltip', {
+                                  bus: row.busId + 1,
+                                  name: prof?.name ?? '',
+                                })
+                          }
+                        />
+                      </div>
+                    </td>
 
-                  {/* 6. Bus State & TEC/REC */}
-                  <td>
-                    <div className="pcan-cell">
-                      <BusStateBadge
-                        busState={bus.busState}
-                        connected={bus.connected}
-                        txErrorCount={bus.txErrorCount}
-                        rxErrorCount={bus.rxErrorCount}
-                        showTecRec
-                        compact
-                      />
-                    </div>
-                  </td>
+                    {/* 2. Bus ID */}
+                    <td>
+                      <div className="pcan-cell font-semibold text-[var(--text-primary)]">
+                        Bus {row.busId + 1}
+                      </div>
+                    </td>
 
-                  {/* 7. Rx/s */}
-                  <td>
-                    <div className="pcan-cell pcan-cell-right">
-                      {Math.round(header.fpsRx)}
-                    </div>
-                  </td>
+                    {/* 3. Name */}
+                    <td>
+                      <div className="pcan-cell font-sans font-medium truncate" title={prof?.name ?? bus?.channelName}>
+                        {prof?.name ?? bus?.channelName ?? `Bus ${row.busId + 1}`}
+                      </div>
+                    </td>
 
-                  {/* 8. Tx/s */}
-                  <td>
-                    <div className="pcan-cell pcan-cell-right">
-                      {Math.round(header.fpsTx)}
-                    </div>
-                  </td>
+                    {/* 4. Net / Hardware */}
+                    <td>
+                      <div className="pcan-cell text-[10px] text-[var(--text-secondary)] truncate" title={hardwareLabel}>
+                        {hardwareLabel}
+                      </div>
+                    </td>
 
-                  {/* 9. Load */}
-                  <td>
-                    <div className="pcan-cell pcan-cell-right">
-                      {header.estimatedBusLoadPct.toFixed(1)}%
-                    </div>
-                  </td>
+                    {/* 5. Bit Rate */}
+                    <td>
+                      <div className="pcan-cell text-[10px]">
+                        <span className="truncate">{bitRateLabel}</span>
+                      </div>
+                    </td>
 
-                  {/* 10. Overruns */}
-                  <td>
-                    <div
-                      className={`pcan-cell pcan-cell-right ${
-                        header.droppedFrames > 0 ? 'text-red-500 font-bold' : 'text-[var(--text-muted)]'
-                      }`}
+                    {/* 6. Databases Badge */}
+                    <td
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (prof) {
+                          connectionStore.selectProfile(prof.id);
+                          workbenchStore.setSelection({ kind: 'connection', profileId: prof.id });
+                        }
+                      }}
                     >
-                      {header.droppedFrames}
-                    </div>
-                  </td>
+                      <div className="pcan-cell pcan-cell-center font-sans">
+                        <span
+                          className={`px-1.5 py-0.2 rounded text-[10px] font-mono cursor-pointer hover:opacity-80 ${
+                            dbCount > 0
+                              ? 'bg-sky-950/70 border border-sky-800/60 text-sky-300'
+                              : 'bg-slate-900 border border-slate-700 text-slate-500'
+                          }`}
+                          title={t('rxtx.dock.dbBadgeTooltip', { count: dbCount })}
+                        >
+                          {dbCount} DBC
+                        </span>
+                      </div>
+                    </td>
 
-                  {/* 11. Settings Icon */}
-                  <td>
-                    <div className="pcan-cell pcan-cell-center">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (prof) connectionStore.selectProfile(prof.id);
-                          databaseStore.setActiveDocTab('connections');
-                        }}
-                        className="text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
-                        title="Configure profile in Connections workspace"
+                    {/* 7. Mode */}
+                    <td>
+                      <div className="pcan-cell font-sans" onClick={(e) => e.stopPropagation()}>
+                        {row.isConnected && bus ? (
+                          bus.listenOnly ? (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => void handleSwitchToActiveTx(bus.busId)}
+                              style={{
+                                backgroundColor: 'rgba(217, 155, 38, 0.12)',
+                                borderColor: 'rgba(217, 155, 38, 0.50)',
+                                color: '#E3B341',
+                              }}
+                              className="h-[18px] px-1.5 border text-[10px] font-semibold hover:border-amber-400 cursor-pointer rounded-[1px]"
+                              title="Click to Switch to Active TX Armed"
+                            >
+                              {t('rxtx.dock.switchToTx')}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => void handleToggleArmTx(bus.busId, Boolean(bus.txArmed))}
+                              style={{
+                                backgroundColor: bus.txArmed
+                                  ? 'rgba(217, 155, 38, 0.22)'
+                                  : 'var(--bg-panel)',
+                                borderColor: bus.txArmed ? '#E3B341' : 'var(--border-strong)',
+                                color: bus.txArmed ? '#E3B341' : 'var(--text-muted)',
+                              }}
+                              className="h-[18px] px-1.5 border text-[10px] font-semibold cursor-pointer rounded-[1px]"
+                              title="Click to toggle TX Armed / Disarmed"
+                            >
+                              {bus.txArmed ? t('rxtx.dock.txArmed') : t('rxtx.dock.txDisarmed')}
+                            </button>
+                          )
+                        ) : (
+                          <span className="text-[10px] text-[var(--text-muted)] font-mono">
+                            {prof?.listenOnly ? t('rxtx.dock.listen') : t('rxtx.dock.active')}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+
+                    {/* 8. Status */}
+                    <td>
+                      <div className="pcan-cell">
+                        {row.isConnected && bus ? (
+                          <BusStateBadge
+                            busState={bus.busState}
+                            connected={bus.connected}
+                            txErrorCount={bus.txErrorCount}
+                            rxErrorCount={bus.rxErrorCount}
+                            showTecRec
+                            compact
+                          />
+                        ) : (
+                          <span className="text-[10px] text-[var(--text-muted)] font-mono">
+                            {t('rxtx.dock.offline')}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+
+                    {/* 9. Overruns */}
+                    <td>
+                      <div
+                        className={`pcan-cell pcan-cell-right ${
+                          row.isConnected && header.droppedFrames > 0
+                            ? 'text-red-500 font-bold'
+                            : 'text-[var(--text-muted)]'
+                        }`}
                       >
-                        <Settings className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+                        {row.isConnected ? header.droppedFrames : '—'}
+                      </div>
+                    </td>
 
-      {/* Bottom 22px Classic Status Strip */}
-      <div
-        style={{
-          backgroundColor: 'var(--bg-toolbar)',
-          borderTop: '1px solid var(--border-strong)',
-          color: 'var(--text-secondary)',
-        }}
-        className="h-[22px] px-2 flex items-center justify-between text-[11px] font-mono tabular-nums"
-      >
-        <div className="flex items-center gap-3 min-w-0 truncate font-sans">
-          <span
-            className={`truncate ${
-              statusBanner?.kind === 'error'
-                ? 'text-red-500 font-semibold'
-                : statusBanner?.kind === 'success'
-                  ? 'text-emerald-500'
-                  : 'text-[var(--text-muted)]'
-            }`}
-          >
-            {statusBanner ? statusBanner.message : 'Ready'}
-          </span>
-        </div>
-
-        <div className="flex items-center shrink-0 text-[var(--text-muted)]">
-          <button
-            type="button"
-            onClick={() => databaseStore.setActiveDocTab('connections')}
-            className="font-sans pr-3 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:underline cursor-pointer"
-            title="Open Multi-Bus Connections, USB/COM Serial & Driver Diagnostics"
-          >
-            Connections ({connectedCount} online)...
-          </button>
-          <span className="inline-flex items-center justify-between w-[144px] px-2.5 border-l border-[var(--border-grid)]">
-            <span>Rx Total:</span>
-            <span className="text-right text-[var(--text-secondary)]">
-              {header.totalFramesRx.toLocaleString('en-US')}
-            </span>
-          </span>
-          <span className="inline-flex items-center justify-between w-[144px] pl-2.5 border-l border-[var(--border-grid)]">
-            <span>Tx Total:</span>
-            <span className="text-right text-[var(--text-secondary)]">
-              {header.totalFramesTx.toLocaleString('en-US')}
-            </span>
-          </span>
+                    {/* 10. Bus Load Bar (pcanex7.png style) */}
+                    <td>
+                      <div className="pcan-cell">
+                        {row.isConnected ? (
+                          <div className="flex items-center gap-1.5 w-full pr-1 font-mono text-[10px] tabular-nums">
+                            <div className="flex-1 h-[7px] bg-slate-800 border border-slate-700 rounded-[1px] overflow-hidden">
+                              <div
+                                style={{ width: `${Math.min(100, Math.max(0, busLoadPct))}%` }}
+                                className={`h-full ${
+                                  busLoadPct > 80
+                                    ? 'bg-red-500'
+                                    : busLoadPct > 50
+                                      ? 'bg-amber-400'
+                                      : 'bg-emerald-400'
+                                }`}
+                              />
+                            </div>
+                            <span className="inline-block w-[6ch] text-right font-mono tabular-nums text-[10px] text-[var(--text-secondary)] shrink-0">
+                              {busLoadPct.toFixed(1)}%
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-[10px] text-[var(--text-muted)] font-mono">—</span>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
-
-      {newConnModalOpen && (
-        <NewConnectionModal
-          devices={devices}
-          onClose={() => setNewConnModalOpen(false)}
-          onStatusMessage={onStatusMessage}
-        />
-      )}
     </footer>
   );
 };

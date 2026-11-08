@@ -1,0 +1,34 @@
+# NexusCAN Headless Field Telemetry Agent — Donanımsız Sentetik (mock0) Test Yapılandırması
+# Çalıştırma komutu:
+#   ./target/release/nexuscan agent run --config test/agent/agent.mock.toml
+#
+# GÜVENLİK KURALI: Headless saha ajanı donanım güvenliği gereği her zaman
+# koşulsuz `listen_only = true` (Pasif Dinleme) modunda çalışır ve uzaktan TX kabul etmez.
+
+[agent]
+name = "NexusCAN Edge Demo (mock0)"
+hostname = "bench-sim-01"
+listen_only = true
+auto_sync_dbc = false
+dbc_path = "test/databases/ev_powertrain_full_test.dbc"
+
+[cloud]
+url = "http://localhost:3000"
+ws_bridge_url = "ws://localhost:3000/api/bridge/ws"
+project_id = "demo-ev-powertrain"
+project_slug = "ev-powertrain-hil"
+# NexusCANCloud Cihaz Eşleştirme (Device Provisioning) ekranından alınan gerçek token ile değiştirin:
+token = "nxc_tok_replace_with_provisioned_device_token"
+
+[can]
+interface = "mock0"
+bitrate = 500000
+enable_fd = true
+data_bitrate = 2000000
+listen_only = true
+
+[web]
+# Yerel Salt-Okunur (Read-Only) Edge Web HMI & JSON durum sunucusu:
+# Tarayıcıdan http://127.0.0.1:8090/ adresini açarak canlı çerçeve ve sinyalleri izleyebilirsiniz.
+enabled = true
+bind = "127.0.0.1:8090"

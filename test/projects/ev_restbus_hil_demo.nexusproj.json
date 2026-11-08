@@ -1,0 +1,909 @@
+{
+  "version": 1,
+  "name": "EV Powertrain Restbus & HIL Demo",
+  "fileStem": "ev-restbus-hil-demo",
+  "createdAt": "2026-11-08T20:45:00.000Z",
+  "updatedAt": "2026-11-08T20:45:00.000Z",
+  "notes": "ev_powertrain_full_test.dbc gömülü; mock0 ve vcan0 CAN-FD profilleri, sembolik TX listesi, 4 kanallı Osiloskop ve 5 buton modlu HIL Simülasyon Kokpiti hazır proje paketi.",
+  "databases": {
+    "usePresetDb": false,
+    "customFiles": [
+      {
+        "fileName": "ev_powertrain_full_test.dbc",
+        "contentBase64": "VkVSU0lPTiAiTmV4dXNDQU5fRVZfUG93ZXJ0cmFpbl9ISUxfVGVzdF92MS4wIgoKCk5TXyA6CglOU19ERVNDXwoJQ01fCglCQV9ERUZfCglCQV8KCVZBTF8KCUNBVF9ERUZfCglDQVRfCglGSUxURVIKCUJBX0RFRl9ERUZfCglFVl9EQVRBXwoJRU5WVkFSX0RBVEFfCglTR1RZUEVfCglTR1RZUEVfVkFMXwoJQkFfREVGX1NHVFlQRV8KCUJBX1NHVFlQRV8KCVNJR19UWVBFX1JFRl8KCVZBTF9UQUJMRV8KCVNJR19HUk9VUF8KCVNJR19WQUxUWVBFXwoJU0lHVFlQRV9WQUxUWVBFXwoJQk9fVFhfQlVfCglCQV9ERUZfUkVMXwoJQkFfUkVMXwoJQkFfREVGX0RFRl9SRUxfCglCVV9TR19SRUxfCglCVV9FVl9SRUxfCglCVV9CT19SRUxfCglTR19NVUxfVkFMXwoKQlNfOgoKQlVfOiBCTVMgVkNVIE1DVSBPQkMgR05TUwoKCkJPXyAyNTcgQk1TX1BhY2tTdGF0dXM6IDggQk1TCiBTR18gUGFja1ZvbHRhZ2VfViA6IDB8MTZAMSsgKDAuMSwwKSBbMHwxMDAwXSAiViIgVkNVLE1DVSxPQkMKIFNHXyBQYWNrQ3VycmVudF9BIDogMTZ8MTZAMS0gKDAuMSwwKSBbLTUwMHw1MDBdICJBIiBWQ1UsTUNVLE9CQwogU0dfIFBhY2tTT0NfUGN0IDogMzJ8OEAxKyAoMC41LDApIFswfDEwMF0gIiUiIFZDVSxNQ1UsT0JDCiBTR18gQ29udGFjdG9yU3RhdGUgOiA0MHwyQDErICgxLDApIFswfDNdICIiIFZDVSxNQ1UsT0JDCiBTR18gSXNvbGF0aW9uRmF1bHRBY3RpdmUgOiA0MnwxQDErICgxLDApIFswfDFdICIiIFZDVSxPQkMKIFNHXyBQYWNrTWF4Q2VsbFRlbXBfQyA6IDQ4fDhAMSsgKDEsLTQwKSBbLTQwfDIxNV0gImRlZ0MiIFZDVSxNQ1UKIFNHXyBCbXNBbGl2ZUNvdW50ZXIgOiA1Nnw0QDErICgxLDApIFswfDE1XSAiIiBWQ1UKCkJPXyAyNTggTUNVX01vdG9yRHJpdmU6IDggTUNVCiBTR18gTW90b3JTcGVlZF9SUE0gOiA3fDE2QDAtICgxLDApIFstMTUwMDB8MTUwMDBdICJycG0iIFZDVSxCTVMKIFNHXyBNb3RvclRvcnF1ZV9ObSA6IDIzfDE2QDAtICgwLjEsMCkgWy01MDB8NTAwXSAiTm0iIFZDVSxCTVMKIFNHXyBJbnZlcnRlclRlbXBfQyA6IDM5fDhAMCsgKDEsLTQwKSBbLTQwfDIxNV0gImRlZ0MiIFZDVSxCTVMKIFNHXyBEY0xpbmtWb2x0YWdlX1YgOiA0N3wxNkAwKyAoMC4xLDApIFswfDEwMDBdICJWIiBWQ1UsQk1TCiBTR18gSW52ZXJ0ZXJNb2RlIDogNjN8NEAwKyAoMSwwKSBbMHw3XSAiIiBWQ1UsQk1TCgpCT18gMjYxIEJNU19DZWxsVm9sdGFnZXNNdXg6IDggQk1TCiBTR18gTXV4UGFnZSBNIDogMHw4QDErICgxLDApIFswfDNdICIiIFZDVQogU0dfIENlbGxCYWxhbmNlQWN0aXZlIDogOHw4QDErICgxLDApIFswfDI1NV0gIiIgVkNVCiBTR18gQ2VsbDAxX21WIG0wIDogMTZ8MTZAMSsgKDEsMCkgWzI1MDB8NDUwMF0gIm1WIiBWQ1UKIFNHXyBDZWxsMDJfbVYgbTAgOiAzMnwxNkAxKyAoMSwwKSBbMjUwMHw0NTAwXSAibVYiIFZDVQogU0dfIENlbGwwM19tViBtMCA6IDQ4fDE2QDErICgxLDApIFsyNTAwfDQ1MDBdICJtViIgVkNVCiBTR18gQ2VsbDA0X21WIG0xIDogMTZ8MTZAMSsgKDEsMCkgWzI1MDB8NDUwMF0gIm1WIiBWQ1UKIFNHXyBDZWxsMDVfbVYgbTEgOiAzMnwxNkAxKyAoMSwwKSBbMjUwMHw0NTAwXSAibVYiIFZDVQogU0dfIENlbGwwNl9tViBtMSA6IDQ4fDE2QDErICgxLDApIFsyNTAwfDQ1MDBdICJtViIgVkNVCiBTR18gQ2VsbDA3X21WIG0yIDogMTZ8MTZAMSsgKDEsMCkgWzI1MDB8NDUwMF0gIm1WIiBWQ1UKIFNHXyBDZWxsMDhfbVYgbTIgOiAzMnwxNkAxKyAoMSwwKSBbMjUwMHw0NTAwXSAibVYiIFZDVQogU0dfIENlbGwwOV9tViBtMiA6IDQ4fDE2QDErICgxLDApIFsyNTAwfDQ1MDBdICJtViIgVkNVCiBTR18gQ2VsbDEwX21WIG0zIDogMTZ8MTZAMSsgKDEsMCkgWzI1MDB8NDUwMF0gIm1WIiBWQ1UKIFNHXyBDZWxsMTFfbVYgbTMgOiAzMnwxNkAxKyAoMSwwKSBbMjUwMHw0NTAwXSAibVYiIFZDVQogU0dfIENlbGwxMl9tViBtMyA6IDQ4fDE2QDErICgxLDApIFsyNTAwfDQ1MDBdICJtViIgVkNVCgpCT18gNTE3IE1DVV9GYXN0RGlhZ25vc3RpY3NGRDogNjQgTUNVCiBTR18gUGhhc2VDdXJyZW50VV9BIDogMHwzMkAxLSAoMSwwKSBbLTYwMHw2MDBdICJBIiBWQ1UsQk1TCiBTR18gUGhhc2VDdXJyZW50Vl9BIDogMzJ8MzJAMS0gKDEsMCkgWy02MDB8NjAwXSAiQSIgVkNVLEJNUwogU0dfIFBoYXNlQ3VycmVudFdfQSA6IDY0fDMyQDEtICgxLDApIFstNjAwfDYwMF0gIkEiIFZDVSxCTVMKIFNHXyBSb3RvckVsZWN0cmljYWxBbmdsZV9EZWcgOiA5NnwzMkAxLSAoMSwwKSBbMHwzNjBdICJkZWciIFZDVQogU0dfIFN0YXRvcldpbmRpbmdUZW1wX0MgOiAxMjh8MTZAMS0gKDAuMSwwKSBbLTQwfDI1MF0gImRlZ0MiIFZDVSxCTVMKIFNHXyBTaUNNb2R1bGVUZW1wX0MgOiAxNDR8MTZAMS0gKDAuMSwwKSBbLTQwfDI1MF0gImRlZ0MiIFZDVSxCTVMKIFNHXyBTd2l0Y2hpbmdGcmVxX2tIeiA6IDE2MHwxNkAxKyAoMC4wMSwwKSBbMHwxMDBdICJrSHoiIFZDVQogU0dfIFRvdGFsTWVjaGFuaWNhbEVuZXJneV9rV2ggOiAxOTJ8NjRAMS0gKDEsMCkgWzB8MTAwMDAwXSAia1doIiBWQ1UsQk1TCiBTR18gUmVzb2x2ZXJEaWFnbm9zdGljUmF3IDogMzg0fDMyQDErICgxLDApIFswfDQyOTQ5NjcyOTVdICIiIFZDVQogU0dfIEZkQWxpdmVTZXFDb3VudGVyIDogNDk2fDhAMSsgKDEsMCkgWzB8MjU1XSAiIiBWQ1UKIFNHXyBGZENyYzhDaGVja3N1bSA6IDUwNHw4QDErICgxLDApIFswfDI1NV0gIiIgVkNVCgpCT18gMjU2Njg2OTIyMSBPQkNfQ2hhcmdlclN0YXR1c0V4dDogOCBPQkMKIFNHXyBDaGFyZ2VyT3V0cHV0X1YgOiAwfDE2QDErICgwLjEsMCkgWzB8MTAwMF0gIlYiIEJNUyxWQ1UKIFNHXyBDaGFyZ2VyT3V0cHV0X0EgOiAxNnwxNkAxLSAoMC4xLDApIFstMjAwfDUwMF0gIkEiIEJNUyxWQ1UKIFNHXyBDaGFyZ2luZ1N0YWdlIDogMzJ8NEAxKyAoMSwwKSBbMHw3XSAiIiBCTVMsVkNVCiBTR18gUGlsb3REdXR5X1BjdCA6IDQwfDhAMSsgKDAuNSwwKSBbMHwxMDBdICIlIiBCTVMsVkNVCiBTR18gSW5sZXRUZW1wX0MgOiA0OHw4QDErICgxLC00MCkgWy00MHwyMTVdICJkZWdDIiBCTVMsVkNVCgpCT18gNzg0IFZDVV9Ecml2ZXJDb250cm9sczogOCBWQ1UKIFNHXyBEcml2ZUdlYXJNb2RlIDogMHw0QDErICgxLDApIFswfDRdICIiIE1DVSxCTVMKIFNHXyBIb3JuUHVsc2VDbWQgOiA0fDFAMSsgKDEsMCkgWzB8MV0gIiIgTUNVCiBTR18gRW1lcmdlbmN5TGF0Y2hDbWQgOiA1fDFAMSsgKDEsMCkgWzB8MV0gIiIgQk1TLE1DVSxPQkMKIFNHXyBSZWdlbkxldmVsU3RlcCA6IDh8OEAxKyAoMSwwKSBbMHw1XSAiIiBNQ1UsQk1TCiBTR18gVGFyZ2V0VG9ycXVlUGN0IDogMTZ8MTZAMSsgKDAuMSwwKSBbMHwxMDBdICIlIiBNQ1UKIFNHXyBCcmFrZVBlZGFsUGN0IDogMzJ8OEAxKyAoMC41LDApIFswfDEwMF0gIiUiIE1DVSxCTVMKCkJPXyAxMDQwIEdOU1NfVmVoaWNsZVBvc2U6IDggR05TUwogU0dfIEduc3NMYXRpdHVkZV9EZWcgOiAwfDMyQDEtICgwLjAwMDAwMSwwKSBbLTkwfDkwXSAiZGVnIiBWQ1UKIFNHXyBHbnNzTG9uZ2l0dWRlX0RlZyA6IDMyfDMyQDEtICgwLjAwMDAwMSwwKSBbLTE4MHwxODBdICJkZWciIFZDVQoKCkNNXyAiTmV4dXNDQU4gVGFtIEthcHNhbWxpIEVWIFBvd2VydHJhaW4sIENBTi1GRCwgSjE5MzkvRXh0ZW5kZWQgdmUgSElMIFNpbXVsYXN5b24gVGVzdCBWZXJpdGFiYW5pLiI7CkNNXyBCVV8gQk1TICJZdWtzZWsgR2VyaWxpbSBCYXRhcnlhIFlvbmV0aW0gU2lzdGVtaSAoODAwViBMaS1OTUMgUGFrZXQgKyAxMiBIdWNyZSBNdXggVGVsZW1ldHJpKSI7CkNNXyBCVV8gVkNVICJBcmFjIEtvbnRyb2wgVW5pdGVzaSAoU3VydWN1IFZpdGVzLCBUb3JrLCBSZWplbmVyYXRpZiBGcmVuIHZlIEFjaWwgRHVyZHVybWEgS29tdXRsYXJpKSI7CkNNXyBCVV8gTUNVICJUcmFrc2l5b24gTW90b3J1ICYgU2lDIEV2aXJpY2kgS29udHJvbCBVbml0ZXNpIChNb3Rvcm9sYSBCaWctRW5kaWFuICsgNjRCIENBTi1GRCkiOwpDTV8gQlVfIE9CQyAiMjktYml0IEV4dGVuZGVkIFllcmxlc2lrIC8gSGl6bGkgU2FyaiBLb250cm9sIFVuaXRlc2kgKDB4MThGRjUwRTUpIjsKQ01fIEJVXyBHTlNTICJZdWtzZWsgSGFzc2FzaXlldGxpIFJUSy9HTlNTIEtvbnVtbGFuZGlybWEgRHVndW11IChIYXJpdGEgV2lkZ2V0IFRlc3RpKSI7CgpDTV8gQk9fIDI1NyAiQk1TIGFuYSBiYXRhcnlhIHBha2V0aSBnZXJpbGltLCBha2ltLCBTT0MgdmUga29udGFrdG9yIGR1cnVtIG1lc2FqaS4iOwpDTV8gQk9fIDI1OCAiTUNVIE1vdG9yb2xhIChCaWctRW5kaWFuKSBtb3RvciBkZXZyaSwgdG9yayB2ZSBzaWNha2xpayB0ZWxlbWV0cmlzaS4iOwpDTV8gQk9fIDI2MSAiNCBzYXlmYWxpIChNdXhQYWdlIDAuLjMpIDEyLWh1Y3JlIGdlcmlsaW0gaXpsZW1lIG11bHRpcGxleGVyIG1lc2FqaS4iOwpDTV8gQk9fIDUxNyAiNjQtYnl0ZSBDQU4tRkQgQlJTIHl1a3NlayBoaXpsaSBJRUVFLTc1NCBGbG9hdDMyL0Zsb2F0NjQgZXZpcmljaSB0YW5pbGFtYSBjZXJjZXZlc2kuIjsKQ01fIEJPXyAyNTY2ODY5MjIxICIyOS1iaXQgRXh0ZW5kZWQgSUQgKDB4MThGRjUwRTUpIHNhcmogY2loYXppIGNpa2lzIGdlcmlsaW0vYWtpbSB2ZSBkdXJ1bSBtZXNhamkuIjsKQ01fIEJPXyA3ODQgIlNpbXVsYXN5b24ga29rcGl0aW5kZWtpIDUgZ2VsaXNtaXMgYnV0b24gbW9kdSB2ZSB0b3JrL2ZyZW4gc2xpZGVyIGhlZGVmIHNpbnlhbGxlcmkuIjsKQ01fIEJPXyAxMDQwICJPcGVuU3RyZWV0TWFwIC8gR05TUyBoYXJpdGEgd2lkZ2V0IGl6bGVtZSB0ZXN0aSBpY2luIGVubGVtL2JveWxhbSB0ZWxlbWV0cmlzaS4iOwoKQ01fIFNHXyAyNTcgUGFja1ZvbHRhZ2VfViAiQW5hIGJhdGFyeWEgdGVybWluYWxpIERDIGdlcmlsaW1pICgwLjEgViBjb3p1bnVybHVrKS4iOwpDTV8gU0dfIDI1NyBQYWNrQ3VycmVudF9BICJQYWtldCBha2ltaTogcG96aXRpZiA9IGRlc2FyaiAoaXZtZWxlbm1lKSwgbmVnYXRpZiA9IHJlamVuZXJhdGlmIHNhcmouIjsKQ01fIFNHXyAyNTggTW90b3JTcGVlZF9SUE0gIk1vdG9yb2xhIEJpZy1FbmRpYW4gKEAwLSkgaXNhcmV0bGkgbW90b3IgZGV2cmkuIjsKQ01fIFNHXyA1MTcgUGhhc2VDdXJyZW50VV9BICJJRUVFLTc1NCAzMi1iaXQgRmxvYXQgVS1mYXppIGFubGlrIGFraW1pLiI7CkNNXyBTR18gNTE3IFRvdGFsTWVjaGFuaWNhbEVuZXJneV9rV2ggIklFRUUtNzU0IDY0LWJpdCBEb3VibGUgdG9wbGFtIGFrdGFyaWxhbiBtZWthbmlrIGVuZXJqaSAoYnl0ZSAyNC4uMzEpLiI7CkNNXyBTR18gNTE3IEZkQ3JjOENoZWNrc3VtICI2NC1ieXRlIENBTi1GRCBzaW5pciBkb2dydWxhbWFzaSBpY2luIHNvbiBieXRlIChiaXQgNTA0Li41MTEpIENSQzggZGVnZXJpLiI7CkNNXyBTR18gNzg0IEVtZXJnZW5jeUxhdGNoQ21kICJDaWZ0IG9uYXkga2FwYWtsaSAocmVxdWlyZUNvbmZpcm0pIFl1a3NlayBHZXJpbGltIEFjaWwgS2VzaWNpIG1hbmRhbGkuIjsKCgpCQV9ERUZfICAiQnVzVHlwZSIgU1RSSU5HIDsKQkFfREVGXyBCT18gICJWRnJhbWVGb3JtYXQiIEVOVU0gICJTdGFuZGFyZENBTiIsIkV4dGVuZGVkQ0FOIiwicmVzZXJ2ZWQiLCJKMTkzOVBHIiwicmVzZXJ2ZWQiLCJyZXNlcnZlZCIsInJlc2VydmVkIiwicmVzZXJ2ZWQiLCJyZXNlcnZlZCIsInJlc2VydmVkIiwicmVzZXJ2ZWQiLCJyZXNlcnZlZCIsInJlc2VydmVkIiwicmVzZXJ2ZWQiLCJTdGFuZGFyZENBTl9GRCIsIkV4dGVuZGVkQ0FOX0ZEIjsKQkFfREVGXyBCT18gICJHZW5Nc2dDeWNsZVRpbWUiIElOVCAwIDYwMDAwOwpCQV9ERUZfIFNHXyAgIkdlblNpZ1N0YXJ0VmFsdWUiIEZMT0FUIC0xMDAwMDAwMDAwIDEwMDAwMDAwMDA7CgpCQV9ERUZfREVGXyAgIkJ1c1R5cGUiICJDQU4gRkQiOwpCQV9ERUZfREVGXyAgIlZGcmFtZUZvcm1hdCIgIlN0YW5kYXJkQ0FOIjsKQkFfREVGX0RFRl8gICJHZW5Nc2dDeWNsZVRpbWUiIDA7CkJBX0RFRl9ERUZfICAiR2VuU2lnU3RhcnRWYWx1ZSIgMDsKCkJBXyAiQnVzVHlwZSIgIkNBTiBGRCI7CkJBXyAiVkZyYW1lRm9ybWF0IiBCT18gMjU3IDA7CkJBXyAiR2VuTXNnQ3ljbGVUaW1lIiBCT18gMjU3IDYwOwpCQV8gIlZGcmFtZUZvcm1hdCIgQk9fIDI1OCAwOwpCQV8gIkdlbk1zZ0N5Y2xlVGltZSIgQk9fIDI1OCA2MDsKQkFfICJWRnJhbWVGb3JtYXQiIEJPXyAyNjEgMDsKQkFfICJHZW5Nc2dDeWNsZVRpbWUiIEJPXyAyNjEgMTYwOwpCQV8gIlZGcmFtZUZvcm1hdCIgQk9fIDUxNyAxNDsKQkFfICJHZW5Nc2dDeWNsZVRpbWUiIEJPXyA1MTcgMjUwOwpCQV8gIlZGcmFtZUZvcm1hdCIgQk9fIDI1NjY4NjkyMjEgMTsKQkFfICJHZW5Nc2dDeWNsZVRpbWUiIEJPXyAyNTY2ODY5MjIxIDMwMDsKQkFfICJWRnJhbWVGb3JtYXQiIEJPXyA3ODQgMDsKQkFfICJHZW5Nc2dDeWNsZVRpbWUiIEJPXyA3ODQgNTAwOwpCQV8gIlZGcmFtZUZvcm1hdCIgQk9fIDEwNDAgMDsKQkFfICJHZW5Nc2dDeWNsZVRpbWUiIEJPXyAxMDQwIDEwMDA7CgpCQV8gIkdlblNpZ1N0YXJ0VmFsdWUiIFNHXyAyNTcgUGFja1ZvbHRhZ2VfViA3OTUwOwpCQV8gIkdlblNpZ1N0YXJ0VmFsdWUiIFNHXyAyNTcgUGFja1NPQ19QY3QgMTY4OwpCQV8gIkdlblNpZ1N0YXJ0VmFsdWUiIFNHXyAyNTcgQ29udGFjdG9yU3RhdGUgMjsKQkFfICJHZW5TaWdTdGFydFZhbHVlIiBTR18gNzg0IERyaXZlR2Vhck1vZGUgMzsKCgpWQUxfIDI1NyBDb250YWN0b3JTdGF0ZSAwICJPUEVOIiAxICJQUkVDSEFSR0UiIDIgIkNMT1NFRCIgMyAiRkFVTFQiIDsKVkFMXyAyNTcgSXNvbGF0aW9uRmF1bHRBY3RpdmUgMCAiT0siIDEgIklTT19GQVVMVCIgOwpWQUxfIDI1OCBJbnZlcnRlck1vZGUgMCAiSU5JVCIgMSAiU1RBTkRCWSIgMiAiVE9SUVVFX0NUUkwiIDMgIlJFR0VOIiA0ICJERVJBVElORyIgNSAiRkFVTFQiIDsKVkFMXyAyNTY2ODY5MjIxIENoYXJnaW5nU3RhZ2UgMCAiSURMRSIgMSAiSEFORFNIQUtFIiAyICJQUkVDSEFSR0UiIDMgIkNDX0ZBU1QiIDQgIkNWX1RBUEVSIiA1ICJDT01QTEVURSIgNiAiVjJMX0VYUE9SVCIgNyAiRkFVTFQiIDsKVkFMXyA3ODQgRHJpdmVHZWFyTW9kZSAwICJQQVJLIiAxICJSRVZFUlNFIiAyICJORVVUUkFMIiAzICJEUklWRSIgNCAiU1BPUlQiIDsKVkFMXyA3ODQgSG9yblB1bHNlQ21kIDAgIk9GRiIgMSAiSE9STl9PTiIgOwpWQUxfIDc4NCBFbWVyZ2VuY3lMYXRjaENtZCAwICJBUk1FRF9PSyIgMSAiRU1FUkdFTkNZX0NVVE9GRiIgOwoKClNJR19WQUxUWVBFXyA1MTcgUGhhc2VDdXJyZW50VV9BIDogMTsKU0lHX1ZBTFRZUEVfIDUxNyBQaGFzZUN1cnJlbnRWX0EgOiAxOwpTSUdfVkFMVFlQRV8gNTE3IFBoYXNlQ3VycmVudFdfQSA6IDE7ClNJR19WQUxUWVBFXyA1MTcgUm90b3JFbGVjdHJpY2FsQW5nbGVfRGVnIDogMTsKU0lHX1ZBTFRZUEVfIDUxNyBUb3RhbE1lY2hhbmljYWxFbmVyZ3lfa1doIDogMjsK",
+        "sizeBytes": 7410
+      }
+    ]
+  },
+  "connections": {
+    "profiles": [
+      {
+        "id": "prof-mock0-ev-hil",
+        "name": "Sentetik EV Telemetri (mock0 CAN-FD)",
+        "busId": 0,
+        "driverFamily": "mock",
+        "deviceId": "mock:mock0",
+        "adapterChannel": "mock0",
+        "serialPort": "",
+        "serialBaudRate": 1000000,
+        "serialDtrRts": false,
+        "bitrateProfileId": "fd_500k_2m",
+        "bitrate": 500000,
+        "enableFd": true,
+        "dataBitrate": 2000000,
+        "listenOnly": true,
+        "mockFpsPreset": 500,
+        "autoConnectOnProjectLoad": false,
+        "notes": "Donanımsız masaüstü testleri için Listen-Only mock0 profili.",
+        "databaseIds": [
+          "db:ev_powertrain_full_test.dbc"
+        ]
+      },
+      {
+        "id": "prof-vcan0-restbus",
+        "name": "Linux SocketCAN HIL (vcan0 CAN-FD)",
+        "busId": 1,
+        "driverFamily": "socketcan",
+        "deviceId": "socketcan:vcan0",
+        "adapterChannel": "vcan0",
+        "serialPort": "",
+        "serialBaudRate": 1000000,
+        "serialDtrRts": false,
+        "bitrateProfileId": "fd_500k_2m",
+        "bitrate": 500000,
+        "enableFd": true,
+        "dataBitrate": 2000000,
+        "listenOnly": true,
+        "mockFpsPreset": null,
+        "autoConnectOnProjectLoad": false,
+        "notes": "Restbus Replay donanım çıkışı testi için vcan0 profili (TX öncesi Arm Active Bus açın).",
+        "databaseIds": [
+          "db:ev_powertrain_full_test.dbc"
+        ]
+      }
+    ],
+    "activeConnectedProfileIds": [],
+    "quickBarState": {
+      "selectedDeviceId": "mock:mock0",
+      "bitrateProfileId": "fd_500k_2m",
+      "mockFpsPreset": 500,
+      "listenOnly": true
+    }
+  },
+  "transmitList": {
+    "entries": [
+      {
+        "id": "tx-vcu-driver-cmd",
+        "busId": 0,
+        "mode": "symbolic",
+        "messageKey": "STD:0x310",
+        "arbId": 784,
+        "isExtended": false,
+        "isFd": false,
+        "isBrs": false,
+        "dlc": 8,
+        "symbolName": "VCU_DriverControls",
+        "rawBytes": [
+          3,
+          2,
+          144,
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        "signalValues": {
+          "42": 3,
+          "45": 2,
+          "46": 40.0
+        },
+        "cycleTimeMs": 100,
+        "periodicEnabled": false,
+        "backendJobId": null,
+        "manualSentCount": 0,
+        "periodicSentCount": 0,
+        "creator": "HIL Test Pack",
+        "comment": "VCU DRIVE vitesi + %40 tork komutu (100 ms periyodik veya Space ile tekli gönderim)"
+      },
+      {
+        "id": "tx-obc-ext-status",
+        "busId": 0,
+        "mode": "symbolic",
+        "messageKey": "EXT:0x18FF50E5",
+        "arbId": 419385573,
+        "isExtended": true,
+        "isFd": false,
+        "isBrs": false,
+        "dlc": 8,
+        "symbolName": "OBC_ChargerStatusExt",
+        "rawBytes": [
+          16,
+          31,
+          176,
+          4,
+          3,
+          160,
+          72,
+          0
+        ],
+        "signalValues": {
+          "37": 795.2,
+          "38": 120.0,
+          "39": 3
+        },
+        "cycleTimeMs": 200,
+        "periodicEnabled": false,
+        "backendJobId": null,
+        "manualSentCount": 0,
+        "periodicSentCount": 0,
+        "creator": "HIL Test Pack",
+        "comment": "29-bit Extended CC_FAST hızlı şarj telemetri çerçevesi"
+      },
+      {
+        "id": "tx-uds-diag-req",
+        "busId": 0,
+        "mode": "raw",
+        "messageKey": null,
+        "arbId": 2016,
+        "isExtended": false,
+        "isFd": false,
+        "isBrs": false,
+        "dlc": 8,
+        "symbolName": "UDS_ReadDataById_VIN",
+        "rawBytes": [
+          3,
+          34,
+          241,
+          144,
+          85,
+          85,
+          85,
+          85
+        ],
+        "signalValues": {},
+        "cycleTimeMs": 0,
+        "periodicEnabled": false,
+        "backendJobId": null,
+        "manualSentCount": 0,
+        "periodicSentCount": 0,
+        "creator": "HIL Test Pack",
+        "comment": "ISO 14229 UDS Service 0x22 DID 0xF190 (VIN) tekil sorgu çerçevesi"
+      }
+    ]
+  },
+  "plotter": {
+    "watchedSignals": [
+      {
+        "busId": 0,
+        "signalId": 7,
+        "messageKey": "STD:0x102",
+        "signalName": "MotorSpeed_RPM",
+        "unit": "rpm",
+        "schemaMin": -15000,
+        "schemaMax": 15000,
+        "colorHex": "#58A6FF",
+        "visible": true,
+        "autoScale": true,
+        "customYMin": -2000,
+        "customYMax": 12000
+      },
+      {
+        "busId": 0,
+        "signalId": 0,
+        "messageKey": "STD:0x101",
+        "signalName": "PackVoltage_V",
+        "unit": "V",
+        "schemaMin": 0,
+        "schemaMax": 1000,
+        "colorHex": "#3FB980",
+        "visible": true,
+        "autoScale": true,
+        "customYMin": 700,
+        "customYMax": 850
+      },
+      {
+        "busId": 0,
+        "signalId": 1,
+        "messageKey": "STD:0x101",
+        "signalName": "PackCurrent_A",
+        "unit": "A",
+        "schemaMin": -500,
+        "schemaMax": 500,
+        "colorHex": "#E3B341",
+        "visible": true,
+        "autoScale": true,
+        "customYMin": -250,
+        "customYMax": 400
+      },
+      {
+        "busId": 0,
+        "signalId": 26,
+        "messageKey": "STD:0x205",
+        "signalName": "PhaseCurrentU_A",
+        "unit": "A",
+        "schemaMin": -600,
+        "schemaMax": 600,
+        "colorHex": "#A371F7",
+        "visible": true,
+        "autoScale": true,
+        "customYMin": -500,
+        "customYMax": 500
+      }
+    ],
+    "layoutMode": "compactSplit",
+    "yScaleMode": "multiAxis",
+    "timeWindowSec": 10,
+    "splitRowHeight": 200
+  },
+  "simulationPanels": [
+    {
+      "id": "panel-ev-cockpit-hil-v1",
+      "name": "EV Powertrain & Restbus HIL Kokpiti",
+      "description": "5 gelismis buton modu (Momentary, Toggle, Pulse, Step, Cycle + Cift Onayli Acil Kesici), Tork Slider, Osiloskop ve GNSS Harita iceren tam kapsamli HIL paneli.",
+      "gridCols": 24,
+      "rowHeightPx": 42,
+      "targetDatabaseId": "db:ev_powertrain_full_test.dbc",
+      "createdAt": "2026-11-08T20:45:00.000Z",
+      "updatedAt": "2026-11-08T20:45:00.000Z",
+      "widgets": [
+        {
+          "id": "w-grp-telem",
+          "kind": "group",
+          "title": "CAN / CAN-FD CANLI TELEMETRİ GÖSTERGELERİ (BMS + MCU + OBC + GNSS)",
+          "accentColor": "cyan",
+          "layout": {
+            "col": 0,
+            "row": 0,
+            "w": 24,
+            "h": 1
+          },
+          "binding": null,
+          "config": {
+            "subtitle": "0x101 BMS_PackStatus • 0x102 MCU_MotorDrive (Motorola) • 0x18FF50E5 OBC • 0x410 GNSS"
+          }
+        },
+        {
+          "id": "w-gauge-rpm",
+          "kind": "gauge",
+          "title": "Motor Devri (RPM)",
+          "accentColor": "cyan",
+          "layout": {
+            "col": 0,
+            "row": 1,
+            "w": 6,
+            "h": 5
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x102",
+            "messageName": "MCU_MotorDrive",
+            "arbId": 258,
+            "isExtended": false,
+            "signalName": "MotorSpeed_RPM",
+            "unit": "rpm",
+            "min": -15000.0,
+            "max": 15000.0,
+            "factor": 1.0,
+            "offset": 0.0,
+            "decimals": 0,
+            "color": "#38BDF8",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "min": -3000,
+            "max": 12000,
+            "warnHigh": 9000,
+            "critHigh": 10500,
+            "majorTicks": 6,
+            "showNeedle": true,
+            "showDigital": true
+          }
+        },
+        {
+          "id": "w-bar-soc",
+          "kind": "bar",
+          "title": "Batarya SoC (%)",
+          "accentColor": "emerald",
+          "layout": {
+            "col": 6,
+            "row": 1,
+            "w": 4,
+            "h": 5
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x101",
+            "messageName": "BMS_PackStatus",
+            "arbId": 257,
+            "isExtended": false,
+            "signalName": "PackSOC_Pct",
+            "unit": "%",
+            "min": 0.0,
+            "max": 100.0,
+            "factor": 0.5,
+            "offset": 0.0,
+            "decimals": 1,
+            "color": "#3FB980",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "min": 0,
+            "max": 100,
+            "warnLow": 20,
+            "critLow": 10,
+            "orientation": "vertical",
+            "showPeakHold": true,
+            "showDigital": true
+          }
+        },
+        {
+          "id": "w-num-pack-v",
+          "kind": "numeric",
+          "title": "HV Paket Gerilimi",
+          "accentColor": "amber",
+          "layout": {
+            "col": 10,
+            "row": 1,
+            "w": 4,
+            "h": 2
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x101",
+            "messageName": "BMS_PackStatus",
+            "arbId": 257,
+            "isExtended": false,
+            "signalName": "PackVoltage_V",
+            "unit": "V",
+            "min": 0.0,
+            "max": 1000.0,
+            "factor": 0.1,
+            "offset": 0.0,
+            "decimals": 1,
+            "color": "#E3B341",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "min": 0,
+            "max": 1000,
+            "showRawHex": true,
+            "fontSize": "lg"
+          }
+        },
+        {
+          "id": "w-led-contactor",
+          "kind": "led",
+          "title": "HV Ana Kontaktör",
+          "accentColor": "emerald",
+          "layout": {
+            "col": 10,
+            "row": 3,
+            "w": 4,
+            "h": 3
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x101",
+            "messageName": "BMS_PackStatus",
+            "arbId": 257,
+            "isExtended": false,
+            "signalName": "ContactorState",
+            "unit": "",
+            "min": 0.0,
+            "max": 3.0,
+            "factor": 1.0,
+            "offset": 0.0,
+            "decimals": 0,
+            "color": "#3FB980",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "ledOperator": "gte",
+            "ledThreshold": 2,
+            "onLabel": "CLOSED (HV AKTİF)",
+            "offLabel": "OPEN / PRECHARGE"
+          }
+        },
+        {
+          "id": "w-graph-drive",
+          "kind": "graph",
+          "title": "RPM & Paket Akımı Osiloskobu",
+          "accentColor": "blue",
+          "layout": {
+            "col": 14,
+            "row": 1,
+            "w": 10,
+            "h": 5
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x102",
+            "messageName": "MCU_MotorDrive",
+            "arbId": 258,
+            "isExtended": false,
+            "signalName": "MotorSpeed_RPM",
+            "unit": "rpm",
+            "min": -15000.0,
+            "max": 15000.0,
+            "factor": 1.0,
+            "offset": 0.0,
+            "decimals": 0,
+            "color": "#58A6FF",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "extraBindings": [
+              {
+                "busId": 0,
+                "messageKey": "STD:0x101",
+                "messageName": "BMS_PackStatus",
+                "arbId": 257,
+                "isExtended": false,
+                "signalName": "PackCurrent_A",
+                "unit": "A",
+                "min": -500.0,
+                "max": 500.0,
+                "factor": 0.1,
+                "offset": 0.0,
+                "decimals": 1,
+                "color": "#E3B341",
+                "databaseId": "db:ev_powertrain_full_test.dbc",
+                "databaseName": "ev_powertrain_full_test.dbc"
+              }
+            ],
+            "timeWindowSec": 10,
+            "autoScaleY": true,
+            "showLegend": true
+          }
+        },
+        {
+          "id": "w-grp-controls",
+          "kind": "group",
+          "title": "VCU ETKİLEŞİMLİ SÜRÜCÜ KOMUTLARI — 5 BUTON MODU + ÇİFT ONAY KAPAĞI (0x310)",
+          "accentColor": "amber",
+          "layout": {
+            "col": 0,
+            "row": 6,
+            "w": 24,
+            "h": 1
+          },
+          "binding": null,
+          "config": {
+            "subtitle": "Momentary (Space) • Toggle • Pulse 350ms (H) • Step (R) • Cycle P/R/N/D/S (G) • Acil Kesici (Çift Onay)"
+          }
+        },
+        {
+          "id": "w-btn-momentary",
+          "kind": "button",
+          "title": "1. Momentary Korna",
+          "accentColor": "cyan",
+          "layout": {
+            "col": 0,
+            "row": 7,
+            "w": 4,
+            "h": 3
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x310",
+            "messageName": "VCU_DriverControls",
+            "arbId": 784,
+            "isExtended": false,
+            "signalName": "HornPulseCmd",
+            "unit": "",
+            "min": 0.0,
+            "max": 1.0,
+            "factor": 1.0,
+            "offset": 0.0,
+            "decimals": 0,
+            "color": "#38BDF8",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "buttonMode": "momentary",
+            "pressValue": 1,
+            "releaseValue": 0,
+            "buttonLabel": "BASILI TUT KORNA",
+            "hotkey": "Space",
+            "txCycleMs": 0
+          }
+        },
+        {
+          "id": "w-btn-toggle",
+          "kind": "button",
+          "title": "2. Toggle Kontaktör",
+          "accentColor": "emerald",
+          "layout": {
+            "col": 4,
+            "row": 7,
+            "w": 4,
+            "h": 3
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x101",
+            "messageName": "BMS_PackStatus",
+            "arbId": 257,
+            "isExtended": false,
+            "signalName": "ContactorState",
+            "unit": "",
+            "min": 0.0,
+            "max": 3.0,
+            "factor": 1.0,
+            "offset": 0.0,
+            "decimals": 0,
+            "color": "#3FB980",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "buttonMode": "toggle",
+            "pressValue": 2,
+            "releaseValue": 0,
+            "buttonLabel": "HV KONTAKTÖR AÇ/KAPA",
+            "txCycleMs": 0
+          }
+        },
+        {
+          "id": "w-btn-pulse",
+          "kind": "button",
+          "title": "3. Pulse Flaşör (350ms)",
+          "accentColor": "blue",
+          "layout": {
+            "col": 8,
+            "row": 7,
+            "w": 4,
+            "h": 3
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x310",
+            "messageName": "VCU_DriverControls",
+            "arbId": 784,
+            "isExtended": false,
+            "signalName": "HornPulseCmd",
+            "unit": "",
+            "min": 0.0,
+            "max": 1.0,
+            "factor": 1.0,
+            "offset": 0.0,
+            "decimals": 0,
+            "color": "#58A6FF",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "buttonMode": "pulse",
+            "pressValue": 1,
+            "releaseValue": 0,
+            "pulseDurationMs": 350,
+            "buttonLabel": "350ms DARBE GÖNDER",
+            "hotkey": "KeyH",
+            "txCycleMs": 0
+          }
+        },
+        {
+          "id": "w-btn-step",
+          "kind": "button",
+          "title": "4. Step Rejenerasyon",
+          "accentColor": "amber",
+          "layout": {
+            "col": 12,
+            "row": 7,
+            "w": 4,
+            "h": 3
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x310",
+            "messageName": "VCU_DriverControls",
+            "arbId": 784,
+            "isExtended": false,
+            "signalName": "RegenLevelStep",
+            "unit": "",
+            "min": 0.0,
+            "max": 5.0,
+            "factor": 1.0,
+            "offset": 0.0,
+            "decimals": 0,
+            "color": "#E3B341",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "buttonMode": "step",
+            "min": 0,
+            "max": 5,
+            "stepDelta": 1,
+            "stepWrap": true,
+            "buttonLabel": "REGEN KADEMESİ +1",
+            "hotkey": "KeyR",
+            "txCycleMs": 0
+          }
+        },
+        {
+          "id": "w-btn-cycle",
+          "kind": "button",
+          "title": "5. Cycle Vites Seçici",
+          "accentColor": "steel",
+          "layout": {
+            "col": 16,
+            "row": 7,
+            "w": 4,
+            "h": 3
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x310",
+            "messageName": "VCU_DriverControls",
+            "arbId": 784,
+            "isExtended": false,
+            "signalName": "DriveGearMode",
+            "unit": "",
+            "min": 0.0,
+            "max": 4.0,
+            "factor": 1.0,
+            "offset": 0.0,
+            "decimals": 0,
+            "color": "#94A3B8",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "buttonMode": "cycle",
+            "buttonLabel": "VİTES DEĞİŞTİR",
+            "hotkey": "KeyG",
+            "cycleOptions": [
+              {
+                "label": "P (PARK)",
+                "value": 0
+              },
+              {
+                "label": "R (REVERSE)",
+                "value": 1
+              },
+              {
+                "label": "N (NEUTRAL)",
+                "value": 2
+              },
+              {
+                "label": "D (DRIVE)",
+                "value": 3
+              },
+              {
+                "label": "S (SPORT)",
+                "value": 4
+              }
+            ],
+            "txCycleMs": 0
+          }
+        },
+        {
+          "id": "w-btn-emergency-confirm",
+          "kind": "button",
+          "title": "HV Acil Kesici (Korumalı)",
+          "accentColor": "red",
+          "layout": {
+            "col": 20,
+            "row": 7,
+            "w": 4,
+            "h": 3
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x310",
+            "messageName": "VCU_DriverControls",
+            "arbId": 784,
+            "isExtended": false,
+            "signalName": "EmergencyLatchCmd",
+            "unit": "",
+            "min": 0.0,
+            "max": 1.0,
+            "factor": 1.0,
+            "offset": 0.0,
+            "decimals": 0,
+            "color": "#EF4444",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "buttonMode": "toggle",
+            "pressValue": 1,
+            "releaseValue": 0,
+            "buttonLabel": "HV ACİL KESİCİ",
+            "requireConfirm": true,
+            "confirmPrompt": "Yüksek gerilim acil kesici mandalı tetiklenecek. Onaylıyor musunuz?",
+            "txCycleMs": 0
+          }
+        },
+        {
+          "id": "w-slider-torque",
+          "kind": "slider",
+          "title": "Hedef Tork Talebi (%)",
+          "accentColor": "emerald",
+          "layout": {
+            "col": 0,
+            "row": 10,
+            "w": 12,
+            "h": 3
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x310",
+            "messageName": "VCU_DriverControls",
+            "arbId": 784,
+            "isExtended": false,
+            "signalName": "TargetTorquePct",
+            "unit": "%",
+            "min": 0.0,
+            "max": 100.0,
+            "factor": 0.1,
+            "offset": 0.0,
+            "decimals": 1,
+            "color": "#3FB980",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "min": 0,
+            "max": 100,
+            "step": 0.5,
+            "showNumericInput": true,
+            "txCycleMs": 100
+          }
+        },
+        {
+          "id": "w-map-gnss",
+          "kind": "map",
+          "title": "GNSS Araç Konumu (İstanbul Park)",
+          "accentColor": "cyan",
+          "layout": {
+            "col": 12,
+            "row": 10,
+            "w": 12,
+            "h": 5
+          },
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x410",
+            "messageName": "GNSS_VehiclePose",
+            "arbId": 1040,
+            "isExtended": false,
+            "signalName": "GnssLatitude_Deg",
+            "unit": "deg",
+            "min": -90.0,
+            "max": 90.0,
+            "factor": 1e-06,
+            "offset": 0.0,
+            "decimals": 2,
+            "color": "#38BDF8",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "config": {
+            "lonBinding": {
+              "busId": 0,
+              "messageKey": "STD:0x410",
+              "messageName": "GNSS_VehiclePose",
+              "arbId": 1040,
+              "isExtended": false,
+              "signalName": "GnssLongitude_Deg",
+              "unit": "deg",
+              "min": -180.0,
+              "max": 180.0,
+              "factor": 1e-06,
+              "offset": 0.0,
+              "decimals": 2,
+              "color": "#38BDF8",
+              "databaseId": "db:ev_powertrain_full_test.dbc",
+              "databaseName": "ev_powertrain_full_test.dbc"
+            },
+            "speedBinding": {
+              "busId": 0,
+              "messageKey": "STD:0x102",
+              "messageName": "MCU_MotorDrive",
+              "arbId": 258,
+              "isExtended": false,
+              "signalName": "MotorSpeed_RPM",
+              "unit": "rpm",
+              "min": -15000.0,
+              "max": 15000.0,
+              "factor": 1.0,
+              "offset": 0.0,
+              "decimals": 0,
+              "color": "#3FB980",
+              "databaseId": "db:ev_powertrain_full_test.dbc",
+              "databaseName": "ev_powertrain_full_test.dbc"
+            },
+            "mapZoom": 15,
+            "mapCenterLat": 40.9531,
+            "mapCenterLon": 29.4068,
+            "mapTileStyle": "osm_dark",
+            "mapAutoFollow": true,
+            "mapShowTrail": true,
+            "mapTrailMaxPoints": 300,
+            "mapClickToSimulate": true
+          }
+        }
+      ],
+      "generators": [
+        {
+          "id": "gen-sine-rpm",
+          "enabled": true,
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x102",
+            "messageName": "MCU_MotorDrive",
+            "arbId": 258,
+            "isExtended": false,
+            "signalName": "MotorSpeed_RPM",
+            "unit": "rpm",
+            "min": -15000.0,
+            "max": 15000.0,
+            "factor": 1.0,
+            "offset": 0.0,
+            "decimals": 0,
+            "color": "#38BDF8",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "waveform": "sine",
+          "min": 800,
+          "max": 8500,
+          "constantValue": 3000,
+          "frequencyHz": 0.2
+        },
+        {
+          "id": "gen-tri-current",
+          "enabled": true,
+          "binding": {
+            "busId": 0,
+            "messageKey": "STD:0x101",
+            "messageName": "BMS_PackStatus",
+            "arbId": 257,
+            "isExtended": false,
+            "signalName": "PackCurrent_A",
+            "unit": "A",
+            "min": -500.0,
+            "max": 500.0,
+            "factor": 0.1,
+            "offset": 0.0,
+            "decimals": 1,
+            "color": "#E3B341",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "waveform": "triangle",
+          "min": -140,
+          "max": 280,
+          "constantValue": 45,
+          "frequencyHz": 0.15
+        }
+      ]
+    }
+  ],
+  "workspace": {
+    "traceMaxBufferRows": 2048,
+    "activeDocTab": "rxtx",
+    "theme": "dark",
+    "expandedRxKeys": [
+      "0:STD:0x101",
+      "0:STD:0x102",
+      "0:STD:0x205"
+    ],
+    "enabledToolpacks": [
+      "core",
+      "simulation_replay",
+      "reverse_engineering",
+      "automotive_diagnostics"
+    ]
+  },
+  "cloudBinding": null
+}

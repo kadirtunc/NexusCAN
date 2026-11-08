@@ -639,7 +639,7 @@ function encodeSignalBits(
       }
     }
   } else {
-    // Vector Motorola (@0 sawtooth): startBit is MSB
+    // Big-Endian Motorola (@0 sawtooth): startBit is MSB
     let byteIdx = Math.floor(sig.startBit / 8);
     let bitInByte = sig.startBit % 8;
     for (let i = 0; i < bitLen; i += 1) {

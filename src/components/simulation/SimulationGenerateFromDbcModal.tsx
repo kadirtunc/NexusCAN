@@ -1,5 +1,4 @@
-
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   CheckSquare,
   Database,
@@ -9,6 +8,7 @@ import {
   Square,
   X,
 } from 'lucide-react';
+import { useI18n } from '../../i18n';
 import type {
   MessageSchemaDto,
   NetworkDatabaseSummaryDto,
@@ -52,33 +52,6 @@ interface SelectableMessageRow {
   hexId: string;
 }
 
-function suggestPanelName(
-  selectedDbs: readonly NetworkDatabaseSummaryDto[]
-): string {
-  if (selectedDbs.length === 0) {
-    return 'DBC Taslak Gösterge Paneli';
-  }
-  if (selectedDbs.length === 1) {
-    return `${selectedDbs[0]!.name} — Taslak Panel`;
-  }
-  if (selectedDbs.length === 2) {
-    return `${selectedDbs[0]!.name} + ${selectedDbs[1]!.name} — Taslak Panel`;
-  }
-  return `${selectedDbs[0]!.name} + ${selectedDbs.length - 1} DB — Karma Taslak Panel`;
-}
-
-function suggestPanelDescription(
-  selectedDbs: readonly NetworkDatabaseSummaryDto[],
-  selectedMsgCount: number,
-  selectedSigCount: number
-): string {
-  if (selectedDbs.length === 0) {
-    return '';
-  }
-  const dbList = selectedDbs.map((d) => `${d.name}.${d.format}`).join(', ');
-  return `${dbList} (${selectedMsgCount} mesaj, ${selectedSigCount} sinyal) üzerinden oluşturulan taslak gösterge paneli`;
-}
-
 export function SimulationGenerateFromDbcModal({
   open,
   mode = 'create_new',
@@ -90,6 +63,51 @@ export function SimulationGenerateFromDbcModal({
   onClose,
   onConfirmGenerate,
 }: SimulationGenerateFromDbcModalProps): React.JSX.Element | null {
+  const { t } = useI18n();
+
+  const suggestPanelName = useCallback(
+    (selectedDbs: readonly NetworkDatabaseSummaryDto[]): string => {
+      if (selectedDbs.length === 0) {
+        return t('simPal.genModal.defaultDraftPanelName');
+      }
+      if (selectedDbs.length === 1) {
+        return t('simPal.genModal.singleDbDraftPanelName', {
+          name: selectedDbs[0]!.name,
+        });
+      }
+      if (selectedDbs.length === 2) {
+        return t('simPal.genModal.twoDbDraftPanelName', {
+          name1: selectedDbs[0]!.name,
+          name2: selectedDbs[1]!.name,
+        });
+      }
+      return t('simPal.genModal.multiDbDraftPanelName', {
+        name: selectedDbs[0]!.name,
+        count: selectedDbs.length - 1,
+      });
+    },
+    [t]
+  );
+
+  const suggestPanelDescription = useCallback(
+    (
+      selectedDbs: readonly NetworkDatabaseSummaryDto[],
+      selectedMsgCount: number,
+      selectedSigCount: number
+    ): string => {
+      if (selectedDbs.length === 0) {
+        return '';
+      }
+      const dbList = selectedDbs.map((d) => `${d.name}.${d.format}`).join(', ');
+      return t('simPal.genModal.suggestedDesc', {
+        dbList,
+        msgCount: selectedMsgCount,
+        sigCount: selectedSigCount,
+      });
+    },
+    [t]
+  );
+
   const [selectedDbIds, setSelectedDbIds] = useState<Set<string>>(new Set());
   const [useAllMessages, setUseAllMessages] = useState<boolean>(true);
   const [selectedMsgKeys, setSelectedMsgKeys] = useState<Set<string>>(
@@ -105,7 +123,6 @@ export function SimulationGenerateFromDbcModal({
   // Reset modal state cleanly whenever opened
   useEffect(() => {
     if (!open) return;
-    // When multiple DBCs exist, require explicit user choice; when exactly 1 exists, pre-check it in the visible selector
     const initialDbSet =
       databases.length === 1 && databases[0]
         ? new Set<string>([databases[0].id])
@@ -120,7 +137,7 @@ export function SimulationGenerateFromDbcModal({
     const initialChosenDbs = databases.filter((d) => initialDbSet.has(d.id));
     setPanelName(suggestPanelName(initialChosenDbs));
     setPanelDescription('');
-  }, [databases, open]);
+  }, [databases, open, suggestPanelName]);
 
   // Close on Escape
   useEffect(() => {
@@ -151,7 +168,7 @@ export function SimulationGenerateFromDbcModal({
   useEffect(() => {
     if (!open || hasCustomName) return;
     setPanelName(suggestPanelName(selectedDatabases));
-  }, [hasCustomName, open, selectedDatabases]);
+  }, [hasCustomName, open, selectedDatabases, suggestPanelName]);
 
   const availableMessages = useMemo<SelectableMessageRow[]>(() => {
     const rows: SelectableMessageRow[] = [];
@@ -323,15 +340,15 @@ export function SimulationGenerateFromDbcModal({
               className="font-mono text-xs font-bold uppercase tracking-wider text-ink"
             >
               {mode === 'populate_current'
-                ? 'SEÇİLİ .DBC / .KCD İLE PANELİ DOLDUR'
-                : "DBC / KCD VERİTABANINDAN TASLAK PANEL OLUŞTUR"}
+                ? t('simPal.genModal.titlePopulate')
+                : t('simPal.genModal.titleCreate')}
             </h2>
           </div>
           <button
             type="button"
             disabled={saving}
             onClick={onClose}
-            aria-label="Modalı kapat"
+            aria-label={t('simPal.genModal.closeAria')}
             className="cursor-pointer rounded-[2px] p-1 text-muted hover:text-ink focus-visible:outline-1 focus-visible:outline-focus"
           >
             <X className="h-3.5 w-3.5" />
@@ -348,21 +365,13 @@ export function SimulationGenerateFromDbcModal({
             <div className="rounded-[2px] border border-hairline bg-canvas p-3 text-xs leading-relaxed text-ink">
               {mode === 'populate_current' ? (
                 <p>
-                  Seçtiğiniz <span className="font-mono font-semibold">.dbc / .kcd</span>{' '}
-                  veritabanındaki mesaj ve sinyallerden otomatik olarak başlangıç
-                  göstergeleri (kadran, durum LED&apos;i, enum göstergesi,
-                  osiloskop ve varsa GNSS haritası) üreterek{' '}
-                  <strong className="font-mono">{currentPanelName}</strong>{' '}
-                  panelini doldurur.
+                  {t('simPal.genModal.explainPopulate', {
+                    name: currentPanelName ?? '',
+                  })}
                 </p>
               ) : (
                 <p>
-                  Seçtiğiniz{' '}
-                  <span className="font-mono font-semibold">.dbc / .kcd</span>{' '}
-                  veritabanındaki mesaj ve sinyallerden otomatik olarak başlangıç
-                  göstergeleri (kadran, durum LED&apos;i, enum göstergesi,
-                  osiloskop ve varsa GNSS haritası) içeren yeni bir taslak panel
-                  oluşturur.
+                  {t('simPal.genModal.explainCreate')}
                 </p>
               )}
             </div>
@@ -371,8 +380,8 @@ export function SimulationGenerateFromDbcModal({
             {mode === 'create_new' && (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <label className="block space-y-1">
-                  <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted">
-                    1. PANEL ADI *
+                  <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-muted">
+                    {t('simPal.genModal.panelNameLabel')}
                   </span>
                   <input
                     type="text"
@@ -382,14 +391,14 @@ export function SimulationGenerateFromDbcModal({
                       setPanelName(e.target.value);
                       setHasCustomName(true);
                     }}
-                    placeholder="Örn: Powertrain — Taslak Panel"
-                    className="h-8 w-full rounded-[2px] border border-hairline bg-canvas px-2.5 text-xs text-ink focus-visible:border-focus focus-visible:outline-none"
+                    placeholder={t('simPal.genModal.panelNamePlaceholder')}
+                    className="h-[32px] w-full rounded-[2px] border border-hairline bg-canvas px-2.5 text-[12.5px] text-ink focus-visible:border-focus focus-visible:outline-none"
                   />
                 </label>
 
                 <label className="block space-y-1">
-                  <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted">
-                    AÇIKLAMA (OPSİYONEL)
+                  <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-muted">
+                    {t('simPal.genModal.descriptionLabel')}
                   </span>
                   <input
                     type="text"
@@ -398,8 +407,8 @@ export function SimulationGenerateFromDbcModal({
                       setPanelDescription(e.target.value);
                       setHasCustomDescription(true);
                     }}
-                    placeholder="Otomatik özet veya özel not..."
-                    className="h-8 w-full rounded-[2px] border border-hairline bg-canvas px-2.5 text-xs text-ink focus-visible:border-focus focus-visible:outline-none"
+                    placeholder={t('simPal.genModal.descriptionPlaceholder')}
+                    className="h-[32px] w-full rounded-[2px] border border-hairline bg-canvas px-2.5 text-[12.5px] text-ink focus-visible:border-focus focus-visible:outline-none"
                   />
                 </label>
               </div>
@@ -409,8 +418,9 @@ export function SimulationGenerateFromDbcModal({
             <div className="space-y-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted">
-                  {mode === 'create_new' ? '2.' : '1.'} KAYNAK VERİTABANI SEÇİMİ
-                  (ZORUNLU — KULLANICI SEÇER)
+                  {t('simPal.genModal.stepSourceDb', {
+                    step: mode === 'create_new' ? '2.' : '1.',
+                  })}
                 </span>
                 {databases.length > 1 && (
                   <div className="flex items-center gap-1.5 font-mono text-[10px]">
@@ -419,14 +429,16 @@ export function SimulationGenerateFromDbcModal({
                       onClick={handleSelectAllDatabases}
                       className="cursor-pointer rounded-[2px] border border-hairline bg-elevated px-2 py-0.5 font-semibold uppercase text-focus hover:border-strong"
                     >
-                      TÜMÜNÜ SEÇ ({databases.length})
+                      {t('simPal.genModal.selectAllDbs', {
+                        count: databases.length,
+                      })}
                     </button>
                     <button
                       type="button"
                       onClick={handleClearDatabases}
                       className="cursor-pointer rounded-[2px] border border-hairline bg-canvas px-2 py-0.5 uppercase text-muted hover:border-strong hover:text-ink"
                     >
-                      TEMİZLE
+                      {t('simPal.genModal.clearDbs')}
                     </button>
                   </div>
                 )}
@@ -434,7 +446,7 @@ export function SimulationGenerateFromDbcModal({
 
               {loadingSchemas ? (
                 <div className="rounded-[2px] border border-hairline bg-canvas px-4 py-6 text-center font-mono text-xs uppercase text-muted">
-                  VERİTABANI ŞEMALARI YÜKLENİYOR...
+                  {t('simPal.genModal.loadingSchemas')}
                 </div>
               ) : (
                 <div className="max-h-44 space-y-1.5 overflow-y-auto rounded-[2px] border border-hairline bg-canvas p-2">
@@ -482,8 +494,10 @@ export function SimulationGenerateFromDbcModal({
                         </div>
 
                         <div className="shrink-0 font-mono text-[10px] tabular-nums text-muted">
-                          <strong className="text-ink">{msgCount}</strong> mesaj ·{' '}
-                          <strong className="text-ink">{sigCount}</strong> sinyal
+                          {t('simPal.genModal.msgAndSigCount', {
+                            msgCount,
+                            sigCount,
+                          })}
                         </div>
                       </label>
                     );
@@ -493,8 +507,7 @@ export function SimulationGenerateFromDbcModal({
 
               {selectedDbIds.size === 0 && !loadingSchemas && (
                 <p className="font-mono text-[10px] text-warn">
-                  Taslak panel üretilecek en az bir .dbc veya .kcd veritabanını
-                  yukarıdan seçin.
+                  {t('simPal.genModal.warnSelectDb')}
                 </p>
               )}
             </div>
@@ -503,8 +516,9 @@ export function SimulationGenerateFromDbcModal({
             <div className="space-y-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted">
-                  {mode === 'create_new' ? '3.' : '2.'} MESAJ FİLTRESİ (İSTEĞE
-                  BAĞLI)
+                  {t('simPal.genModal.stepMsgFilter', {
+                    step: mode === 'create_new' ? '3.' : '2.',
+                  })}
                 </span>
 
                 {availableMessages.length > 0 && (
@@ -518,7 +532,10 @@ export function SimulationGenerateFromDbcModal({
                       className="h-3.5 w-3.5 rounded-[2px] accent-[var(--status-focus)]"
                     />
                     <span>
-                      TÜM MESAJLAR ({checkedMsgCount}/{availableMessages.length})
+                      {t('simPal.genModal.allMessagesCheck', {
+                        checked: checkedMsgCount,
+                        total: availableMessages.length,
+                      })}
                     </span>
                   </label>
                 )}
@@ -526,12 +543,11 @@ export function SimulationGenerateFromDbcModal({
 
               {selectedDbIds.size === 0 ? (
                 <div className="rounded-[2px] border border-hairline bg-canvas px-3 py-4 text-center font-mono text-[11px] text-subtle">
-                  VERİTABANI SEÇİLDİĞİNDE İÇERİĞİNDEKİ CAN MESAJLARI BURADA
-                  LİSTELENİR.
+                  {t('simPal.genModal.emptyDbSelectHint')}
                 </div>
               ) : availableMessages.length === 0 ? (
                 <div className="rounded-[2px] border border-hairline bg-canvas px-3 py-4 text-center font-mono text-[11px] text-muted">
-                  SEÇİLİ VERİTABANINDA ÇÖZÜMLENMİŞ CAN MESAJI BULUNAMADI.
+                  {t('simPal.genModal.emptyMessages')}
                 </div>
               ) : (
                 <div className="space-y-1.5 rounded-[2px] border border-hairline bg-canvas p-2">
@@ -545,8 +561,8 @@ export function SimulationGenerateFromDbcModal({
                         type="text"
                         value={msgQuery}
                         onChange={(e) => setMsgQuery(e.target.value)}
-                        placeholder="Mesaj filtrele (0x101, INV_MotorStatus)..."
-                        aria-label="Taslak panel mesajlarını filtrele"
+                        placeholder={t('simPal.genModal.filterMsgPlaceholder')}
+                        aria-label={t('simPal.genModal.filterMsgAria')}
                         className="h-6 w-full rounded-[2px] border border-hairline bg-surface pr-2 pl-6 font-mono text-[10px] text-ink placeholder:text-subtle"
                       />
                     </div>
@@ -558,7 +574,7 @@ export function SimulationGenerateFromDbcModal({
                         className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-surface px-2 font-semibold uppercase text-focus hover:border-strong"
                       >
                         <CheckSquare className="h-2.5 w-2.5" aria-hidden="true" />
-                        TÜMÜ
+                        {t('simPal.genModal.filterAll')}
                       </button>
                       <button
                         type="button"
@@ -569,7 +585,7 @@ export function SimulationGenerateFromDbcModal({
                         className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-surface px-2 uppercase text-muted hover:border-strong hover:text-ink"
                       >
                         <Square className="h-2.5 w-2.5" aria-hidden="true" />
-                        HİÇBİRİ
+                        {t('simPal.genModal.filterNone')}
                       </button>
                     </div>
                   </div>
@@ -608,7 +624,9 @@ export function SimulationGenerateFromDbcModal({
                             <span className="truncate">{row.msg.name}</span>
                           </span>
                           <span className="shrink-0 text-[9px] text-subtle">
-                            {row.signalCount} sny
+                            {t('simPal.genModal.sigShort', {
+                              count: row.signalCount,
+                            })}
                           </span>
                         </label>
                       );
@@ -626,12 +644,14 @@ export function SimulationGenerateFromDbcModal({
                     className="h-3.5 w-3.5 text-nominal"
                     aria-hidden="true"
                   />
-                  TASLAK PANEL ÖNİZLEMESİ
+                  {t('simPal.genModal.previewTitle')}
                 </span>
                 <span className="text-muted">
-                  {draftPlan.counts.sourceDatabaseCount} DB ·{' '}
-                  {draftPlan.counts.selectedMessageCount} MESAJ ·{' '}
-                  {draftPlan.counts.selectedSignalCount} SİNYAL
+                  {t('simPal.genModal.previewStats', {
+                    dbCount: draftPlan.counts.sourceDatabaseCount,
+                    msgCount: draftPlan.counts.selectedMessageCount,
+                    sigCount: draftPlan.counts.selectedSignalCount,
+                  })}
                 </span>
               </div>
               <p className="mt-1.5 font-mono text-[11px] tabular-nums text-ink">
@@ -644,7 +664,7 @@ export function SimulationGenerateFromDbcModal({
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-hairline bg-elevated px-4 py-3">
             <span className="inline-flex items-center gap-1.5 font-mono text-[10px] text-muted">
               <Layers className="h-3 w-3 text-focus" aria-hidden="true" />
-              Panel içinde diğer tüm .dbc dosyalarından da sinyal ekleyebilirsiniz.
+              {t('simPal.genModal.footerNote')}
             </span>
 
             <div className="flex items-center gap-2">
@@ -654,7 +674,7 @@ export function SimulationGenerateFromDbcModal({
                 onClick={onClose}
                 className="h-8 cursor-pointer rounded-[2px] border border-hairline bg-surface px-3 font-mono text-[11px] font-semibold uppercase text-ink hover:border-strong"
               >
-                İPTAL
+                {t('simPal.genModal.cancelBtn')}
               </button>
               <button
                 type="submit"
@@ -663,10 +683,10 @@ export function SimulationGenerateFromDbcModal({
                 style={{ backgroundColor: 'var(--status-focus)' }}
               >
                 {saving
-                  ? 'OLUŞTURULUYOR...'
+                  ? t('simPal.genModal.generatingBtn')
                   : mode === 'populate_current'
-                    ? '[ BU PANELİ SEÇİLENLERLE DOLDUR ]'
-                    : '[ TASLAK PANELİ OLUŞTUR VE AÇ ]'}
+                    ? t('simPal.genModal.populateBtn')
+                    : t('simPal.genModal.createBtn')}
               </button>
             </div>
           </div>

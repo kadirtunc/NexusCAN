@@ -27,6 +27,7 @@ import { cloudBridgeStore, useCloudBridgeStore } from '../store/cloudBridgeStore
 import { useTelemetryChrono } from '../store/telemetryStore';
 import { useTransmitStore } from '../store/transmitStore';
 import type { StatusBanner } from './TopBar';
+import { useI18n } from '../i18n';
 
 interface ProjectModalProps {
   quickBarState: QuickBarConnectionState;
@@ -41,6 +42,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
   onStatusMessage,
   onClose,
 }) => {
+  const { t } = useI18n();
   const projState = useProjectStore();
   const dbState = useDatabaseStore();
   const connState = useConnectionStore();
@@ -108,14 +110,18 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
       );
       onStatusMessage({
         kind: 'success',
-        message: `Saved project "${saved.name}" (projects/${saved.fileStem}.nexusproj.json).`,
+        message: t('modal.project.statusSaved', {
+          name: saved.name,
+          fileStem: saved.fileStem,
+        }),
       });
     } catch (err) {
       onStatusMessage({
         kind: 'info',
-        message: `Saved "${nameInput}" locally (${
-          err instanceof Error ? err.message : String(err)
-        }).`,
+        message: t('modal.project.statusSavedLocal', {
+          name: nameInput,
+          error: err instanceof Error ? err.message : String(err),
+        }),
       });
     } finally {
       setBusy(false);
@@ -133,7 +139,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
       setNotesInput(loaded.notes);
       onStatusMessage({
         kind: 'success',
-        message: `Loaded project "${loaded.name}" (DB, Connections, TX List & Plotter restored).`,
+        message: t('modal.project.statusLoaded', { name: loaded.name }),
       });
       onClose();
 
@@ -147,9 +153,10 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: `Failed to open project "${fileStem}": ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        message: t('modal.project.statusLoadFailed', {
+          fileStem,
+          error: err instanceof Error ? err.message : String(err),
+        }),
       });
     } finally {
       setBusy(false);
@@ -162,12 +169,14 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
       await projectStore.deleteServerProjectByStem(fileStem);
       onStatusMessage({
         kind: 'info',
-        message: `Deleted saved project "${fileStem}".`,
+        message: t('modal.project.statusDeleted', { fileStem }),
       });
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: `Delete failed: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('modal.project.statusDeleteFailed', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
       });
     } finally {
       setBusy(false);
@@ -193,7 +202,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
     URL.revokeObjectURL(url);
     onStatusMessage({
       kind: 'success',
-      message: `Exported "${snap.fileStem}.nexusproj.json" with embedded DBC/KCD, Connections & TX List.`,
+      message: t('modal.project.statusExported', { fileStem: snap.fileStem }),
     });
   };
 
@@ -209,14 +218,17 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
       const rawText = await file.text();
       const parsed = JSON.parse(rawText) as NexusProjectFileV1;
       if (!parsed || parsed.version !== 1) {
-        throw new Error('Invalid .nexusproj.json format (expected version: 1).');
+        throw new Error(t('modal.project.errInvalidFormat'));
       }
       const res = await projectStore.restoreProject(parsed, onApplyQuickBar);
       setNameInput(parsed.name);
       setNotesInput(parsed.notes ?? '');
       onStatusMessage({
         kind: 'success',
-        message: `Imported project "${parsed.name}" (${res.reconnectedCount} bus(es) connected).`,
+        message: t('modal.project.statusImported', {
+          name: parsed.name,
+          count: res.reconnectedCount,
+        }),
       });
       onClose();
 
@@ -230,9 +242,9 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: `Project import failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        message: t('modal.project.statusImportFailed', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
       });
     } finally {
       setBusy(false);
@@ -261,20 +273,25 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
           });
           onStatusMessage({
             kind: 'success',
-            message: `"${targetName}" oluşturuldu ve NexusCANCloud'a pushlandı ([${res.project.code}] Rev #${res.revisionNumber}).`,
+            message: t('modal.project.statusCreatedAndPushed', {
+              name: targetName,
+              code: res.project.code,
+              rev: res.revisionNumber,
+            }),
           });
         } catch (cloudErr) {
           onStatusMessage({
             kind: 'error',
-            message: `"${targetName}" yerel oluşturuldu fakat Cloud'a pushlanamadı: ${
-              cloudErr instanceof Error ? cloudErr.message : String(cloudErr)
-            }`,
+            message: t('modal.project.statusCreatedPushFailed', {
+              name: targetName,
+              error: cloudErr instanceof Error ? cloudErr.message : String(cloudErr),
+            }),
           });
         }
       } else {
         onStatusMessage({
           kind: 'info',
-          message: 'Initialized clean workspace project.',
+          message: t('modal.project.statusInitializedClean'),
         });
       }
     } finally {
@@ -289,7 +306,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
       await projectStore.closeCurrentProject(onApplyQuickBar);
       onStatusMessage({
         kind: 'info',
-        message: `Closed project "${closedName}". Returned to Start Page.`,
+        message: t('modal.project.statusClosed', { name: closedName }),
       });
       onClose();
     } finally {
@@ -299,10 +316,12 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
 
   const dbSummary =
     dbState.databases.length > 0
-      ? `${dbState.databases.length} catalog file(s): ${dbState.databases
-          .map((d) => d.fileName)
-          .join(', ')} · ${dbState.busSchemas.size} bus binding(s)`
-      : 'Catalog empty';
+      ? t('modal.project.summaryDbFiles', {
+          count: dbState.databases.length,
+          files: dbState.databases.map((d) => d.fileName).join(', '),
+          busCount: dbState.busSchemas.size,
+        })
+      : t('modal.project.summaryDbEmpty');
 
   return (
     <div
@@ -327,7 +346,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
           className="h-[32px] px-3 flex items-center justify-between text-[12px] font-semibold"
         >
           <div className="flex items-center gap-2">
-            <span>Project Manager</span>
+            <span>{t('modal.project.title')}</span>
             {Boolean(cloudState.sessionToken) && (
               <div className="flex items-center gap-1.5 text-[11px] font-normal">
                 <span className="text-[var(--text-muted)]">|</span>
@@ -363,7 +382,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
             className="p-3 border space-y-2.5"
           >
             <div className="flex items-center justify-between">
-              <span className="font-semibold">Current Active Project</span>
+              <span className="font-semibold">{t('modal.project.currentActive')}</span>
               <span className="font-mono text-[11px] text-[var(--text-muted)]">
                 projects/{projState.currentFileStem}.nexusproj.json
               </span>
@@ -372,13 +391,13 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
             <div className="grid grid-cols-2 gap-2.5">
               <div>
                 <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">
-                  Project Name
+                  {t('modal.project.nameLabel')}
                 </label>
                 <input
                   type="text"
                   value={nameInput}
                   onChange={(e) => setNameInput(e.target.value)}
-                  placeholder="EV BMS Bench Setup"
+                  placeholder={t('modal.project.namePlaceholder')}
                   style={{
                     backgroundColor: 'var(--bg-input)',
                     borderColor: 'var(--border-strong)',
@@ -390,13 +409,13 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
 
               <div>
                 <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">
-                  Project Description / Notes
+                  {t('modal.project.descLabel')}
                 </label>
                 <input
                   type="text"
                   value={notesInput}
                   onChange={(e) => setNotesInput(e.target.value)}
-                  placeholder="Bench harness v2, 500k/2M FD..."
+                  placeholder={t('modal.project.descPlaceholder')}
                   style={{
                     backgroundColor: 'var(--bg-input)',
                     borderColor: 'var(--border-strong)',
@@ -410,18 +429,24 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
             {/* Included State Summary */}
             <div className="grid grid-cols-2 gap-1.5 text-[11px] font-mono tabular-nums text-[var(--text-secondary)] pt-0.5">
               <div>
-                • Databases: <strong className="font-sans text-[var(--text-primary)]">{dbSummary}</strong>
+                {t('modal.project.summaryDatabases')}{' '}
+                <strong className="font-sans text-[var(--text-primary)]">{dbSummary}</strong>
               </div>
               <div>
-                • Connection Profiles: <strong className="text-[var(--text-primary)]">{connState.profiles.length}</strong>
+                {t('modal.project.summaryProfiles')}{' '}
+                <strong className="text-[var(--text-primary)]">{connState.profiles.length}</strong>
               </div>
               <div>
-                • Transmit List Entries: <strong className="text-[var(--text-primary)]">{txState.entries.length}</strong>
+                {t('modal.project.summaryTxEntries')}{' '}
+                <strong className="text-[var(--text-primary)]">{txState.entries.length}</strong>
               </div>
               <div>
-                • Plotter Signals / Trace Limit:{' '}
+                {t('modal.project.summaryPlotterLimit')}{' '}
                 <strong className="text-[var(--text-primary)]">
-                  {plotState.series.length} sigs / {chrono.maxBufferRows.toLocaleString('en-US')} rows
+                  {t('modal.project.summaryPlotterLimitVal', {
+                    sigs: plotState.series.length,
+                    rows: chrono.maxBufferRows.toLocaleString('en-US'),
+                  })}
                 </strong>
               </div>
             </div>
@@ -438,23 +463,32 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-1.5 text-[11px]">
                     <Cloud className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                    <span className="font-semibold text-slate-200">NexusCANCloud:</span>
-                    <span className="font-mono text-emerald-400">Bağlı ({cloudState.cloudBaseUrl})</span>
+                    <span className="font-semibold text-slate-200">
+                      {t('modal.project.cloudHeader')}
+                    </span>
+                    <span className="font-mono text-emerald-400">
+                      {t('modal.project.cloudConnected', { url: cloudState.cloudBaseUrl })}
+                    </span>
                   </div>
                   {projState.cloudBinding ? (
                     <span className="px-1.5 py-0.5 rounded bg-sky-950/70 border border-sky-800/60 text-sky-300 font-mono text-[10px] tabular-nums">
-                      Bağlı: [{projState.cloudBinding.projectCode}] Rev #{projState.cloudBinding.baseRevisionNumber ?? 1}
+                      {t('modal.project.cloudBoundCode', {
+                        code: projState.cloudBinding.projectCode,
+                        rev: projState.cloudBinding.baseRevisionNumber ?? 1,
+                      })}
                     </span>
                   ) : (
                     <span className="px-1.5 py-0.5 rounded bg-amber-950/50 border border-amber-800/50 text-amber-300 font-mono text-[10px]">
-                      Sadece Yerel — Cloud'a Pushlanmadı
+                      {t('modal.project.localOnlyBadge')}
                     </span>
                   )}
                 </div>
 
                 {/* Explicit Organization Row */}
                 <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-800/80">
-                  <span className="text-slate-400 font-medium">Organizasyon:</span>
+                  <span className="text-slate-400 font-medium">
+                    {t('modal.project.orgLabel')}
+                  </span>
                   {projState.cloudBinding ? (
                     <div className="flex items-center gap-1.5 font-mono text-[11px] text-slate-200">
                       <Building2 className="w-3 h-3 text-sky-400 shrink-0" />
@@ -463,7 +497,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                           cloudState.organizations.find(
                             (o) => o.id === projState.cloudBinding?.orgId,
                           )?.name ||
-                          'Bilinmiyor'}
+                          t('modal.project.unknownOrg')}
                       </span>
                       {projState.cloudBinding.orgSlug && (
                         <span className="text-slate-400">
@@ -512,12 +546,18 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                             });
                             onStatusMessage({
                               kind: 'success',
-                              message: `"${res.project.name}" Cloud'a pushlandı ([${res.project.code}] Rev #${res.revisionNumber}).`,
+                              message: t('modal.project.statusPushed', {
+                                name: res.project.name,
+                                code: res.project.code,
+                                rev: res.revisionNumber,
+                              }),
                             });
                           } catch (err) {
                             onStatusMessage({
                               kind: 'error',
-                              message: `Cloud push hatası: ${err instanceof Error ? err.message : String(err)}`,
+                              message: t('modal.project.statusPushError', {
+                                error: err instanceof Error ? err.message : String(err),
+                              }),
                             });
                           } finally {
                             setBusy(false);
@@ -526,7 +566,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                         className="h-[24px] px-2.5 border border-sky-500/60 bg-sky-950/40 text-sky-300 hover:bg-sky-900/50 text-[11px] font-semibold flex items-center gap-1 cursor-pointer rounded-sm"
                       >
                         <UploadCloud className="w-3 h-3 text-sky-400" />
-                        <span>Cloud'a Pushla</span>
+                        <span>{t('modal.project.pushToCloud')}</span>
                       </button>
                       <button
                         type="button"
@@ -534,14 +574,14 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                           projectStore.setCloudBinding(null, quickBarState);
                           onStatusMessage({
                             kind: 'info',
-                            message: 'Cloud bağlantısı kaldırıldı. Proje sadece yerel olarak çalışacak.',
+                            message: t('modal.project.statusUnlinked'),
                           });
                         }}
                         className="h-[24px] px-2 border border-slate-700 hover:border-slate-500 text-slate-400 hover:text-slate-200 text-[11px] flex items-center gap-1 cursor-pointer rounded-sm"
-                        title="Cloud projesiyle bağlantıyı kes (sadece yerelde tut)"
+                        title={t('modal.project.unlinkTitle')}
                       >
                         <Unlink className="w-3 h-3" />
-                        <span>Bağlantıyı Kaldır (Sadece Yerel)</span>
+                        <span>{t('modal.project.unlinkButton')}</span>
                       </button>
                     </div>
                   ) : (
@@ -557,7 +597,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                       className="h-[24px] px-2.5 border border-amber-600/60 bg-amber-950/40 text-amber-300 hover:bg-amber-900/50 text-[11px] font-semibold flex items-center gap-1 cursor-pointer rounded-sm"
                     >
                       <UploadCloud className="w-3 h-3 text-amber-400" />
-                      <span>Cloud'a Pushla…</span>
+                      <span>{t('modal.project.pushToCloudPrompt')}</span>
                     </button>
                   )}
                 </div>
@@ -579,7 +619,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                     className="h-[25px] px-2.5 border flex items-center gap-1 text-[11px] hover:border-[var(--text-secondary)] cursor-pointer"
                   >
                     <FilePlus2 className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
-                    <span>New Project</span>
+                    <span>{t('modal.project.newProject')}</span>
                   </button>
 
                   {Boolean(cloudState.sessionToken) && (
@@ -590,7 +630,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                         onChange={(e) => setNewProjectPushToCloud(e.target.checked)}
                         className="h-3.5 w-3.5 rounded accent-sky-500 cursor-pointer"
                       />
-                      <span>Yeni projeyi Cloud'a da pushla</span>
+                      <span>{t('modal.project.pushNewToCloud')}</span>
                     </label>
                   )}
                 </div>
@@ -613,7 +653,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                   className="h-[25px] px-2.5 border flex items-center gap-1 text-[11px] hover:border-[var(--text-secondary)] cursor-pointer"
                 >
                   <Upload className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
-                  <span>Import...</span>
+                  <span>{t('modal.project.import')}</span>
                 </button>
 
                 <button
@@ -626,7 +666,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                   className="h-[25px] px-2.5 border flex items-center gap-1 text-[11px] hover:border-[var(--text-secondary)] cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
-                  <span>Export...</span>
+                  <span>{t('modal.project.export')}</span>
                 </button>
 
                 {projState.hasActiveWorkspace && (
@@ -640,10 +680,10 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                       color: 'var(--text-secondary)',
                     }}
                     className="h-[25px] px-2.5 border flex items-center gap-1 text-[11px] hover:text-red-400 hover:border-red-500/50 cursor-pointer"
-                    title="Close Project & Return to Start Page"
+                    title={t('modal.project.closeProjectTitle')}
                   >
                     <FolderX className="w-3.5 h-3.5 text-red-400" />
-                    <span>Close Project</span>
+                    <span>{t('modal.project.closeProject')}</span>
                   </button>
                 )}
               </div>
@@ -660,7 +700,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                 className="h-[25px] px-3.5 border flex items-center gap-1.5 text-[11px] font-semibold hover:opacity-90 cursor-pointer"
               >
                 <Save className="w-3.5 h-3.5 text-emerald-500" />
-                <span>Save Project (Ctrl+S)</span>
+                <span>{t('modal.project.saveProject')}</span>
               </button>
             </div>
           </div>
@@ -668,7 +708,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
           {/* Saved Server Projects Table */}
           <div>
             <div className="text-[11px] font-semibold text-[var(--text-secondary)] mb-1">
-              Saved Projects
+              {t('modal.project.savedProjectsHeading')}
             </div>
             <div style={{ borderColor: 'var(--border-strong)' }} className="border">
               <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums">
@@ -682,12 +722,12 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                 </colgroup>
                 <thead>
                   <tr>
-                    <th className="font-sans">Project Name</th>
-                    <th>File Stem</th>
-                    <th>Organization</th>
-                    <th>Updated</th>
-                    <th className="text-right">Size</th>
-                    <th className="font-sans">Actions</th>
+                    <th className="font-sans">{t('modal.project.colProjectName')}</th>
+                    <th>{t('modal.project.colFileStem')}</th>
+                    <th>{t('modal.project.colOrganization')}</th>
+                    <th>{t('modal.project.colUpdated')}</th>
+                    <th className="text-right">{t('modal.project.colSize')}</th>
+                    <th className="font-sans">{t('modal.project.colActions')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -695,7 +735,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                     <tr>
                       <td colSpan={6}>
                         <div className="pcan-cell pcan-cell-center font-sans text-[var(--text-muted)]">
-                          No saved projects
+                          {t('modal.project.noSavedProjects')}
                         </div>
                       </td>
                     </tr>
@@ -732,7 +772,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                               <span className="truncate">{item.name}</span>
                               {isCurrent && (
                                 <span className="px-1 py-0.2 rounded bg-emerald-950/70 border border-emerald-800/60 text-emerald-300 font-mono text-[9px]">
-                                  Aktif
+                                  {t('modal.project.activeBadge')}
                                 </span>
                               )}
                             </div>
@@ -775,7 +815,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                                 className="h-[18px] px-2 border text-[10px] font-medium hover:border-[var(--text-secondary)] flex items-center gap-1 cursor-pointer"
                               >
                                 <FolderOpen className="w-2.5 h-2.5 text-[var(--text-secondary)]" />
-                                <span>Open</span>
+                                <span>{t('modal.project.btnOpen')}</span>
                               </button>
 
                               <button
@@ -789,7 +829,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                                   borderColor: 'var(--border-strong)',
                                 }}
                                 className="h-[18px] px-1.5 border text-[10px] text-[var(--text-secondary)] hover:text-red-400 cursor-pointer"
-                                title="Delete project file"
+                                title={t('modal.project.btnDeleteTitle')}
                               >
                                 <Trash2 className="w-2.5 h-2.5" />
                               </button>
@@ -810,7 +850,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
               <div className="flex items-center justify-between text-[11px] font-semibold text-[var(--text-secondary)] mb-1">
                 <div className="flex items-center gap-1.5">
                   <Cloud className="w-3.5 h-3.5 text-sky-400" />
-                  <span>Cloud Projects (Organizasyon Projeleri)</span>
+                  <span>{t('modal.project.cloudProjectsHeading')}</span>
                   <span className="font-mono text-[10px] text-[var(--text-muted)]">
                     ({filteredCloudProjects.length} / {cloudState.projects.length})
                   </span>
@@ -818,7 +858,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
 
                 <div className="flex items-center gap-2 font-normal">
                   <label className="flex items-center gap-1 text-[11px] text-[var(--text-secondary)]">
-                    <span>Organizasyon:</span>
+                    <span>{t('modal.project.orgLabel')}</span>
                     <select
                       value={cloudOrgFilter}
                       onChange={(e) => setCloudOrgFilter(e.target.value)}
@@ -829,7 +869,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                       }}
                       className="h-[22px] px-1.5 border text-[11px] font-mono focus:outline-none"
                     >
-                      <option value="">Tüm Organizasyonlar</option>
+                      <option value="">{t('modal.project.allOrganizations')}</option>
                       {cloudState.organizations.map((org) => (
                         <option key={org.id} value={org.id}>
                           {org.name} ({org.myRole})
@@ -847,14 +887,14 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                       borderColor: 'var(--border-strong)',
                     }}
                     className="h-[22px] px-2 border text-[10px] hover:border-[var(--text-secondary)] flex items-center gap-1 cursor-pointer"
-                    title="Cloud projelerini yenile"
+                    title={t('modal.project.refreshCloudProjectsTitle')}
                   >
                     <RefreshCw
                       className={`w-2.5 h-2.5 text-sky-400 ${
                         cloudState.loadingProjects ? 'animate-spin' : ''
                       }`}
                     />
-                    <span>Yenile</span>
+                    <span>{t('modal.project.refreshButton')}</span>
                   </button>
                 </div>
               </div>
@@ -873,11 +913,11 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                   </colgroup>
                   <thead>
                     <tr>
-                      <th className="font-sans">Project Name</th>
-                      <th>Code / Rev</th>
-                      <th>Organization</th>
-                      <th>Protocol</th>
-                      <th className="font-sans">Actions</th>
+                      <th className="font-sans">{t('modal.project.colProjectName')}</th>
+                      <th>{t('modal.project.colCodeRev')}</th>
+                      <th>{t('modal.project.colOrganization')}</th>
+                      <th>{t('modal.project.colProtocol')}</th>
+                      <th className="font-sans">{t('modal.project.colActions')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -886,8 +926,8 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                         <td colSpan={5}>
                           <div className="pcan-cell pcan-cell-center font-sans text-[var(--text-muted)] py-3">
                             {cloudOrgFilter
-                              ? 'Bu organizasyonda kayıtlı Cloud projesi bulunamadı.'
-                              : 'Cloud hesabınızda kayıtlı proje bulunamadı.'}
+                              ? t('modal.project.noOrgCloudProjects')
+                              : t('modal.project.noCloudProjects')}
                           </div>
                         </td>
                       </tr>
@@ -904,7 +944,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                                 <span className="truncate">{p.name}</span>
                                 {isBound && (
                                   <span className="px-1 py-0.2 rounded bg-sky-950/70 border border-sky-800/60 text-sky-300 font-mono text-[9px]">
-                                    Aktif Bağlı
+                                    {t('modal.project.activeBoundBadge')}
                                   </span>
                                 )}
                               </div>
@@ -914,7 +954,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                                 [{p.code}]{' '}
                                 {p.latestRevisionNumber
                                   ? `Rev #${p.latestRevisionNumber}`
-                                  : 'Taslak'}
+                                  : t('modal.project.draftBadge')}
                               </div>
                             </td>
                             <td>
@@ -945,15 +985,19 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                                       });
                                       onStatusMessage({
                                         kind: 'success',
-                                        message: `Cloud projesi "${p.name}" ([${p.code}]) masaüstüne çekildi ve çalışma alanına yüklendi.`,
+                                        message: t('modal.project.statusPulledSuccess', {
+                                          name: p.name,
+                                          code: p.code,
+                                        }),
                                       });
                                       onClose();
                                     } catch (err) {
                                       onStatusMessage({
                                         kind: 'error',
-                                        message: `Cloud projesi çekilemedi: ${
-                                          err instanceof Error ? err.message : String(err)
-                                        }`,
+                                        message: t('modal.project.statusPullFailed', {
+                                          error:
+                                            err instanceof Error ? err.message : String(err),
+                                        }),
                                       });
                                     } finally {
                                       setBusy(false);
@@ -965,10 +1009,10 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                                     color: '#38BDF8',
                                   }}
                                   className="h-[20px] px-2 border text-[10px] font-semibold hover:opacity-90 flex items-center gap-1 cursor-pointer"
-                                  title="Bu Cloud projesini indir, yerel çalışma alanı olarak aç ve bağla"
+                                  title={t('modal.project.pullAndOpenTitle')}
                                 >
                                   <Download className="w-2.5 h-2.5" />
-                                  <span>Pull & Open</span>
+                                  <span>{t('modal.project.btnPullAndOpen')}</span>
                                 </button>
                               </div>
                             </td>

@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
-import { Lock, Minus, Plus, RotateCcw } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Lock, Minus, Plus, RotateCcw, ShieldAlert, Zap } from 'lucide-react';
+import { useI18n } from '../../i18n';
 import type {
   DatabaseSchemaDto,
   SignalSchemaDto,
@@ -14,6 +15,12 @@ import type {
 } from '../../types/simulation';
 import { SimulationGraphCanvas } from './SimulationGraphCanvas';
 import { SimulationMapWidget } from './SimulationMapWidget';
+import {
+  formatButtonModeShortTag,
+  formatHotkeyBadge,
+  formatStepDeltaBadge,
+  resolveEffectiveCycleOptions,
+} from './buttonControlUtils';
 import {
   type SimulationRuntimeBus,
   useRuntimePeakValue,
@@ -136,6 +143,7 @@ function findBoundSchemaSignal(
 }
 
 function ReadOnlyCloudLockStrip({ isListenOnly = true }: { isListenOnly?: boolean } = {}): React.JSX.Element {
+  const { t } = useI18n();
   return (
     <div
       className="inline-flex items-center gap-1 rounded-[2px] border px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider"
@@ -144,10 +152,10 @@ function ReadOnlyCloudLockStrip({ isListenOnly = true }: { isListenOnly?: boolea
         borderColor: 'var(--status-nominal-border)',
         color: 'var(--status-nominal)',
       }}
-      title={isListenOnly ? 'Saha Güvenliği: Listen-Only modunda veya bus bağlı değilken TX kilitlidir.' : 'Bulut köprü modunda uzaktan CAN TX kilitlidir.'}
+      title={isListenOnly ? t('simWdg.lock.listenOnlyTitle') : t('simWdg.lock.cloudReadOnlyTitle')}
     >
       <Lock className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
-      <span>{isListenOnly ? '[LISTEN-ONLY]' : '[READ-ONLY CLOUD]'}</span>
+      <span>{isListenOnly ? t('simWdg.lock.listenOnlyTag') : t('simWdg.lock.cloudReadOnlyTag')}</span>
     </div>
   );
 }
@@ -159,6 +167,7 @@ function GaugeWidgetView({
   widget: SimulationWidgetDto;
   value: number;
 }): React.JSX.Element {
+  const { t } = useI18n();
   const min = widget.config.min ?? widget.binding?.min ?? 0;
   const max = widget.config.max ?? widget.binding?.max ?? 100;
   const safeSpan = Math.max(1e-6, max - min);
@@ -378,10 +387,10 @@ function GaugeWidgetView({
             >
               {unit ? `${unit} · ` : ''}
               {zone === 'critical'
-                ? 'CRIT'
+                ? t('simWdg.status.crit')
                 : zone === 'warning'
-                  ? 'WARN'
-                  : 'NOM'}
+                  ? t('simWdg.status.warn')
+                  : t('simWdg.status.nom')}
             </text>
           </g>
         )}
@@ -401,6 +410,7 @@ function BarWidgetView({
   peakValue: number;
   onResetPeak: () => void;
 }): React.JSX.Element {
+  const { t } = useI18n();
   const min = widget.config.min ?? widget.binding?.min ?? 0;
   const max = widget.config.max ?? widget.binding?.max ?? 100;
   const safeSpan = Math.max(1e-6, max - min);
@@ -444,7 +454,7 @@ function BarWidgetView({
                 bottom: `${(peakNorm * 100).toFixed(2)}%`,
                 backgroundColor: 'var(--text-ink)',
               }}
-              title={`Peak: ${peakValue.toFixed(decimals)} ${unit}`}
+              title={t('simWdg.bar.peakTitle', { peak: peakValue.toFixed(decimals), unit })}
             />
           )}
         </div>
@@ -454,17 +464,17 @@ function BarWidgetView({
             <div className="text-sm font-bold text-ink">
               {value.toFixed(decimals)}
             </div>
-            <div className="text-[10px] text-muted">{unit || 'RAW'}</div>
+            <div className="text-[10px] text-muted">{unit || t('simWdg.common.raw')}</div>
           </div>
           {showPeak && (
             <button
               type="button"
               onClick={onResetPeak}
               className="inline-flex items-center gap-1 self-start rounded-[2px] border border-hairline bg-elevated px-1.5 py-0.5 text-[9px] text-muted hover:border-strong hover:text-ink"
-              title="Tepe tutucu değerini sıfırla"
+              title={t('simWdg.bar.resetPeakTitle')}
             >
               <RotateCcw className="h-2.5 w-2.5" aria-hidden="true" />
-              PK {peakValue.toFixed(decimals)}
+              {t('simWdg.bar.pk')} {peakValue.toFixed(decimals)}
             </button>
           )}
         </div>
@@ -487,10 +497,10 @@ function BarWidgetView({
               type="button"
               onClick={onResetPeak}
               className="inline-flex cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-elevated px-1.5 py-0.5 text-[9px] text-muted hover:border-strong hover:text-ink"
-              title="Tepe tutucu değerini sıfırla"
+              title={t('simWdg.bar.resetPeakTitle')}
             >
               <RotateCcw className="h-2.5 w-2.5" aria-hidden="true" />
-              PK: {peakValue.toFixed(decimals)}
+              {t('simWdg.bar.pkColon')} {peakValue.toFixed(decimals)}
             </button>
           )}
           <span
@@ -499,7 +509,7 @@ function BarWidgetView({
               color: zone === 'nominal' ? 'var(--text-muted)' : fillColor,
             }}
           >
-            {zone === 'critical' ? 'CRIT' : zone === 'warning' ? 'WARN' : 'NOM'}
+            {zone === 'critical' ? t('simWdg.status.crit') : zone === 'warning' ? t('simWdg.status.warn') : t('simWdg.status.nom')}
           </span>
         </div>
       </div>
@@ -570,6 +580,7 @@ function NumericWidgetView({
   value: number;
   schemaSig: SignalSchemaDto | null;
 }): React.JSX.Element {
+  const { t } = useI18n();
   const decimals = widget.binding?.decimals ?? 1;
   const unit = widget.binding?.unit ?? '';
   const min = widget.config.min ?? widget.binding?.min ?? 0;
@@ -615,7 +626,7 @@ function NumericWidgetView({
       <div className="flex flex-wrap items-center justify-between gap-1.5 border-t border-hairline pt-1.5 text-[10px]">
         {showRawHex ? (
           <span className="text-muted">
-            RAW <strong className="text-ink">{rawInfo.rawInt}</strong> ·{' '}
+            {t('simWdg.numeric.rawLabel')} <strong className="text-ink">{rawInfo.rawInt}</strong> ·{' '}
             <strong className="text-focus">{rawInfo.hex}</strong>
           </span>
         ) : (
@@ -636,14 +647,14 @@ function NumericWidgetView({
           }}
         >
           {clampedLow
-            ? 'LOW-CLAMP'
+            ? t('simWdg.status.lowClamp')
             : clampedHigh
-              ? 'HIGH-CLAMP'
+              ? t('simWdg.status.highClamp')
               : zone === 'critical'
-                ? 'CRITICAL'
+                ? t('simWdg.status.critical')
                 : zone === 'warning'
-                  ? 'WARNING'
-                  : 'IN-RANGE'}
+                  ? t('simWdg.status.warning')
+                  : t('simWdg.status.inRange')}
         </span>
       </div>
     </div>
@@ -657,10 +668,11 @@ function LedWidgetView({
   widget: SimulationWidgetDto;
   value: number;
 }): React.JSX.Element {
+  const { t } = useI18n();
   const op = widget.config.ledOperator ?? 'gte';
   const threshold = widget.config.ledThreshold ?? 1;
-  const onLabel = widget.config.onLabel || 'ACTIVE';
-  const offLabel = widget.config.offLabel || 'IDLE';
+  const onLabel = widget.config.onLabel || t('simWdg.led.active');
+  const offLabel = widget.config.offLabel || t('simWdg.led.idle');
   const decimals = widget.binding?.decimals ?? 0;
   const unit = widget.binding?.unit ?? '';
 
@@ -702,7 +714,7 @@ function LedWidgetView({
             {isLit ? onLabel : offLabel}
           </div>
           <div className="truncate text-[10px] text-subtle">
-            COND: VAL {formatLedOpSymbol(op)} {threshold}
+            {t('simWdg.led.cond', { op: formatLedOpSymbol(op), threshold })}
           </div>
         </div>
       </div>
@@ -726,6 +738,7 @@ function EnumBadgeWidgetView({
   value: number;
   schemaSig: SignalSchemaDto | null;
 }): React.JSX.Element {
+  const { t } = useI18n();
   const intKey = Math.round(value);
   const mergedMap = useMemo<Record<string, string>>(() => {
     return {
@@ -755,7 +768,7 @@ function EnumBadgeWidgetView({
         }
       >
         <span className="truncate text-xs font-bold uppercase tracking-wider text-ink">
-          {resolvedLabel ? `${intKey} : ${resolvedLabel}` : `RAW: ${intKey}`}
+          {resolvedLabel ? `${intKey} : ${resolvedLabel}` : t('simWdg.enum.raw', { val: intKey })}
         </span>
         <span className="shrink-0 text-[10px] text-muted">
           0x{(intKey >>> 0).toString(16).toUpperCase().padStart(2, '0')}
@@ -785,14 +798,20 @@ function EnumBadgeWidgetView({
   );
 }
 
+const GUARD_AUTO_DISARM_MS = 4000;
+
 function ButtonWidgetView({
   widget,
+  runtimeBus,
+  signalKey,
   value,
   canStimulate,
   isLiveBridgeReadOnly,
   onWrite,
 }: {
   widget: SimulationWidgetDto;
+  runtimeBus: SimulationRuntimeBus;
+  signalKey: string | null;
   value: number;
   canStimulate: boolean;
   isLiveBridgeReadOnly: boolean;
@@ -801,98 +820,447 @@ function ButtonWidgetView({
     momentaryFlags?: { holdMomentary?: boolean; releaseMomentary?: boolean }
   ) => void;
 }): React.JSX.Element {
+  const { t } = useI18n();
   const mode = widget.config.buttonMode ?? 'momentary';
   const pressValue = widget.config.pressValue ?? 1;
   const releaseValue = widget.config.releaseValue ?? 0;
+  const pulseDurationMs = Math.max(
+    20,
+    Math.min(60000, Math.round(widget.config.pulseDurationMs ?? 250))
+  );
+  const stepDelta = widget.config.stepDelta ?? 1;
+  const stepWrap = widget.config.stepWrap === true;
+  const minBound = widget.config.min ?? widget.binding?.min ?? 0;
+  const maxBound = widget.config.max ?? widget.binding?.max ?? 100;
+  const requireConfirm = widget.config.requireConfirm === true;
+  const confirmPrompt =
+    widget.config.confirmPrompt?.trim() || t('simWdg.button.confirmPromptFallback');
+  const hotkeyBadge = formatHotkeyBadge(widget.config.hotkey);
   const label = widget.config.buttonLabel || widget.title;
   const accentHex = ACCENT_HEX_MAP[widget.accentColor];
 
   const [momentaryPressed, setMomentaryPressed] = useState<boolean>(false);
-  const isLatched =
+  const [pulseActive, setPulseActive] = useState<boolean>(false);
+  const [armedUntilMs, setArmedUntilMs] = useState<number | null>(null);
+  const [armedRemainingMs, setArmedRemainingMs] = useState<number>(0);
+
+  const momentaryPressedRef = useRef<boolean>(false);
+  const pulseTimerRef = useRef<number | null>(null);
+  const armTimerRef = useRef<number | null>(null);
+  const armedUntilRef = useRef<number | null>(null);
+  const onWriteRef = useRef(onWrite);
+  onWriteRef.current = onWrite;
+
+  const cycleOptions = useMemo(
+    () => resolveEffectiveCycleOptions(widget),
+    [widget]
+  );
+
+  const cycleMeta = useMemo(() => {
+    const activeIdx = cycleOptions.findIndex(
+      (opt) => Math.abs(opt.value - value) < 1e-5
+    );
+    const currentOpt = activeIdx >= 0 ? cycleOptions[activeIdx] : null;
+    const nextIdx = activeIdx >= 0 ? (activeIdx + 1) % cycleOptions.length : 0;
+    const nextOpt = cycleOptions[nextIdx] ?? { label: 'ON', value: pressValue };
+    return {
+      currentLabel: currentOpt ? currentOpt.label : `${value}`,
+      nextOption: nextOpt,
+    };
+  }, [cycleOptions, pressValue, value]);
+
+  const clearPulseTimer = useCallback(() => {
+    if (pulseTimerRef.current !== null) {
+      window.clearTimeout(pulseTimerRef.current);
+      pulseTimerRef.current = null;
+    }
+  }, []);
+
+  const disarmGuard = useCallback(() => {
+    if (armTimerRef.current !== null) {
+      window.clearInterval(armTimerRef.current);
+      armTimerRef.current = null;
+    }
+    armedUntilRef.current = null;
+    setArmedUntilMs(null);
+    setArmedRemainingMs(0);
+  }, []);
+
+  const armGuard = useCallback(() => {
+    if (armTimerRef.current !== null) {
+      window.clearInterval(armTimerRef.current);
+    }
+    const deadline = performance.now() + GUARD_AUTO_DISARM_MS;
+    armedUntilRef.current = deadline;
+    setArmedUntilMs(deadline);
+    setArmedRemainingMs(GUARD_AUTO_DISARM_MS);
+
+    armTimerRef.current = window.setInterval(() => {
+      const target = armedUntilRef.current;
+      if (target === null) {
+        disarmGuard();
+        return;
+      }
+      const rem = Math.max(0, target - performance.now());
+      if (rem <= 0) {
+        disarmGuard();
+      } else {
+        setArmedRemainingMs(rem);
+      }
+    }, 80);
+  }, [disarmGuard]);
+
+  // Clean up timers on unmount or if stimulation becomes unavailable
+  useEffect(() => {
+    if (!canStimulate) {
+      disarmGuard();
+      clearPulseTimer();
+      setPulseActive(false);
+      if (momentaryPressedRef.current) {
+        momentaryPressedRef.current = false;
+        setMomentaryPressed(false);
+      }
+    }
+  }, [canStimulate, clearPulseTimer, disarmGuard]);
+
+  useEffect(() => {
+    return () => {
+      clearPulseTimer();
+      if (armTimerRef.current !== null) {
+        window.clearInterval(armTimerRef.current);
+        armTimerRef.current = null;
+      }
+    };
+  }, [clearPulseTimer]);
+
+  const executeSingleTriggerAction = useCallback(() => {
+    if (!canStimulate) return;
+
+    if (mode === 'toggle') {
+      const cur = signalKey ? runtimeBus.getValue(signalKey, value) : value;
+      const currentlyLatched = Math.abs(cur - pressValue) < 1e-5;
+      onWriteRef.current(currentlyLatched ? releaseValue : pressValue);
+      return;
+    }
+
+    if (mode === 'pulse') {
+      clearPulseTimer();
+      setPulseActive(true);
+      onWriteRef.current(pressValue, { holdMomentary: true });
+      const scheduledRelease = releaseValue;
+      pulseTimerRef.current = window.setTimeout(() => {
+        pulseTimerRef.current = null;
+        setPulseActive(false);
+        onWriteRef.current(scheduledRelease, { releaseMomentary: true });
+      }, pulseDurationMs);
+      return;
+    }
+
+    if (mode === 'step') {
+      const cur = signalKey ? runtimeBus.getValue(signalKey, value) : value;
+      const rawNext = cur + stepDelta;
+      let nextVal: number;
+      if (stepWrap && maxBound > minBound) {
+        if (rawNext > maxBound + 1e-9) {
+          nextVal = minBound;
+        } else if (rawNext < minBound - 1e-9) {
+          nextVal = maxBound;
+        } else {
+          nextVal = Math.max(minBound, Math.min(maxBound, rawNext));
+        }
+      } else {
+        nextVal = Math.max(minBound, Math.min(maxBound, rawNext));
+      }
+      onWriteRef.current(Number(nextVal.toFixed(6)));
+      return;
+    }
+
+    if (mode === 'cycle') {
+      const cur = signalKey ? runtimeBus.getValue(signalKey, value) : value;
+      const idx = cycleOptions.findIndex(
+        (opt) => Math.abs(opt.value - cur) < 1e-5
+      );
+      const nextIdx = idx >= 0 ? (idx + 1) % cycleOptions.length : 0;
+      const nextOpt = cycleOptions[nextIdx];
+      if (nextOpt) {
+        onWriteRef.current(nextOpt.value);
+      }
+    }
+  }, [
+    canStimulate,
+    clearPulseTimer,
+    cycleOptions,
+    maxBound,
+    minBound,
+    mode,
+    pressValue,
+    pulseDurationMs,
+    releaseValue,
+    runtimeBus,
+    signalKey,
+    stepDelta,
+    stepWrap,
+    value,
+  ]);
+
+  const handleMomentaryDown = useCallback(() => {
+    if (!canStimulate || mode !== 'momentary') return;
+    if (requireConfirm && armedUntilRef.current === null) {
+      armGuard();
+      return;
+    }
+    if (requireConfirm) {
+      disarmGuard();
+    }
+    momentaryPressedRef.current = true;
+    setMomentaryPressed(true);
+    onWriteRef.current(pressValue, { holdMomentary: true });
+  }, [armGuard, canStimulate, disarmGuard, mode, pressValue, requireConfirm]);
+
+  const handleMomentaryUp = useCallback(() => {
+    if (!canStimulate || mode !== 'momentary' || !momentaryPressedRef.current) {
+      return;
+    }
+    momentaryPressedRef.current = false;
+    setMomentaryPressed(false);
+    onWriteRef.current(releaseValue, { releaseMomentary: true });
+  }, [canStimulate, mode, releaseValue]);
+
+  const handleSingleClick = useCallback(() => {
+    if (!canStimulate || mode === 'momentary') return;
+    if (requireConfirm && armedUntilRef.current === null) {
+      armGuard();
+      return;
+    }
+    if (requireConfirm) {
+      disarmGuard();
+    }
+    executeSingleTriggerAction();
+  }, [
+    armGuard,
+    canStimulate,
+    disarmGuard,
+    executeSingleTriggerAction,
+    mode,
+    requireConfirm,
+  ]);
+
+  // Register hotkey handler on runtimeBus so RUN mode window keydown/keyup drives identical behavior
+  useEffect(() => {
+    if (!widget.config.hotkey) return;
+    return runtimeBus.registerButtonHotkeyHandler(widget.id, {
+      onKeyDown: () => {
+        if (mode === 'momentary') {
+          handleMomentaryDown();
+        } else {
+          handleSingleClick();
+        }
+      },
+      onKeyUp: () => {
+        if (mode === 'momentary') {
+          handleMomentaryUp();
+        }
+      },
+    });
+  }, [
+    handleMomentaryDown,
+    handleMomentaryUp,
+    handleSingleClick,
+    mode,
+    runtimeBus,
+    widget.config.hotkey,
+    widget.id,
+  ]);
+
+  const isArmed = armedUntilMs !== null;
+  const isLatchedOrActive =
     mode === 'toggle'
       ? Math.abs(value - pressValue) < 1e-5
-      : momentaryPressed || Math.abs(value - pressValue) < 1e-5;
+      : mode === 'pulse'
+        ? pulseActive || Math.abs(value - pressValue) < 1e-5
+        : mode === 'momentary'
+          ? momentaryPressed || Math.abs(value - pressValue) < 1e-5
+          : false;
 
-  const handleMomentaryDown = () => {
-    if (!canStimulate || mode !== 'momentary') return;
-    setMomentaryPressed(true);
-    onWrite(pressValue, { holdMomentary: true });
-  };
-
-  const handleMomentaryUp = () => {
-    if (!canStimulate || mode !== 'momentary' || !momentaryPressed) return;
-    setMomentaryPressed(false);
-    onWrite(releaseValue, { releaseMomentary: true });
-  };
-
-  const handleToggleClick = () => {
-    if (!canStimulate || mode !== 'toggle') return;
-    onWrite(isLatched ? releaseValue : pressValue);
-  };
+  const countdownSecText = (armedRemainingMs / 1000).toFixed(1);
 
   return (
     <div className="flex h-full w-full min-h-0 flex-col justify-between gap-1.5 p-2 font-mono tabular-nums">
-      <button
-        type="button"
-        disabled={!canStimulate}
-        aria-pressed={isLatched}
-        onClick={mode === 'toggle' ? handleToggleClick : undefined}
-        onPointerDown={mode === 'momentary' ? handleMomentaryDown : undefined}
-        onPointerUp={mode === 'momentary' ? handleMomentaryUp : undefined}
-        onPointerLeave={mode === 'momentary' ? handleMomentaryUp : undefined}
-        onPointerCancel={mode === 'momentary' ? handleMomentaryUp : undefined}
-        onKeyDown={
-          mode === 'momentary'
-            ? (e) => {
-                if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) {
-                  e.preventDefault();
-                  handleMomentaryDown();
+      <div className="relative flex flex-1 min-h-0">
+        <button
+          type="button"
+          disabled={!canStimulate}
+          aria-pressed={isLatchedOrActive}
+          onClick={mode !== 'momentary' ? handleSingleClick : undefined}
+          onPointerDown={mode === 'momentary' ? handleMomentaryDown : undefined}
+          onPointerUp={mode === 'momentary' ? handleMomentaryUp : undefined}
+          onPointerLeave={mode === 'momentary' ? handleMomentaryUp : undefined}
+          onPointerCancel={mode === 'momentary' ? handleMomentaryUp : undefined}
+          onKeyDown={
+            mode === 'momentary'
+              ? (e) => {
+                  if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) {
+                    e.preventDefault();
+                    handleMomentaryDown();
+                  }
                 }
-              }
-            : undefined
-        }
-        onKeyUp={
-          mode === 'momentary'
-            ? (e) => {
-                if (e.key === ' ' || e.key === 'Enter') {
-                  e.preventDefault();
-                  handleMomentaryUp();
+              : undefined
+          }
+          onKeyUp={
+            mode === 'momentary'
+              ? (e) => {
+                  if (e.key === ' ' || e.key === 'Enter') {
+                    e.preventDefault();
+                    handleMomentaryUp();
+                  }
                 }
-              }
-            : undefined
-        }
-        className={`relative flex flex-1 items-center justify-center rounded-[2px] border px-3 py-1.5 text-xs font-bold uppercase tracking-wider transition-colors ${
-          canStimulate ? 'cursor-pointer' : 'cursor-not-allowed opacity-65'
-        }`}
-        style={
-          isLatched
-            ? {
-                backgroundColor: `${accentHex}28`,
-                borderColor: accentHex,
-                color: 'var(--text-ink)',
-              }
-            : {
-                backgroundColor: 'var(--bg-elevated)',
-                borderColor: 'var(--border-strong)',
-                color: 'var(--text-ink)',
-              }
-        }
-      >
-        {/* Crisp top armed LED bar */}
-        <span
-          className="absolute top-0 right-0 left-0 h-[2px]"
-          style={{
-            backgroundColor: isLatched ? accentHex : 'transparent',
-          }}
-          aria-hidden="true"
-        />
-        <span className="truncate">{label}</span>
-      </button>
+              : undefined
+          }
+          className={`relative flex h-full w-full flex-col items-center justify-center gap-0.5 rounded-[2px] border px-2.5 py-1.5 text-xs font-bold uppercase tracking-wider transition-colors ${
+            canStimulate ? 'cursor-pointer' : 'cursor-not-allowed opacity-65'
+          }`}
+          style={
+            isArmed
+              ? {
+                  backgroundColor: 'var(--status-warn-bg)',
+                  borderColor: 'var(--status-warn)',
+                  color: 'var(--status-warn)',
+                }
+              : isLatchedOrActive
+                ? {
+                    backgroundColor: `${accentHex}28`,
+                    borderColor: accentHex,
+                    color: 'var(--text-ink)',
+                  }
+                : {
+                    backgroundColor: 'var(--bg-elevated)',
+                    borderColor: 'var(--border-strong)',
+                    color: 'var(--text-ink)',
+                  }
+          }
+        >
+          {/* Crisp top status / guard / armed LED bar */}
+          <span
+            className="absolute top-0 right-0 left-0 h-[2px]"
+            style={{
+              backgroundColor: isArmed
+                ? 'var(--status-warn)'
+                : isLatchedOrActive
+                  ? accentHex
+                  : 'transparent',
+            }}
+            aria-hidden="true"
+          />
+
+          {/* Top corner badges: Guarded lock (left) + Hotkey / Step / Pulse badges (right) */}
+          {(requireConfirm || hotkeyBadge || mode === 'step' || mode === 'pulse') && (
+            <span className="pointer-events-none absolute top-1 right-1.5 left-1.5 flex items-center justify-between gap-1 text-[9px] font-semibold">
+              <span className="inline-flex items-center gap-1">
+                {requireConfirm && (
+                  <span
+                    className="inline-flex items-center gap-0.5 rounded-[2px] border px-1 py-[1px]"
+                    style={
+                      isArmed
+                        ? {
+                            backgroundColor: 'var(--status-critical-bg)',
+                            borderColor: 'var(--status-critical-border)',
+                            color: 'var(--status-critical)',
+                          }
+                        : {
+                            backgroundColor: 'var(--bg-canvas)',
+                            borderColor: 'var(--border-hairline)',
+                            color: 'var(--text-muted)',
+                          }
+                    }
+                  >
+                    <ShieldAlert className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
+                    <span>{isArmed ? t('simWdg.button.armed', { sec: countdownSecText }) : t('simWdg.button.guardConfirm')}</span>
+                  </span>
+                )}
+              </span>
+
+              <span className="inline-flex items-center gap-1">
+                {mode === 'step' && (
+                  <span
+                    className="rounded-[2px] border px-1 py-[1px] text-[9px] font-bold"
+                    style={{
+                      backgroundColor: `${accentHex}1F`,
+                      borderColor: `${accentHex}80`,
+                      color: accentHex,
+                    }}
+                  >
+                    {formatStepDeltaBadge(stepDelta)}
+                  </span>
+                )}
+                {mode === 'pulse' && (
+                  <span
+                    className="inline-flex items-center gap-0.5 rounded-[2px] border px-1 py-[1px] text-[9px]"
+                    style={
+                      pulseActive
+                        ? {
+                            backgroundColor: `${accentHex}30`,
+                            borderColor: accentHex,
+                            color: 'var(--text-ink)',
+                          }
+                        : {
+                            backgroundColor: 'var(--bg-canvas)',
+                            borderColor: 'var(--border-hairline)',
+                            color: 'var(--text-muted)',
+                          }
+                    }
+                  >
+                    <Zap className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
+                    <span>{pulseDurationMs} ms</span>
+                  </span>
+                )}
+                {hotkeyBadge && (
+                  <kbd className="rounded-[2px] border border-hairline bg-canvas px-1 py-[1px] font-mono text-[9px] font-semibold text-subtle">
+                    [{hotkeyBadge}]
+                  </kbd>
+                )}
+              </span>
+            </span>
+          )}
+
+          {isArmed ? (
+            <span className="mt-2 line-clamp-2 px-1 text-center text-[10px] font-bold normal-case tracking-normal">
+              {confirmPrompt}
+            </span>
+          ) : (
+            <>
+              <span className="max-w-full truncate px-1">{label}</span>
+              {mode === 'cycle' && (
+                <span className="max-w-full truncate text-[9px] font-normal text-muted">
+                  <strong className="text-ink">{cycleMeta.currentLabel}</strong>{' '}
+                  <span className="text-subtle">→ {cycleMeta.nextOption.label}</span>
+                </span>
+              )}
+            </>
+          )}
+        </button>
+
+        {/* Sibling mini Cancel button when Guarded Switch Cover is ARMED (avoids nested <button>) */}
+        {isArmed && (
+          <button
+            type="button"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              disarmGuard();
+            }}
+            className="absolute right-1.5 bottom-1 z-10 cursor-pointer rounded-[2px] border border-strong bg-canvas px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted transition-colors hover:border-focus hover:text-ink"
+          >
+            {t('simWdg.button.cancel')}
+          </button>
+        )}
+      </div>
 
       <div className="flex items-center justify-between gap-1 text-[9px] text-muted">
-        <span>
-          {mode === 'momentary' ? 'MOMENTARY' : 'LATCH'} · OUT:{' '}
+        <span className="truncate">
+          {formatButtonModeShortTag(mode)}
+          {mode === 'step' && stepWrap ? ' (WRAP)' : ''} · {t('simWdg.button.out')}:{' '}
           <strong className="text-ink">{value}</strong>
+          {widget.binding?.unit ? ` ${widget.binding.unit}` : ''}
         </span>
         {isLiveBridgeReadOnly && <ReadOnlyCloudLockStrip />}
       </div>
@@ -913,6 +1281,7 @@ function CheckboxWidgetView({
   isLiveBridgeReadOnly: boolean;
   onWrite: (nextVal: number) => void;
 }): React.JSX.Element {
+  const { t } = useI18n();
   const checkedVal = widget.config.checkedValue ?? 1;
   const uncheckedVal = widget.config.uncheckedValue ?? 0;
   const label = widget.config.checkLabel || widget.title;
@@ -962,13 +1331,13 @@ function CheckboxWidgetView({
                 }
           }
         >
-          {isChecked ? 'ON' : 'OFF'}
+          {isChecked ? t('simWdg.checkbox.on') : t('simWdg.checkbox.off')}
         </span>
       </button>
 
       <div className="flex items-center justify-between gap-1 text-[9px] text-muted">
         <span>
-          BUS VAL: <strong className="text-ink">{value}</strong> ({uncheckedVal}
+          {t('simWdg.checkbox.busVal')}: <strong className="text-ink">{value}</strong> ({uncheckedVal}
           /{checkedVal})
         </span>
         {isLiveBridgeReadOnly && <ReadOnlyCloudLockStrip />}
@@ -992,6 +1361,7 @@ function ComboBoxWidgetView({
   isLiveBridgeReadOnly: boolean;
   onWrite: (nextVal: number) => void;
 }): React.JSX.Element {
+  const { t } = useI18n();
   const options = useMemo(() => {
     if (widget.config.options && widget.config.options.length > 0) {
       return widget.config.options;
@@ -1000,10 +1370,10 @@ function ComboBoxWidgetView({
       return enumTableToComboOptions(schemaSig.enumTable);
     }
     return [
-      { label: '0 : OFF', value: 0 },
-      { label: '1 : ON', value: 1 },
+      { label: t('simWdg.combo.defaultOff'), value: 0 },
+      { label: t('simWdg.combo.defaultOn'), value: 1 },
     ];
-  }, [schemaSig, widget.config.options]);
+  }, [schemaSig, t, widget.config.options]);
 
   const rounded = Math.round(value);
   const hasMatchingOption = options.some(
@@ -1026,7 +1396,7 @@ function ComboBoxWidgetView({
         className="h-8 w-full cursor-pointer rounded-[2px] border border-strong bg-canvas px-2 text-xs font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-65"
       >
         {!hasMatchingOption && (
-          <option value={String(rounded)}>RAW : {rounded}</option>
+          <option value={String(rounded)}>{t('simWdg.combo.rawOption', { val: rounded })}</option>
         )}
         {options.map((opt) => (
           <option key={`${opt.value}-${opt.label}`} value={String(opt.value)}>
@@ -1037,8 +1407,8 @@ function ComboBoxWidgetView({
 
       <div className="flex items-center justify-between gap-1 text-[9px] text-muted">
         <span>
-          SELECTED: <strong className="text-ink">{value}</strong> (
-          {options.length} STATES)
+          {t('simWdg.combo.selected')}: <strong className="text-ink">{value}</strong> (
+          {t('simWdg.combo.states', { count: options.length })})
         </span>
         {isLiveBridgeReadOnly && <ReadOnlyCloudLockStrip />}
       </div>
@@ -1059,6 +1429,7 @@ function SliderWidgetView({
   isLiveBridgeReadOnly: boolean;
   onWrite: (nextVal: number) => void;
 }): React.JSX.Element {
+  const { t } = useI18n();
   const min = widget.config.min ?? widget.binding?.min ?? 0;
   const max = widget.config.max ?? widget.binding?.max ?? 100;
   const step = widget.config.step ?? 1;
@@ -1080,7 +1451,7 @@ function SliderWidgetView({
             type="button"
             disabled={!canStimulate}
             onClick={() => onWrite(clampVal(value - step))}
-            aria-label="Adım azalt"
+            aria-label={t('simWdg.slider.stepDown')}
             className="inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-elevated text-ink hover:border-strong disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Minus className="h-3 w-3" />
@@ -1089,7 +1460,7 @@ function SliderWidgetView({
             type="button"
             disabled={!canStimulate}
             onClick={() => onWrite(clampVal(value + step))}
-            aria-label="Adım artır"
+            aria-label={t('simWdg.slider.stepUp')}
             className="inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-elevated text-ink hover:border-strong disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Plus className="h-3 w-3" />
@@ -1100,7 +1471,7 @@ function SliderWidgetView({
           {showNumeric ? (
             <input
               type="number"
-              aria-label={`${widget.title} sayısal giriş`}
+              aria-label={t('simWdg.slider.numericInputAria', { title: widget.title })}
               disabled={!canStimulate}
               min={min}
               max={max}
@@ -1143,7 +1514,7 @@ function SliderWidgetView({
 
       <div className="flex items-center justify-between gap-1 text-[9px] text-muted">
         <span>
-          [{min} .. {max}] STEP {step}
+          [{min} .. {max}] {t('simWdg.slider.step')} {step}
         </span>
         {isLiveBridgeReadOnly && <ReadOnlyCloudLockStrip />}
       </div>
@@ -1164,6 +1535,7 @@ export function SimulationWidgetBody({
   groupChildCount = 0,
   onQuickAddToGroup,
 }: SimulationWidgetBodyProps): React.JSX.Element {
+  const { t } = useI18n();
   const signalKey = widget.binding
     ? makeSignalBusKey(widget.binding.messageKey, widget.binding.signalName)
     : null;
@@ -1186,7 +1558,7 @@ export function SimulationWidgetBody({
         <div className="flex h-full w-full items-center justify-center p-3 font-mono">
           <div className="max-w-md space-y-2 rounded-[2px] border border-dashed border-strong bg-canvas px-3 py-2.5 text-center">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">
-              GRUP BOŞ — SOL PALETTEN SÜRÜKLEYİN VEYA HIZLI EKLEYİN
+              {t('simWdg.group.emptyTitle')}
             </div>
             {canMutate && onQuickAddToGroup && (
               <div className="flex flex-wrap items-center justify-center gap-1">
@@ -1241,7 +1613,7 @@ export function SimulationWidgetBody({
   if (!widget.binding) {
     return (
       <div className="flex h-full w-full items-center justify-center bg-canvas/50 p-2 text-center font-mono text-[10px] uppercase tracking-wider text-subtle">
-        UNBOUND // SELECT SIGNAL IN INSPECTOR
+        {t('simWdg.body.unbound')}
       </div>
     );
   }
@@ -1303,6 +1675,8 @@ export function SimulationWidgetBody({
       return (
         <ButtonWidgetView
           widget={widget}
+          runtimeBus={runtimeBus}
+          signalKey={signalKey}
           value={liveValue}
           canStimulate={canStimulate}
           isLiveBridgeReadOnly={isLiveBridgeReadOnly}

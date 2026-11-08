@@ -130,14 +130,24 @@ pub struct FrameTelemetryDto {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChronologicalFrameDto {
+    #[serde(alias = "timestamp_us")]
     pub timestamp_us: u64,
+    #[serde(default, alias = "bus_id")]
     pub bus_id: u8,
+    #[serde(default, alias = "message_key")]
     pub message_key: String,
+    #[serde(alias = "arb_id")]
     pub arb_id: u32,
+    #[serde(default, alias = "is_extended")]
     pub is_extended: bool,
+    #[serde(default, alias = "is_fd")]
     pub is_fd: bool,
+    #[serde(default, alias = "is_brs")]
+    pub is_brs: bool,
+    #[serde(default, alias = "is_tx")]
     pub is_tx: bool,
     pub dlc: u8,
+    #[serde(default, alias = "raw_bytes")]
     pub raw_bytes: Vec<u8>,
 }
 
@@ -159,6 +169,8 @@ pub struct TelemetrySnapshotDto {
     pub buses: Vec<BusHealthDto>,
     pub frames: Vec<FrameTelemetryDto>,
     pub recent_chronological: Vec<ChronologicalFrameDto>,
+    #[serde(default)]
+    pub replay: TraceReplayStatusDto,
 }
 
 /// Result returned when engaging Panic Stop (halt all TX & disarm all buses).
@@ -251,5 +263,182 @@ pub struct DbFileInputDto {
     #[serde(alias = "content_base64")]
     pub content_base64: String,
 }
+
+/// Summary metadata for a persistent trace capture file inside `./traces/`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceFileSummaryDto {
+    pub file_name: String,
+    pub file_path: String,
+    /// `"trc"` | `"asc"` | `"log"` | `"csv"` | `"blf"`
+    pub format: String,
+    pub size_bytes: u64,
+    pub frame_count: usize,
+    pub duration_us: u64,
+    pub updated_at: String,
+}
+
+/// Persistent `./traces/` storage directory path and discovered trace file summaries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceStorageInfoDto {
+    pub traces_dir: String,
+    pub files: Vec<TraceFileSummaryDto>,
+}
+
+/// Parsed trace file summary + full normalized chronological frame sequence for `TraceView`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadedTraceFileDto {
+    pub summary: TraceFileSummaryDto,
+    pub frames: Vec<ChronologicalFrameDto>,
+}
+
+/// Real-time status of the deterministic zero-allocation trace replay worker streamed at 60Hz.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceReplayStatusDto {
+    /// `"idle"` | `"playing"` | `"paused"` | `"completed"`
+    pub state: String,
+    pub source_name: String,
+    pub current_index: usize,
+    pub total_frames: usize,
+    pub elapsed_us: u64,
+    pub duration_us: u64,
+    pub speed_factor: f64,
+    pub loop_playback: bool,
+    pub bus_override: Option<u8>,
+    pub transmit_to_hardware: bool,
+    /// `"all"` | `"include"` | `"exclude"`
+    #[serde(default = "default_filter_mode")]
+    pub filter_mode: String,
+    #[serde(default)]
+    pub filter_keys: Vec<String>,
+    /// `"all"` | `"rx"` | `"tx"`
+    #[serde(default = "default_direction_filter")]
+    pub direction_filter: String,
+    #[serde(default)]
+    pub dispatched_frames: u64,
+    #[serde(default)]
+    pub filtered_out_frames: u64,
+    #[serde(default)]
+    pub hw_tx_frames: u64,
+}
+
+impl Default for TraceReplayStatusDto {
+    fn default() -> Self {
+        Self {
+            state: "idle".to_string(),
+            source_name: String::new(),
+            current_index: 0,
+            total_frames: 0,
+            elapsed_us: 0,
+            duration_us: 0,
+            speed_factor: 1.0,
+            loop_playback: false,
+            bus_override: None,
+            transmit_to_hardware: false,
+            filter_mode: default_filter_mode(),
+            filter_keys: Vec::new(),
+            direction_filter: default_direction_filter(),
+            dispatched_frames: 0,
+            filtered_out_frames: 0,
+            hw_tx_frames: 0,
+        }
+    }
+}
+
+fn default_replay_speed() -> f64 {
+    1.0
+}
+
+fn default_filter_mode() -> String {
+    "all".to_string()
+}
+
+fn default_direction_filter() -> String {
+    "all".to_string()
+}
+
+/// Arguments for starting a deterministic trace replay session (`cmd_start_trace_replay`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartTraceReplayArgsDto {
+    #[serde(default, alias = "source_name")]
+    pub source_name: String,
+    #[serde(default, alias = "file_name")]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default, alias = "content_base64")]
+    pub content_base64: Option<String>,
+    #[serde(default)]
+    pub frames: Option<Vec<ChronologicalFrameDto>>,
+    #[serde(default = "default_replay_speed", alias = "speed_factor")]
+    pub speed_factor: f64,
+    #[serde(default, alias = "loop_playback")]
+    pub loop_playback: bool,
+    #[serde(default, alias = "bus_override")]
+    pub bus_override: Option<u8>,
+    #[serde(default, alias = "transmit_to_hardware")]
+    pub transmit_to_hardware: bool,
+    #[serde(default, alias = "reset_telemetry_first")]
+    pub reset_telemetry_first: bool,
+    #[serde(default = "default_filter_mode", alias = "filter_mode")]
+    pub filter_mode: String,
+    #[serde(default, alias = "filter_keys")]
+    pub filter_keys: Vec<String>,
+    #[serde(default = "default_direction_filter", alias = "direction_filter")]
+    pub direction_filter: String,
+}
+
+impl Default for StartTraceReplayArgsDto {
+    fn default() -> Self {
+        Self {
+            source_name: String::new(),
+            file_name: None,
+            content: None,
+            content_base64: None,
+            frames: None,
+            speed_factor: 1.0,
+            loop_playback: false,
+            bus_override: None,
+            transmit_to_hardware: false,
+            reset_telemetry_first: false,
+            filter_mode: default_filter_mode(),
+            filter_keys: Vec::new(),
+            direction_filter: default_direction_filter(),
+        }
+    }
+}
+
+/// Runtime playback control parameters (`cmd_control_trace_replay`).
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceReplayControlArgsDto {
+    /// `"pause"` | `"resume"` | `"stop"` | `"seek"` | `"configure"`
+    pub action: String,
+    #[serde(default, alias = "seek_us")]
+    pub seek_us: Option<u64>,
+    #[serde(default, alias = "speed_factor")]
+    pub speed_factor: Option<f64>,
+    #[serde(default, alias = "loop_playback")]
+    pub loop_playback: Option<bool>,
+    #[serde(default, alias = "update_bus_override")]
+    pub update_bus_override: bool,
+    #[serde(default, alias = "bus_override")]
+    pub bus_override: Option<u8>,
+    #[serde(default, alias = "transmit_to_hardware")]
+    pub transmit_to_hardware: Option<bool>,
+    #[serde(default, alias = "filter_mode")]
+    pub filter_mode: Option<String>,
+    #[serde(default, alias = "update_filter_keys")]
+    pub update_filter_keys: bool,
+    #[serde(default, alias = "filter_keys")]
+    pub filter_keys: Option<Vec<String>>,
+    #[serde(default, alias = "direction_filter")]
+    pub direction_filter: Option<String>,
+}
+
 
 

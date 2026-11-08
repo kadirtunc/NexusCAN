@@ -36,6 +36,7 @@ import {
 import { useProjectStore } from '../store/projectStore';
 import { fileToBase64 } from '../utils/formatters';
 import { syncAllBusDatabasesWithBackend } from '../utils/busDatabaseSync';
+import { useI18n } from '../i18n';
 import type { DeviceDescriptorDto } from '../types/hal';
 import { BitLayoutMatrix } from './BitLayoutMatrix';
 import { DatabaseExplorer } from './DatabaseExplorer';
@@ -70,6 +71,7 @@ async function buildCatalogEntry(
  * and clicking a row drills into that specific database's symbol tree & bit layout.
  */
 export const SymbolsLayoutView: React.FC = () => {
+  const { t } = useI18n();
   const dbState = useDatabaseStore();
   const connState = useConnectionStore();
   const cloudState = useCloudBridgeStore();
@@ -203,9 +205,7 @@ export const SymbolsLayoutView: React.FC = () => {
       }
     }
     if (added > 0) {
-      setActionInfo(
-        `${added} veritabanı kataloğa eklendi. Çözümleme için "Bağlı Bağlantılar" sütunundan bir hatta bağlayın.`,
-      );
+      setActionInfo(t('netdb.symbols.databasesAdded', { count: added }));
     }
     if (errors.length > 0) setActionError(errors.join(' · '));
     setBusy(false);
@@ -221,7 +221,10 @@ export const SymbolsLayoutView: React.FC = () => {
         databaseStore.upsertDatabaseEntry(await buildCatalogEntry(f.fileName, f.contentBase64));
       }
       setActionInfo(
-        `${files.length} örnek veritabanı kataloğa eklendi (${files.map((f) => f.fileName).join(', ')}).`,
+        t('netdb.symbols.presetsAdded', {
+          count: files.length,
+          names: files.map((f) => f.fileName).join(', '),
+        }),
       );
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
@@ -273,11 +276,11 @@ export const SymbolsLayoutView: React.FC = () => {
 
   const handleExecuteCloudPull = async () => {
     if (selectedDbKeys.size === 0) {
-      setPullError('Lütfen indirilecek en az bir veritabanı seçin.');
+      setPullError(t('netdb.symbols.pullSelectAtLeastOne'));
       return;
     }
     if (!selectedCloudProjId) {
-      setPullError('Lütfen bir bulut projesi seçin.');
+      setPullError(t('netdb.symbols.pullSelectProject'));
       return;
     }
 
@@ -311,9 +314,9 @@ export const SymbolsLayoutView: React.FC = () => {
 
       const busCount = targetProfileIds.size;
       setActionInfo(
-        `${addedEntries.length} veritabanı Cloud'dan çekildi${
-          busCount > 0 ? ` ve ${busCount} Bus hattına bağlandı` : ''
-        }.`,
+        busCount > 0
+          ? t('netdb.symbols.pulledAndBound', { count: addedEntries.length, busCount })
+          : t('netdb.symbols.pulledOnly', { count: addedEntries.length }),
       );
       setCloudPullModalOpen(false);
     } catch (err) {
@@ -329,20 +332,20 @@ export const SymbolsLayoutView: React.FC = () => {
   if (mode === 'inspect' && inspected) {
     return (
       <div className="flex flex-1 min-h-0 flex-col overflow-hidden bg-canvas">
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline bg-surface px-3 py-1.5">
+        <div className="flex shrink-0 min-h-[42px] flex-wrap items-center gap-2.5 border-b border-hairline bg-surface px-4 py-1.5">
           <button
             type="button"
             onClick={() => setMode('list')}
-            className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-elevated px-2.5 font-mono text-[11px] font-semibold uppercase text-ink hover:border-strong"
+            className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-elevated px-3 font-mono text-[12px] font-semibold uppercase text-ink hover:border-strong"
           >
             <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
-            VERİTABANI LİSTESİ
+            {t('netdb.symbols.backToCatalog')}
           </button>
           <select
             value={inspected.id}
             onChange={(e) => databaseStore.setInspectedDatabaseId(e.target.value)}
-            aria-label="İncelenen veritabanı"
-            className="h-7 max-w-[320px] rounded-[2px] border border-hairline bg-canvas px-2 font-mono text-[11px] text-ink"
+            aria-label={t('netdb.symbols.inspectedDbAria')}
+            className="h-[30px] max-w-[340px] rounded-[2px] border border-hairline bg-canvas px-2.5 font-mono text-[12px] text-ink"
           >
             {databases.map((d) => (
               <option key={d.id} value={d.id}>
@@ -350,17 +353,20 @@ export const SymbolsLayoutView: React.FC = () => {
               </option>
             ))}
           </select>
-          <span className="font-mono text-[10px] tabular-nums text-muted">
-            {inspected.schema?.messages.length ?? 0} MSG · {inspected.schema?.signals.length ?? 0} SİNYAL ·{' '}
-            {inspected.schema?.ecus.length ?? 0} ECU
+          <span className="font-mono text-[11.5px] tabular-nums text-muted">
+            {t('netdb.symbols.inspectMeta', {
+              messages: inspected.schema?.messages.length ?? 0,
+              signals: inspected.schema?.signals.length ?? 0,
+              ecus: inspected.schema?.ecus.length ?? 0,
+            })}
           </span>
 
           {/* Interactive Bus Binding Controls on Level 2 */}
-          <div className="ml-auto flex flex-wrap items-center gap-1.5">
-            <span className="font-mono text-[10px] uppercase text-muted mr-0.5">Bağlı Buslar:</span>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <span className="font-mono text-[11px] uppercase text-muted mr-0.5">{t('netdb.symbols.boundBuses')}</span>
             {profiles.length === 0 ? (
-              <span className="font-mono text-[10px] text-amber-400 border border-amber-800/60 px-1.5 py-0.5 rounded-[2px]">
-                Kayıtlı Bus yok
+              <span className="font-mono text-[11px] text-amber-400 border border-amber-800/60 px-2 py-0.5 rounded-[2px]">
+                {t('netdb.symbols.noBusesRegistered')}
               </span>
             ) : (
               profiles
@@ -373,15 +379,19 @@ export const SymbolsLayoutView: React.FC = () => {
                       key={p.id}
                       type="button"
                       onClick={() => toggleBinding(inspected.id, p.id)}
-                      className={`inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border px-2 font-mono text-[10px] tabular-nums transition-colors ${
+                      className={`inline-flex h-[28px] cursor-pointer items-center gap-1.5 rounded-[2px] border px-2.5 font-mono text-[11.5px] tabular-nums transition-colors ${
                         isBound
                           ? 'border-emerald-500/60 bg-emerald-950/50 text-emerald-300 font-semibold'
                           : 'border-hairline bg-canvas text-muted hover:text-ink hover:border-strong opacity-75 hover:opacity-100'
                       }`}
-                      title={`${p.name} (${p.adapterChannel || p.deviceId}) · Tıkla ve ${isBound ? 'çöz' : 'bağla'}`}
+                      title={t('netdb.symbols.busBindToggleTitle', {
+                        name: p.name,
+                        channel: p.adapterChannel || p.deviceId,
+                        action: isBound ? t('netdb.symbols.unbind') : t('netdb.symbols.bind'),
+                      })}
                     >
                       <span>Bus {p.busId + 1}</span>
-                      {isBound ? <Check className="h-3 w-3 text-emerald-400" /> : <Plus className="h-3 w-3 text-muted" />}
+                      {isBound ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Plus className="h-3.5 w-3.5 text-muted" />}
                     </button>
                   );
                 })
@@ -389,10 +399,10 @@ export const SymbolsLayoutView: React.FC = () => {
             <button
               type="button"
               onClick={() => setModalBindDb(inspected)}
-              className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-elevated px-2 font-mono text-[10px] text-focus hover:border-strong"
+              className="inline-flex h-[28px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-elevated px-2.5 font-mono text-[11.5px] text-focus hover:border-strong"
             >
-              <Cable className="h-3 w-3" />
-              <span>Bus Yönet…</span>
+              <Cable className="h-3.5 w-3.5" />
+              <span>{t('netdb.symbols.manageBuses')}</span>
             </button>
           </div>
         </div>
@@ -401,7 +411,7 @@ export const SymbolsLayoutView: React.FC = () => {
           <div className="flex flex-1 min-h-0 overflow-hidden">
             <div
               style={{ borderRight: '1px solid var(--border-strong)' }}
-              className="w-[38%] min-w-[300px] h-full min-h-0 flex flex-col"
+              className="w-[38%] min-w-[320px] max-w-[540px] h-full min-h-0 flex flex-col"
             >
               <DatabaseExplorer />
             </div>
@@ -411,7 +421,7 @@ export const SymbolsLayoutView: React.FC = () => {
           </div>
         ) : (
           <div className="p-6 font-mono text-xs" style={{ color: 'var(--status-critical)' }}>
-            Bu dosya derlenemedi. Kataloğdan silip yeniden yükleyin.
+            {t('netdb.symbols.compileFailed')}
           </div>
         )}
       </div>
@@ -423,13 +433,13 @@ export const SymbolsLayoutView: React.FC = () => {
   // ==========================================================================
   return (
     <div className="flex-1 min-h-0 overflow-y-auto bg-canvas">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-hairline bg-surface px-4 py-2.5">
+      <div className="flex min-h-[42px] flex-wrap items-center justify-between gap-3 border-b border-hairline bg-surface px-4 py-2">
         <div className="flex items-center gap-2.5">
           <span className="font-mono text-[11px] uppercase tracking-wider text-muted">
-            NETDB // DBC·KCD KATALOĞU
+            {t('netdb.symbols.breadcrumbTag')}
           </span>
           <span className="text-subtle">/</span>
-          <h1 className="text-[14px] font-semibold text-ink">Sinyal Veritabanları</h1>
+          <h1 className="text-[14px] font-semibold text-ink">{t('netdb.symbols.title')}</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {/* CLOUD'DAN ÇEK BUTTON */}
@@ -437,20 +447,20 @@ export const SymbolsLayoutView: React.FC = () => {
             type="button"
             disabled={busy}
             onClick={() => setCloudPullModalOpen(true)}
-            className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[2px] border border-sky-500/50 bg-sky-950/40 px-3 font-mono text-[11px] font-semibold uppercase tracking-wider text-sky-300 hover:bg-sky-900/50 disabled:opacity-50"
+            className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-sky-500/50 bg-sky-950/40 px-3 font-mono text-[12px] font-semibold uppercase tracking-wider text-sky-300 hover:bg-sky-900/50 disabled:opacity-50"
           >
             <DownloadCloud className="h-3.5 w-3.5 text-sky-400" aria-hidden="true" />
-            CLOUD'DAN ÇEK
+            {t('netdb.symbols.pullFromCloudBtn')}
           </button>
 
           <button
             type="button"
             disabled={busy}
             onClick={() => void handleAddPresets()}
-            className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-elevated px-2.5 font-mono text-[11px] font-medium text-ink hover:border-strong disabled:opacity-50"
+            className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-elevated px-3 font-mono text-[12px] font-medium text-ink hover:border-strong disabled:opacity-50"
           >
             <Plus className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
-            ÖRNEK ARAÇ / BMS EKLE
+            {t('netdb.symbols.addSampleVehicleBtn')}
           </button>
           <input
             ref={fileInputRef}
@@ -464,11 +474,11 @@ export const SymbolsLayoutView: React.FC = () => {
             type="button"
             disabled={busy}
             onClick={() => fileInputRef.current?.click()}
-            className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[2px] px-3 font-mono text-[11px] font-semibold uppercase tracking-wider text-white hover:opacity-90 disabled:opacity-50"
+            className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] px-3.5 font-mono text-[12px] font-semibold uppercase tracking-wider text-white hover:opacity-90 disabled:opacity-50"
             style={{ backgroundColor: 'var(--status-nominal)' }}
           >
             <UploadCloud className="h-3.5 w-3.5" aria-hidden="true" />
-            {busy ? 'DERLENİYOR...' : '.DBC / .KCD YÜKLE'}
+            {busy ? t('netdb.symbols.compiling') : t('netdb.symbols.uploadDbcKcdBtn')}
           </button>
         </div>
       </div>
@@ -495,15 +505,15 @@ export const SymbolsLayoutView: React.FC = () => {
         <div className="grid grid-cols-2 divide-x divide-y divide-hairline rounded-[2px] border border-hairline bg-surface sm:grid-cols-5 sm:divide-y-0">
           {(
             [
-              ['TOPLAM VERİTABANI', databases.length],
-              ['TOPLAM MESAJ', kpi.msgs],
-              ['TOPLAM SİNYAL', kpi.sigs],
-              ['ECU DÜĞÜMÜ', kpi.ecus],
-              ['DB BAĞLI HAT', `${kpi.boundBuses} / ${profiles.length}`],
+              [t('netdb.symbols.kpiTotalDb'), databases.length],
+              [t('netdb.symbols.kpiTotalMsg'), kpi.msgs],
+              [t('netdb.symbols.kpiTotalSig'), kpi.sigs],
+              [t('netdb.symbols.kpiEcuNodes'), kpi.ecus],
+              [t('netdb.symbols.kpiBoundBuses'), `${kpi.boundBuses} / ${profiles.length}`],
             ] as const
           ).map(([label, value]) => (
             <div key={label} className="px-4 py-3">
-              <div className="font-mono text-[10px] uppercase tracking-wider text-muted">{label}</div>
+              <div className="font-mono text-[11px] uppercase tracking-wider text-muted">{label}</div>
               <div className="mt-1 font-mono text-[18px] font-semibold tabular-nums text-ink">{value}</div>
             </div>
           ))}
@@ -513,9 +523,9 @@ export const SymbolsLayoutView: React.FC = () => {
           <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-hairline bg-elevated px-3.5 py-2">
             <div className="flex items-center gap-2">
               <Database className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
-              <h2 className="font-mono text-[11px] font-semibold uppercase tracking-wider text-ink">
-                KATALOGDAKİ VERİTABANLARI ({filtered.length}
-                {filtered.length !== databases.length ? ` / ${databases.length}` : ''})
+              <h2 className="font-mono text-[12px] font-semibold uppercase tracking-wider text-ink">
+                {t('netdb.symbols.catalogDatabasesHeading', { count: filtered.length })}
+                {filtered.length !== databases.length ? ` / ${databases.length}` : ''}
               </h2>
             </div>
             {databases.length > 0 && (
@@ -523,16 +533,16 @@ export const SymbolsLayoutView: React.FC = () => {
                 <div className="inline-flex divide-x divide-hairline rounded-[2px] border border-hairline bg-canvas">
                   {(
                     [
-                      { id: 'all', label: 'TÜMÜ' },
-                      { id: 'dbc', label: '.DBC' },
-                      { id: 'kcd', label: '.KCD' },
+                      { id: 'all' as const, label: t('netdb.symbols.filterAll') },
+                      { id: 'dbc' as const, label: '.DBC' },
+                      { id: 'kcd' as const, label: '.KCD' },
                     ] as const
                   ).map((item) => (
                     <button
                       key={item.id}
                       type="button"
                       onClick={() => setFormatFilter(item.id)}
-                      className={`h-7 cursor-pointer px-2.5 font-mono text-[10px] font-semibold uppercase tracking-wider ${
+                      className={`h-[30px] cursor-pointer px-3 font-mono text-[11.5px] font-semibold uppercase tracking-wider ${
                         formatFilter === item.id ? 'bg-surface text-ink' : 'text-muted hover:text-ink'
                       }`}
                     >
@@ -549,15 +559,15 @@ export const SymbolsLayoutView: React.FC = () => {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Dosya, mesaj adı veya 0x101 ara..."
-                    aria-label="Veritabanlarını filtrele"
-                    className="h-7 w-full rounded-[2px] border border-hairline bg-canvas pr-7 pl-8 font-mono text-xs text-ink placeholder:text-subtle"
+                    placeholder={t('netdb.symbols.searchPlaceholder')}
+                    aria-label={t('netdb.symbols.filterDbAria')}
+                    className="h-[30px] w-full rounded-[2px] border border-hairline bg-canvas pr-7 pl-8 font-mono text-[12px] text-ink placeholder:text-subtle"
                   />
                   {searchQuery && (
                     <button
                       type="button"
                       onClick={() => setSearchQuery('')}
-                      aria-label="Aramayı temizle"
+                      aria-label={t('netdb.symbols.clearSearchAria')}
                       className="absolute top-1/2 right-2 -translate-y-1/2 cursor-pointer p-0.5 text-muted hover:text-ink"
                     >
                       <X className="h-3 w-3" aria-hidden="true" />
@@ -572,47 +582,46 @@ export const SymbolsLayoutView: React.FC = () => {
             <div className="flex flex-col items-center justify-center gap-3 px-6 py-12 text-center">
               <Database className="h-6 w-6 text-muted" aria-hidden="true" />
               <p className="font-mono text-xs font-semibold uppercase tracking-wider text-ink">
-                HENÜZ .DBC / .KCD VERİTABANI EKLENMEDİ
+                {t('netdb.symbols.emptyTitle')}
               </p>
               <p className="max-w-lg text-xs text-muted">
-                İstediğiniz kadar .dbc / .kcd dosyası ekleyin; ardından her bağlantıya (Bus) 0, 1 veya
-                birden fazla veritabanı bağlayın. Veritabanı bağlanmamış hatlar Raw Hex olarak kalır.
+                {t('netdb.symbols.emptyDesc')}
               </p>
               <div className="flex items-center gap-2 pt-2">
                 <button
                   type="button"
                   onClick={() => setCloudPullModalOpen(true)}
-                  className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[2px] border border-sky-500/50 bg-sky-950/40 px-3 font-mono text-[11px] font-semibold uppercase text-sky-300 hover:bg-sky-900/50"
+                  className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-sky-500/50 bg-sky-950/40 px-3 font-mono text-[12px] font-semibold uppercase text-sky-300 hover:bg-sky-900/50"
                 >
                   <DownloadCloud className="h-3.5 w-3.5 text-sky-400" aria-hidden="true" />
-                  CLOUD'DAN ÇEK
+                  {t('netdb.symbols.pullFromCloudBtn')}
                 </button>
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[2px] px-3 font-mono text-[11px] font-semibold uppercase text-white"
+                  className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] px-3.5 font-mono text-[12px] font-semibold uppercase text-white"
                   style={{ backgroundColor: 'var(--status-nominal)' }}
                 >
                   <UploadCloud className="h-3.5 w-3.5" aria-hidden="true" />
-                  İLK .DBC / .KCD DOSYASINI YÜKLE
+                  {t('netdb.symbols.loadFirstDbBtn')}
                 </button>
               </div>
             </div>
           ) : filtered.length === 0 ? (
             <div className="px-6 py-10 text-center font-mono text-xs text-muted">
-              ARAMA KRİTERİNE UYGUN VERİTABANI BULUNAMADI.
+              {t('netdb.symbols.searchNoResults')}
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-left text-xs">
+              <table className="w-full border-collapse text-left text-[12px]">
                 <thead>
-                  <tr className="border-b border-hairline bg-elevated font-mono text-[10px] uppercase tracking-wider text-muted">
-                    <th className="py-2 px-3">FORMAT</th>
-                    <th className="py-2 px-3">VERİTABANI ADI & DOSYA</th>
-                    <th className="py-2 px-3">BAĞLI BAĞLANTILAR (BUS)</th>
-                    <th className="py-2 px-3 text-right">MSG / SİNYAL / ECU</th>
-                    <th className="py-2 px-3 text-right">BOYUT</th>
-                    <th className="py-2 px-3 text-right">İŞLEMLER</th>
+                  <tr className="border-b border-hairline bg-elevated font-mono text-[11px] uppercase tracking-wider text-muted">
+                    <th className="py-2.5 px-3">{t('netdb.symbols.thFormat')}</th>
+                    <th className="py-2.5 px-3">{t('netdb.symbols.thNameFile')}</th>
+                    <th className="py-2.5 px-3">{t('netdb.symbols.thBoundConnections')}</th>
+                    <th className="py-2.5 px-3 text-right">{t('netdb.symbols.thMsgSigEcu')}</th>
+                    <th className="py-2.5 px-3 text-right">{t('netdb.symbols.thSize')}</th>
+                    <th className="py-2.5 px-3 text-right">{t('netdb.symbols.thActions')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-hairline">
@@ -624,15 +633,15 @@ export const SymbolsLayoutView: React.FC = () => {
                         className="cursor-pointer hover:bg-hover/60"
                       >
                         <td className="py-2.5 px-3">
-                          <span className="inline-flex items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase text-focus">
+                          <span className="inline-flex items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-1.5 py-0.5 font-mono text-[11px] font-bold uppercase text-focus">
                             <FileCode2 className="h-3 w-3" aria-hidden="true" />.{db.format}
                           </span>
                         </td>
                         <td className="py-2.5 px-3">
-                          <div className="font-semibold text-ink">{db.name}</div>
-                          <div className="font-mono text-[10px] text-muted">
+                          <div className="font-semibold text-ink text-[12px]">{db.name}</div>
+                          <div className="font-mono text-[11px] text-muted">
                             {db.fileName}
-                            {db.schema ? '' : ' · DERLEME HATASI'}
+                            {db.schema ? '' : ` · ${t('netdb.symbols.compileError')}`}
                           </div>
                         </td>
 
@@ -641,10 +650,10 @@ export const SymbolsLayoutView: React.FC = () => {
                           <div className="flex flex-wrap items-center gap-1.5">
                             {profiles.length === 0 ? (
                               <span
-                                className="rounded-[2px] border px-1.5 py-0.5 font-mono text-[10px] uppercase"
+                                className="rounded-[2px] border px-2 py-0.5 font-mono text-[11px] uppercase"
                                 style={{ borderColor: 'var(--status-warn)', color: 'var(--status-warn)' }}
                               >
-                                Kayıtlı Bus yok
+                                {t('netdb.symbols.noBuses')}
                               </span>
                             ) : (
                               profiles
@@ -657,15 +666,19 @@ export const SymbolsLayoutView: React.FC = () => {
                                       key={p.id}
                                       type="button"
                                       onClick={() => toggleBinding(db.id, p.id)}
-                                      className={`inline-flex h-5 cursor-pointer items-center gap-1 rounded-[2px] border px-1.5 font-mono text-[10px] tabular-nums transition-colors ${
+                                      className={`inline-flex h-[26px] cursor-pointer items-center gap-1 rounded-[2px] border px-2 font-mono text-[11px] tabular-nums transition-colors ${
                                         isBound
                                           ? 'border-emerald-500/60 bg-emerald-950/50 text-emerald-300 font-semibold'
                                           : 'border-hairline bg-canvas text-muted hover:text-ink hover:border-strong opacity-75 hover:opacity-100'
                                       }`}
-                                      title={`${p.name} · Tıkla ve ${isBound ? 'çöz' : 'bağla'}`}
+                                      title={t('netdb.symbols.busBindToggleTitle', {
+                                        name: p.name,
+                                        channel: p.adapterChannel || p.deviceId,
+                                        action: isBound ? t('netdb.symbols.unbind') : t('netdb.symbols.bind'),
+                                      })}
                                     >
                                       <span>Bus {p.busId + 1}</span>
-                                      {isBound && <Check className="h-2.5 w-2.5 text-emerald-400" />}
+                                      {isBound && <Check className="h-3 w-3 text-emerald-400" />}
                                     </button>
                                   );
                                 })
@@ -673,20 +686,20 @@ export const SymbolsLayoutView: React.FC = () => {
                             <button
                               type="button"
                               onClick={() => setModalBindDb(db)}
-                              className="inline-flex h-5 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-1.5 font-mono text-[10px] text-focus hover:border-strong"
-                              title="Ayrıntılı Bus Bağlantı Penceresi"
+                              className="inline-flex h-[26px] cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-2 font-mono text-[11px] text-focus hover:border-strong"
+                              title={t('netdb.symbols.selectBusTitle')}
                             >
                               <Cable className="h-3 w-3" aria-hidden="true" />
-                              <span>Bus Seç…</span>
+                              <span>{t('netdb.symbols.selectBus')}</span>
                             </button>
                           </div>
                         </td>
 
-                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-ink">
+                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-ink text-[12px]">
                           {db.schema?.messages.length ?? 0} / {db.schema?.signals.length ?? 0} /{' '}
                           {db.schema?.ecus.length ?? 0}
                         </td>
-                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-muted">
+                        <td className="py-2.5 px-3 text-right font-mono tabular-nums text-muted text-[12px]">
                           {formatKb(db.sizeBytes)}
                         </td>
                         <td className="py-2.5 px-3" onClick={(e) => e.stopPropagation()}>
@@ -694,19 +707,19 @@ export const SymbolsLayoutView: React.FC = () => {
                             <button
                               type="button"
                               onClick={() => openInspector(db.id)}
-                              className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-elevated px-2 font-mono text-[10px] font-semibold text-ink hover:border-strong"
+                              className="inline-flex h-[28px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-elevated px-2.5 font-mono text-[11.5px] font-semibold text-ink hover:border-strong"
                             >
-                              <Layers className="h-3 w-3 text-focus" aria-hidden="true" />
-                              İncele (Bit Matrisi)
+                              <Layers className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
+                              {t('netdb.symbols.inspectBitMatrix')}
                             </button>
                             <button
                               type="button"
                               onClick={() => setDeletingDb(db)}
-                              className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-2 font-mono text-[10px] hover:border-strong"
+                              className="inline-flex h-[28px] cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-2.5 font-mono text-[11.5px] hover:border-strong"
                               style={{ color: 'var(--status-critical)' }}
                             >
-                              <Trash2 className="h-3 w-3" aria-hidden="true" />
-                              Sil
+                              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                              {t('netdb.symbols.delete')}
                             </button>
                           </div>
                         </td>
@@ -732,7 +745,7 @@ export const SymbolsLayoutView: React.FC = () => {
               <div className="flex items-center gap-2">
                 <Cable className="h-4 w-4 text-focus" />
                 <span className="font-mono text-xs font-semibold uppercase tracking-wider text-ink">
-                  BUS BAĞLANTILARI
+                  {t('netdb.symbols.modalBusTitle')}
                 </span>
               </div>
               <button
@@ -746,13 +759,12 @@ export const SymbolsLayoutView: React.FC = () => {
 
             <div className="p-4 space-y-3 flex-1 min-h-0 overflow-y-auto">
               <div className="text-xs text-muted">
-                <strong className="text-ink font-mono">{modalBindDb.fileName}</strong> veritabanının
-                çözümleneceği CAN Bus hatlarını seçin:
+                {t('netdb.symbols.modalBusDesc', { fileName: modalBindDb.fileName })}
               </div>
 
               {profiles.length === 0 ? (
                 <div className="p-3 border border-dashed border-hairline rounded-[2px] text-center text-xs text-muted">
-                  Kayıtlı bağlantı (Bus) profili bulunamadı.
+                  {t('netdb.symbols.noBusProfilesFound')}
                 </div>
               ) : (
                 <div className="divide-y divide-hairline border border-hairline rounded-[2px] bg-canvas">
@@ -791,7 +803,7 @@ export const SymbolsLayoutView: React.FC = () => {
                 className="w-full h-7 border border-dashed border-focus/50 bg-focus/10 text-focus hover:bg-focus/20 font-mono text-[11px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer rounded-[2px]"
               >
                 <Plus className="h-3.5 w-3.5" />
-                <span>+ Yeni Bus Bağlantısı Oluştur...</span>
+                <span>{t('netdb.symbols.createNewBusConn')}</span>
               </button>
             </div>
 
@@ -801,7 +813,7 @@ export const SymbolsLayoutView: React.FC = () => {
                 onClick={() => setModalBindDb(null)}
                 className="h-7 cursor-pointer rounded-[2px] px-4 font-mono text-[11px] font-semibold uppercase text-white bg-focus hover:opacity-90"
               >
-                TAMAM
+                {t('netdb.symbols.ok')}
               </button>
             </div>
           </div>
@@ -820,7 +832,7 @@ export const SymbolsLayoutView: React.FC = () => {
               <div className="flex items-center gap-2">
                 <DownloadCloud className="h-4 w-4 text-sky-400" />
                 <span className="font-mono text-xs font-semibold uppercase tracking-wider text-ink">
-                  NEXUSCANCLOUD // VERİTABANI ÇEK VE BAĞLA
+                  {t('netdb.symbols.cloudModalTitle')}
                 </span>
               </div>
               <button
@@ -836,9 +848,9 @@ export const SymbolsLayoutView: React.FC = () => {
               {!cloudState.sessionToken ? (
                 <div className="p-4 border border-hairline bg-canvas rounded-[2px] text-center space-y-3">
                   <Cloud className="h-8 w-8 text-muted mx-auto" />
-                  <div className="text-xs font-semibold text-ink">NexusCANCloud Oturumu Açık Değil</div>
+                  <div className="text-xs font-semibold text-ink">{t('netdb.symbols.cloudNotLoggedIn')}</div>
                   <div className="text-[11px] text-muted max-w-sm mx-auto">
-                    Buluttaki projelerinize ait .dbc ve .kcd veritabanlarını çekmek için önce oturum açmalısınız.
+                    {t('netdb.symbols.cloudLoginDesc')}
                   </div>
                   <button
                     type="button"
@@ -848,7 +860,7 @@ export const SymbolsLayoutView: React.FC = () => {
                     }}
                     className="h-7 px-4 rounded-[2px] font-mono text-[11px] font-semibold uppercase text-white bg-sky-600 hover:bg-sky-500 cursor-pointer"
                   >
-                    Cloud Sekmesine Git ve Giriş Yap
+                    {t('netdb.symbols.goToCloudTab')}
                   </button>
                 </div>
               ) : (
@@ -856,7 +868,7 @@ export const SymbolsLayoutView: React.FC = () => {
                   {/* Cloud Project Selector */}
                   <div className="space-y-1">
                     <div className="flex items-center justify-between text-[11px]">
-                      <span className="font-mono uppercase text-muted">Cloud Projesi:</span>
+                      <span className="font-mono uppercase text-muted">{t('netdb.symbols.cloudProjectLabel')}</span>
                       <button
                         type="button"
                         disabled={loadingPullable}
@@ -864,7 +876,7 @@ export const SymbolsLayoutView: React.FC = () => {
                         className="font-mono text-[10px] text-sky-400 hover:underline flex items-center gap-1 cursor-pointer"
                       >
                         <RefreshCw className={`h-3 w-3 ${loadingPullable ? 'animate-spin' : ''}`} />
-                        Yenile
+                        {t('netdb.symbols.refresh')}
                       </button>
                     </div>
                     <select
@@ -884,7 +896,7 @@ export const SymbolsLayoutView: React.FC = () => {
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between text-[11px]">
                       <span className="font-mono uppercase text-muted">
-                        Buluttaki Veritabanları ({pullableDatabases.length}):
+                        {t('netdb.symbols.cloudDatabasesCount', { count: pullableDatabases.length })}
                       </span>
                       {pullableDatabases.length > 0 && (
                         <button
@@ -898,7 +910,7 @@ export const SymbolsLayoutView: React.FC = () => {
                           }}
                           className="font-mono text-[10px] text-muted hover:text-ink cursor-pointer"
                         >
-                          {selectedDbKeys.size === pullableDatabases.length ? 'Seçimi Kaldır' : 'Tümünü Seç'}
+                          {selectedDbKeys.size === pullableDatabases.length ? t('netdb.symbols.deselectAll') : t('netdb.symbols.selectAll')}
                         </button>
                       )}
                     </div>
@@ -906,11 +918,11 @@ export const SymbolsLayoutView: React.FC = () => {
                     {loadingPullable ? (
                       <div className="py-8 flex items-center justify-center gap-2 font-mono text-xs text-muted">
                         <Loader2 className="h-4 w-4 animate-spin text-sky-400" />
-                        <span>Veritabanları taranıyor...</span>
+                        <span>{t('netdb.symbols.scanningDatabases')}</span>
                       </div>
                     ) : pullableDatabases.length === 0 ? (
                       <div className="p-4 border border-dashed border-hairline rounded-[2px] text-center text-xs text-muted">
-                        Bu bulut projesinde henüz kayıtlı .dbc veya .kcd veritabanı bulunamadı.
+                        {t('netdb.symbols.noCloudDatabases')}
                       </div>
                     ) : (
                       <div className="divide-y divide-hairline border border-hairline rounded-[2px] bg-canvas max-h-48 overflow-y-auto">
@@ -955,7 +967,7 @@ export const SymbolsLayoutView: React.FC = () => {
                                     : 'border-emerald-600/50 bg-emerald-950/30 text-emerald-300'
                                 }`}
                               >
-                                {existsLocally ? 'GÜNCELLE' : 'YENİ'}
+                                {existsLocally ? t('netdb.symbols.updateBadge') : t('netdb.symbols.newBadge')}
                               </span>
                             </label>
                           );
@@ -967,21 +979,21 @@ export const SymbolsLayoutView: React.FC = () => {
                   {/* Target Bus / Connection Selection */}
                   <div className="space-y-1.5">
                     <span className="font-mono text-[11px] uppercase text-muted">
-                      Hedef Bus / Bağlantı Seçimi:
+                      {t('netdb.symbols.targetBusSelection')}
                     </span>
                     <div className="text-[11px] text-muted">
-                      İndirilen veritabanları hangi bağlantılara bağlansın? (İsteğe bağlı, seçilmezse sadece kataloğa eklenir)
+                      {t('netdb.symbols.targetBusDesc')}
                     </div>
 
                     {profiles.length === 0 ? (
                       <div className="p-3 border border-dashed border-hairline rounded-[2px] text-xs text-muted flex items-center justify-between">
-                        <span>Henüz kayıtlı Bus bağlantısı yok.</span>
+                        <span>{t('netdb.symbols.noBusesYet')}</span>
                         <button
                           type="button"
                           onClick={() => void handleOpenNewConnectionModal()}
                           className="font-mono text-[10px] text-focus font-semibold hover:underline cursor-pointer"
                         >
-                          + Bus Ekle
+                          {t('netdb.symbols.addBusInline')}
                         </button>
                       </div>
                     ) : (
@@ -1028,7 +1040,7 @@ export const SymbolsLayoutView: React.FC = () => {
                       className="inline-flex items-center gap-1 font-mono text-[11px] text-focus hover:underline cursor-pointer pt-0.5"
                     >
                       <Plus className="h-3 w-3" />
-                      <span>+ Yeni Bus Bağlantısı Oluştur...</span>
+                      <span>{t('netdb.symbols.createNewBusConn')}</span>
                     </button>
                   </div>
 
@@ -1051,7 +1063,7 @@ export const SymbolsLayoutView: React.FC = () => {
                 onClick={() => setCloudPullModalOpen(false)}
                 className="h-7 cursor-pointer rounded-[2px] border border-hairline bg-surface px-3 font-mono text-[11px] text-ink hover:border-strong disabled:opacity-50"
               >
-                İPTAL
+                {t('netdb.symbols.cancel')}
               </button>
 
               {Boolean(cloudState.sessionToken) && (
@@ -1064,12 +1076,12 @@ export const SymbolsLayoutView: React.FC = () => {
                   {pullingBusy ? (
                     <>
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      <span>İNDİRİLİYOR...</span>
+                      <span>{t('netdb.symbols.downloading')}</span>
                     </>
                   ) : (
                     <>
                       <DownloadCloud className="h-3.5 w-3.5" />
-                      <span>CLOUD'DAN ÇEK VE SEÇİLİ BUS'LARA BAĞLA</span>
+                      <span>{t('netdb.symbols.pullAndBindBtn')}</span>
                     </>
                   )}
                 </button>
@@ -1098,16 +1110,14 @@ export const SymbolsLayoutView: React.FC = () => {
         >
           <div className="w-full max-w-md rounded-[2px] border border-strong bg-surface">
             <div className="flex h-10 items-center border-b border-hairline bg-elevated px-3.5 font-mono text-xs font-semibold uppercase tracking-wider text-ink">
-              VERİTABANINI SİL
+              {t('netdb.symbols.deleteModalTitle')}
             </div>
             <div className="space-y-3 p-4 text-xs text-muted">
               <p>
-                <strong className="text-ink">{deletingDb.fileName}</strong> katalogdan kaldırılacak ve
-                bağlı olduğu{' '}
-                <span className="font-mono tabular-nums text-ink">
-                  {(profilesByDbId.get(deletingDb.id) ?? []).length}
-                </span>{' '}
-                bağlantıdan çözülecek (bu hatlar başka DB bağlı değilse Raw Hex'e döner).
+                {t('netdb.symbols.deleteModalDesc', {
+                  fileName: deletingDb.fileName,
+                  count: (profilesByDbId.get(deletingDb.id) ?? []).length,
+                })}
               </p>
               <div className="flex justify-end gap-2 border-t border-hairline pt-3">
                 <button
@@ -1115,7 +1125,7 @@ export const SymbolsLayoutView: React.FC = () => {
                   onClick={() => setDeletingDb(null)}
                   className="h-7 cursor-pointer rounded-[2px] border border-hairline bg-elevated px-3 font-mono text-[11px] text-ink"
                 >
-                  İPTAL
+                  {t('netdb.symbols.cancel')}
                 </button>
                 <button
                   type="button"
@@ -1123,7 +1133,7 @@ export const SymbolsLayoutView: React.FC = () => {
                   className="h-7 cursor-pointer rounded-[2px] px-3.5 font-mono text-[11px] font-semibold uppercase text-white"
                   style={{ backgroundColor: 'var(--status-critical)' }}
                 >
-                  SİL
+                  {t('netdb.symbols.delete')}
                 </button>
               </div>
             </div>

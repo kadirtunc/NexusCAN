@@ -1,24 +1,28 @@
-
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   Compass,
   Copy,
   Database,
+  Keyboard,
   Link2,
   Plus,
   RefreshCw,
   Search,
   Settings2,
+  ShieldAlert,
   Trash2,
   Unlink,
+  X,
 } from 'lucide-react';
+import { useI18n, type TranslationKey } from '../../i18n';
 import type {
   DatabaseSchemaDto,
   MessageSchemaDto,
   NetworkDatabaseSummaryDto,
   SignalSchemaDto,
   SimulationAccentColor,
+  SimulationButtonMode,
   SimulationComboOptionDto,
   SimulationGeneratorSpecDto,
   SimulationLedOperator,
@@ -41,22 +45,28 @@ import {
   type LoadedSimulationDatabaseEntry,
   type SignalBindingDbMeta,
 } from './virtualCanPacking';
+import {
+  captureHotkeyFromKeyboardEvent,
+  formatHotkeyBadge,
+} from './buttonControlUtils';
 
-const GROUP_QUICK_ADD_OPTIONS: ReadonlyArray<{
+interface GroupQuickAddOptionDef {
   kind: SimulationWidgetKind;
-  label: string;
-}> = [
-  { kind: 'button', label: '+ BUTTON' },
-  { kind: 'checkbox', label: '+ CHECKBOX' },
-  { kind: 'combobox', label: '+ COMBOBOX' },
-  { kind: 'slider', label: '+ SLIDER' },
-  { kind: 'gauge', label: '+ GAUGE' },
-  { kind: 'bar', label: '+ BAR' },
-  { kind: 'numeric', label: '+ NUMERIC' },
-  { kind: 'led', label: '+ LED' },
-  { kind: 'enum_badge', label: '+ ENUM' },
-  { kind: 'graph', label: '+ GRAPH' },
-  { kind: 'map', label: '+ MAP' },
+  labelKey: TranslationKey;
+}
+
+const GROUP_QUICK_ADD_OPTIONS: ReadonlyArray<GroupQuickAddOptionDef> = [
+  { kind: 'button', labelKey: 'simInsp.groupAdd.button' },
+  { kind: 'checkbox', labelKey: 'simInsp.groupAdd.checkbox' },
+  { kind: 'combobox', labelKey: 'simInsp.groupAdd.combobox' },
+  { kind: 'slider', labelKey: 'simInsp.groupAdd.slider' },
+  { kind: 'gauge', labelKey: 'simInsp.groupAdd.gauge' },
+  { kind: 'bar', labelKey: 'simInsp.groupAdd.bar' },
+  { kind: 'numeric', labelKey: 'simInsp.groupAdd.numeric' },
+  { kind: 'led', labelKey: 'simInsp.groupAdd.led' },
+  { kind: 'enum_badge', labelKey: 'simInsp.groupAdd.enum' },
+  { kind: 'graph', labelKey: 'simInsp.groupAdd.graph' },
+  { kind: 'map', labelKey: 'simInsp.groupAdd.map' },
 ];
 
 const ACCENT_OPTIONS: readonly SimulationAccentColor[] = [
@@ -68,30 +78,37 @@ const ACCENT_OPTIONS: readonly SimulationAccentColor[] = [
   'blue',
 ];
 
-const WIDGET_KIND_OPTIONS: ReadonlyArray<{
+interface WidgetKindOptionDef {
   value: SimulationWidgetKind;
-  label: string;
-}> = [
-  { value: 'gauge', label: 'GAUGE (240° Dial)' },
-  { value: 'bar', label: 'BAR (Level Meter)' },
-  { value: 'numeric', label: 'NUMERIC (Digital)' },
-  { value: 'led', label: 'LED (Status Lamp)' },
-  { value: 'enum_badge', label: 'ENUM_BADGE (Symbolic)' },
-  { value: 'graph', label: 'GRAPH (60 FPS Canvas)' },
-  { value: 'map', label: 'MAP (OpenStreetMap / GNSS)' },
-  { value: 'button', label: 'BUTTON (Momentary/Toggle)' },
-  { value: 'checkbox', label: 'CHECKBOX (Switch)' },
-  { value: 'combobox', label: 'COMBOBOX (Dropdown)' },
-  { value: 'slider', label: 'SLIDER (Range Fader)' },
-  { value: 'group', label: 'GROUP (Subsystem Frame)' },
+  labelKey: TranslationKey;
+}
+
+const WIDGET_KIND_OPTIONS: ReadonlyArray<WidgetKindOptionDef> = [
+  { value: 'gauge', labelKey: 'simInsp.kind.gauge' },
+  { value: 'bar', labelKey: 'simInsp.kind.bar' },
+  { value: 'numeric', labelKey: 'simInsp.kind.numeric' },
+  { value: 'led', labelKey: 'simInsp.kind.led' },
+  { value: 'enum_badge', labelKey: 'simInsp.kind.enum_badge' },
+  { value: 'graph', labelKey: 'simInsp.kind.graph' },
+  { value: 'map', labelKey: 'simInsp.kind.map' },
+  { value: 'button', labelKey: 'simInsp.kind.button' },
+  { value: 'checkbox', labelKey: 'simInsp.kind.checkbox' },
+  { value: 'combobox', labelKey: 'simInsp.kind.combobox' },
+  { value: 'slider', labelKey: 'simInsp.kind.slider' },
+  { value: 'group', labelKey: 'simInsp.kind.group' },
 ];
 
-const WAVEFORM_OPTIONS: readonly SimulationWaveformKind[] = [
-  'sine',
-  'triangle',
-  'sawtooth',
-  'square',
-  'constant',
+interface WaveformOptionDef {
+  value: SimulationWaveformKind;
+  labelKey: TranslationKey;
+}
+
+const WAVEFORM_OPTIONS: ReadonlyArray<WaveformOptionDef> = [
+  { value: 'sine', labelKey: 'simInsp.waveform.sine' },
+  { value: 'triangle', labelKey: 'simInsp.waveform.triangle' },
+  { value: 'sawtooth', labelKey: 'simInsp.waveform.sawtooth' },
+  { value: 'square', labelKey: 'simInsp.waveform.square' },
+  { value: 'constant', labelKey: 'simInsp.waveform.constant' },
 ];
 
 interface CatalogSignalPair {
@@ -188,6 +205,8 @@ export function SimulationInspectorSidebar({
   onDeleteWidget,
   onUpdateGenerators,
 }: SimulationInspectorSidebarProps): React.JSX.Element {
+  const { t } = useI18n();
+
   const [activeTab, setActiveTab] = useState<'inspector' | 'generators'>(
     'inspector'
   );
@@ -198,8 +217,50 @@ export function SimulationInspectorSidebar({
   const [newEnumLabel, setNewEnumLabel] = useState<string>('READY');
   const [newOptVal, setNewOptVal] = useState<string>('0');
   const [newOptLabel, setNewOptLabel] = useState<string>('0 : OFF');
+  const [newCycleVal, setNewCycleVal] = useState<string>('0');
+  const [newCycleLabel, setNewCycleLabel] = useState<string>('MOD 0');
+  const [capturingHotkeyWidgetId, setCapturingHotkeyWidgetId] = useState<
+    string | null
+  >(null);
   const [moveCandidateWidgetId, setMoveCandidateWidgetId] =
     useState<string>('');
+
+  useEffect(() => {
+    if (
+      !capturingHotkeyWidgetId ||
+      !selectedWidget ||
+      selectedWidget.id !== capturingHotkeyWidgetId ||
+      !canMutate
+    ) {
+      return;
+    }
+
+    const onCaptureKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setCapturingHotkeyWidgetId(null);
+        return;
+      }
+      const captured = captureHotkeyFromKeyboardEvent(e);
+      if (!captured) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onUpdateWidget(selectedWidget.id, (w) => ({
+        ...w,
+        config: {
+          ...w.config,
+          hotkey: captured,
+        },
+      }));
+      setCapturingHotkeyWidgetId(null);
+    };
+
+    window.addEventListener('keydown', onCaptureKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', onCaptureKeyDown, true);
+    };
+  }, [canMutate, capturingHotkeyWidgetId, onUpdateWidget, selectedWidget]);
 
   const groupChildren = useMemo<SimulationWidgetDto[]>(() => {
     if (!selectedWidget || selectedWidget.kind !== 'group') return [];
@@ -583,7 +644,7 @@ export function SimulationInspectorSidebar({
         className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 font-mono text-[10px] tabular-nums text-ink"
       >
         <option value="ALL">
-          {`TÜM YÜKLÜ VERİTABANLARI (${databases.length})`}
+          {t('simInsp.gen.allDbs', { count: databases.length })}
         </option>
         {databases.map((db) => (
           <option key={db.id} value={db.id}>
@@ -596,11 +657,11 @@ export function SimulationInspectorSidebar({
 
   return (
     <aside
-      aria-label="Widget Denetçisi ve Sinyal Üreteçleri"
-      className="flex w-full shrink-0 flex-col border-t border-hairline bg-surface lg:w-[324px] lg:border-t-0 lg:border-l"
+      aria-label={t('simInsp.aside.aria')}
+      className="flex w-full shrink-0 flex-col border-t border-hairline bg-surface lg:w-[340px] xl:w-[380px] lg:border-t-0 lg:border-l"
     >
       {/* Top Sub-Tabs: INSPECTOR vs GENERATORS */}
-      <div className="grid h-9 shrink-0 grid-cols-2 border-b border-hairline bg-elevated font-mono text-[10px] font-semibold uppercase tracking-wider">
+      <div className="grid min-h-[40px] shrink-0 grid-cols-2 border-b border-hairline bg-elevated font-mono text-[12px] font-semibold uppercase tracking-wider">
         <button
           type="button"
           onClick={() => setActiveTab('inspector')}
@@ -610,8 +671,8 @@ export function SimulationInspectorSidebar({
               : 'text-muted hover:text-ink'
           }`}
         >
-          <Settings2 className="h-3 w-3 text-focus" aria-hidden="true" />
-          INSPECTOR
+          <Settings2 className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
+          {t('simInsp.tab.inspector')}
         </button>
         <button
           type="button"
@@ -622,42 +683,43 @@ export function SimulationInspectorSidebar({
               : 'text-muted hover:text-ink'
           }`}
         >
-          <Activity className="h-3 w-3 text-nominal" aria-hidden="true" />
-          GENERATORS ({activeGenCount}/{generators.length})
+          <Activity className="h-3.5 w-3.5 text-nominal" aria-hidden="true" />
+          {t('simInsp.tab.generators', {
+            active: activeGenCount,
+            total: generators.length,
+          })}
         </button>
       </div>
 
       {activeTab === 'generators' ? (
         <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
           <div className="flex items-center justify-between">
-            <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-              60HZ VIRTUAL WAVEFORMS
+            <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-muted">
+              {t('simInsp.gen.headerTitle')}
             </span>
             <button
               type="button"
               disabled={!canMutate}
               onClick={handleAddGenerator}
-              className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-elevated px-2 font-mono text-[10px] font-semibold text-focus hover:border-strong disabled:opacity-50"
+              className="inline-flex h-[28px] cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-elevated px-2.5 font-mono text-[11.5px] font-semibold text-focus hover:border-strong disabled:opacity-50"
             >
-              <Plus className="h-3 w-3" aria-hidden="true" />
-              ADD GENERATOR
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              {t('simInsp.gen.addBtn')}
             </button>
           </div>
 
           {databases.length > 0 && (
             <div className="space-y-1">
               <span className="block font-mono text-[9px] uppercase text-subtle">
-                VERİTABANI FİLTRESİ
+                {t('simInsp.gen.dbFilterLabel')}
               </span>
-              {renderDatabaseFilterDropdown(
-                'Üreteç sinyal veritabanı filtresi'
-              )}
+              {renderDatabaseFilterDropdown(t('simInsp.gen.dbFilterAria'))}
             </div>
           )}
 
           {generators.length === 0 ? (
             <div className="rounded-[2px] border border-hairline bg-canvas p-4 text-center font-mono text-[11px] text-muted">
-              KAYITLI SİNYAL ÜRETECİ YOK. RUN (VIRTUAL BUS) MODUNDA OTOMATİK SİNÜS / ÜÇGEN / TESTERE DİŞİ DALGA ÜRETMEK İÇİN EKLEYİN.
+              {t('simInsp.gen.empty')}
             </div>
           ) : (
             <div className="space-y-2">
@@ -697,7 +759,7 @@ export function SimulationInspectorSidebar({
                               }
                         }
                       >
-                        {gen.enabled ? 'ENABLED' : 'PAUSED'}
+                        {gen.enabled ? t('simInsp.gen.enabled') : t('simInsp.gen.paused')}
                       </button>
 
                       <span className="truncate font-semibold text-ink">
@@ -715,7 +777,7 @@ export function SimulationInspectorSidebar({
                             generators.filter((g) => g.id !== gen.id)
                           )
                         }
-                        aria-label="Üreteci sil"
+                        aria-label={t('simInsp.gen.deleteAria')}
                         className="cursor-pointer rounded-[2px] p-1 text-muted hover:text-critical"
                       >
                         <Trash2 className="h-3 w-3" />
@@ -724,7 +786,7 @@ export function SimulationInspectorSidebar({
 
                     {visibleCatalogPairs.length > 0 && (
                       <select
-                        aria-label="Üreteç DBC sinyali"
+                        aria-label={t('simInsp.gen.signalAria')}
                         disabled={!canMutate}
                         value={currentCatalogId}
                         onChange={(e) => {
@@ -757,7 +819,7 @@ export function SimulationInspectorSidebar({
                         }}
                         className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-[10px] text-ink"
                       >
-                        <option value="">-- DBC / KCD SİNYALİ SEÇ --</option>
+                        <option value="">{t('simInsp.gen.selectSignal')}</option>
                         {visibleCatalogPairs.map((p) => (
                           <option key={p.id} value={p.id}>
                             {isAllDbFilter ? p.labelAll : p.labelSingle}
@@ -769,7 +831,7 @@ export function SimulationInspectorSidebar({
                     <div className="grid grid-cols-2 gap-1.5">
                       <label className="space-y-0.5">
                         <span className="block text-[9px] text-subtle">
-                          MESSAGE KEY
+                          {t('simInsp.gen.messageKey')}
                         </span>
                         <input
                           type="text"
@@ -795,7 +857,7 @@ export function SimulationInspectorSidebar({
                       </label>
                       <label className="space-y-0.5">
                         <span className="block text-[9px] text-subtle">
-                          SIGNAL NAME
+                          {t('simInsp.gen.signalName')}
                         </span>
                         <input
                           type="text"
@@ -824,7 +886,7 @@ export function SimulationInspectorSidebar({
                     <div className="grid grid-cols-2 gap-1.5">
                       <label className="space-y-0.5">
                         <span className="block text-[9px] text-subtle">
-                          WAVEFORM
+                          {t('simInsp.gen.waveform')}
                         </span>
                         <select
                           disabled={!canMutate}
@@ -845,8 +907,8 @@ export function SimulationInspectorSidebar({
                           className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1 text-[10px] uppercase text-ink"
                         >
                           {WAVEFORM_OPTIONS.map((wf) => (
-                            <option key={wf} value={wf}>
-                              {wf.toUpperCase()}
+                            <option key={wf.value} value={wf.value}>
+                              {t(wf.labelKey)}
                             </option>
                           ))}
                         </select>
@@ -855,7 +917,7 @@ export function SimulationInspectorSidebar({
                       {gen.waveform === 'constant' ? (
                         <label className="space-y-0.5">
                           <span className="block text-[9px] text-subtle">
-                            CONST VAL
+                            {t('simInsp.gen.constVal')}
                           </span>
                           <input
                             type="number"
@@ -881,7 +943,7 @@ export function SimulationInspectorSidebar({
                       ) : (
                         <label className="space-y-0.5">
                           <span className="block text-[9px] text-subtle">
-                            FREQ (HZ)
+                            {t('simInsp.gen.freqHz')}
                           </span>
                           <input
                             type="number"
@@ -918,7 +980,7 @@ export function SimulationInspectorSidebar({
                       <div className="grid grid-cols-2 gap-1.5">
                         <label className="space-y-0.5">
                           <span className="block text-[9px] text-subtle">
-                            MIN
+                            {t('simInsp.gen.min')}
                           </span>
                           <input
                             type="number"
@@ -939,7 +1001,7 @@ export function SimulationInspectorSidebar({
                         </label>
                         <label className="space-y-0.5">
                           <span className="block text-[9px] text-subtle">
-                            MAX
+                            {t('simInsp.gen.max')}
                           </span>
                           <input
                             type="number"
@@ -968,7 +1030,7 @@ export function SimulationInspectorSidebar({
         </div>
       ) : !selectedWidget ? (
         <div className="flex min-h-0 flex-1 items-center justify-center p-6 text-center font-mono text-[11px] text-muted">
-          24-SÜTUNLU IZGARADAN BİR ENSTRÜMAN SEÇİN VEYA SOL PALETTEN YENİ WIDGET EKLEYİN.
+          {t('simInsp.empty.hint')}
         </div>
       ) : (
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 font-mono text-[10px] tabular-nums">
@@ -982,29 +1044,31 @@ export function SimulationInspectorSidebar({
                 <button
                   type="button"
                   onClick={() => onDuplicateWidget(selectedWidget.id)}
-                  title="Widget kopyala"
+                  title={t('simInsp.actions.dupTitle')}
                   className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-elevated px-1.5 text-[9px] text-ink hover:border-strong"
                 >
                   <Copy className="h-2.5 w-2.5" aria-hidden="true" />
-                  DUP
+                  {t('simInsp.actions.dupBtn')}
                 </button>
                 <button
                   type="button"
                   onClick={() => onDeleteWidget(selectedWidget.id)}
-                  title="Widget sil"
+                  title={t('simInsp.actions.delTitle')}
                   className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-elevated px-1.5 text-[9px] text-muted hover:border-critical hover:text-critical"
                 >
                   <Trash2 className="h-2.5 w-2.5" aria-hidden="true" />
-                  DEL
+                  {t('simInsp.actions.delBtn')}
                 </button>
               </div>
             )}
           </div>
 
           {/* General Metadata & Grid Coordinates */}
-          <div className="space-y-2">
-            <label className="block space-y-0.5">
-              <span className="text-[9px] uppercase text-subtle">TITLE</span>
+          <div className="space-y-2.5">
+            <label className="block space-y-1">
+              <span className="text-[11.5px] font-medium uppercase text-muted">
+                {t('simInsp.general.title')}
+              </span>
               <input
                 type="text"
                 disabled={!canMutate}
@@ -1015,13 +1079,13 @@ export function SimulationInspectorSidebar({
                     title: e.target.value,
                   }))
                 }
-                className="h-7 w-full rounded-[2px] border border-hairline bg-canvas px-2 font-sans text-xs text-ink"
+                className="h-[30px] w-full rounded-[2px] border border-hairline bg-canvas px-2.5 font-sans text-[12px] text-ink"
               />
             </label>
 
-            <label className="block space-y-0.5">
-              <span className="text-[9px] uppercase text-subtle">
-                WIDGET TYPE
+            <label className="block space-y-1">
+              <span className="text-[11.5px] font-medium uppercase text-muted">
+                {t('simInsp.general.type')}
               </span>
               <select
                 disabled={!canMutate}
@@ -1034,21 +1098,21 @@ export function SimulationInspectorSidebar({
                       e.target.value === 'group' ? null : w.binding,
                   }))
                 }
-                className="h-7 w-full rounded-[2px] border border-hairline bg-canvas px-1.5 text-[10px] text-ink"
+                className="h-[30px] w-full rounded-[2px] border border-hairline bg-canvas px-2 text-[12px] text-ink"
               >
                 {WIDGET_KIND_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>
-                    {opt.label}
+                    {t(opt.labelKey)}
                   </option>
                 ))}
               </select>
             </label>
 
             <div className="space-y-1">
-              <span className="block text-[9px] uppercase text-subtle">
-                ACCENT COLOR
+              <span className="block text-[11.5px] font-medium uppercase text-muted">
+                {t('simInsp.general.accentColor')}
               </span>
-              <div className="grid grid-cols-6 gap-1">
+              <div className="grid grid-cols-6 gap-1.5">
                 {ACCENT_OPTIONS.map((acc) => {
                   const active = selectedWidget.accentColor === acc;
                   return (
@@ -1066,14 +1130,14 @@ export function SimulationInspectorSidebar({
                         }))
                       }
                       title={acc.toUpperCase()}
-                      className={`flex h-6 cursor-pointer items-center justify-center rounded-[2px] border ${
+                      className={`flex h-7 cursor-pointer items-center justify-center rounded-[2px] border ${
                         active
                           ? 'border-ink bg-elevated'
                           : 'border-hairline bg-canvas'
                       }`}
                     >
                       <span
-                        className="h-3 w-3 rounded-[1px]"
+                        className="h-3.5 w-3.5 rounded-[1px]"
                         style={{ backgroundColor: ACCENT_HEX_MAP[acc] }}
                       />
                     </button>
@@ -1085,7 +1149,9 @@ export function SimulationInspectorSidebar({
             {/* Accessible Keyboard & Single-Pointer Grid Layout Inputs */}
             <div className="grid grid-cols-4 gap-1.5">
               <label className="space-y-0.5">
-                <span className="block text-[9px] text-subtle">COL</span>
+                <span className="block text-[11px] font-medium text-muted">
+                  {t('simInsp.general.col')}
+                </span>
                 <input
                   type="number"
                   disabled={!canMutate}
@@ -1105,11 +1171,13 @@ export function SimulationInspectorSidebar({
                       layout: { ...w.layout, col },
                     }));
                   }}
-                  className="h-6 w-full rounded-[2px] border border-hairline bg-canvas px-1.5 text-ink"
+                  className="h-[28px] w-full rounded-[2px] border border-hairline bg-canvas px-1.5 font-mono text-[12px] text-ink"
                 />
               </label>
               <label className="space-y-0.5">
-                <span className="block text-[9px] text-subtle">ROW</span>
+                <span className="block text-[11px] font-medium text-muted">
+                  {t('simInsp.general.row')}
+                </span>
                 <input
                   type="number"
                   disabled={!canMutate}
@@ -1126,11 +1194,13 @@ export function SimulationInspectorSidebar({
                       layout: { ...w.layout, row },
                     }));
                   }}
-                  className="h-6 w-full rounded-[2px] border border-hairline bg-canvas px-1.5 text-ink"
+                  className="h-[28px] w-full rounded-[2px] border border-hairline bg-canvas px-1.5 font-mono text-[12px] text-ink"
                 />
               </label>
               <label className="space-y-0.5">
-                <span className="block text-[9px] text-subtle">W</span>
+                <span className="block text-[11px] font-medium text-muted">
+                  {t('simInsp.general.w')}
+                </span>
                 <input
                   type="number"
                   disabled={!canMutate}
@@ -1150,11 +1220,13 @@ export function SimulationInspectorSidebar({
                       layout: { ...w.layout, w: wVal },
                     }));
                   }}
-                  className="h-6 w-full rounded-[2px] border border-hairline bg-canvas px-1.5 text-ink"
+                  className="h-[28px] w-full rounded-[2px] border border-hairline bg-canvas px-1.5 font-mono text-[12px] text-ink"
                 />
               </label>
               <label className="space-y-0.5">
-                <span className="block text-[9px] text-subtle">H</span>
+                <span className="block text-[11px] font-medium text-muted">
+                  {t('simInsp.general.h')}
+                </span>
                 <input
                   type="number"
                   disabled={!canMutate}
@@ -1171,7 +1243,7 @@ export function SimulationInspectorSidebar({
                       layout: { ...w.layout, h: hVal },
                     }));
                   }}
-                  className="h-6 w-full rounded-[2px] border border-hairline bg-canvas px-1.5 text-ink"
+                  className="h-[28px] w-full rounded-[2px] border border-hairline bg-canvas px-1.5 font-mono text-[12px] text-ink"
                 />
               </label>
             </div>
@@ -1184,8 +1256,8 @@ export function SimulationInspectorSidebar({
                 <span className="inline-flex items-center gap-1 font-semibold uppercase text-ink">
                   <Link2 className="h-3 w-3 text-focus" aria-hidden="true" />
                   {selectedWidget.kind === 'map'
-                    ? 'LATITUDE SIGNAL (PRIMARY)'
-                    : 'SIGNAL BINDING'}
+                    ? t('simInsp.binding.latPrimary')
+                    : t('simInsp.binding.title')}
                 </span>
                 {canMutate &&
                   (selectedWidget.binding ? (
@@ -1200,7 +1272,7 @@ export function SimulationInspectorSidebar({
                       className="inline-flex cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-surface px-1.5 py-0.5 text-[9px] text-muted hover:text-critical"
                     >
                       <Unlink className="h-2.5 w-2.5" />
-                      UNBIND
+                      {t('simInsp.binding.unbindBtn')}
                     </button>
                   ) : (
                     <button
@@ -1209,7 +1281,7 @@ export function SimulationInspectorSidebar({
                       className="inline-flex cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-surface px-1.5 py-0.5 text-[9px] text-focus hover:border-strong"
                     >
                       <Plus className="h-2.5 w-2.5" />
-                      MANUAL BIND
+                      {t('simInsp.binding.manualBindBtn')}
                     </button>
                   ))}
               </div>
@@ -1222,7 +1294,7 @@ export function SimulationInspectorSidebar({
                       aria-hidden="true"
                     />
                     <span className="truncate">
-                      ŞEMA:{' '}
+                      {t('simInsp.binding.schemaLabel')}{' '}
                       <strong className="text-ink">
                         {selectedWidget.binding.databaseName}
                       </strong>
@@ -1246,7 +1318,7 @@ export function SimulationInspectorSidebar({
                       className="h-2.5 w-2.5 text-nominal"
                       aria-hidden="true"
                     />
-                    AUTO-PAIR LON / HDG / SPD FROM SAME MESSAGE
+                    {t('simInsp.binding.autoPairGnss')}
                   </button>
                 )}
 
@@ -1254,7 +1326,7 @@ export function SimulationInspectorSidebar({
               {allCatalogPairs.length > 0 && (
                 <div className="space-y-1">
                   {renderDatabaseFilterDropdown(
-                    'Denetçi sinyal veritabanı filtresi'
+                    t('simInsp.binding.dbFilterAria')
                   )}
 
                   <div className="relative">
@@ -1266,13 +1338,13 @@ export function SimulationInspectorSidebar({
                       type="text"
                       value={pickerQuery}
                       onChange={(e) => setPickerQuery(e.target.value)}
-                      placeholder="DB adı, 0x101, mesaj veya sinyal ara..."
+                      placeholder={t('simInsp.binding.searchPlaceholder')}
                       className="h-6 w-full rounded-[2px] border border-hairline bg-surface pr-2 pl-5 text-[10px] text-ink placeholder:text-subtle"
                     />
                   </div>
 
                   <select
-                    aria-label="DBC sinyali seç"
+                    aria-label={t('simInsp.binding.selectSignalAria')}
                     disabled={!canMutate}
                     value={resolveBindingCatalogId(
                       selectedWidget.binding,
@@ -1289,7 +1361,9 @@ export function SimulationInspectorSidebar({
                     className="h-7 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-[10px] text-ink"
                   >
                     <option value="">
-                      {`-- SİNYAL SEÇ (${filteredCatalogPairs.length}) --`}
+                      {t('simInsp.binding.selectSignalPrompt', {
+                        count: filteredCatalogPairs.length,
+                      })}
                     </option>
                     {filteredCatalogPairs.map((p) => (
                       <option key={p.id} value={p.id}>
@@ -1305,7 +1379,9 @@ export function SimulationInspectorSidebar({
                 <div className="space-y-1.5 border-t border-hairline pt-2">
                   <div className="grid grid-cols-3 gap-1.5">
                     <label className="space-y-0.5">
-                      <span className="block text-[9px] text-subtle">BUS</span>
+                      <span className="block text-[9px] text-subtle">
+                        {t('simInsp.binding.bus')}
+                      </span>
                       <input
                         type="number"
                         disabled={!canMutate}
@@ -1333,7 +1409,7 @@ export function SimulationInspectorSidebar({
                     </label>
                     <label className="space-y-0.5">
                       <span className="block text-[9px] text-subtle">
-                        ARB ID (HEX)
+                        {t('simInsp.binding.arbId')}
                       </span>
                       <input
                         type="text"
@@ -1366,7 +1442,9 @@ export function SimulationInspectorSidebar({
                       />
                     </label>
                     <label className="space-y-0.5">
-                      <span className="block text-[9px] text-subtle">FRAME</span>
+                      <span className="block text-[9px] text-subtle">
+                        {t('simInsp.binding.frame')}
+                      </span>
                       <select
                         disabled={!canMutate}
                         value={selectedWidget.binding.isExtended ? 'EXT' : 'STD'}
@@ -1390,8 +1468,8 @@ export function SimulationInspectorSidebar({
                         }}
                         className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1 text-ink"
                       >
-                        <option value="STD">STD 11b</option>
-                        <option value="EXT">EXT 29b</option>
+                        <option value="STD">{t('simInsp.binding.std11')}</option>
+                        <option value="EXT">{t('simInsp.binding.ext29')}</option>
                       </select>
                     </label>
                   </div>
@@ -1399,7 +1477,7 @@ export function SimulationInspectorSidebar({
                   <div className="grid grid-cols-2 gap-1.5">
                     <label className="space-y-0.5">
                       <span className="block text-[9px] text-subtle">
-                        MESSAGE NAME
+                        {t('simInsp.binding.messageName')}
                       </span>
                       <input
                         type="text"
@@ -1423,7 +1501,7 @@ export function SimulationInspectorSidebar({
                     </label>
                     <label className="space-y-0.5">
                       <span className="block text-[9px] text-subtle">
-                        SIGNAL NAME
+                        {t('simInsp.binding.signalName')}
                       </span>
                       <input
                         type="text"
@@ -1449,7 +1527,9 @@ export function SimulationInspectorSidebar({
 
                   <div className="grid grid-cols-3 gap-1.5">
                     <label className="space-y-0.5">
-                      <span className="block text-[9px] text-subtle">UNIT</span>
+                      <span className="block text-[9px] text-subtle">
+                        {t('simInsp.binding.unit')}
+                      </span>
                       <input
                         type="text"
                         disabled={!canMutate}
@@ -1471,7 +1551,9 @@ export function SimulationInspectorSidebar({
                       />
                     </label>
                     <label className="space-y-0.5">
-                      <span className="block text-[9px] text-subtle">MIN</span>
+                      <span className="block text-[9px] text-subtle">
+                        {t('simInsp.binding.min')}
+                      </span>
                       <input
                         type="number"
                         disabled={!canMutate}
@@ -1494,10 +1576,12 @@ export function SimulationInspectorSidebar({
                       />
                     </label>
                     <label className="space-y-0.5">
-                      <span className="block text-[9px] text-subtle">MAX</span>
+                      <span className="block text-[9px] text-subtle">
+                        {t('simInsp.binding.max')}
+                      </span>
                       <input
                         type="number"
-                        disabled={!canMutate}
+                        disabled={!!canMutate}
                         step="any"
                         value={selectedWidget.binding.max}
                         onChange={(e) =>
@@ -1521,7 +1605,7 @@ export function SimulationInspectorSidebar({
                   <div className="grid grid-cols-3 gap-1.5">
                     <label className="space-y-0.5">
                       <span className="block text-[9px] text-subtle">
-                        FACTOR
+                        {t('simInsp.binding.factor')}
                       </span>
                       <input
                         type="number"
@@ -1546,7 +1630,7 @@ export function SimulationInspectorSidebar({
                     </label>
                     <label className="space-y-0.5">
                       <span className="block text-[9px] text-subtle">
-                        OFFSET
+                        {t('simInsp.binding.offset')}
                       </span>
                       <input
                         type="number"
@@ -1571,7 +1655,7 @@ export function SimulationInspectorSidebar({
                     </label>
                     <label className="space-y-0.5">
                       <span className="block text-[9px] text-subtle">
-                        DECIMALS
+                        {t('simInsp.binding.decimals')}
                       </span>
                       <input
                         type="number"
@@ -1607,7 +1691,7 @@ export function SimulationInspectorSidebar({
           {/* Kind-Specific Instrument Configuration */}
           <div className="space-y-2 rounded-[2px] border border-hairline bg-canvas p-2.5">
             <div className="font-semibold uppercase text-ink">
-              INSTRUMENT PARAMETERS
+              {t('simInsp.params.header')}
             </div>
 
             {(selectedWidget.kind === 'gauge' ||
@@ -1616,7 +1700,7 @@ export function SimulationInspectorSidebar({
               <div className="grid grid-cols-2 gap-1.5">
                 <label className="space-y-0.5">
                   <span className="block text-[9px] text-subtle">
-                    SCALE MIN
+                    {t('simInsp.params.scaleMin')}
                   </span>
                   <input
                     type="number"
@@ -1641,7 +1725,7 @@ export function SimulationInspectorSidebar({
                 </label>
                 <label className="space-y-0.5">
                   <span className="block text-[9px] text-subtle">
-                    SCALE MAX
+                    {t('simInsp.params.scaleMax')}
                   </span>
                   <input
                     type="number"
@@ -1672,7 +1756,9 @@ export function SimulationInspectorSidebar({
               selectedWidget.kind === 'numeric') && (
               <div className="grid grid-cols-2 gap-1.5">
                 <label className="space-y-0.5">
-                  <span className="block text-[9px] text-subtle">WARN LOW</span>
+                  <span className="block text-[9px] text-subtle">
+                    {t('simInsp.params.warnLow')}
+                  </span>
                   <input
                     type="number"
                     disabled={!canMutate}
@@ -1693,7 +1779,7 @@ export function SimulationInspectorSidebar({
                 </label>
                 <label className="space-y-0.5">
                   <span className="block text-[9px] text-subtle">
-                    WARN HIGH
+                    {t('simInsp.params.warnHigh')}
                   </span>
                   <input
                     type="number"
@@ -1714,7 +1800,9 @@ export function SimulationInspectorSidebar({
                   />
                 </label>
                 <label className="space-y-0.5">
-                  <span className="block text-[9px] text-subtle">CRIT LOW</span>
+                  <span className="block text-[9px] text-subtle">
+                    {t('simInsp.params.critLow')}
+                  </span>
                   <input
                     type="number"
                     disabled={!canMutate}
@@ -1735,7 +1823,7 @@ export function SimulationInspectorSidebar({
                 </label>
                 <label className="space-y-0.5">
                   <span className="block text-[9px] text-subtle">
-                    CRIT HIGH
+                    {t('simInsp.params.critHigh')}
                   </span>
                   <input
                     type="number"
@@ -1761,7 +1849,9 @@ export function SimulationInspectorSidebar({
             {selectedWidget.kind === 'gauge' && (
               <div className="space-y-1.5">
                 <label className="block space-y-0.5">
-                  <span className="text-[9px] text-subtle">MAJOR TICKS</span>
+                  <span className="text-[9px] text-subtle">
+                    {t('simInsp.params.majorTicks')}
+                  </span>
                   <input
                     type="number"
                     disabled={!canMutate}
@@ -1796,7 +1886,7 @@ export function SimulationInspectorSidebar({
                         }))
                       }
                     />
-                    NEEDLE
+                    {t('simInsp.params.needle')}
                   </label>
                   <label className="inline-flex items-center gap-1.5 text-ink">
                     <input
@@ -1813,7 +1903,7 @@ export function SimulationInspectorSidebar({
                         }))
                       }
                     />
-                    DIGITAL
+                    {t('simInsp.params.digital')}
                   </label>
                 </div>
               </div>
@@ -1822,7 +1912,9 @@ export function SimulationInspectorSidebar({
             {selectedWidget.kind === 'bar' && (
               <div className="space-y-1.5">
                 <label className="block space-y-0.5">
-                  <span className="text-[9px] text-subtle">ORIENTATION</span>
+                  <span className="text-[9px] text-subtle">
+                    {t('simInsp.params.orientation')}
+                  </span>
                   <select
                     disabled={!canMutate}
                     value={selectedWidget.config.orientation ?? 'horizontal'}
@@ -1839,8 +1931,12 @@ export function SimulationInspectorSidebar({
                     }
                     className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-ink"
                   >
-                    <option value="horizontal">HORIZONTAL</option>
-                    <option value="vertical">VERTICAL</option>
+                    <option value="horizontal">
+                      {t('simInsp.params.horizontal')}
+                    </option>
+                    <option value="vertical">
+                      {t('simInsp.params.vertical')}
+                    </option>
                   </select>
                 </label>
                 <label className="inline-flex items-center gap-1.5 pt-1 text-ink">
@@ -1855,7 +1951,7 @@ export function SimulationInspectorSidebar({
                       }))
                     }
                   />
-                  PEAK-HOLD HAIRLINE
+                  {t('simInsp.params.peakHold')}
                 </label>
               </div>
             )}
@@ -1863,7 +1959,9 @@ export function SimulationInspectorSidebar({
             {selectedWidget.kind === 'numeric' && (
               <div className="space-y-1.5">
                 <label className="block space-y-0.5">
-                  <span className="text-[9px] text-subtle">DIGIT SIZE</span>
+                  <span className="text-[9px] text-subtle">
+                    {t('simInsp.params.digitSize')}
+                  </span>
                   <select
                     disabled={!canMutate}
                     value={selectedWidget.config.fontSize ?? 'md'}
@@ -1878,9 +1976,9 @@ export function SimulationInspectorSidebar({
                     }
                     className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-ink"
                   >
-                    <option value="sm">SMALL (SM)</option>
-                    <option value="md">MEDIUM (MD)</option>
-                    <option value="lg">LARGE (LG)</option>
+                    <option value="sm">{t('simInsp.params.sizeSm')}</option>
+                    <option value="md">{t('simInsp.params.sizeMd')}</option>
+                    <option value="lg">{t('simInsp.params.sizeLg')}</option>
                   </select>
                 </label>
                 <label className="inline-flex items-center gap-1.5 pt-1 text-ink">
@@ -1895,7 +1993,7 @@ export function SimulationInspectorSidebar({
                       }))
                     }
                   />
-                  SHOW RAW INT & HEX
+                  {t('simInsp.params.showRawHex')}
                 </label>
               </div>
             )}
@@ -1905,7 +2003,7 @@ export function SimulationInspectorSidebar({
                 <div className="grid grid-cols-2 gap-1.5">
                   <label className="space-y-0.5">
                     <span className="block text-[9px] text-subtle">
-                      OPERATOR
+                      {t('simInsp.params.ledOperator')}
                     </span>
                     <select
                       disabled={!canMutate}
@@ -1932,7 +2030,7 @@ export function SimulationInspectorSidebar({
                   </label>
                   <label className="space-y-0.5">
                     <span className="block text-[9px] text-subtle">
-                      THRESHOLD
+                      {t('simInsp.params.ledThreshold')}
                     </span>
                     <input
                       type="number"
@@ -1955,7 +2053,7 @@ export function SimulationInspectorSidebar({
                 <div className="grid grid-cols-2 gap-1.5">
                   <label className="space-y-0.5">
                     <span className="block text-[9px] text-subtle">
-                      ON LABEL
+                      {t('simInsp.params.ledOnLabel')}
                     </span>
                     <input
                       type="text"
@@ -1972,7 +2070,7 @@ export function SimulationInspectorSidebar({
                   </label>
                   <label className="space-y-0.5">
                     <span className="block text-[9px] text-subtle">
-                      OFF LABEL
+                      {t('simInsp.params.ledOffLabel')}
                     </span>
                     <input
                       type="text"
@@ -2010,7 +2108,7 @@ export function SimulationInspectorSidebar({
                       className="inline-flex h-6 w-full cursor-pointer items-center justify-center gap-1 rounded-[2px] border border-hairline bg-elevated text-[9px] font-semibold text-focus hover:border-strong"
                     >
                       <RefreshCw className="h-2.5 w-2.5" />
-                      SYNC VAL_ FROM DBC
+                      {t('simInsp.params.syncValDbc')}
                     </button>
                   )}
 
@@ -2093,7 +2191,7 @@ export function SimulationInspectorSidebar({
                 <div className="grid grid-cols-2 gap-1.5">
                   <label className="space-y-0.5">
                     <span className="block text-[9px] text-subtle">
-                      WINDOW (SEC)
+                      {t('simInsp.params.graphWindowSec')}
                     </span>
                     <input
                       type="number"
@@ -2132,7 +2230,7 @@ export function SimulationInspectorSidebar({
                           }))
                         }
                       />
-                      AUTO-SCALE Y
+                      {t('simInsp.params.graphAutoScaleY')}
                     </label>
                     <label className="inline-flex items-center gap-1.5 text-ink">
                       <input
@@ -2149,7 +2247,7 @@ export function SimulationInspectorSidebar({
                           }))
                         }
                       />
-                      SHOW LEGEND
+                      {t('simInsp.params.graphShowLegend')}
                     </label>
                   </div>
                 </div>
@@ -2158,7 +2256,7 @@ export function SimulationInspectorSidebar({
                   <div className="grid grid-cols-2 gap-1.5">
                     <label className="space-y-0.5">
                       <span className="block text-[9px] text-subtle">
-                        FIXED Y MIN
+                        {t('simInsp.params.graphFixedYMin')}
                       </span>
                       <input
                         type="number"
@@ -2183,7 +2281,7 @@ export function SimulationInspectorSidebar({
                     </label>
                     <label className="space-y-0.5">
                       <span className="block text-[9px] text-subtle">
-                        FIXED Y MAX
+                        {t('simInsp.params.graphFixedYMax')}
                       </span>
                       <input
                         type="number"
@@ -2212,8 +2310,9 @@ export function SimulationInspectorSidebar({
                 {/* Extra Multi-Trace Bindings (can mix signals across ANY DBC!) */}
                 <div className="space-y-1 border-t border-hairline pt-2">
                   <span className="block text-[9px] uppercase text-subtle">
-                    EXTRA TRACES (
-                    {selectedWidget.config.extraBindings?.length ?? 0})
+                    {t('simInsp.params.extraTraces', {
+                      count: selectedWidget.config.extraBindings?.length ?? 0,
+                    })}
                   </span>
                   {(selectedWidget.config.extraBindings ?? []).map(
                     (extra, idx) => (
@@ -2280,7 +2379,7 @@ export function SimulationInspectorSidebar({
                         onChange={(e) => setExtraSignalKeyToAdd(e.target.value)}
                         className="h-6 min-w-0 flex-1 rounded-[2px] border border-hairline bg-surface px-1 text-[10px] text-ink"
                       >
-                        <option value="">-- EXTRA TRACE SEÇ --</option>
+                        <option value="">{t('simInsp.params.selectExtraTrace')}</option>
                         {visibleCatalogPairs.map((p) => (
                           <option key={p.id} value={p.id}>
                             {isAllDbFilter ? p.labelAll : p.labelSingle}
@@ -2324,7 +2423,7 @@ export function SimulationInspectorSidebar({
                         }}
                         className="h-6 cursor-pointer rounded-[2px] border border-hairline bg-elevated px-2 text-focus hover:border-strong"
                       >
-                        +ADD
+                        {t('simInsp.params.addExtraTraceBtn')}
                       </button>
                     </div>
                   )}
@@ -2338,7 +2437,7 @@ export function SimulationInspectorSidebar({
                 <div className="space-y-1 rounded-[2px] border border-hairline bg-surface p-2">
                   <div className="flex items-center justify-between">
                     <span className="text-[9px] font-semibold uppercase text-ink">
-                      LONGITUDE SIGNAL (LON)
+                      {t('simInsp.params.mapLonSignal')}
                     </span>
                     {canMutate &&
                       (selectedWidget.config.lonBinding ? (
@@ -2352,7 +2451,7 @@ export function SimulationInspectorSidebar({
                           }
                           className="cursor-pointer text-[9px] text-muted hover:text-critical"
                         >
-                          UNBIND
+                          {t('simInsp.binding.unbindBtn')}
                         </button>
                       ) : (
                         <button
@@ -2385,14 +2484,14 @@ export function SimulationInspectorSidebar({
                           }}
                           className="cursor-pointer text-[9px] font-semibold text-focus hover:underline"
                         >
-                          +MANUAL
+                          {t('simInsp.params.mapManualBtn')}
                         </button>
                       ))}
                   </div>
 
                   {visibleCatalogPairs.length > 0 && (
                     <select
-                      aria-label="Longitude DBC sinyali seç"
+                      aria-label={t('simInsp.params.mapPickLonDbc')}
                       disabled={!canMutate}
                       value={resolveBindingCatalogId(
                         selectedWidget.config.lonBinding,
@@ -2426,7 +2525,7 @@ export function SimulationInspectorSidebar({
                       }}
                       className="h-6 w-full rounded-[2px] border border-hairline bg-canvas px-1.5 text-[10px] text-ink"
                     >
-                      <option value="">-- PICK LONGITUDE FROM DBC --</option>
+                      <option value="">{t('simInsp.params.mapPickLonDbc')}</option>
                       {visibleCatalogPairs.map((p) => (
                         <option key={p.id} value={p.id}>
                           {isAllDbFilter ? p.labelAll : p.labelSingle}
@@ -2491,7 +2590,7 @@ export function SimulationInspectorSidebar({
                 <div className="space-y-1 rounded-[2px] border border-hairline bg-surface p-2">
                   <div className="flex items-center justify-between">
                     <span className="text-[9px] font-semibold uppercase text-subtle">
-                      HEADING / YAW (0..360° OPT)
+                      {t('simInsp.params.mapHdgSignal')}
                     </span>
                     {canMutate &&
                       (selectedWidget.config.headingBinding ? (
@@ -2505,7 +2604,7 @@ export function SimulationInspectorSidebar({
                           }
                           className="cursor-pointer text-[9px] text-muted hover:text-critical"
                         >
-                          CLEAR
+                          {t('simInsp.params.clearBtn')}
                         </button>
                       ) : (
                         <button
@@ -2541,14 +2640,14 @@ export function SimulationInspectorSidebar({
                           }}
                           className="cursor-pointer text-[9px] font-semibold text-focus hover:underline"
                         >
-                          +MANUAL
+                          {t('simInsp.params.mapManualBtn')}
                         </button>
                       ))}
                   </div>
 
                   {visibleCatalogPairs.length > 0 && (
                     <select
-                      aria-label="Heading DBC sinyali seç"
+                      aria-label={t('simInsp.params.mapAutoBearing')}
                       disabled={!canMutate}
                       value={resolveBindingCatalogId(
                         selectedWidget.config.headingBinding,
@@ -2586,7 +2685,7 @@ export function SimulationInspectorSidebar({
                       className="h-6 w-full rounded-[2px] border border-hairline bg-canvas px-1.5 text-[10px] text-ink"
                     >
                       <option value="">
-                        -- AUTO COURSE BEARING (OPTIONAL) --
+                        {t('simInsp.params.mapAutoBearing')}
                       </option>
                       {visibleCatalogPairs.map((p) => (
                         <option key={p.id} value={p.id}>
@@ -2613,7 +2712,7 @@ export function SimulationInspectorSidebar({
                 <div className="space-y-1 rounded-[2px] border border-hairline bg-surface p-2">
                   <div className="flex items-center justify-between">
                     <span className="text-[9px] font-semibold uppercase text-subtle">
-                      SPEED SIGNAL (OPTIONAL)
+                      {t('simInsp.params.mapSpeedSignal')}
                     </span>
                     {canMutate &&
                       (selectedWidget.config.speedBinding ? (
@@ -2627,7 +2726,7 @@ export function SimulationInspectorSidebar({
                           }
                           className="cursor-pointer text-[9px] text-muted hover:text-critical"
                         >
-                          CLEAR
+                          {t('simInsp.params.clearBtn')}
                         </button>
                       ) : (
                         <button
@@ -2660,14 +2759,14 @@ export function SimulationInspectorSidebar({
                           }}
                           className="cursor-pointer text-[9px] font-semibold text-focus hover:underline"
                         >
-                          +MANUAL
+                          {t('simInsp.params.mapManualBtn')}
                         </button>
                       ))}
                   </div>
 
                   {visibleCatalogPairs.length > 0 && (
                     <select
-                      aria-label="Speed DBC sinyali seç"
+                      aria-label={t('simInsp.params.mapSpeedSignal')}
                       disabled={!canMutate}
                       value={resolveBindingCatalogId(
                         selectedWidget.config.speedBinding,
@@ -2704,7 +2803,7 @@ export function SimulationInspectorSidebar({
                       }}
                       className="h-6 w-full rounded-[2px] border border-hairline bg-canvas px-1.5 text-[10px] text-ink"
                     >
-                      <option value="">-- NONE (OPTIONAL) --</option>
+                      <option value="">{t('simInsp.params.mapSpeedNone')}</option>
                       {visibleCatalogPairs.map((p) => (
                         <option key={p.id} value={p.id}>
                           {isAllDbFilter ? p.labelAll : p.labelSingle}
@@ -2732,7 +2831,7 @@ export function SimulationInspectorSidebar({
                 {/* 4. Map Layer Style + Custom Tile URL */}
                 <label className="block space-y-0.5">
                   <span className="text-[9px] text-subtle">
-                    MAP LAYER STYLE
+                    {t('simInsp.params.mapLayerStyle')}
                   </span>
                   <select
                     disabled={!canMutate}
@@ -2749,20 +2848,24 @@ export function SimulationInspectorSidebar({
                     className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-ink"
                   >
                     <option value="osm_standard">
-                      OSM STANDARD (STREET)
+                      {t('simInsp.params.mapOsmStandard')}
                     </option>
                     <option value="osm_dark">
-                      OSM DARK MATTER (LOW-GLARE)
+                      {t('simInsp.params.mapOsmDark')}
                     </option>
-                    <option value="osm_hot">OSM HUMANITARIAN (HOT)</option>
-                    <option value="custom">CUSTOM XYZ TILE SERVER</option>
+                    <option value="osm_hot">
+                      {t('simInsp.params.mapOsmHot')}
+                    </option>
+                    <option value="custom">
+                      {t('simInsp.params.mapCustomTile')}
+                    </option>
                   </select>
                 </label>
 
                 {selectedWidget.config.mapTileStyle === 'custom' && (
                   <label className="block space-y-0.5">
                     <span className="text-[9px] text-subtle">
-                      CUSTOM TILE URL ({'{z}/{x}/{y}'})
+                      {t('simInsp.params.mapCustomTileUrl')}
                     </span>
                     <input
                       type="url"
@@ -2787,7 +2890,7 @@ export function SimulationInspectorSidebar({
                 <div className="grid grid-cols-2 gap-1.5">
                   <label className="space-y-0.5">
                     <span className="block text-[9px] text-subtle">
-                      INITIAL ZOOM (1..19)
+                      {t('simInsp.params.mapInitZoom')}
                     </span>
                     <input
                       type="number"
@@ -2816,7 +2919,7 @@ export function SimulationInspectorSidebar({
 
                   <label className="space-y-0.5">
                     <span className="block text-[9px] text-subtle">
-                      TRAIL MAX PTS
+                      {t('simInsp.params.mapTrailMaxPts')}
                     </span>
                     <input
                       type="number"
@@ -2849,7 +2952,7 @@ export function SimulationInspectorSidebar({
                 <div className="grid grid-cols-2 gap-1.5">
                   <label className="space-y-0.5">
                     <span className="block text-[9px] text-subtle">
-                      DEFAULT LAT (°)
+                      {t('simInsp.params.mapDefaultLat')}
                     </span>
                     <input
                       type="number"
@@ -2878,7 +2981,7 @@ export function SimulationInspectorSidebar({
 
                   <label className="space-y-0.5">
                     <span className="block text-[9px] text-subtle">
-                      DEFAULT LON (°)
+                      {t('simInsp.params.mapDefaultLon')}
                     </span>
                     <input
                       type="number"
@@ -2923,7 +3026,7 @@ export function SimulationInspectorSidebar({
                         }))
                       }
                     />
-                    <span>Auto-Follow Position</span>
+                    <span>{t('simInsp.params.mapAutoFollow')}</span>
                   </label>
 
                   <label className="flex items-center gap-1.5 text-ink">
@@ -2941,7 +3044,7 @@ export function SimulationInspectorSidebar({
                         }))
                       }
                     />
-                    <span>Show GPS Breadcrumb Trail</span>
+                    <span>{t('simInsp.params.mapShowTrail')}</span>
                   </label>
 
                   <label className="flex items-center gap-1.5 text-ink">
@@ -2959,16 +3062,18 @@ export function SimulationInspectorSidebar({
                         }))
                       }
                     />
-                    <span>Click Map to Set Simulated GPS (Virtual Bus)</span>
+                    <span>{t('simInsp.params.mapClickToSimulate')}</span>
                   </label>
                 </div>
               </div>
             )}
 
             {selectedWidget.kind === 'button' && (
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 <label className="block space-y-0.5">
-                  <span className="text-[9px] text-subtle">BUTTON MODE</span>
+                  <span className="text-[9px] text-subtle">
+                    {t('simInsp.params.btnModeLabel')}
+                  </span>
                   <select
                     disabled={!canMutate}
                     value={selectedWidget.config.buttonMode ?? 'momentary'}
@@ -2977,18 +3082,34 @@ export function SimulationInspectorSidebar({
                         ...w,
                         config: {
                           ...w.config,
-                          buttonMode: e.target.value as 'momentary' | 'toggle',
+                          buttonMode: e.target.value as SimulationButtonMode,
                         },
                       }))
                     }
                     className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-ink"
                   >
-                    <option value="momentary">MOMENTARY (PUSH-HOLD)</option>
-                    <option value="toggle">TOGGLE (LATCH)</option>
+                    <option value="momentary">
+                      {t('simInsp.params.btnModeMomentary')}
+                    </option>
+                    <option value="toggle">
+                      {t('simInsp.params.btnModeToggle')}
+                    </option>
+                    <option value="pulse">
+                      {t('simInsp.params.btnModePulse')}
+                    </option>
+                    <option value="step">
+                      {t('simInsp.params.btnModeStep')}
+                    </option>
+                    <option value="cycle">
+                      {t('simInsp.params.btnModeCycle')}
+                    </option>
                   </select>
                 </label>
+
                 <label className="block space-y-0.5">
-                  <span className="text-[9px] text-subtle">BUTTON LABEL</span>
+                  <span className="text-[9px] text-subtle">
+                    {t('simInsp.params.btnLabel')}
+                  </span>
                   <input
                     type="text"
                     disabled={!canMutate}
@@ -3002,49 +3123,483 @@ export function SimulationInspectorSidebar({
                     className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-ink"
                   />
                 </label>
-                <div className="grid grid-cols-2 gap-1.5">
-                  <label className="space-y-0.5">
-                    <span className="block text-[9px] text-subtle">
-                      PRESS VAL
+
+                {/* PRESS / RELEASE values for momentary, toggle, pulse */}
+                {(selectedWidget.config.buttonMode === undefined ||
+                  selectedWidget.config.buttonMode === 'momentary' ||
+                  selectedWidget.config.buttonMode === 'toggle' ||
+                  selectedWidget.config.buttonMode === 'pulse') && (
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <label className="space-y-0.5">
+                      <span className="block text-[9px] text-subtle">
+                        {t('simInsp.params.btnPressVal')}
+                      </span>
+                      <input
+                        type="number"
+                        disabled={!canMutate}
+                        step="any"
+                        value={selectedWidget.config.pressValue ?? 1}
+                        onChange={(e) =>
+                          onUpdateWidget(selectedWidget.id, (w) => ({
+                            ...w,
+                            config: {
+                              ...w.config,
+                              pressValue: Number(e.target.value) || 0,
+                            },
+                          }))
+                        }
+                        className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-ink"
+                      />
+                    </label>
+                    <label className="space-y-0.5">
+                      <span className="block text-[9px] text-subtle">
+                        {t('simInsp.params.btnReleaseVal')}
+                      </span>
+                      <input
+                        type="number"
+                        disabled={!canMutate}
+                        step="any"
+                        value={selectedWidget.config.releaseValue ?? 0}
+                        onChange={(e) =>
+                          onUpdateWidget(selectedWidget.id, (w) => ({
+                            ...w,
+                            config: {
+                              ...w.config,
+                              releaseValue: Number(e.target.value) || 0,
+                            },
+                          }))
+                        }
+                        className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-ink"
+                      />
+                    </label>
+                  </div>
+                )}
+
+                {/* PULSE duration */}
+                {selectedWidget.config.buttonMode === 'pulse' && (
+                  <label className="block space-y-0.5">
+                    <span className="text-[9px] text-subtle">
+                      {t('simInsp.params.btnPulseDuration')}
                     </span>
                     <input
                       type="number"
                       disabled={!canMutate}
-                      step="any"
-                      value={selectedWidget.config.pressValue ?? 1}
+                      min={20}
+                      max={60000}
+                      step={10}
+                      value={selectedWidget.config.pulseDurationMs ?? 250}
                       onChange={(e) =>
                         onUpdateWidget(selectedWidget.id, (w) => ({
                           ...w,
                           config: {
                             ...w.config,
-                            pressValue: Number(e.target.value) || 0,
+                            pulseDurationMs: Math.max(
+                              20,
+                              Math.min(
+                                60000,
+                                Math.round(Number(e.target.value) || 250)
+                              )
+                            ),
                           },
                         }))
                       }
                       className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-ink"
                     />
                   </label>
-                  <label className="space-y-0.5">
-                    <span className="block text-[9px] text-subtle">
-                      RELEASE VAL
+                )}
+
+                {/* STEP delta, bounds & wrap */}
+                {selectedWidget.config.buttonMode === 'step' && (
+                  <div className="space-y-1.5 rounded-[2px] border border-hairline bg-surface p-2">
+                    <label className="block space-y-0.5">
+                      <span className="text-[9px] text-subtle">
+                        {t('simInsp.params.btnStepDelta')}
+                      </span>
+                      <input
+                        type="number"
+                        disabled={!canMutate}
+                        step="any"
+                        value={selectedWidget.config.stepDelta ?? 1}
+                        onChange={(e) => {
+                          const parsed = Number(e.target.value);
+                          onUpdateWidget(selectedWidget.id, (w) => ({
+                            ...w,
+                            config: {
+                              ...w.config,
+                              stepDelta: Number.isFinite(parsed) ? parsed : 1,
+                            },
+                          }));
+                        }}
+                        className="h-6 w-full rounded-[2px] border border-hairline bg-canvas px-1.5 text-ink"
+                      />
+                    </label>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <label className="space-y-0.5">
+                        <span className="block text-[9px] text-subtle">
+                          {t('simInsp.params.btnMinBound')}
+                        </span>
+                        <input
+                          type="number"
+                          disabled={!canMutate}
+                          step="any"
+                          value={
+                            selectedWidget.config.min ??
+                            selectedWidget.binding?.min ??
+                            0
+                          }
+                          onChange={(e) =>
+                            onUpdateWidget(selectedWidget.id, (w) => ({
+                              ...w,
+                              config: {
+                                ...w.config,
+                                min: Number(e.target.value) || 0,
+                              },
+                            }))
+                          }
+                          className="h-6 w-full rounded-[2px] border border-hairline bg-canvas px-1.5 text-ink"
+                        />
+                      </label>
+                      <label className="space-y-0.5">
+                        <span className="block text-[9px] text-subtle">
+                          {t('simInsp.params.btnMaxBound')}
+                        </span>
+                        <input
+                          type="number"
+                          disabled={!canMutate}
+                          step="any"
+                          value={
+                            selectedWidget.config.max ??
+                            selectedWidget.binding?.max ??
+                            100
+                          }
+                          onChange={(e) =>
+                            onUpdateWidget(selectedWidget.id, (w) => ({
+                              ...w,
+                              config: {
+                                ...w.config,
+                                max: Number(e.target.value) || 0,
+                              },
+                            }))
+                          }
+                          className="h-6 w-full rounded-[2px] border border-hairline bg-canvas px-1.5 text-ink"
+                        />
+                      </label>
+                    </div>
+                    <label className="inline-flex cursor-pointer items-center gap-1.5 pt-0.5 text-[10px] text-ink">
+                      <input
+                        type="checkbox"
+                        disabled={!canMutate}
+                        checked={selectedWidget.config.stepWrap === true}
+                        onChange={(e) =>
+                          onUpdateWidget(selectedWidget.id, (w) => ({
+                            ...w,
+                            config: {
+                              ...w.config,
+                              stepWrap: e.target.checked,
+                            },
+                          }))
+                        }
+                      />
+                      <span>{t('simInsp.params.btnStepWrap')}</span>
+                    </label>
+                  </div>
+                )}
+
+                {/* CYCLE options add / edit / remove */}
+                {selectedWidget.config.buttonMode === 'cycle' && (
+                  <div className="space-y-1.5 rounded-[2px] border border-hairline bg-surface p-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[9px] font-semibold uppercase text-subtle">
+                        {t('simInsp.params.btnCycleOptions')}
+                      </span>
+                      <span className="text-[9px] text-muted">
+                        {t('simInsp.params.btnCycleCount', {
+                          count: (selectedWidget.config.cycleOptions ?? []).length,
+                        })}
+                      </span>
+                    </div>
+
+                    {boundSchemaSignal &&
+                      Object.keys(boundSchemaSignal.enumTable).length > 0 &&
+                      canMutate && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateWidget(selectedWidget.id, (w) => ({
+                              ...w,
+                              config: {
+                                ...w.config,
+                                cycleOptions: enumTableToComboOptions(
+                                  boundSchemaSignal.enumTable
+                                ),
+                              },
+                            }))
+                          }
+                          className="inline-flex h-6 w-full cursor-pointer items-center justify-center gap-1 rounded-[2px] border border-hairline bg-elevated text-[9px] font-semibold text-focus hover:border-strong"
+                        >
+                          <RefreshCw className="h-2.5 w-2.5" />
+                          {t('simInsp.params.btnFillDbc')}
+                        </button>
+                      )}
+
+                    <div className="max-h-36 space-y-1 overflow-y-auto">
+                      {(selectedWidget.config.cycleOptions ?? []).length ===
+                        0 && (
+                        <div className="rounded-[2px] border border-dashed border-hairline bg-canvas px-1.5 py-1 text-[9px] text-muted">
+                          {t('simInsp.params.btnCycleEmptyHint')}
+                        </div>
+                      )}
+                      {(selectedWidget.config.cycleOptions ?? []).map(
+                        (opt, idx) => (
+                          <div
+                            key={`cycle-${idx}`}
+                            className="flex items-center gap-1"
+                          >
+                            <input
+                              type="number"
+                              step="any"
+                              disabled={!canMutate}
+                              aria-label={`Cycle value ${idx + 1}`}
+                              value={opt.value}
+                              onChange={(e) => {
+                                const nextNum = Number(e.target.value) || 0;
+                                onUpdateWidget(selectedWidget.id, (w) => ({
+                                  ...w,
+                                  config: {
+                                    ...w.config,
+                                    cycleOptions: (
+                                      w.config.cycleOptions ?? []
+                                    ).map((item, oIdx) =>
+                                      oIdx === idx
+                                        ? { ...item, value: nextNum }
+                                        : item
+                                    ),
+                                  },
+                                }));
+                              }}
+                              className="h-6 w-12 rounded-[2px] border border-hairline bg-canvas px-1 text-ink"
+                            />
+                            <input
+                              type="text"
+                              disabled={!canMutate}
+                              aria-label={`Cycle label ${idx + 1}`}
+                              value={opt.label}
+                              maxLength={120}
+                              onChange={(e) => {
+                                const nextLabel = e.target.value;
+                                onUpdateWidget(selectedWidget.id, (w) => ({
+                                  ...w,
+                                  config: {
+                                    ...w.config,
+                                    cycleOptions: (
+                                      w.config.cycleOptions ?? []
+                                    ).map((item, oIdx) =>
+                                      oIdx === idx
+                                        ? {
+                                            ...item,
+                                            label: nextLabel || `${item.value}`,
+                                          }
+                                        : item
+                                    ),
+                                  },
+                                }));
+                              }}
+                              className="h-6 min-w-0 flex-1 rounded-[2px] border border-hairline bg-canvas px-1.5 text-ink"
+                            />
+                            {canMutate && (
+                              <button
+                                type="button"
+                                title={t('simInsp.params.btnDeleteCycleState')}
+                                onClick={() =>
+                                  onUpdateWidget(selectedWidget.id, (w) => ({
+                                    ...w,
+                                    config: {
+                                      ...w.config,
+                                      cycleOptions: (
+                                        w.config.cycleOptions ?? []
+                                      ).filter((_, oIdx) => oIdx !== idx),
+                                    },
+                                  }))
+                                }
+                                className="cursor-pointer p-0.5 text-muted hover:text-critical"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </button>
+                            )}
+                          </div>
+                        )
+                      )}
+                    </div>
+
+                    {canMutate && (
+                      <div className="flex gap-1 pt-1">
+                        <input
+                          type="number"
+                          step="any"
+                          value={newCycleVal}
+                          onChange={(e) => setNewCycleVal(e.target.value)}
+                          placeholder="0"
+                          className="h-6 w-12 rounded-[2px] border border-hairline bg-canvas px-1 text-ink"
+                        />
+                        <input
+                          type="text"
+                          value={newCycleLabel}
+                          maxLength={120}
+                          onChange={(e) => setNewCycleLabel(e.target.value)}
+                          placeholder={t('simInsp.params.btnCycleNamePlaceholder')}
+                          className="h-6 min-w-0 flex-1 rounded-[2px] border border-hairline bg-canvas px-1.5 text-ink"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const clean = newCycleLabel.trim();
+                            if (!clean) return;
+                            const nextVal = Number(newCycleVal) || 0;
+                            const nextOpt: SimulationComboOptionDto = {
+                              value: nextVal,
+                              label: clean,
+                            };
+                            onUpdateWidget(selectedWidget.id, (w) => ({
+                              ...w,
+                              config: {
+                                ...w.config,
+                                cycleOptions: [
+                                  ...(w.config.cycleOptions ?? []),
+                                  nextOpt,
+                                ],
+                              },
+                            }));
+                            setNewCycleVal(String(nextVal + 1));
+                            setNewCycleLabel(`MOD ${nextVal + 1}`);
+                          }}
+                          className="inline-flex h-6 cursor-pointer items-center gap-0.5 rounded-[2px] border border-hairline bg-elevated px-2 text-[9px] font-semibold text-focus hover:border-strong"
+                        >
+                          <Plus className="h-2.5 w-2.5" />
+                          {t('simInsp.params.btnAddBtn')}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Hotkey Assignment ("Tuş Ata" capture + clear) */}
+                <div className="space-y-1 rounded-[2px] border border-hairline bg-surface p-2">
+                  <div className="flex items-center justify-between">
+                    <span className="inline-flex items-center gap-1 text-[9px] font-semibold uppercase text-subtle">
+                      <Keyboard className="h-2.5 w-2.5" />
+                      {t('simInsp.params.btnHotkeyLabel')}
                     </span>
+                    {selectedWidget.config.hotkey ? (
+                      <kbd className="rounded-[2px] border border-hairline bg-canvas px-1.5 py-0.5 font-mono text-[9px] font-bold text-focus">
+                        [{formatHotkeyBadge(selectedWidget.config.hotkey)}]
+                      </kbd>
+                    ) : (
+                      <span className="text-[9px] text-muted">
+                        {t('simInsp.params.btnHotkeyNone')}
+                      </span>
+                    )}
+                  </div>
+
+                  {canMutate && (
+                    <div className="flex items-center gap-1 pt-0.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCapturingHotkeyWidgetId((prev) =>
+                            prev === selectedWidget.id
+                              ? null
+                              : selectedWidget.id
+                          )
+                        }
+                        className="inline-flex h-6 flex-1 cursor-pointer items-center justify-center gap-1 rounded-[2px] border px-2 text-[9px] font-semibold transition-colors"
+                        style={
+                          capturingHotkeyWidgetId === selectedWidget.id
+                            ? {
+                                backgroundColor: 'var(--status-focus-bg)',
+                                borderColor: 'var(--status-focus)',
+                                color: 'var(--status-focus)',
+                              }
+                            : {
+                                backgroundColor: 'var(--bg-elevated)',
+                                borderColor: 'var(--border-hairline)',
+                                color: 'var(--text-ink)',
+                              }
+                        }
+                      >
+                        {capturingHotkeyWidgetId === selectedWidget.id
+                          ? t('simInsp.params.btnPressKey')
+                          : t('simInsp.params.btnAssignKey')}
+                      </button>
+
+                      {selectedWidget.config.hotkey && (
+                        <button
+                          type="button"
+                          title={t('simInsp.params.btnClearHotkeyTitle')}
+                          onClick={() => {
+                            setCapturingHotkeyWidgetId(null);
+                            onUpdateWidget(selectedWidget.id, (w) => ({
+                              ...w,
+                              config: {
+                                ...w.config,
+                                hotkey: undefined,
+                              },
+                            }));
+                          }}
+                          className="inline-flex h-6 cursor-pointer items-center gap-0.5 rounded-[2px] border border-hairline bg-canvas px-1.5 text-[9px] text-muted hover:border-strong hover:text-critical"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                          {t('simInsp.params.btnClearHotkeyBtn')}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Guarded Switch Cover (requireConfirm + confirmPrompt) */}
+                <div className="space-y-1.5 rounded-[2px] border border-hairline bg-surface p-2">
+                  <label className="inline-flex cursor-pointer items-center gap-1.5 text-[10px] font-medium text-ink">
                     <input
-                      type="number"
+                      type="checkbox"
                       disabled={!canMutate}
-                      step="any"
-                      value={selectedWidget.config.releaseValue ?? 0}
+                      checked={selectedWidget.config.requireConfirm === true}
                       onChange={(e) =>
                         onUpdateWidget(selectedWidget.id, (w) => ({
                           ...w,
                           config: {
                             ...w.config,
-                            releaseValue: Number(e.target.value) || 0,
+                            requireConfirm: e.target.checked,
                           },
                         }))
                       }
-                      className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-ink"
                     />
+                    <ShieldAlert className="h-3 w-3 shrink-0 text-warn" />
+                    <span>{t('simInsp.params.btnGuardedSwitch')}</span>
                   </label>
+
+                  {selectedWidget.config.requireConfirm === true && (
+                    <label className="block space-y-0.5">
+                      <span className="text-[9px] text-subtle">
+                        {t('simInsp.params.btnConfirmPromptLabel')}
+                      </span>
+                      <input
+                        type="text"
+                        disabled={!canMutate}
+                        maxLength={120}
+                        placeholder={t('simInsp.params.btnConfirmPromptPlaceholder')}
+                        value={selectedWidget.config.confirmPrompt ?? ''}
+                        onChange={(e) =>
+                          onUpdateWidget(selectedWidget.id, (w) => ({
+                            ...w,
+                            config: {
+                              ...w.config,
+                              confirmPrompt: e.target.value,
+                            },
+                          }))
+                        }
+                        className="h-6 w-full rounded-[2px] border border-hairline bg-canvas px-1.5 text-ink"
+                      />
+                    </label>
+                  )}
                 </div>
               </div>
             )}
@@ -3052,7 +3607,9 @@ export function SimulationInspectorSidebar({
             {selectedWidget.kind === 'checkbox' && (
               <div className="space-y-1.5">
                 <label className="block space-y-0.5">
-                  <span className="text-[9px] text-subtle">SWITCH LABEL</span>
+                  <span className="text-[9px] text-subtle">
+                    {t('simInsp.params.chkLabel')}
+                  </span>
                   <input
                     type="text"
                     disabled={!canMutate}
@@ -3069,7 +3626,7 @@ export function SimulationInspectorSidebar({
                 <div className="grid grid-cols-2 gap-1.5">
                   <label className="space-y-0.5">
                     <span className="block text-[9px] text-subtle">
-                      CHECKED VAL
+                      {t('simInsp.params.chkCheckedVal')}
                     </span>
                     <input
                       type="number"
@@ -3090,7 +3647,7 @@ export function SimulationInspectorSidebar({
                   </label>
                   <label className="space-y-0.5">
                     <span className="block text-[9px] text-subtle">
-                      UNCHECKED VAL
+                      {t('simInsp.params.chkUncheckedVal')}
                     </span>
                     <input
                       type="number"
@@ -3134,7 +3691,7 @@ export function SimulationInspectorSidebar({
                       className="inline-flex h-6 w-full cursor-pointer items-center justify-center gap-1 rounded-[2px] border border-hairline bg-elevated text-[9px] font-semibold text-focus hover:border-strong"
                     >
                       <RefreshCw className="h-2.5 w-2.5" />
-                      POPULATE FROM DBC VAL_
+                      {t('simInsp.params.cmbPopulateDbc')}
                     </button>
                   )}
 
@@ -3215,7 +3772,9 @@ export function SimulationInspectorSidebar({
             {selectedWidget.kind === 'slider' && (
               <div className="space-y-1.5">
                 <label className="block space-y-0.5">
-                  <span className="text-[9px] text-subtle">STEP</span>
+                  <span className="text-[9px] text-subtle">
+                    {t('simInsp.params.sldStep')}
+                  </span>
                   <input
                     type="number"
                     disabled={!canMutate}
@@ -3249,7 +3808,7 @@ export function SimulationInspectorSidebar({
                       }))
                     }
                   />
-                  SHOW NUMERIC INPUT
+                  {t('simInsp.params.sldShowNumeric')}
                 </label>
               </div>
             )}
@@ -3261,7 +3820,7 @@ export function SimulationInspectorSidebar({
               <div className="border-t border-hairline pt-2">
                 <label className="block space-y-0.5">
                   <span className="text-[9px] text-subtle">
-                    DESKTOP TX CYCLE HINT (MS · 0 = ON-CHANGE)
+                    {t('simInsp.params.txCycleHint')}
                   </span>
                   <input
                     type="number"
@@ -3288,7 +3847,7 @@ export function SimulationInspectorSidebar({
                   />
                 </label>
                 <p className="mt-1 text-[9px] text-subtle">
-                  Senkronize edilen NexusCAN Masaüstü istemcisi için periyodik ipucudur; Bulut üzerinde uzaktan CAN TX her zaman kilitlidir.
+                  {t('simInsp.params.txCycleExpl')}
                 </p>
               </div>
             )}
@@ -3296,7 +3855,9 @@ export function SimulationInspectorSidebar({
             {selectedWidget.kind === 'group' && (
               <div className="space-y-3">
                 <label className="block space-y-0.5">
-                  <span className="text-[9px] text-subtle">SUBTITLE</span>
+                  <span className="text-[9px] text-subtle">
+                    {t('simInsp.group.subtitle')}
+                  </span>
                   <input
                     type="text"
                     disabled={!canMutate}
@@ -3314,17 +3875,19 @@ export function SimulationInspectorSidebar({
                 <div className="space-y-2.5 border-t border-hairline pt-2.5">
                   <div className="flex items-center justify-between gap-1.5">
                     <span className="font-semibold uppercase tracking-wider text-focus">
-                      GROUP CONTAINER // İÇERİK YÖNETİMİ
+                      {t('simInsp.group.containerTitle')}
                     </span>
                     <span className="rounded-[2px] border border-hairline bg-surface px-1.5 py-0.5 text-[9px] tabular-nums text-muted">
-                      {groupChildren.length} ÖĞE
+                      {t('simInsp.group.itemCount', {
+                        count: groupChildren.length,
+                      })}
                     </span>
                   </div>
 
                   {/* 1. Quick Add Control / Indicator into Group */}
                   <div className="space-y-1">
                     <span className="block text-[9px] uppercase text-subtle">
-                      GRUBA HIZLI KONTROL / GÖSTERGE EKLE
+                      {t('simInsp.group.quickAddTitle')}
                     </span>
                     <div className="grid grid-cols-2 gap-1">
                       {GROUP_QUICK_ADD_OPTIONS.map((opt) => (
@@ -3337,7 +3900,7 @@ export function SimulationInspectorSidebar({
                           }
                           className="flex h-6 cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-surface px-1.5 text-[9px] font-semibold uppercase tracking-wider text-ink transition-colors hover:border-strong hover:bg-elevated hover:text-focus disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                          {opt.label}
+                          {t(opt.labelKey)}
                         </button>
                       ))}
                     </div>
@@ -3347,11 +3910,11 @@ export function SimulationInspectorSidebar({
                   {outsideGroupWidgets.length > 0 && (
                     <div className="space-y-1 border-t border-hairline pt-2">
                       <span className="block text-[9px] uppercase text-subtle">
-                        PANELDEKİ MEVCUT BİLEŞENİ BU GRUBA TAŞI
+                        {t('simInsp.group.moveExistingTitle')}
                       </span>
                       <div className="flex items-center gap-1">
                         <select
-                          aria-label="Bu gruba taşınacak bileşeni seçin"
+                          aria-label={t('simInsp.group.moveSelectAria')}
                           disabled={!canMutate}
                           value={effectiveMoveCandidateId}
                           onChange={(e) =>
@@ -3378,7 +3941,7 @@ export function SimulationInspectorSidebar({
                           }}
                           className="h-6 shrink-0 cursor-pointer rounded-[2px] border border-strong bg-elevated px-2 text-[9px] font-semibold uppercase tracking-wider text-focus hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                          GRUBA TAŞI
+                          {t('simInsp.group.moveBtn')}
                         </button>
                       </div>
                     </div>
@@ -3387,11 +3950,13 @@ export function SimulationInspectorSidebar({
                   {/* 3. Children Inside Group List */}
                   <div className="space-y-1 border-t border-hairline pt-2">
                     <span className="block text-[9px] uppercase tabular-nums text-subtle">
-                      GRUP İÇİNDEKİ BİLEŞENLER ({groupChildren.length})
+                      {t('simInsp.group.childrenTitle', {
+                        count: groupChildren.length,
+                      })}
                     </span>
                     {groupChildren.length === 0 ? (
                       <div className="rounded-[2px] border border-hairline bg-surface px-2 py-2 text-center text-[9px] text-muted">
-                        BU GRUPTA HENÜZ BİLEŞEN YOK. YUKARIDAN HIZLI EKLEYİN VEYA SOL PALETTEN SÜRÜKLEYİN.
+                        {t('simInsp.group.emptyHint')}
                       </div>
                     ) : (
                       <div className="max-h-44 space-y-1 overflow-y-auto">
@@ -3419,7 +3984,7 @@ export function SimulationInspectorSidebar({
                               onClick={() => onSelectWidget(child.id)}
                               className="shrink-0 cursor-pointer rounded-[2px] border border-hairline bg-elevated px-1.5 py-0.5 text-[9px] font-semibold uppercase text-ink hover:border-strong hover:text-focus"
                             >
-                              DÜZENLE
+                              {t('simInsp.group.editChildBtn')}
                             </button>
                           </div>
                         ))}

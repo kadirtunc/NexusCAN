@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
+import { useI18n } from '../i18n';
 import { useDatabaseStore } from '../store/databaseStore';
 import { MAX_BUS_ID, useConnectionStore } from '../store/connectionStore';
 import type { TxEntryMode, TxListEntry } from '../store/transmitStore';
@@ -27,6 +28,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
   onClose,
   onSave,
 }) => {
+  const { t } = useI18n();
   const dbState = useDatabaseStore();
   const [busId, setBusId] = useState<number>(initialEntry?.busId ?? defaultBusId ?? 0);
 
@@ -201,7 +203,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
 
     if (mode === 'symbolic') {
       if (!selectedMessage) {
-        setValidationError(`Bus ${busId + 1} has no .dbc/.kcd bound. Switch to Raw Mode or bind a database in Connections / Databases.`);
+        setValidationError(t('rxtx.modal.errNoDb', { bus: busId + 1 }));
         return;
       }
 
@@ -236,16 +238,14 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
     // Raw mode validation
     const cleanHex = arbIdHex.trim().replace(/^0x/i, '');
     if (!/^[0-9a-fA-F]{1,8}$/.test(cleanHex)) {
-      setValidationError('Invalid CAN-ID hex (enter e.g. 101 or 18FF50E5).');
+      setValidationError(t('rxtx.modal.errInvalidHex'));
       return;
     }
     const parsedArbId = parseInt(cleanHex, 16);
     const maxArb = isExtended ? 0x1fffffff : 0x7ff;
     if (parsedArbId > maxArb) {
       setValidationError(
-        isExtended
-          ? 'Extended 29-bit CAN-ID cannot exceed 1FFFFFFF.'
-          : 'Standard 11-bit CAN-ID cannot exceed 7FF (check Extended 29-bit for larger IDs).',
+        isExtended ? t('rxtx.modal.errExtLimit') : t('rxtx.modal.errStdLimit'),
       );
       return;
     }
@@ -310,13 +310,13 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
           className="h-[30px] px-3 flex items-center justify-between select-none"
         >
           <span className="font-semibold text-[12px]">
-            {initialEntry ? 'Edit Transmit Message' : 'New Transmit Message'}
+            {initialEntry ? t('rxtx.modal.editTitle') : t('rxtx.modal.newTitle')}
           </span>
           <button
             type="button"
             onClick={onClose}
             className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-            aria-label="Close modal"
+            aria-label={t('rxtx.modal.closeAria')}
           >
             <X className="w-4 h-4" />
           </button>
@@ -340,7 +340,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
             }}
             className="px-2.5 py-1 border text-[11px] font-semibold cursor-pointer disabled:opacity-40"
           >
-            Symbolic Message (.dbc / .kcd)
+            {t('rxtx.modal.symbolicTab')}
           </button>
           <button
             type="button"
@@ -351,7 +351,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
             }}
             className="px-2.5 py-1 border text-[11px] font-semibold cursor-pointer"
           >
-            Raw CAN / CAN-FD Frame
+            {t('rxtx.modal.rawTab')}
           </button>
         </div>
 
@@ -369,7 +369,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
                 <div className="grid grid-cols-12 gap-2">
                   <div className="col-span-3">
                     <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                      Bus
+                      {t('rxtx.modal.bus')}
                     </label>
                     <select
                       value={busId}
@@ -390,7 +390,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
 
                   <div className="col-span-9">
                     <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                      Symbol (Database Message)
+                      {t('rxtx.modal.symbol')}
                     </label>
                     <select
                       value={selectedMessage?.messageKey ?? ''}
@@ -418,7 +418,9 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
                     }}
                     className="flex items-center gap-2 px-2.5 py-1.5 border text-[11px]"
                   >
-                    <span className="text-[var(--text-secondary)] font-sans">Active Multiplexer Path:</span>
+                    <span className="text-[var(--text-secondary)] font-sans">
+                      {t('rxtx.modal.activeMuxPath')}
+                    </span>
                     <span className="font-mono tabular-nums font-semibold" style={{ color: '#E6EDF3' }}>
                       {muxResolution.formatted.baseName}
                     </span>
@@ -438,9 +440,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
                     className="px-2.5 py-2 border text-[11px] leading-relaxed"
                     style={{ borderColor: 'var(--status-warn)', color: 'var(--status-warn)' }}
                   >
-                    Bus {busId + 1} bağlantısına atanmış bir .dbc / .kcd veritabanı yok — Raw Hex
-                    gönderebilir veya Bağlantılar / Databases sekmesinden bu hatta veritabanı
-                    bağlayabilirsiniz.
+                    {t('rxtx.modal.noMessagesWarn', { bus: busId + 1 })}
                   </div>
                 )}
 
@@ -453,10 +453,10 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
                     <table className="pcan-grid">
                       <thead>
                         <tr>
-                          <th>Signal Name</th>
-                          <th className="w-48">Physical / Enum Value</th>
-                          <th className="w-16">Unit</th>
-                          <th className="w-32">Range [Min..Max]</th>
+                          <th>{t('rxtx.modal.sigName')}</th>
+                          <th className="w-48">{t('rxtx.modal.sigValue')}</th>
+                          <th className="w-16">{t('rxtx.modal.sigUnit')}</th>
+                          <th className="w-32">{t('rxtx.modal.sigRange')}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -541,7 +541,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
                 {/* Packed Hex Preview */}
                 <div>
                   <div className="text-[11px] text-[var(--text-secondary)] mb-1">
-                    Packed Data Preview (Hex):
+                    {t('rxtx.modal.packedHexPreview')}
                   </div>
                   <div
                     style={{
@@ -560,7 +560,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
                 <div className="grid grid-cols-12 gap-2 items-end">
                   <div className="col-span-2">
                     <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                      Bus
+                      {t('rxtx.modal.bus')}
                     </label>
                     <select
                       value={busId}
@@ -581,7 +581,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
 
                   <div className="col-span-3">
                     <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                      CAN-ID (Hex)
+                      {t('rxtx.modal.canIdHex')}
                     </label>
                     <input
                       type="text"
@@ -598,7 +598,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
 
                   <div className="col-span-3">
                     <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                      ID Format
+                      {t('rxtx.modal.idFormat')}
                     </label>
                     <select
                       value={isExtended ? 'ext' : 'std'}
@@ -609,14 +609,14 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
                       }}
                       className="w-full h-[26px] px-1.5 border text-[11px]"
                     >
-                      <option value="std">Standard (11-bit)</option>
-                      <option value="ext">Extended (29-bit)</option>
+                      <option value="std">{t('rxtx.modal.std11')}</option>
+                      <option value="ext">{t('rxtx.modal.ext29')}</option>
                     </select>
                   </div>
 
                   <div className="col-span-2">
                     <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                      Length
+                      {t('rxtx.modal.length')}
                     </label>
                     <select
                       value={isFd ? dlc : Math.min(8, dlc)}
@@ -663,7 +663,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
                 {/* Hex Byte Grid B0..DLC-1 */}
                 <div>
                   <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                    Data Bytes (Hex 00..FF)
+                    {t('rxtx.modal.dataBytes')}
                   </label>
                   <div className="grid grid-cols-8 gap-1.5 max-h-[190px] overflow-y-auto p-2 border border-[var(--border-grid)] bg-[var(--bg-row-alt)]">
                     {Array.from(
@@ -705,7 +705,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
             <div className="grid grid-cols-12 gap-2 pt-1 border-t border-[var(--border-grid)]">
               <div className="col-span-4">
                 <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                  Cycle Time (ms) — 0 = Wait
+                  {t('rxtx.modal.cycleTime')}
                 </label>
                 <input
                   type="number"
@@ -723,13 +723,13 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
 
               <div className="col-span-8">
                 <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                  Comment
+                  {t('rxtx.modal.comment')}
                 </label>
                 <input
                   type="text"
                   value={comment}
                   onChange={(e) => setComment(e.target.value)}
-                  placeholder="Optional engineering note"
+                  placeholder={t('rxtx.modal.commentPlaceholder')}
                   style={{
                     backgroundColor: 'var(--bg-input)',
                     borderColor: 'var(--border-strong)',
@@ -758,7 +758,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
               }}
               className="h-[25px] px-3 border text-[11px] hover:text-[var(--text-primary)] cursor-pointer"
             >
-              Cancel
+              {t('rxtx.modal.cancel')}
             </button>
             <button
               type="submit"
@@ -769,7 +769,7 @@ export const TxMessageModal: React.FC<TxMessageModalProps> = ({
               }}
               className="h-[25px] px-4 border text-[11px] font-semibold hover:opacity-90 cursor-pointer"
             >
-              OK
+              {t('rxtx.modal.ok')}
             </button>
           </div>
         </form>

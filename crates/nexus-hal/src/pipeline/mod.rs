@@ -2,14 +2,17 @@
 //! preset/custom `.dbc` & `.kcd` database management, persistent `.nexusproj.json` project storage,
 //! cross-OS driver diagnostics, and all 20 IPC command handlers.
 
+pub mod blf;
+pub mod replay;
 pub mod state_table;
 pub mod tx_scheduler;
 
 use crate::drivers::probe::probe_all_drivers;
 use crate::dto::{
-    BusHealthDto, ChannelConfigDto, DbFileInputDto, DeviceDescriptorDto, DriverProbeReportDto,
-    PanicStopResultDto, PeriodicTxJobDto, ProjectSummaryDto, TelemetrySnapshotDto,
-    TxTransmitResultDto,
+    BusHealthDto, ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto, DeviceDescriptorDto,
+    DriverProbeReportDto, LoadedTraceFileDto, PanicStopResultDto, PeriodicTxJobDto,
+    ProjectSummaryDto, StartTraceReplayArgsDto, TelemetrySnapshotDto, TraceFileSummaryDto,
+    TraceReplayControlArgsDto, TraceReplayStatusDto, TraceStorageInfoDto, TxTransmitResultDto,
 };
 use crate::error::{AdapterError, HalError};
 use crate::registry::DriverRegistry;
@@ -23,6 +26,11 @@ use nexus_netdb::{
     NetworkDatabase, ParseOptions,
 };
 use parking_lot::{Mutex, RwLock};
+use replay::{
+    compile_chronological_frames, delete_trace_file, list_trace_files, load_trace_file,
+    parse_trace_bytes, parse_trace_entries_from_bytes, sanitize_trace_filename, save_trace_file,
+    save_trace_file_bytes, ReplayController,
+};
 use state_table::StateTable;
 use std::collections::BTreeMap;
 use std::fs;
@@ -49,26 +57,33 @@ enum AggregatorControl {
     FlushSnapshot(Sender<TelemetrySnapshotDto>),
 }
 
-struct TxDispatchRequest {
-    frame: RawCanFrame,
-    ack: Option<Sender<Result<(), AdapterError>>>,
+pub(crate) struct TxDispatchRequest {
+    pub(crate) frame: RawCanFrame,
+    pub(crate) ack: Option<Sender<Result<(), AdapterError>>>,
+    pub(crate) suppress_echo: bool,
+    pub(crate) hw_tx_counter: Option<Arc<AtomicU64>>,
 }
 
-struct ConnectedBusHandle {
+pub(crate) struct ConnectedBusHandle {
     bus_id: BusId,
     descriptor: DeviceDescriptor,
     config: ChannelConfigDto,
-    listen_only: bool,
-    tx_armed: Arc<AtomicBool>,
+    pub(crate) listen_only: bool,
+    pub(crate) tx_armed: Arc<AtomicBool>,
     bus_state: Arc<AtomicU8>,
     tx_errors: Arc<AtomicU32>,
     rx_errors: Arc<AtomicU32>,
     stop_flag: Arc<AtomicBool>,
-    tx_sender: Sender<TxDispatchRequest>,
+    pub(crate) tx_sender: Sender<TxDispatchRequest>,
     io_join: Option<JoinHandle<()>>,
 }
 
 impl ConnectedBusHandle {
+    #[inline]
+    pub(crate) fn is_connected(&self) -> bool {
+        BusState::from_u8(self.bus_state.load(Ordering::Acquire)) != BusState::Disconnected
+    }
+
     fn to_health_dto(&self) -> BusHealthDto {
         let state = BusState::from_u8(self.bus_state.load(Ordering::Acquire));
         BusHealthDto {
@@ -113,10 +128,12 @@ struct LoadedDatabaseState {
 pub struct PipelineEngine {
     registry: DriverRegistry,
     projects_dir: PathBuf,
+    traces_dir: PathBuf,
     buses: Arc<Mutex<BTreeMap<BusId, ConnectedBusHandle>>>,
     db_state: RwLock<Option<LoadedDatabaseState>>,
     bus_db_states: RwLock<BTreeMap<BusId, Option<LoadedDatabaseState>>>,
     tx_scheduler: Arc<Mutex<TxScheduler>>,
+    replay: Arc<ReplayController>,
     frame_tx: Sender<RawCanFrame>,
     ctrl_tx: Sender<AggregatorControl>,
     dropped_frames: Arc<AtomicU64>,
@@ -142,11 +159,22 @@ impl PipelineEngine {
 
     /// Creates a [`PipelineEngine`] with a custom [`DriverRegistry`].
     pub fn with_registry(registry: DriverRegistry) -> Self {
-        Self::with_projects_dir(registry, locate_projects_dir())
+        Self::with_storage_dirs(registry, locate_projects_dir(), locate_traces_dir())
     }
 
     /// Creates a [`PipelineEngine`] with an explicit persistent `./projects` directory path.
     pub fn with_projects_dir(registry: DriverRegistry, projects_dir: PathBuf) -> Self {
+        Self::with_storage_dirs(registry, projects_dir, locate_traces_dir())
+    }
+
+    /// Creates a [`PipelineEngine`] with explicit persistent `./projects` and `./traces` directories.
+    pub fn with_storage_dirs(
+        registry: DriverRegistry,
+        projects_dir: PathBuf,
+        traces_dir: PathBuf,
+    ) -> Self {
+        let _ = fs::create_dir_all(&traces_dir);
+
         let (frame_tx, frame_rx) = bounded::<RawCanFrame>(FRAME_RING_CAPACITY);
         let (ctrl_tx, ctrl_rx) = bounded::<AggregatorControl>(64);
         let (snapshot_bcast_tx, _) = broadcast::channel::<TelemetrySnapshotDto>(128);
@@ -159,10 +187,19 @@ impl PipelineEngine {
         let engine_stop = Arc::new(AtomicBool::new(false));
         let latest_snapshot = Arc::new(RwLock::new(None));
 
+        let replay = Arc::new(ReplayController::spawn(
+            frame_tx.clone(),
+            Arc::clone(&dropped_frames),
+            Arc::clone(&buses),
+            Arc::clone(&tx_panic_latched),
+            Arc::clone(&engine_stop),
+        ));
+
         let agg_stop = Arc::clone(&engine_stop);
         let agg_buses = Arc::clone(&buses);
         let agg_dropped = Arc::clone(&dropped_frames);
         let agg_panic = Arc::clone(&tx_panic_latched);
+        let agg_replay = Arc::clone(&replay);
         let agg_bcast = snapshot_bcast_tx.clone();
         let agg_latest = Arc::clone(&latest_snapshot);
 
@@ -176,6 +213,7 @@ impl PipelineEngine {
                     agg_buses,
                     agg_dropped,
                     agg_panic,
+                    agg_replay,
                     agg_bcast,
                     agg_latest,
                 );
@@ -197,10 +235,12 @@ impl PipelineEngine {
         Self {
             registry,
             projects_dir,
+            traces_dir,
             buses,
             db_state: RwLock::new(None),
             bus_db_states: RwLock::new(BTreeMap::new()),
             tx_scheduler,
+            replay,
             frame_tx,
             ctrl_tx,
             dropped_frames,
@@ -254,7 +294,7 @@ impl PipelineEngine {
         let tx_errors = Arc::new(AtomicU32::new(initial_health.tx_error_count));
         let rx_errors = Arc::new(AtomicU32::new(initial_health.rx_error_count));
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let (tx_sender, tx_receiver) = bounded::<TxDispatchRequest>(512);
+        let (tx_sender, tx_receiver) = bounded::<TxDispatchRequest>(4_096);
 
         let io_stop = Arc::clone(&stop_flag);
         let io_engine_stop = Arc::clone(&self.engine_stop);
@@ -442,9 +482,10 @@ impl PipelineEngine {
         Ok(dto)
     }
 
-    /// 5. `cmd_panic_stop_tx` -> Emergency stop: cancels all periodic TX jobs and disarms every bus.
+    /// 5. `cmd_panic_stop_tx` -> Emergency stop: cancels all periodic TX jobs, disarms replay hardware TX, and disarms every bus.
     pub fn cmd_panic_stop_tx(&self) -> PanicStopResultDto {
         self.tx_panic_latched.store(true, Ordering::Release);
+        self.replay.disarm_hardware_tx();
         let stopped_periodic_jobs = self.tx_scheduler.lock().clear_all();
 
         let mut disarmed_buses = 0usize;
@@ -823,6 +864,8 @@ impl PipelineEngine {
             .send(TxDispatchRequest {
                 frame: tx_frame,
                 ack: Some(ack_tx),
+                suppress_echo: false,
+                hw_tx_counter: None,
             })
             .map_err(|_| HalError::BusNotConnected(bus_id))?;
 
@@ -944,6 +987,8 @@ impl PipelineEngine {
             .send(TxDispatchRequest {
                 frame: tx_frame,
                 ack: Some(ack_tx),
+                suppress_echo: false,
+                hw_tx_counter: None,
             })
             .map_err(|_| HalError::BusNotConnected(bus_id))?;
 
@@ -1185,11 +1230,179 @@ impl PipelineEngine {
             .map_err(|_| HalError::InvalidInput("Aggregator thread stopped".to_string()))?;
         Ok(())
     }
+
+    /// 22. `cmd_list_traces` -> Lists persistent `.trc`, `.asc`, `.blf`, `.log`, and `.csv` files in `./traces/`.
+    pub fn cmd_list_traces(&self) -> Result<TraceStorageInfoDto, HalError> {
+        list_trace_files(&self.traces_dir)
+    }
+
+    /// 23. `cmd_save_trace_file` -> Sanitizes `file_name` and persists either binary `content_base64` (e.g. `.blf`)
+    ///     or UTF-8 `content` inside `./traces/`.
+    pub fn cmd_save_trace_file(
+        &self,
+        file_name: String,
+        content: Option<String>,
+        content_base64: Option<String>,
+    ) -> Result<TraceFileSummaryDto, HalError> {
+        if let Some(b64) = content_base64.as_deref().filter(|s| !s.trim().is_empty()) {
+            let raw_bytes = decode_base64_trace_bytes(b64)?;
+            save_trace_file_bytes(&self.traces_dir, &file_name, &raw_bytes)
+        } else if let Some(text) = content {
+            save_trace_file(&self.traces_dir, &file_name, &text)
+        } else {
+            Err(HalError::InvalidInput(
+                "Trace kaydında oynatılacak çerçeve bulunamadı".to_string(),
+            ))
+        }
+    }
+
+    /// 24. `cmd_load_trace_file` -> Loads and parses `./traces/<safe_name>` into `LoadedTraceFileDto`.
+    pub fn cmd_load_trace_file(&self, file_name: String) -> Result<LoadedTraceFileDto, HalError> {
+        load_trace_file(&self.traces_dir, &file_name)
+    }
+
+    /// 25. `cmd_delete_trace_file` -> Deletes `./traces/<safe_name>`.
+    pub fn cmd_delete_trace_file(&self, file_name: String) -> Result<(), HalError> {
+        delete_trace_file(&self.traces_dir, &file_name)
+    }
+
+    /// 26. `cmd_parse_trace_content` -> Statelessly parses binary `content_base64` (`.blf`) or text `content`
+    ///     (`.trc`, `.asc`, `.log`, `.csv`) into `LoadedTraceFileDto`.
+    pub fn cmd_parse_trace_content(
+        &self,
+        file_name: String,
+        content: Option<String>,
+        content_base64: Option<String>,
+    ) -> Result<LoadedTraceFileDto, HalError> {
+        if let Some(b64) = content_base64.as_deref().filter(|s| !s.trim().is_empty()) {
+            let raw_bytes = decode_base64_trace_bytes(b64)?;
+            parse_trace_bytes(&file_name, &raw_bytes)
+        } else {
+            let bytes = content.unwrap_or_default().into_bytes();
+            parse_trace_bytes(&file_name, &bytes)
+        }
+    }
+
+    /// 27. `cmd_start_trace_replay` -> Compiles frames from `args.frames`, `args.content_base64`,
+    ///     `args.content`, or `./traces/<file_name>` and launches deterministic zero-allocation
+    ///     ID-filtered Restbus playback on `nexus-trace-replay`.
+    pub fn cmd_start_trace_replay(
+        &self,
+        args: StartTraceReplayArgsDto,
+    ) -> Result<TraceReplayStatusDto, HalError> {
+        let resolve_name_hint = |default_name: &'static str| -> String {
+            args.file_name
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    let s = args.source_name.trim();
+                    if s.is_empty() {
+                        None
+                    } else {
+                        Some(s)
+                    }
+                })
+                .unwrap_or(default_name)
+                .to_string()
+        };
+
+        let (entries, fallback_source) =
+            if let Some(ref frames) = args.frames.as_ref().filter(|f| !f.is_empty()) {
+                (
+                    compile_chronological_frames(frames),
+                    "In-Memory Trace".to_string(),
+                )
+            } else if let Some(ref b64) =
+                args.content_base64.as_ref().filter(|c| !c.trim().is_empty())
+            {
+                let name_hint = resolve_name_hint("inline_trace.blf");
+                let raw_bytes = decode_base64_trace_bytes(b64)?;
+                (
+                    parse_trace_entries_from_bytes(&name_hint, &raw_bytes)?,
+                    name_hint,
+                )
+            } else if let Some(ref content) = args.content.as_ref().filter(|c| !c.trim().is_empty())
+            {
+                let name_hint = resolve_name_hint("inline_trace.trc");
+                (
+                    parse_trace_entries_from_bytes(&name_hint, content.as_bytes())?,
+                    name_hint,
+                )
+            } else if let Some(ref fname) = args.file_name.as_ref().filter(|s| !s.trim().is_empty())
+            {
+                let safe_name = sanitize_trace_filename(fname);
+                let target_path = self.traces_dir.join(&safe_name);
+                if !target_path.is_file() {
+                    return Err(HalError::InvalidInput(format!(
+                        "Trace file '{safe_name}' does not exist in traces directory"
+                    )));
+                }
+                let raw_bytes =
+                    fs::read(&target_path).map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
+                (
+                    parse_trace_entries_from_bytes(&safe_name, &raw_bytes)?,
+                    safe_name,
+                )
+            } else {
+                (Vec::new(), String::new())
+            };
+
+        if entries.is_empty() {
+            return Err(HalError::InvalidInput(
+                "Trace kaydında oynatılacak çerçeve bulunamadı".to_string(),
+            ));
+        }
+
+        if args.reset_telemetry_first {
+            self.replay.stop_sync();
+            self.cmd_reset_telemetry()?;
+            let _ = self.flush_snapshot_now();
+        }
+
+        let source_name = if args.source_name.trim().is_empty() {
+            fallback_source
+        } else {
+            args.source_name.trim().to_string()
+        };
+
+        self.replay.start_compiled(source_name, entries, &args)
+    }
+
+    /// 28. `cmd_control_trace_replay` -> Controls active playback (`pause`, `resume`, `stop`, `seek`, `configure`).
+    pub fn cmd_control_trace_replay(
+        &self,
+        args: TraceReplayControlArgsDto,
+    ) -> Result<TraceReplayStatusDto, HalError> {
+        self.replay.control(args)
+    }
+
+    /// 29. `cmd_export_trace_blf` -> Encodes `ChronologicalFrameDto` records into a zlib-compressed
+    ///     standard Vector `.blf` binary file and returns Base64-encoded bytes.
+    pub fn cmd_export_trace_blf(
+        &self,
+        _file_name: String,
+        frames: Vec<ChronologicalFrameDto>,
+    ) -> Result<String, HalError> {
+        if frames.is_empty() {
+            return Err(HalError::InvalidInput(
+                "Trace kaydında oynatılacak çerçeve bulunamadı".to_string(),
+            ));
+        }
+        let entries = compile_chronological_frames(&frames);
+        if entries.is_empty() {
+            return Err(HalError::InvalidInput(
+                "Trace kaydında oynatılacak çerçeve bulunamadı".to_string(),
+            ));
+        }
+        let blf_bytes = blf::encode_blf_bytes(&entries)?;
+        Ok(BASE64_STD.encode(&blf_bytes))
+    }
 }
 
 impl Drop for PipelineEngine {
     fn drop(&mut self) {
         self.engine_stop.store(true, Ordering::Release);
+        self.replay.shutdown();
         {
             let mut buses = self.buses.lock();
             for bus in buses.values_mut() {
@@ -1224,6 +1437,7 @@ fn run_bus_io_loop(
     let mut rx_batch = [RawCanFrame::zeroed(); 256];
     let mut tick_counter = 0u32;
     let driver_has_self_loopback = channel.descriptor().driver_id == "mock";
+    let mut pending_suppressed_mock_echoes = 0usize;
 
     while !bus_stop.load(Ordering::Acquire) && !engine_stop.load(Ordering::Acquire) {
         // 1. Drain outbound TX requests immediately
@@ -1236,13 +1450,21 @@ fn run_bus_io_loop(
                 )))
             } else {
                 let send_res = channel.send_frame(&req.frame);
-                if send_res.is_ok() && !driver_has_self_loopback {
-                    let mut tx_echo = req.frame.with_flags(nexus_core::FLAG_TX);
-                    tx_echo.bus_id = bus_id;
-                    if tx_echo.timestamp_us == 0 {
-                        tx_echo.timestamp_us = now_monotonic_us().max(1);
+                if send_res.is_ok() {
+                    if let Some(ref counter) = req.hw_tx_counter {
+                        counter.fetch_add(1, Ordering::Relaxed);
                     }
-                    let _ = frame_tx.try_send(tx_echo);
+                    if driver_has_self_loopback && req.suppress_echo {
+                        pending_suppressed_mock_echoes =
+                            pending_suppressed_mock_echoes.saturating_add(1);
+                    } else if !driver_has_self_loopback && !req.suppress_echo {
+                        let mut tx_echo = req.frame.with_flags(nexus_core::FLAG_TX);
+                        tx_echo.bus_id = bus_id;
+                        if tx_echo.timestamp_us == 0 {
+                            tx_echo.timestamp_us = now_monotonic_us().max(1);
+                        }
+                        let _ = frame_tx.try_send(tx_echo);
+                    }
                 }
                 send_res
             };
@@ -1255,6 +1477,10 @@ fn run_bus_io_loop(
         match channel.recv_batch(&mut rx_batch, 1) {
             Ok(count) => {
                 for frame in &mut rx_batch[..count] {
+                    if pending_suppressed_mock_echoes > 0 && frame.is_tx() {
+                        pending_suppressed_mock_echoes -= 1;
+                        continue;
+                    }
                     frame.bus_id = bus_id;
                     if let Err(TrySendError::Full(_)) = frame_tx.try_send(*frame) {
                         dropped_frames.fetch_add(1, Ordering::Relaxed);
@@ -1289,6 +1515,7 @@ fn run_aggregator_loop(
     buses: Arc<Mutex<BTreeMap<BusId, ConnectedBusHandle>>>,
     dropped_frames: Arc<AtomicU64>,
     tx_panic_latched: Arc<AtomicBool>,
+    replay: Arc<ReplayController>,
     snapshot_bcast_tx: broadcast::Sender<TelemetrySnapshotDto>,
     latest_snapshot: Arc<RwLock<Option<TelemetrySnapshotDto>>>,
 ) {
@@ -1315,6 +1542,7 @@ fn run_aggregator_loop(
                         &buses,
                         &dropped_frames,
                         &tx_panic_latched,
+                        &replay,
                         &snapshot_bcast_tx,
                         &latest_snapshot,
                     );
@@ -1328,6 +1556,7 @@ fn run_aggregator_loop(
                         &buses,
                         &dropped_frames,
                         &tx_panic_latched,
+                        &replay,
                         &snapshot_bcast_tx,
                         &latest_snapshot,
                     );
@@ -1360,6 +1589,7 @@ fn run_aggregator_loop(
                 &buses,
                 &dropped_frames,
                 &tx_panic_latched,
+                &replay,
                 &snapshot_bcast_tx,
                 &latest_snapshot,
             );
@@ -1382,6 +1612,7 @@ fn emit_snapshot_now(
     buses: &Mutex<BTreeMap<BusId, ConnectedBusHandle>>,
     dropped_frames: &AtomicU64,
     tx_panic_latched: &AtomicBool,
+    replay: &ReplayController,
     snapshot_bcast_tx: &broadcast::Sender<TelemetrySnapshotDto>,
     latest_snapshot: &RwLock<Option<TelemetrySnapshotDto>>,
 ) -> TelemetrySnapshotDto {
@@ -1399,7 +1630,9 @@ fn emit_snapshot_now(
     let now_us = now_monotonic_us().max(1);
     let dropped = dropped_frames.load(Ordering::Relaxed);
     let panic = tx_panic_latched.load(Ordering::Acquire);
-    let snapshot = state_table.build_snapshot(now_us, dropped, panic, nominal_cap_bps, bus_dtos);
+    let mut snapshot =
+        state_table.build_snapshot(now_us, dropped, panic, nominal_cap_bps, bus_dtos);
+    snapshot.replay = replay.status_snapshot();
 
     *latest_snapshot.write() = Some(snapshot.clone());
     let _ = snapshot_bcast_tx.send(snapshot.clone());
@@ -1433,7 +1666,12 @@ fn run_tx_scheduler_loop(
             for (bus_id, frame) in due {
                 if let Some(bus) = guard.get(&bus_id) {
                     if !bus.listen_only && bus.tx_armed.load(Ordering::Acquire) {
-                        let _ = bus.tx_sender.try_send(TxDispatchRequest { frame, ack: None });
+                        let _ = bus.tx_sender.try_send(TxDispatchRequest {
+                            frame,
+                            ack: None,
+                            suppress_echo: false,
+                            hw_tx_counter: None,
+                        });
                     }
                 }
             }
@@ -1449,6 +1687,14 @@ fn decode_base64_db_bytes(content_base64: &str) -> Result<Vec<u8>, HalError> {
         .decode(trimmed)
         .or_else(|_| BASE64_NO_PAD.decode(trimmed))
         .map_err(|e| HalError::InvalidInput(format!("Invalid Base64 database content: {e}")))
+}
+
+fn decode_base64_trace_bytes(content_base64: &str) -> Result<Vec<u8>, HalError> {
+    let trimmed = content_base64.trim();
+    BASE64_STD
+        .decode(trimmed)
+        .or_else(|_| BASE64_NO_PAD.decode(trimmed))
+        .map_err(|e| HalError::InvalidInput(format!("Invalid Base64 trace content: {e}")))
 }
 
 fn locate_preset_scripts_dir() -> Result<PathBuf, HalError> {
@@ -1523,5 +1769,16 @@ fn locate_projects_dir() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("projects")
+}
+
+fn locate_traces_dir() -> PathBuf {
+    if let Ok(scripts_dir) = locate_preset_scripts_dir() {
+        if let Some(workspace_root) = scripts_dir.parent() {
+            return workspace_root.join("traces");
+        }
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("traces")
 }
 

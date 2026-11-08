@@ -20,6 +20,7 @@ import type {
   SimulationPanelDto,
   SimulationWidgetDto,
 } from '../types/simulation';
+import { normalizeEnabledToolpacks } from '../types/toolpacks';
 
 export interface CloudProjectBindingV1 {
   cloudBaseUrl: string;
@@ -187,6 +188,7 @@ export function computeWorkspaceSemanticHash(proj: NexusProjectFileV1 | null): s
     workspace: {
       traceMaxBufferRows: proj.workspace?.traceMaxBufferRows ?? 100000,
       theme: proj.workspace?.theme ?? 'dark',
+      enabledToolpacks: normalizeEnabledToolpacks(proj.workspace?.enabledToolpacks),
     },
   };
 
@@ -762,7 +764,12 @@ export function validateAndNormalizeWorkspaceJson(
       customYMax: typeof s.customYMax === 'number' ? s.customYMax : 100,
     }));
 
-  const layoutMode: PlotLayoutMode = rawPlot.layoutMode === 'split' ? 'split' : 'combined';
+  const layoutMode: PlotLayoutMode =
+    rawPlot.layoutMode === 'split'
+      ? 'split'
+      : rawPlot.layoutMode === 'compactSplit'
+        ? 'compactSplit'
+        : 'combined';
   const yScaleMode: PlotYScaleMode =
     rawPlot.yScaleMode === 'normalized'
       ? 'normalized'
@@ -937,6 +944,11 @@ export function validateAndNormalizeWorkspaceJson(
           : 'rxtx',
       theme: rawWs.theme === 'light' ? 'light' : 'dark',
       expandedRxKeys: Array.isArray(rawWs.expandedRxKeys) ? rawWs.expandedRxKeys.map(String) : [],
+      enabledToolpacks: normalizeEnabledToolpacks(
+        Array.isArray(rawWs.enabledToolpacks)
+          ? (rawWs.enabledToolpacks as readonly string[])
+          : undefined,
+      ),
     },
   };
 
@@ -995,6 +1007,10 @@ export function sanitizeCloudWorkspaceForLocalApply(
         binding: { ...g.binding },
       })),
     })),
+    workspace: {
+      ...proj.workspace,
+      enabledToolpacks: normalizeEnabledToolpacks(proj.workspace?.enabledToolpacks),
+    },
     cloudBinding: binding,
   };
 }

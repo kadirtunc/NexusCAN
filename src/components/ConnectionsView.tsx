@@ -40,6 +40,7 @@ import {
 import { ensureMockPresetDatabasesLoaded, syncAllBusDatabasesWithBackend } from '../utils/busDatabaseSync';
 import { telemetryStore, useTelemetryHeader } from '../store/telemetryStore';
 import { transmitStore } from '../store/transmitStore';
+import { useI18n, type TranslationKey } from '../i18n';
 import type {
   DeviceDescriptorDto,
   DriverFamilyId,
@@ -58,23 +59,23 @@ interface ConnectionsViewProps {
 
 const DRIVER_FAMILY_OPTIONS: readonly {
   id: DriverFamilyId;
-  label: string;
+  labelKey: TranslationKey;
   shortTag: string;
 }[] = [
-  { id: 'socketcan', label: 'Linux Native SocketCAN (can* / vcan*)', shortTag: 'SOCKETCAN' },
+  { id: 'socketcan', labelKey: 'conn.driver.socketcan', shortTag: 'SOCKETCAN' },
   {
     id: 'gs_usb',
-    label: 'USB-CAN gs_usb / candleLight (CANable / CANtact)',
+    labelKey: 'conn.driver.gs_usb',
     shortTag: 'GS_USB',
   },
   {
     id: 'slcan',
-    label: 'Serial / USB-CDC Lawicel (SLCAN)',
+    labelKey: 'conn.driver.slcan',
     shortTag: 'SLCAN',
   },
-  { id: 'pcan', label: 'PEAK-System PCAN-Basic (USB / PCI)', shortTag: 'PCAN' },
-  { id: 'kvaser', label: 'Kvaser CANlib (Leaf / Memorator)', shortTag: 'KVASER' },
-  { id: 'mock', label: 'Virtual Simulator (mock0 / mock1) [Test Only]', shortTag: 'MOCK' },
+  { id: 'pcan', labelKey: 'conn.driver.pcan', shortTag: 'PCAN' },
+  { id: 'kvaser', labelKey: 'conn.driver.kvaser', shortTag: 'KVASER' },
+  { id: 'mock', labelKey: 'conn.driver.mock', shortTag: 'MOCK' },
 ];
 
 function createBlankProfile(
@@ -166,6 +167,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   onRefreshDevices,
   onStatusMessage,
 }) => {
+  const { t } = useI18n();
   const connState = useConnectionStore();
   const header = useTelemetryHeader();
 
@@ -203,21 +205,28 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           const installedCnt = report.families.filter((f) => f.installed).length;
           onStatusMessage({
             kind: 'info',
-            message: `Driver & USB check complete (${report.hostOs}): ${installedCnt}/${report.families.length} driver families ready, ${report.serialPorts.length} serial port(s) detected.`,
+            message: t('conn.status.driverCheckComplete', {
+              hostOs: report.hostOs,
+              ready: installedCnt,
+              total: report.families.length,
+              serialCount: report.serialPorts.length,
+            }),
           });
         }
       } catch (err) {
         if (!silent) {
           onStatusMessage({
             kind: 'error',
-            message: `Driver probe failed: ${err instanceof Error ? err.message : String(err)}`,
+            message: t('conn.status.driverProbeFailed', {
+              err: err instanceof Error ? err.message : String(err),
+            }),
           });
         }
       } finally {
         setProbing(false);
       }
     },
-    [onRefreshDevices, onStatusMessage],
+    [onRefreshDevices, onStatusMessage, t],
   );
 
   useEffect(() => {
@@ -279,7 +288,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
     if (draft.driverFamily === 'slcan' && draft.serialPort.trim().length === 0) {
       onStatusMessage({
         kind: 'error',
-        message: 'SLCAN requires a Serial Port (e.g. COM3 or /dev/ttyUSB0).',
+        message: t('conn.status.slcanPortRequired'),
       });
       return null;
     }
@@ -295,7 +304,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
     setDraft(normalized);
     onStatusMessage({
       kind: 'success',
-      message: `Saved connection profile "${normalized.name}" (Bus ${normalized.busId + 1}).`,
+      message: t('conn.status.savedProfile', {
+        name: normalized.name,
+        bus: normalized.busId + 1,
+      }),
     });
     return normalized;
   };
@@ -313,7 +325,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
         telemetryStore.removeBusHealth(profile.busId);
         onStatusMessage({
           kind: 'info',
-          message: `Disconnected Bus ${profile.busId + 1} (${liveBus.channelName}).`,
+          message: t('conn.status.disconnectedBus', {
+            bus: profile.busId + 1,
+            channel: liveBus.channelName,
+          }),
         });
       } else {
         if (
@@ -322,7 +337,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
         ) {
           onStatusMessage({
             kind: 'error',
-            message: `Cannot connect "${profile.name}": Serial Port (COMx / /dev/ttyUSBx) is empty.`,
+            message: t('conn.status.serialPortEmpty', { name: profile.name }),
           });
           return;
         }
@@ -340,17 +355,20 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
         telemetryStore.upsertBusHealth(health);
         onStatusMessage({
           kind: 'success',
-          message: `Connected Bus ${profile.busId + 1}: ${health.channelName} (${
-            health.listenOnly ? 'Listen-Only' : 'Active CAN'
-          }).`,
+          message: t('conn.status.connectedBus', {
+            bus: profile.busId + 1,
+            channel: health.channelName,
+            mode: health.listenOnly ? 'Listen-Only' : 'Active CAN',
+          }),
         });
       }
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: `Connection failed (${profile.name}): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        message: t('conn.status.connFailed', {
+          name: profile.name,
+          err: err instanceof Error ? err.message : String(err),
+        }),
       });
     } finally {
       setBusyProfileId(null);
@@ -382,13 +400,15 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
       onStatusMessage({
         kind: willArm ? 'success' : 'info',
         message: willArm
-          ? `TX Armed on Bus ${busId + 1} (${updated.channelName}). Active CAN mode enabled.`
-          : `TX Disarmed on Bus ${busId + 1} (${updated.channelName}). Switched to Listen-Only.`,
+          ? t('conn.status.txArmed', { bus: busId + 1, channel: updated.channelName })
+          : t('conn.status.txDisarmed', { bus: busId + 1, channel: updated.channelName }),
       });
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: `Set bus mode error: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('conn.status.setModeError', {
+          err: err instanceof Error ? err.message : String(err),
+        }),
       });
     }
   };
@@ -400,12 +420,14 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
       transmitStore.markAllPaused();
       onStatusMessage({
         kind: 'info',
-        message: `Disconnected ${count} active CAN bus channel(s).`,
+        message: t('conn.status.disconnectedAll', { count }),
       });
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: `Disconnect all error: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('conn.status.disconnectAllError', {
+          err: err instanceof Error ? err.message : String(err),
+        }),
       });
     }
   };
@@ -428,7 +450,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
     setDraft(fresh);
     onStatusMessage({
       kind: 'info',
-      message: `Added Test Simulator profile "${fresh.name}" on Bus ${fresh.busId + 1} with mock DBC/KCD.`,
+      message: t('conn.status.mockAdded', { name: fresh.name, bus: fresh.busId + 1 }),
     });
   };
 
@@ -465,20 +487,20 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 ? '1px solid var(--border-grid)'
                 : 'none',
           }}
-          className="h-[28px] px-2.5 flex items-center justify-between gap-2 text-[11px]"
+          className="min-h-[38px] py-1.5 px-3 flex items-center justify-between gap-2 text-[12px] flex-wrap"
         >
-          <div className="flex items-center gap-2 min-w-0 overflow-x-auto no-scrollbar">
-            <Cpu className="w-3.5 h-3.5 text-[var(--text-secondary)] shrink-0" />
+          <div className="flex items-center gap-2 min-w-0 flex-wrap">
+            <Cpu className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
             <span className="font-semibold text-[var(--text-secondary)] shrink-0">
-              Drivers:
+              {t('conn.bar.drivers')}
             </span>
 
             {(connState.probeReport?.families ?? []).length === 0 ? (
               <span className="text-[var(--text-muted)] truncate">
-                {probing ? 'Scanning host drivers...' : 'Not scanned'}
+                {probing ? t('conn.bar.scanningDrivers') : t('conn.bar.notScanned')}
               </span>
             ) : (
-              <div className="flex items-center gap-2 font-mono text-[11px] shrink-0">
+              <div className="flex items-center gap-2.5 font-mono text-[12px] shrink-0 flex-wrap">
                 {connState.probeReport?.families.map((fam, idx) => (
                   <React.Fragment key={fam.familyId}>
                     {idx > 0 && (
@@ -487,7 +509,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     <span
                       title={
                         fam.installed
-                          ? `${fam.displayName}: ${fam.detectedLibraryOrModule ?? 'Ready'}`
+                          ? `${fam.displayName}: ${fam.detectedLibraryOrModule ?? t('conn.status.ready')}`
                           : `${fam.displayName}: ${fam.installHint}`
                       }
                       className={
@@ -513,13 +535,13 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
             )}
 
             {connState.probeReport && (
-              <span className="hidden lg:inline font-mono text-[10px] text-[var(--text-muted)] ml-1 shrink-0">
+              <span className="hidden lg:inline font-mono text-[11px] text-[var(--text-muted)] ml-1 shrink-0">
                 ({connState.probeReport.hostOs} · {devices.length} ch)
               </span>
             )}
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={() => setDriverDetailsOpen((v) => !v)}
@@ -530,14 +552,14 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 borderColor: 'var(--border-strong)',
                 color: 'var(--text-secondary)',
               }}
-              className="h-[20px] px-2 border flex items-center gap-1 text-[11px] hover:text-[var(--text-primary)] cursor-pointer"
+              className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[12px] font-medium hover:text-[var(--text-primary)] cursor-pointer"
             >
               {driverDetailsOpen ? (
-                <ChevronDown className="w-3 h-3" />
+                <ChevronDown className="w-3.5 h-3.5" />
               ) : (
-                <ChevronRight className="w-3 h-3" />
+                <ChevronRight className="w-3.5 h-3.5" />
               )}
-              <span>Driver Details</span>
+              <span>{t('conn.bar.driverDetails')}</span>
             </button>
 
             <button
@@ -549,44 +571,44 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 borderColor: 'var(--border-strong)',
                 color: 'var(--text-primary)',
               }}
-              className="h-[20px] px-2 border flex items-center gap-1 text-[11px] hover:border-[var(--text-secondary)] cursor-pointer"
-              title="Rescan host CAN driver libraries and USB serial ports"
+              className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[12px] font-medium hover:border-[var(--text-secondary)] cursor-pointer"
+              title={t('conn.bar.rescanTitle')}
             >
               <RefreshCw
-                className={`w-3 h-3 text-[var(--text-secondary)] ${
+                className={`w-3.5 h-3.5 text-[var(--text-secondary)] ${
                   probing ? 'animate-spin' : ''
                 }`}
               />
-              <span>Rescan</span>
+              <span>{t('conn.bar.rescan')}</span>
             </button>
           </div>
         </div>
 
         {driverDetailsOpen && (
-          <div className="max-h-[162px] overflow-y-auto">
-            <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums">
+          <div className="max-h-[180px] overflow-y-auto">
+            <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums text-[12px]">
               <colgroup>
-                <col style={{ width: '215px' }} />
-                <col style={{ width: '130px' }} />
-                <col style={{ width: '210px' }} />
                 <col style={{ width: '220px' }} />
+                <col style={{ width: '140px' }} />
+                <col style={{ width: '220px' }} />
+                <col style={{ width: '230px' }} />
                 <col />
               </colgroup>
               <thead>
                 <tr>
-                  <th className="font-sans">Driver Family</th>
-                  <th className="font-sans">Status</th>
-                  <th>Library / Kernel Module</th>
-                  <th>Detected Channels</th>
-                  <th className="font-sans">Install Hint</th>
+                  <th className="font-sans">{t('conn.table.thDriverFamily')}</th>
+                  <th className="font-sans">{t('conn.table.thStatus')}</th>
+                  <th>{t('conn.table.thLibrary')}</th>
+                  <th>{t('conn.table.thDetectedChannels')}</th>
+                  <th className="font-sans">{t('conn.table.thInstallHint')}</th>
                 </tr>
               </thead>
               <tbody>
                 {(connState.probeReport?.families ?? []).length === 0 ? (
                   <tr>
                     <td colSpan={5}>
-                      <div className="pcan-cell font-sans text-[var(--text-muted)]">
-                        {probing ? 'Scanning host drivers...' : 'Click Rescan to probe drivers.'}
+                      <div className="pcan-cell font-sans text-[var(--text-muted)] text-[12px]">
+                        {probing ? t('conn.bar.scanningDrivers') : t('conn.table.clickRescan')}
                       </div>
                     </td>
                   </tr>
@@ -594,22 +616,22 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   connState.probeReport?.families.map((fam) => (
                     <tr key={fam.familyId}>
                       <td>
-                        <div className="pcan-cell font-sans font-semibold">
+                        <div className="pcan-cell font-sans font-semibold text-[12px]">
                           <span className="truncate">{fam.displayName}</span>
                         </div>
                       </td>
                       <td>
-                        <div className="pcan-cell font-sans">
+                        <div className="pcan-cell font-sans text-[12px]">
                           {fam.installed ? (
-                            <span className="inline-flex items-center gap-1 text-emerald-500 font-medium text-[11px]">
-                              <CheckCircle2 className="w-3 h-3 shrink-0" />
-                              <span className="truncate">{fam.statusLabel || 'Ready'}</span>
+                            <span className="inline-flex items-center gap-1 text-emerald-500 font-medium text-[12px]">
+                              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                              <span className="truncate">{fam.statusLabel || t('conn.status.ready')}</span>
                             </span>
                           ) : (
-                            <span className="inline-flex items-center gap-1 text-[var(--text-muted)] text-[11px]">
-                              <TriangleAlert className="w-3 h-3 shrink-0" />
+                            <span className="inline-flex items-center gap-1 text-[var(--text-muted)] text-[12px]">
+                              <TriangleAlert className="w-3.5 h-3.5 shrink-0" />
                               <span className="truncate">
-                                {fam.statusLabel || 'Not Installed'}
+                                {fam.statusLabel || t('conn.status.notInstalled')}
                               </span>
                             </span>
                           )}
@@ -617,7 +639,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       </td>
                       <td>
                         <div
-                          className="pcan-cell text-[11px] text-[var(--text-secondary)]"
+                          className="pcan-cell text-[12px] text-[var(--text-secondary)]"
                           title={
                             fam.searchedPaths.length > 0
                               ? `Searched paths:\n${fam.searchedPaths.join('\n')}`
@@ -631,7 +653,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       </td>
                       <td>
                         <div
-                          className="pcan-cell text-[11px]"
+                          className="pcan-cell text-[12px]"
                           title={fam.detectedChannels.join(', ')}
                         >
                           <span className="truncate">
@@ -643,7 +665,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       </td>
                       <td>
                         <div
-                          className="pcan-cell font-sans text-[11px] text-[var(--text-secondary)]"
+                          className="pcan-cell font-sans text-[12px] text-[var(--text-secondary)]"
                           title={fam.installHint}
                         >
                           <span className="truncate">{fam.installHint}</span>
@@ -664,11 +686,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               backgroundColor: 'var(--bg-row-alt)',
               borderTop: driverDetailsOpen ? '1px solid var(--border-grid)' : 'none',
             }}
-            className="px-2.5 py-1 flex flex-wrap items-center gap-1.5 text-[11px]"
+            className="min-h-[36px] px-3 py-1.5 flex flex-wrap items-center gap-2 text-[12px]"
           >
-            <span className="font-semibold text-[var(--text-secondary)] flex items-center gap-1">
-              <Usb className="w-3 h-3 text-[var(--text-secondary)]" />
-              <span>Serial Ports:</span>
+            <span className="font-semibold text-[var(--text-secondary)] flex items-center gap-1.5">
+              <Usb className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+              <span>{t('conn.bar.serialPorts')}</span>
             </span>
             {serialPorts.map((sp) => (
               <button
@@ -687,8 +709,8 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   backgroundColor: 'var(--bg-panel)',
                   borderColor: 'var(--border-strong)',
                 }}
-                className="h-[20px] px-2 border font-mono text-[11px] hover:border-[var(--text-secondary)] cursor-pointer"
-                title={`Select ${sp.portName} in SLCAN Connection Editor`}
+                className="h-[28px] px-2.5 border font-mono text-[12px] hover:border-[var(--text-secondary)] cursor-pointer flex items-center gap-1"
+                title={t('conn.bar.selectPortTitle', { port: sp.portName })}
               >
                 <span className="font-semibold text-[var(--text-primary)]">{sp.portName}</span>
                 {sp.product ? ` · ${sp.product}` : ''}
@@ -713,9 +735,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               backgroundColor: 'var(--bg-toolbar)',
               borderBottom: '1px solid var(--border-strong)',
             }}
-            className="shrink-0 h-[26px] px-2 flex items-center justify-between text-[11px]"
+            className="shrink-0 min-h-[38px] px-3 py-1 flex items-center justify-between gap-2 text-[12px] flex-wrap"
           >
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2 flex-wrap">
               <button
                 type="button"
                 onClick={handleCreateNewProfile}
@@ -724,10 +746,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   borderColor: 'var(--border-strong)',
                   color: 'var(--text-primary)',
                 }}
-                className="h-[20px] px-2 border flex items-center gap-1 font-medium hover:border-[var(--text-secondary)] cursor-pointer"
+                className="h-[28px] px-2.5 border flex items-center gap-1.5 font-medium text-[12px] hover:border-[var(--text-secondary)] cursor-pointer"
               >
-                <Plus className="w-3 h-3 text-[var(--text-secondary)]" />
-                <span>New Profile</span>
+                <Plus className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                <span>{t('conn.btn.newProfile')}</span>
               </button>
 
               <button
@@ -739,10 +761,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   borderColor: 'var(--border-strong)',
                   color: 'var(--text-primary)',
                 }}
-                className="h-[20px] px-2 border flex items-center gap-1 hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
+                className="h-[28px] px-2.5 border flex items-center gap-1.5 font-medium text-[12px] hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
               >
-                <PlugZap className="w-3 h-3 text-[var(--text-secondary)]" />
-                <span>Disconnect All</span>
+                <PlugZap className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                <span>{t('conn.btn.disconnectAll')}</span>
               </button>
               <button
                 type="button"
@@ -752,15 +774,15 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   borderColor: 'var(--border-strong)',
                   color: 'var(--text-secondary)',
                 }}
-                className="h-[20px] px-2 border flex items-center gap-1 text-[10px] font-mono hover:text-[var(--text-primary)] hover:border-[var(--text-secondary)] cursor-pointer"
-                title="Add synthetic EV simulator profile (mock0) [Test Only]"
+                className="h-[28px] px-2.5 border flex items-center gap-1 text-[11.5px] font-mono hover:text-[var(--text-primary)] hover:border-[var(--text-secondary)] cursor-pointer"
+                title={t('conn.btn.addSimulatorTitle')}
               >
-                <span>+ Simulator (mock0)</span>
+                <span>{t('conn.btn.addSimulator')}</span>
               </button>
             </div>
 
-            <span className="text-[var(--text-muted)]">
-              Profiles ({connState.profiles.length})
+            <span className="text-[var(--text-muted)] text-[12px]">
+              {t('conn.bar.profilesCount', { count: connState.profiles.length })}
             </span>
           </div>
 
@@ -780,16 +802,16 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               </colgroup>
               <thead>
                 <tr>
-                  <th className="text-center font-sans" title="Connection Active Switch">On</th>
-                  <th>Bus</th>
-                  <th className="font-sans">Profile Name</th>
-                  <th className="font-sans">Driver</th>
-                  <th>Port / Channel</th>
-                  <th>Bitrate / FD</th>
-                  <th className="font-sans">Safety</th>
-                  <th className="font-sans">Host Lib</th>
-                  <th className="font-sans">Live Status</th>
-                  <th className="font-sans">Actions</th>
+                  <th className="text-center font-sans" title={t('conn.th.onTitle')}>{t('conn.th.on')}</th>
+                  <th>{t('conn.th.bus')}</th>
+                  <th className="font-sans">{t('conn.th.profileName')}</th>
+                  <th className="font-sans">{t('conn.th.driver')}</th>
+                  <th>{t('conn.th.portChannel')}</th>
+                  <th>{t('conn.th.bitrateFd')}</th>
+                  <th className="font-sans">{t('conn.th.safety')}</th>
+                  <th className="font-sans">{t('conn.th.hostLib')}</th>
+                  <th className="font-sans">{t('conn.th.liveStatus')}</th>
+                  <th className="font-sans">{t('conn.th.actions')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -797,34 +819,34 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   <tr>
                     <td colSpan={10} className="p-0">
                       <div className="p-8 flex flex-col items-center justify-center text-center gap-3 bg-[var(--bg-panel)]">
-                        <div className="w-10 h-10 rounded border border-[var(--border-strong)] bg-[var(--bg-toolbar)] flex items-center justify-center text-cyan-400">
-                          <Cpu className="w-5 h-5" />
+                        <div className="w-12 h-12 rounded border border-[var(--border-strong)] bg-[var(--bg-toolbar)] flex items-center justify-center text-cyan-400">
+                          <Cpu className="w-6 h-6" />
                         </div>
                         <div>
-                          <div className="font-semibold text-[13px] text-[var(--text-primary)] font-sans">
-                            No CAN Connection Profiles Configured
+                          <div className="font-semibold text-[14px] text-[var(--text-primary)] font-sans">
+                            {t('conn.empty.title')}
                           </div>
-                          <div className="text-[11px] text-[var(--text-secondary)] mt-1 max-w-md font-sans">
-                            Configure your hardware interface (Linux Native SocketCAN, USB-CAN gs_usb, Serial SLCAN, PCAN) to start capturing live bus frames.
+                          <div className="text-[12px] text-[var(--text-secondary)] mt-1.5 max-w-md font-sans leading-relaxed">
+                            {t('conn.empty.desc')}
                           </div>
                         </div>
-                        <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
+                        <div className="flex flex-wrap items-center justify-center gap-2.5 mt-2.5">
                           <button
                             type="button"
                             onClick={handleCreateNewProfile}
-                            className="h-[26px] px-3 border border-emerald-500/60 bg-emerald-950/40 text-emerald-300 rounded font-medium text-[11px] hover:bg-emerald-900/50 cursor-pointer flex items-center gap-1.5"
+                            className="h-[30px] px-3.5 border border-emerald-500/60 bg-emerald-950/40 text-emerald-300 rounded font-medium text-[12px] hover:bg-emerald-900/50 cursor-pointer flex items-center gap-1.5"
                           >
                             <Plus className="w-3.5 h-3.5" />
-                            <span>+ Add Connection (SocketCAN / USB / Hardware)</span>
+                            <span>{t('conn.empty.addConnBtn')}</span>
                           </button>
                           <button
                             type="button"
                             onClick={handleAddMockProfile}
-                            className="h-[26px] px-3 border border-cyan-500/40 bg-cyan-950/30 text-cyan-300 rounded text-[11px] hover:bg-cyan-900/40 cursor-pointer flex items-center gap-1.5"
-                            title="Add synthetic 16 msg/s multi-mux EV powertrain simulator profile for testing"
+                            className="h-[30px] px-3.5 border border-cyan-500/40 bg-cyan-950/30 text-cyan-300 rounded text-[12px] hover:bg-cyan-900/40 cursor-pointer flex items-center gap-1.5"
+                            title={t('conn.btn.addSimulatorTitle')}
                           >
                             <Cpu className="w-3.5 h-3.5" />
-                            <span>+ Add Test Simulator (mock0)</span>
+                            <span>{t('conn.empty.addSimBtn')}</span>
                           </button>
                         </div>
                       </div>
@@ -832,214 +854,214 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   </tr>
                 ) : (
                   connState.profiles.map((prof) => {
-                  const isSelected = prof.id === connState.selectedProfileId;
-                  const famStatus = familyStatusMap.get(prof.driverFamily);
-                  const liveBus = header.buses.find(
-                    (b) => b.busId === prof.busId && b.connected,
-                  );
-                  const portOrChan =
-                    prof.driverFamily === 'slcan'
-                      ? `${prof.serialPort || 'Unset'} @${Math.round(prof.serialBaudRate / 1000)}k`
-                      : prof.adapterChannel || prof.deviceId;
-                  const timingLabel =
-                    prof.enableFd && prof.driverFamily !== 'slcan'
-                      ? `${formatBitrateShort(prof.bitrate)}/${formatBitrateShort(prof.dataBitrate)} FD`
-                      : `${formatBitrateShort(prof.bitrate)} CC`;
+                    const isSelected = prof.id === connState.selectedProfileId;
+                    const famStatus = familyStatusMap.get(prof.driverFamily);
+                    const liveBus = header.buses.find(
+                      (b) => b.busId === prof.busId && b.connected,
+                    );
+                    const portOrChan =
+                      prof.driverFamily === 'slcan'
+                        ? `${prof.serialPort || 'Unset'} @${Math.round(prof.serialBaudRate / 1000)}k`
+                        : prof.adapterChannel || prof.deviceId;
+                    const timingLabel =
+                      prof.enableFd && prof.driverFamily !== 'slcan'
+                        ? `${formatBitrateShort(prof.bitrate)}/${formatBitrateShort(prof.dataBitrate)} FD`
+                        : `${formatBitrateShort(prof.bitrate)} CC`;
 
-                  return (
-                    <tr
-                      key={prof.id}
-                      onClick={() => connectionStore.selectProfile(prof.id)}
-                      style={{
-                        backgroundColor: isSelected
-                          ? 'var(--bg-row-selected)'
-                          : 'var(--bg-panel)',
-                      }}
-                      className="hover:!bg-[var(--bg-row-hover)] cursor-pointer"
-                    >
-                      {/* Checkbox toggle connection */}
-                      <td onClick={(e) => e.stopPropagation()}>
-                        <div className="pcan-cell pcan-cell-center">
-                          <input
-                            type="checkbox"
-                            checked={Boolean(liveBus)}
-                            disabled={busyProfileId === prof.id}
-                            onChange={() => void handleConnectOrDisconnectProfile(prof)}
-                            className="accent-emerald-600 cursor-pointer"
-                            title={
-                              Boolean(liveBus)
-                                ? `Bus ${prof.busId + 1} connected. Uncheck to Disconnect.`
-                                : `Bus ${prof.busId + 1} disconnected. Check to Connect.`
-                            }
-                          />
-                        </div>
-                      </td>
-
-                      <td>
-                        <div className="pcan-cell font-semibold">
-                          Bus {prof.busId + 1}
-                        </div>
-                      </td>
-
-                      <td>
-                        <div
-                          className="pcan-cell font-sans font-medium"
-                          title={prof.notes || prof.name}
-                        >
-                          <span className="truncate">{prof.name}</span>
-                          {(() => {
-                            const bound = prof.databaseIds
-                              .map((id) => dbCatalog.find((d) => d.id === id)?.fileName)
-                              .filter((n): n is string => Boolean(n));
-                            return (
-                              <span
-                                className="ml-1.5 shrink-0 truncate max-w-[160px] border px-1 font-mono text-[9px]"
-                                style={{
-                                  borderColor: bound.length > 0 ? 'var(--border-strong)' : 'var(--status-warn)',
-                                  color: bound.length > 0 ? 'var(--text-secondary)' : 'var(--status-warn)',
-                                }}
-                                title={bound.length > 0 ? bound.join(', ') : 'Veritabanı Bağlı Değil (Raw Hex)'}
-                              >
-                                {bound.length === 0
-                                  ? 'RAW HEX'
-                                  : bound.length === 1
-                                    ? bound[0]
-                                    : `${bound.length} DB`}
-                              </span>
-                            );
-                          })()}
-                        </div>
-                      </td>
-
-                      <td>
-                        <div className="pcan-cell font-mono text-[11px] uppercase text-[var(--text-secondary)]">
-                          {prof.driverFamily}
-                        </div>
-                      </td>
-
-                      <td>
-                        <div className="pcan-cell text-[11px]" title={portOrChan}>
-                          <span className="truncate">{portOrChan}</span>
-                        </div>
-                      </td>
-
-                      <td>
-                        <div className="pcan-cell text-[11px]">{timingLabel}</div>
-                      </td>
-
-                      <td>
-                        <div className="pcan-cell font-sans text-[11px]">
-                          {prof.listenOnly ? (
-                            <span className="text-emerald-500">Listen-Only</span>
-                          ) : (
-                            <span className="text-amber-500 font-semibold">
-                              Active CAN
-                            </span>
-                          )}
-                        </div>
-                      </td>
-
-                      <td>
-                        <div className="pcan-cell font-sans text-[11px]">
-                          {famStatus === undefined ? (
-                            <span className="text-[var(--text-muted)]">—</span>
-                          ) : famStatus.installed ? (
-                            <span className="text-emerald-500 font-semibold">Ready</span>
-                          ) : (
-                            <span
-                              className="text-amber-500 font-semibold"
-                              title={famStatus.installHint}
-                            >
-                              Missing
-                            </span>
-                          )}
-                        </div>
-                      </td>
-
-                      <td>
-                        <div className="pcan-cell">
-                          <BusStateBadge
-                            busState={liveBus?.busState ?? 'offline'}
-                            connected={Boolean(liveBus?.connected)}
-                            listenOnly={liveBus?.listenOnly}
-                            txArmed={liveBus?.txArmed}
-                            txErrorCount={liveBus?.txErrorCount ?? 0}
-                            rxErrorCount={liveBus?.rxErrorCount ?? 0}
-                            compact
-                          />
-                        </div>
-                      </td>
-
-                      <td onClick={(e) => e.stopPropagation()}>
-                        <div className="pcan-cell gap-1 font-sans">
-                          <button
-                            type="button"
-                            disabled={busyProfileId === prof.id}
-                            onClick={() => void handleConnectOrDisconnectProfile(prof)}
-                            style={{
-                              backgroundColor: liveBus
-                                ? 'rgba(220, 38, 38, 0.14)'
-                                : 'rgba(16, 185, 129, 0.16)',
-                              borderColor: liveBus ? '#dc2626' : '#10b981',
-                            }}
-                            className="h-[18px] px-1.5 border text-[10px] font-semibold cursor-pointer"
-                          >
-                            {liveBus ? 'Disconnect' : 'Connect'}
-                          </button>
-
-                          {liveBus && !liveBus.listenOnly && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                void handleToggleArmOnBus(prof.busId, liveBus.txArmed)
+                    return (
+                      <tr
+                        key={prof.id}
+                        onClick={() => connectionStore.selectProfile(prof.id)}
+                        style={{
+                          backgroundColor: isSelected
+                            ? 'var(--bg-row-selected)'
+                            : 'var(--bg-panel)',
+                        }}
+                        className="hover:!bg-[var(--bg-row-hover)] cursor-pointer text-[12px]"
+                      >
+                        {/* Checkbox toggle connection */}
+                        <td onClick={(e) => e.stopPropagation()}>
+                          <div className="pcan-cell pcan-cell-center">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(liveBus)}
+                              disabled={busyProfileId === prof.id}
+                              onChange={() => void handleConnectOrDisconnectProfile(prof)}
+                              className="accent-emerald-600 cursor-pointer h-4 w-4"
+                              title={
+                                Boolean(liveBus)
+                                  ? t('conn.row.connectedTooltip', { bus: prof.busId + 1 })
+                                  : t('conn.row.disconnectedTooltip', { bus: prof.busId + 1 })
                               }
-                              style={{
-                                backgroundColor: liveBus.txArmed
-                                  ? 'rgba(245, 158, 11, 0.2)'
-                                  : 'var(--bg-toolbar)',
-                                borderColor: liveBus.txArmed
-                                  ? '#f59e0b'
-                                  : 'var(--border-strong)',
-                              }}
-                              className="h-[18px] px-1.5 border text-[10px] cursor-pointer"
-                              title="Arm or Disarm active TX on this bus"
-                            >
-                              <Unlock className="w-2.5 h-2.5 inline text-amber-500" />
-                            </button>
-                          )}
+                            />
+                          </div>
+                        </td>
 
-                          <button
-                            type="button"
-                            onClick={() => handleDuplicateProfile(prof)}
-                            style={{
-                              backgroundColor: 'var(--bg-toolbar)',
-                              borderColor: 'var(--border-strong)',
-                            }}
-                            className="h-[18px] px-1 border text-[10px] cursor-pointer"
-                            title="Duplicate profile"
+                        <td>
+                          <div className="pcan-cell font-semibold text-[12px]">
+                            Bus {prof.busId + 1}
+                          </div>
+                        </td>
+
+                        <td>
+                          <div
+                            className="pcan-cell font-sans font-medium text-[12px]"
+                            title={prof.notes || prof.name}
                           >
-                            <Copy className="w-2.5 h-2.5" />
-                          </button>
+                            <span className="truncate">{prof.name}</span>
+                            {(() => {
+                              const bound = prof.databaseIds
+                                .map((id) => dbCatalog.find((d) => d.id === id)?.fileName)
+                                .filter((n): n is string => Boolean(n));
+                              return (
+                                <span
+                                  className="ml-1.5 shrink-0 truncate max-w-[180px] border px-1.5 py-0.5 font-mono text-[11px]"
+                                  style={{
+                                    borderColor: bound.length > 0 ? 'var(--border-strong)' : 'var(--status-warn)',
+                                    color: bound.length > 0 ? 'var(--text-secondary)' : 'var(--status-warn)',
+                                  }}
+                                  title={bound.length > 0 ? bound.join(', ') : t('conn.row.rawHexTooltip')}
+                                >
+                                  {bound.length === 0
+                                    ? t('conn.row.rawHexBadge')
+                                    : bound.length === 1
+                                      ? bound[0]
+                                      : t('conn.row.dbCountBadge', { count: bound.length })}
+                                </span>
+                              );
+                            })()}
+                          </div>
+                        </td>
 
-                          {connState.profiles.length > 0 && (
+                        <td>
+                          <div className="pcan-cell font-mono text-[12px] uppercase text-[var(--text-secondary)]">
+                            {prof.driverFamily}
+                          </div>
+                        </td>
+
+                        <td>
+                          <div className="pcan-cell text-[12px]" title={portOrChan}>
+                            <span className="truncate">{portOrChan}</span>
+                          </div>
+                        </td>
+
+                        <td>
+                          <div className="pcan-cell text-[12px]">{timingLabel}</div>
+                        </td>
+
+                        <td>
+                          <div className="pcan-cell font-sans text-[12px]">
+                            {prof.listenOnly ? (
+                              <span className="text-emerald-500 font-medium">{t('conn.row.listenOnly')}</span>
+                            ) : (
+                              <span className="text-amber-500 font-semibold">
+                                {t('conn.row.activeCan')}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+
+                        <td>
+                          <div className="pcan-cell font-sans text-[12px]">
+                            {famStatus === undefined ? (
+                              <span className="text-[var(--text-muted)]">—</span>
+                            ) : famStatus.installed ? (
+                              <span className="text-emerald-500 font-semibold">{t('conn.status.ready')}</span>
+                            ) : (
+                              <span
+                                className="text-amber-500 font-semibold"
+                                title={famStatus.installHint}
+                              >
+                                {t('conn.row.missing')}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+
+                        <td>
+                          <div className="pcan-cell">
+                            <BusStateBadge
+                              busState={liveBus?.busState ?? 'offline'}
+                              connected={Boolean(liveBus?.connected)}
+                              listenOnly={liveBus?.listenOnly}
+                              txArmed={liveBus?.txArmed}
+                              txErrorCount={liveBus?.txErrorCount ?? 0}
+                              rxErrorCount={liveBus?.rxErrorCount ?? 0}
+                              compact
+                            />
+                          </div>
+                        </td>
+
+                        <td onClick={(e) => e.stopPropagation()}>
+                          <div className="pcan-cell gap-1.5 font-sans">
                             <button
                               type="button"
-                              onClick={() => connectionStore.removeProfile(prof.id)}
+                              disabled={busyProfileId === prof.id}
+                              onClick={() => void handleConnectOrDisconnectProfile(prof)}
+                              style={{
+                                backgroundColor: liveBus
+                                  ? 'rgba(220, 38, 38, 0.14)'
+                                  : 'rgba(16, 185, 129, 0.16)',
+                                borderColor: liveBus ? '#dc2626' : '#10b981',
+                              }}
+                              className="h-[26px] px-2.5 border text-[11.5px] font-semibold cursor-pointer"
+                            >
+                              {liveBus ? t('conn.btn.disconnect') : t('conn.btn.connect')}
+                            </button>
+
+                            {liveBus && !liveBus.listenOnly && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void handleToggleArmOnBus(prof.busId, liveBus.txArmed)
+                                }
+                                style={{
+                                  backgroundColor: liveBus.txArmed
+                                    ? 'rgba(245, 158, 11, 0.2)'
+                                    : 'var(--bg-toolbar)',
+                                  borderColor: liveBus.txArmed
+                                    ? '#f59e0b'
+                                    : 'var(--border-strong)',
+                                }}
+                                className="h-[26px] px-2 border text-[11.5px] cursor-pointer"
+                                title={t('conn.btn.armDisarmTitle')}
+                              >
+                                <Unlock className="w-3 h-3 inline text-amber-500" />
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => handleDuplicateProfile(prof)}
                               style={{
                                 backgroundColor: 'var(--bg-toolbar)',
                                 borderColor: 'var(--border-strong)',
                               }}
-                              className="h-[18px] px-1 border text-[10px] text-[var(--text-secondary)] hover:text-red-400 cursor-pointer"
-                              title="Delete profile"
+                              className="h-[26px] px-2 border text-[11.5px] cursor-pointer"
+                              title={t('conn.btn.duplicateTitle')}
                             >
-                              <Trash2 className="w-2.5 h-2.5" />
+                              <Copy className="w-3 h-3" />
                             </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
+
+                            {connState.profiles.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => connectionStore.removeProfile(prof.id)}
+                                style={{
+                                  backgroundColor: 'var(--bg-toolbar)',
+                                  borderColor: 'var(--border-strong)',
+                                }}
+                                className="h-[26px] px-2 border text-[11.5px] text-[var(--text-secondary)] hover:text-red-400 cursor-pointer"
+                                title={t('conn.btn.deleteTitle')}
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -1047,28 +1069,28 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
         </div>
 
         {/* RIGHT: Connection Profile Editor */}
-        <aside className="w-[390px] shrink-0 flex flex-col min-h-0 overflow-hidden">
+        <aside className="w-[380px] lg:w-[420px] xl:w-[460px] shrink-0 flex flex-col min-h-0 overflow-hidden">
           <div
             style={{
               backgroundColor: 'var(--bg-toolbar)',
               borderBottom: '1px solid var(--border-strong)',
             }}
-            className="shrink-0 h-[26px] px-2.5 flex items-center justify-between text-[11px]"
+            className="shrink-0 min-h-[38px] px-3 py-1 flex items-center justify-between text-[12px] flex-wrap gap-2"
           >
             <span className="font-semibold text-[var(--text-primary)]">
-              Connection Profile Editor
+              {t('conn.editor.title')}
             </span>
-            <span className="font-mono text-[10px] text-[var(--text-muted)]">
+            <span className="font-mono text-[11px] text-[var(--text-muted)]">
               {resolveDeviceIdForProfile(draft)}
             </span>
           </div>
 
-          <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2.5 text-[11px]">
+          <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3 text-[12px]">
             {/* Profile Name & Target Bus */}
-            <div className="grid grid-cols-[1fr_92px] gap-2">
+            <div className="grid grid-cols-[1fr_100px] gap-2.5">
               <div>
-                <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
-                  Profile Name
+                <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                  {t('conn.editor.profileName')}
                 </label>
                 <input
                   type="text"
@@ -1079,17 +1101,17 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="w-full h-[24px] px-2 border text-[12px] focus:outline-none"
+                  className="w-full h-[30px] px-2.5 border text-[12px] focus:outline-none"
                 />
               </div>
 
               <div>
-                <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
-                  Bus Slot
+                <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                  {t('conn.editor.busSlot')}
                 </label>
                 <div className="flex items-center gap-1.5">
                   <select
-                    aria-label="Bus Slot"
+                    aria-label={t('conn.editor.busSlot')}
                     value={draft.busId}
                     onChange={(e) =>
                       setDraft((p) => ({ ...p, busId: clampBusId(Number(e.target.value)) }))
@@ -1099,7 +1121,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-primary)',
                     }}
-                    className="flex-1 min-w-0 h-[24px] px-1.5 border font-mono tabular-nums text-[11px]"
+                    className="flex-1 min-w-0 h-[30px] px-1.5 border font-mono tabular-nums text-[12px]"
                   >
                     {Array.from(
                       {
@@ -1133,7 +1155,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-primary)',
                     }}
-                    className="w-14 h-[24px] px-1 border font-mono text-center text-[11px] focus:outline-none"
+                    className="w-14 h-[30px] px-1 border font-mono text-center text-[12px] focus:outline-none"
                   />
                 </div>
               </div>
@@ -1141,11 +1163,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
 
             {/* Hardware Driver Family */}
             <div>
-              <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
-                Hardware Driver Family
+              <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                {t('conn.editor.driverFamily')}
               </label>
               <select
-                aria-label="Hardware Driver Family"
+                aria-label={t('conn.editor.driverFamily')}
                 value={draft.driverFamily}
                 onChange={(e) =>
                   handleSelectDriverFamily(e.target.value as DriverFamilyId)
@@ -1155,11 +1177,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   borderColor: 'var(--border-strong)',
                   color: 'var(--text-primary)',
                 }}
-                className="w-full h-[24px] px-1.5 border text-[11px]"
+                className="w-full h-[30px] px-2 border text-[12px]"
               >
                 {DRIVER_FAMILY_OPTIONS.map((opt) => (
                   <option key={opt.id} value={opt.id}>
-                    {opt.label}
+                    {t(opt.labelKey)}
                   </option>
                 ))}
               </select>
@@ -1168,9 +1190,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
             {/* Live Driver Readiness for Selected Family */}
             {draftDriverStatus &&
               (draftDriverStatus.installed ? (
-                <div className="flex items-center justify-between text-[11px] text-[var(--text-secondary)] font-mono">
+                <div className="flex items-center justify-between text-[12px] text-[var(--text-secondary)] font-mono">
                   <span>
-                    <span className="text-emerald-500 mr-1">✓</span>
+                    <span className="text-emerald-500 mr-1.5 font-bold">✓</span>
                     {draftDriverStatus.detectedLibraryOrModule ??
                       draftDriverStatus.displayName}
                   </span>
@@ -1181,12 +1203,12 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     backgroundColor: 'var(--bg-row-alt)',
                     borderColor: 'rgba(217, 155, 38, 0.55)',
                   }}
-                  className="p-2 border text-[11px] space-y-0.5"
+                  className="p-2.5 border text-[12px] space-y-1"
                 >
                   <div className="font-semibold text-amber-400">
-                    Driver not installed ({draftDriverStatus.displayName})
+                    {t('conn.editor.driverNotInstalled', { name: draftDriverStatus.displayName })}
                   </div>
-                  <div className="text-[var(--text-secondary)] leading-snug">
+                  <div className="text-[var(--text-secondary)] leading-snug text-[11.5px]">
                     {draftDriverStatus.installHint}
                   </div>
                 </div>
@@ -1201,20 +1223,20 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   backgroundColor: 'var(--bg-row-alt)',
                   borderColor: 'var(--border-strong)',
                 }}
-                className="p-2.5 border space-y-2"
+                className="p-2.5 border space-y-2.5"
               >
-                <div className="font-semibold text-sky-500 flex items-center gap-1">
-                  <Usb className="w-3.5 h-3.5" />
-                  <span>USB / Serial Port Configuration (SLCAN / Lawicel)</span>
+                <div className="font-semibold text-sky-500 flex items-center gap-1.5 text-[12px]">
+                  <Usb className="w-4 h-4" />
+                  <span>{t('conn.editor.slcanConfig')}</span>
                 </div>
 
                 {serialPorts.length > 0 && (
                   <div>
-                    <label className="block text-[var(--text-secondary)] mb-0.5">
-                      Detected Host USB-Serial Ports
+                    <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                      {t('conn.editor.detectedPorts')}
                     </label>
                     <select
-                      aria-label="Detected Serial Ports"
+                      aria-label={t('conn.editor.detectedPorts')}
                       value={
                         serialPorts.some((s) => s.portName === draft.serialPort)
                           ? draft.serialPort
@@ -1230,9 +1252,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                         borderColor: 'var(--border-strong)',
                         color: 'var(--text-primary)',
                       }}
-                      className="w-full h-[24px] px-1.5 border font-mono text-[11px]"
+                      className="w-full h-[30px] px-2 border font-mono text-[12px]"
                     >
-                      <option value="">-- Choose detected USB port or type below --</option>
+                      <option value="">{t('conn.editor.chooseDetectedPort')}</option>
                       {serialPorts.map((sp) => (
                         <option key={sp.portName} value={sp.portName}>
                           {sp.portName}
@@ -1244,10 +1266,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   </div>
                 )}
 
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-2 gap-2.5">
                   <div>
-                    <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
-                      Serial Port (COM / tty) *
+                    <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                      {t('conn.editor.serialPortLabel')}
                     </label>
                     <input
                       type="text"
@@ -1264,16 +1286,16 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                             : 'var(--border-strong)',
                         color: 'var(--text-primary)',
                       }}
-                      className="w-full h-[24px] px-2 border font-mono text-[11px] focus:outline-none"
+                      className="w-full h-[30px] px-2.5 border font-mono text-[12px] focus:outline-none"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
-                      UART Baud Rate
+                    <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                      {t('conn.editor.uartBaudRate')}
                     </label>
                     <select
-                      aria-label="Serial UART Baud Rate"
+                      aria-label={t('conn.editor.uartBaudRate')}
                       value={draft.serialBaudRate}
                       onChange={(e) =>
                         setDraft((p) => ({
@@ -1286,7 +1308,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                         borderColor: 'var(--border-strong)',
                         color: 'var(--text-primary)',
                       }}
-                      className="w-full h-[24px] px-1.5 border font-mono tabular-nums text-[11px]"
+                      className="w-full h-[30px] px-2 border font-mono tabular-nums text-[12px]"
                     >
                       {SERIAL_BAUD_RATES.map((baud) => (
                         <option key={baud} value={baud}>
@@ -1297,27 +1319,27 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   </div>
                 </div>
 
-                <label className="flex items-center gap-1.5 cursor-pointer">
+                <label className="flex items-center gap-2 cursor-pointer text-[12px]">
                   <input
                     type="checkbox"
                     checked={draft.serialDtrRts}
                     onChange={(e) =>
                       setDraft((p) => ({ ...p, serialDtrRts: e.target.checked }))
                     }
-                    className="accent-emerald-600"
+                    className="accent-emerald-600 h-4 w-4"
                   />
-                  <span>Assert USB-CDC DTR / RTS lines on open</span>
+                  <span>{t('conn.editor.assertDtrRts')}</span>
                 </label>
               </div>
             )}
 
             {draft.driverFamily === 'pcan' && (
               <div>
-                <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
-                  PEAK PCAN Hardware Handle / Channel
+                <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                  {t('conn.editor.pcanChannel')}
                 </label>
                 <select
-                  aria-label="PCAN Adapter Channel"
+                  aria-label={t('conn.editor.pcanChannel')}
                   value={draft.adapterChannel}
                   onChange={(e) =>
                     setDraft((p) => ({ ...p, adapterChannel: e.target.value }))
@@ -1327,7 +1349,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="w-full h-[24px] px-1.5 border font-mono text-[11px]"
+                  className="w-full h-[30px] px-2 border font-mono text-[12px]"
                 >
                   {PCAN_ADAPTER_CHANNELS.map((ch) => (
                     <option key={ch} value={ch}>
@@ -1340,11 +1362,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
 
             {draft.driverFamily === 'kvaser' && (
               <div>
-                <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
-                  Kvaser CANlib Virtual / Physical Channel
+                <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                  {t('conn.editor.kvaserChannel')}
                 </label>
                 <select
-                  aria-label="Kvaser Channel"
+                  aria-label={t('conn.editor.kvaserChannel')}
                   value={draft.adapterChannel}
                   onChange={(e) =>
                     setDraft((p) => ({ ...p, adapterChannel: e.target.value }))
@@ -1354,7 +1376,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="w-full h-[24px] px-1.5 border font-mono tabular-nums text-[11px]"
+                  className="w-full h-[30px] px-2 border font-mono tabular-nums text-[12px]"
                 >
                   {KVASER_ADAPTER_CHANNELS.map((ch) => (
                     <option key={ch} value={ch}>
@@ -1368,10 +1390,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
             {(draft.driverFamily === 'socketcan' ||
               draft.driverFamily === 'gs_usb') && (
               <div>
-                <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
+                <label className="block text-[var(--text-secondary)] mb-1 font-medium">
                   {draft.driverFamily === 'socketcan'
-                    ? 'SocketCAN Interface Name (can0, vcan0, slcan0)'
-                    : 'USB gs_usb / candleLight Device Index'}
+                    ? t('conn.editor.socketcanInterface')
+                    : t('conn.editor.gsUsbDeviceIndex')}
                 </label>
                 <input
                   type="text"
@@ -1385,19 +1407,19 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="w-full h-[24px] px-2 border font-mono text-[11px] focus:outline-none"
+                  className="w-full h-[30px] px-2.5 border font-mono text-[12px] focus:outline-none"
                 />
               </div>
             )}
 
             {draft.driverFamily === 'mock' && (
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
-                    Virtual Channel
+                  <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                    {t('conn.editor.virtualChannel')}
                   </label>
                   <select
-                    aria-label="Virtual Mock Channel"
+                    aria-label={t('conn.editor.virtualChannel')}
                     value={draft.adapterChannel || 'mock0'}
                     onChange={(e) =>
                       setDraft((p) => ({ ...p, adapterChannel: e.target.value }))
@@ -1407,19 +1429,19 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-primary)',
                     }}
-                    className="w-full h-[24px] px-1.5 border font-mono text-[11px]"
+                    className="w-full h-[30px] px-2 border font-mono text-[12px]"
                   >
-                    <option value="mock0">mock0 (Primary EV)</option>
-                    <option value="mock1">mock1 (Aux Bus)</option>
+                    <option value="mock0">{t('conn.editor.mock0Primary')}</option>
+                    <option value="mock1">{t('conn.editor.mock1Aux')}</option>
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
-                    Traffic Pacing
+                  <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                    {t('conn.editor.trafficPacing')}
                   </label>
                   <select
-                    aria-label="Mock Traffic Pacing"
+                    aria-label={t('conn.editor.trafficPacing')}
                     value={
                       draft.mockFpsPreset === null
                         ? 'calm'
@@ -1437,27 +1459,27 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-primary)',
                     }}
-                    className="w-full h-[24px] px-1.5 border font-mono tabular-nums text-[11px]"
+                    className="w-full h-[30px] px-2 border font-mono tabular-nums text-[12px]"
                   >
-                    <option value="calm">Calm (~16 msg/s)</option>
-                    <option value="475">Nominal (~475/s)</option>
-                    <option value="1000">Bench 1k/s</option>
-                    <option value="10000">Stress 10k/s</option>
-                    <option value="25000">Stress 25k/s</option>
-                    <option value="50000">Stress 50k/s</option>
+                    <option value="calm">{t('conn.editor.pacingCalm')}</option>
+                    <option value="475">{t('conn.editor.pacingNominal')}</option>
+                    <option value="1000">{t('conn.editor.pacingBench1k')}</option>
+                    <option value="10000">{t('conn.editor.pacingStress10k')}</option>
+                    <option value="25000">{t('conn.editor.pacingStress25k')}</option>
+                    <option value="50000">{t('conn.editor.pacingStress50k')}</option>
                   </select>
                 </div>
               </div>
             )}
 
             {/* CAN / CAN-FD Bit Timing */}
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-2 gap-2.5">
               <div>
-                <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
-                  CAN Nominal Bitrate
+                <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                  {t('conn.editor.nominalBitrate')}
                 </label>
                 <select
-                  aria-label="CAN Nominal Bitrate"
+                  aria-label={t('conn.editor.nominalBitrate')}
                   value={draft.bitrate}
                   onChange={(e) =>
                     setDraft((p) => ({ ...p, bitrate: Number(e.target.value) }))
@@ -1467,7 +1489,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="w-full h-[24px] px-1.5 border font-mono tabular-nums text-[11px]"
+                  className="w-full h-[30px] px-2 border font-mono tabular-nums text-[12px]"
                 >
                   {NOMINAL_BITRATES.map((b) => (
                     <option key={b.value} value={b.value}>
@@ -1478,11 +1500,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               </div>
 
               <div>
-                <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
-                  CAN-FD Data Bitrate
+                <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                  {t('conn.editor.fdDataBitrate')}
                 </label>
                 <select
-                  aria-label="CAN-FD Data Bitrate"
+                  aria-label={t('conn.editor.fdDataBitrate')}
                   disabled={!draft.enableFd || draft.driverFamily === 'slcan'}
                   value={draft.dataBitrate}
                   onChange={(e) =>
@@ -1493,7 +1515,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="w-full h-[24px] px-1.5 border font-mono tabular-nums text-[11px] disabled:opacity-50"
+                  className="w-full h-[30px] px-2 border font-mono tabular-nums text-[12px] disabled:opacity-50"
                 >
                   {DATA_BITRATES_FD.map((b) => (
                     <option key={b.value} value={b.value}>
@@ -1505,16 +1527,16 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
             </div>
 
             {draft.driverFamily !== 'slcan' && (
-              <label className="flex items-center gap-1.5 cursor-pointer">
+              <label className="flex items-center gap-2 cursor-pointer text-[12px]">
                 <input
                   type="checkbox"
                   checked={draft.enableFd}
                   onChange={(e) =>
                     setDraft((p) => ({ ...p, enableFd: e.target.checked }))
                   }
-                  className="accent-sky-600"
+                  className="accent-sky-600 h-4 w-4"
                 />
-                <span>Enable CAN-FD (64-Byte Payload + BRS)</span>
+                <span>{t('conn.editor.enableCanFd')}</span>
               </label>
             )}
 
@@ -1524,21 +1546,21 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 backgroundColor: 'var(--bg-row-alt)',
                 borderColor: 'var(--border-grid)',
               }}
-              className="p-2 border space-y-1.5"
+              className="p-2.5 border space-y-2 text-[12px]"
             >
-              <label className="flex items-center gap-1.5 cursor-pointer font-medium">
+              <label className="flex items-center gap-2 cursor-pointer font-medium">
                 <input
                   type="checkbox"
                   checked={draft.listenOnly}
                   onChange={(e) =>
                     setDraft((p) => ({ ...p, listenOnly: e.target.checked }))
                   }
-                  className="accent-emerald-600"
+                  className="accent-emerald-600 h-4 w-4"
                 />
-                <span>Listen-Only Passive Mode (No ACK / TX Locked — Safe Default)</span>
+                <span>{t('conn.editor.listenOnlySafe')}</span>
               </label>
 
-              <label className="flex items-center gap-1.5 cursor-pointer text-[var(--text-secondary)]">
+              <label className="flex items-center gap-2 cursor-pointer text-[var(--text-secondary)]">
                 <input
                   type="checkbox"
                   checked={draft.autoConnectOnProjectLoad}
@@ -1548,9 +1570,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       autoConnectOnProjectLoad: e.target.checked,
                     }))
                   }
-                  className="accent-sky-600"
+                  className="accent-sky-600 h-4 w-4"
                 />
-                <span>Auto-connect this channel when Project is opened</span>
+                <span>{t('conn.editor.autoConnect')}</span>
               </label>
             </div>
 
@@ -1569,20 +1591,20 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
 
             {/* Notes */}
             <div>
-              <label className="block text-[var(--text-secondary)] mb-0.5 font-medium">
-                Adapter / Harness Notes
+              <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                {t('conn.editor.notes')}
               </label>
               <input
                 type="text"
                 value={draft.notes}
                 onChange={(e) => setDraft((p) => ({ ...p, notes: e.target.value }))}
-                placeholder="Termination 120R ON, OBD-II pin 6/14..."
+                placeholder={t('conn.editor.notesPlaceholder')}
                 style={{
                   backgroundColor: 'var(--bg-input)',
                   borderColor: 'var(--border-strong)',
                   color: 'var(--text-primary)',
                 }}
-                className="w-full h-[24px] px-2 border text-[11px] focus:outline-none"
+                className="w-full h-[30px] px-2.5 border text-[12px] focus:outline-none"
               />
             </div>
           </div>
@@ -1593,7 +1615,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               backgroundColor: 'var(--bg-toolbar)',
               borderTop: '1px solid var(--border-strong)',
             }}
-            className="shrink-0 p-2 flex items-center justify-end gap-2"
+            className="shrink-0 p-2.5 flex items-center justify-end gap-2.5"
           >
             <button
               type="button"
@@ -1605,10 +1627,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 borderColor: 'var(--border-strong)',
                 color: 'var(--text-primary)',
               }}
-              className="h-[25px] px-3 border flex items-center gap-1.5 text-[11px] font-medium hover:border-[var(--text-secondary)] cursor-pointer"
+              className="h-[30px] px-3.5 border flex items-center gap-1.5 text-[12px] font-medium hover:border-[var(--text-secondary)] cursor-pointer"
             >
               <Save className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
-              <span>Save Profile</span>
+              <span>{t('conn.editor.saveProfile')}</span>
             </button>
 
             <button
@@ -1619,10 +1641,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 borderColor: 'rgba(63, 185, 128, 0.65)',
                 color: 'var(--text-primary)',
               }}
-              className="h-[25px] px-3 border flex items-center gap-1.5 text-[11px] font-semibold hover:opacity-90 cursor-pointer"
+              className="h-[30px] px-3.5 border flex items-center gap-1.5 text-[12px] font-semibold hover:opacity-90 cursor-pointer"
             >
               <Plug className="w-3.5 h-3.5 text-emerald-500" />
-              <span>Save &amp; Connect</span>
+              <span>{t('conn.editor.saveAndConnect')}</span>
             </button>
           </div>
         </aside>

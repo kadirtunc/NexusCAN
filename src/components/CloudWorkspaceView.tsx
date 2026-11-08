@@ -38,6 +38,7 @@ import {
   projectStore,
   useProjectStore,
 } from '../store/projectStore';
+import { isToolpackEnabled } from '../types/toolpacks';
 import {
   simulationPanelStore,
   useSimulationPanelStore,
@@ -60,6 +61,7 @@ import {
   type LoadedSimulationDatabaseEntry,
 } from './simulation/virtualCanPacking';
 import { apiParseDatabaseSchema } from '../services/ipcClient';
+import { useI18n } from '../i18n';
 
 interface CloudWorkspaceViewProps {
   quickBarState: QuickBarConnectionState;
@@ -84,11 +86,13 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
   onApplyQuickBar,
   onStatusMessage,
 }) => {
+  const { t } = useI18n();
   const cloudState = useCloudBridgeStore();
   const cloudHeader = useCloudBridgeHeader();
   const projState = useProjectStore();
   const dbState = useDatabaseStore();
   const simState = useSimulationPanelStore();
+  const isSimEnabled = isToolpackEnabled(projState.enabledToolpacks, 'simulation_replay');
 
   // Local active workspace snapshot
   const localProject = useMemo(() => {
@@ -344,7 +348,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
       }
       onStatusMessage({
         kind: 'success',
-        message: 'NexusCANCloud oturumu başarıyla açıldı.',
+        message: t('cloud.auth.loginSuccess'),
       });
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : String(err));
@@ -361,7 +365,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
       setActiveModule('overview');
       onStatusMessage({
         kind: 'info',
-        message: 'NexusCANCloud oturumu kapatıldı.',
+        message: t('cloud.auth.logoutSuccess'),
       });
     } catch (err) {
       onStatusMessage({
@@ -411,12 +415,12 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
       setActiveModule('overview');
       onStatusMessage({
         kind: 'success',
-        message: `Cloud projesi "${created.name}" başarıyla oluşturuldu.`,
+        message: t('cloud.status.projectCreated', { name: created.name }),
       });
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: `Proje oluşturulamadı: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('cloud.status.projectCreateFailed', { error: err instanceof Error ? err.message : String(err) }),
       });
     } finally {
       setBusyAction(null);
@@ -440,12 +444,12 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
       });
       onStatusMessage({
         kind: 'success',
-        message: `"${inspectedProject.name}" masaüstüne aktarıldı (Saha Güvenliği: Listen-Only modunda açıldı).`,
+        message: t('cloud.status.pullSuccess', { name: inspectedProject.name }),
       });
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: `Masaüstüne çekme başarısız: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('cloud.status.pullFailed', { error: err instanceof Error ? err.message : String(err) }),
       });
     } finally {
       setBusyAction(null);
@@ -480,12 +484,12 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
       setForcePush(false);
       onStatusMessage({
         kind: 'success',
-        message: `Çalışma alanı Cloud'a başarıyla gönderildi (Rev #${res.revisionNumber}).`,
+        message: t('cloud.status.pushSuccess', { rev: res.revisionNumber }),
       });
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: `Cloud'a gönderme hatası: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('cloud.status.pushFailed', { error: err instanceof Error ? err.message : String(err) }),
       });
     } finally {
       setBusyAction(null);
@@ -527,40 +531,40 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
         if (activeModule === 'panels') {
           onStatusMessage({
             kind: 'success',
-            message: `Cloud Sync tamamlandı: [${target.code}] Proje ve güncel paneller buluttan eşitlendi.`,
+            message: t('cloud.status.syncPanels', { code: target.code }),
           });
         } else if (activeModule === 'databases') {
           onStatusMessage({
             kind: 'success',
-            message: `Cloud Sync tamamlandı: [${target.code}] Veritabanları buluttan eşitlendi.`,
+            message: t('cloud.status.syncDatabases', { code: target.code }),
           });
         } else if (activeModule === 'sync_diff' || activeModule === 'overview') {
           const revNum = cloudBridgeStore.getState().remoteRevisionNumber;
           onStatusMessage({
             kind: 'success',
-            message: `Cloud Sync tamamlandı: [${target.code}] Çalışma alanı #${revNum ?? 'son'} eşitlendi.`,
+            message: t('cloud.status.syncWorkspace', { code: target.code, rev: revNum ?? 'last' }),
           });
         } else {
           onStatusMessage({
             kind: 'success',
-            message: `Cloud Sync tamamlandı: [${target.code}] Proje ve tüm alt modüller eşitlendi.`,
+            message: t('cloud.status.syncAllModules', { code: target.code }),
           });
         }
       } else {
         onStatusMessage({
           kind: 'success',
-          message: `Cloud Sync tamamlandı: ${projects.length} proje listesi güncellendi.`,
+          message: t('cloud.status.syncProjects', { count: projects.length }),
         });
       }
     } catch (err) {
       onStatusMessage({
         kind: 'error',
-        message: err instanceof Error ? err.message : 'Cloud senkronizasyonu başarısız.',
+        message: err instanceof Error ? err.message : t('cloud.status.syncFailed'),
       });
     } finally {
       setIsSyncingCloud(false);
     }
-  }, [activeModule, isSyncingCloud, onStatusMessage]);
+  }, [activeModule, isSyncingCloud, onStatusMessage, t]);
 
   // Stable Memoized Cloud Project Context for SimulationWorkbenchView
   const simulationCloudContext = useMemo(() => {
@@ -599,7 +603,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
         );
         onStatusMessage({
           kind: 'success',
-          message: `"${panel.name}" buluta kaydedildi.`,
+          message: t('cloud.status.panelSaved', { name: panel.name }),
         });
       },
       onCreatePanel: async (panel: SimulationPanelDto) => {
@@ -610,7 +614,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
         setCloudPanels((prev) => [...prev, created]);
         onStatusMessage({
           kind: 'success',
-          message: `"${created.name}" bulutta oluşturuldu.`,
+          message: t('cloud.status.panelCreated', { name: created.name }),
         });
       },
       onRequestRenamePanel: async (panel: SimulationPanelDto, newName: string) => {
@@ -625,7 +629,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
         );
         onStatusMessage({
           kind: 'success',
-          message: `Panel "${newName}" olarak adlandırıldı.`,
+          message: t('cloud.status.panelRenamed', { name: newName }),
         });
       },
       onDeletePanel: async (panelId: string) => {
@@ -636,14 +640,14 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
         setCloudPanels((prev) => prev.filter((p) => p.id !== panelId));
         onStatusMessage({
           kind: 'info',
-          message: 'Panel buluttan silindi.',
+          message: t('cloud.status.panelDeleted'),
         });
       },
       onPullPanelToLocal: (panel: SimulationPanelDto) => {
         simulationPanelStore.upsertPanelFromCloud(panel);
         onStatusMessage({
           kind: 'success',
-          message: `"${panel.name}" masaüstüne aktarıldı.`,
+          message: t('cloud.status.panelPulled', { name: panel.name }),
         });
       },
     };
@@ -656,6 +660,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
     handleDeepCloudSync,
     isSyncingCloud,
     onStatusMessage,
+    t,
   ]);
 
   // URL to direct Live WebCAN stream
@@ -677,7 +682,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
     cloudBridgeStore.stopLiveStream();
     onStatusMessage({
       kind: 'info',
-      message: `Canlı yayın durduruldu (${projName}). Cloud oturumu açık kalmaya devam ediyor.`,
+      message: t('cloud.status.streamStopped', { name: projName }),
     });
   };
 
@@ -691,8 +696,28 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
           backgroundColor: 'var(--bg-canvas)',
           color: 'var(--text-primary)',
         }}
-        className="flex-1 min-h-0 flex items-center justify-center p-6 select-none"
+        className="flex-1 min-h-0 flex flex-col items-center justify-center p-6 select-none overflow-y-auto"
       >
+        {/* Offline Simulation Access Banner */}
+        {simState.panels.length > 0 && isSimEnabled && (
+          <div className="w-full max-w-[760px] mb-3 p-3 rounded-[2px] border border-cyan-500/40 bg-cyan-950/20 flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 text-[12px] text-cyan-300">
+              <LayoutGrid className="w-4 h-4 text-cyan-400 shrink-0" />
+              <span>
+                {t('cloud.offlineBanner.notice', { count: simState.panels.length })}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => databaseStore.setActiveDocTab('panels')}
+              className="h-[30px] px-3 rounded-[2px] border border-cyan-500/60 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 text-[12px] font-semibold flex items-center gap-1.5 cursor-pointer"
+            >
+              <span>{t('cloud.offlineBanner.btn')}</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         <div
           style={{
             backgroundColor: 'var(--bg-panel)',
@@ -706,24 +731,24 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
               <Cloud className="w-5 h-5 text-cyan-400" />
               <div>
                 <span className="font-semibold text-[14px] text-[var(--text-primary)] block">
-                  NexusCANCloud Oturumu Aç
+                  {t('cloud.auth.title')}
                 </span>
-                <span className="text-[11px] text-[var(--text-secondary)]">
-                  Mühendislik Düzeyi Canlı Telemetri & Çalışma Alanı
+                <span className="text-[12px] text-[var(--text-secondary)]">
+                  {t('cloud.auth.subtitle')}
                 </span>
               </div>
             </div>
 
             {authError && (
-              <div className="p-2 border border-red-500/40 bg-red-950/20 text-red-400 text-[11px] font-medium rounded-[2px]">
+              <div className="p-2.5 border border-red-500/40 bg-red-950/20 text-red-400 text-[12px] font-medium rounded-[2px]">
                 {authError}
               </div>
             )}
 
-            <form onSubmit={(e) => void handleLoginSubmit(e)} className="space-y-3 text-[11px]">
+            <form onSubmit={(e) => void handleLoginSubmit(e)} className="space-y-3.5 text-[12px]">
               <div>
-                <label className="block text-[10px] text-[var(--text-secondary)] mb-0.5">
-                  Sunucu URL
+                <label className="block text-[11.5px] font-medium text-[var(--text-secondary)] mb-1">
+                  {t('cloud.auth.serverUrl')}
                 </label>
                 <input
                   type="text"
@@ -733,14 +758,14 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                     backgroundColor: 'var(--bg-input)',
                     borderColor: 'var(--border-strong)',
                   }}
-                  className="w-full h-[26px] px-2 border font-mono text-[11px] focus:outline-none"
+                  className="w-full h-[30px] px-2.5 border font-mono text-[12px] focus:outline-none"
                 />
               </div>
 
               {isRegisterMode && (
                 <div>
-                  <label className="block text-[10px] text-[var(--text-secondary)] mb-0.5">
-                    Ad Soyad
+                  <label className="block text-[11.5px] font-medium text-[var(--text-secondary)] mb-1">
+                    {t('cloud.auth.fullName')}
                   </label>
                   <input
                     type="text"
@@ -751,14 +776,14 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       backgroundColor: 'var(--bg-input)',
                       borderColor: 'var(--border-strong)',
                     }}
-                    className="w-full h-[26px] px-2 border text-[11px] focus:outline-none"
+                    className="w-full h-[30px] px-2.5 border text-[12px] focus:outline-none"
                   />
                 </div>
               )}
 
               <div>
-                <label className="block text-[10px] text-[var(--text-secondary)] mb-0.5">
-                  E-Posta
+                <label className="block text-[11.5px] font-medium text-[var(--text-secondary)] mb-1">
+                  {t('cloud.auth.email')}
                 </label>
                 <input
                   type="email"
@@ -769,13 +794,13 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                     backgroundColor: 'var(--bg-input)',
                     borderColor: 'var(--border-strong)',
                   }}
-                  className="w-full h-[26px] px-2 border text-[11px] focus:outline-none"
+                  className="w-full h-[30px] px-2.5 border text-[12px] focus:outline-none"
                 />
               </div>
 
               <div>
-                <label className="block text-[10px] text-[var(--text-secondary)] mb-0.5">
-                  Parola
+                <label className="block text-[11.5px] font-medium text-[var(--text-secondary)] mb-1">
+                  {t('cloud.auth.password')}
                 </label>
                 <input
                   type="password"
@@ -786,7 +811,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                     backgroundColor: 'var(--bg-input)',
                     borderColor: 'var(--border-strong)',
                   }}
-                  className="w-full h-[26px] px-2 border text-[11px] focus:outline-none"
+                  className="w-full h-[30px] px-2.5 border text-[12px] focus:outline-none"
                 />
               </div>
 
@@ -797,7 +822,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                   backgroundColor: 'rgba(6, 182, 212, 0.18)',
                   borderColor: 'rgba(6, 182, 212, 0.65)',
                 }}
-                className="w-full h-[28px] border flex items-center justify-center gap-1.5 text-[11px] font-semibold text-cyan-300 hover:opacity-90 cursor-pointer disabled:opacity-50"
+                className="w-full h-[32px] border flex items-center justify-center gap-1.5 text-[12px] font-semibold text-cyan-300 hover:opacity-90 cursor-pointer disabled:opacity-50"
               >
                 {authBusy ? (
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -806,16 +831,16 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 )}
                 <span>
                   {authBusy
-                    ? 'Bağlanıyor...'
+                    ? t('cloud.auth.connecting')
                     : isRegisterMode
-                      ? 'Hesap Oluştur ve Oturum Aç'
-                      : 'Oturum Aç & Bağlan'}
+                      ? t('cloud.auth.registerAndLogin')
+                      : t('cloud.auth.loginAndConnect')}
                 </span>
               </button>
             </form>
 
-            <div className="pt-2 border-t border-[var(--border-strong)] flex items-center justify-between text-[11px] text-[var(--text-secondary)]">
-              <span>{isRegisterMode ? 'Mevcut hesabınız var mı?' : 'Hesabınız yok mu?'}</span>
+            <div className="pt-2.5 border-t border-[var(--border-strong)] flex items-center justify-between text-[12px] text-[var(--text-secondary)]">
+              <span>{isRegisterMode ? t('cloud.auth.haveAccount') : t('cloud.auth.noAccount')}</span>
               <button
                 type="button"
                 onClick={() => {
@@ -824,7 +849,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 }}
                 className="text-cyan-400 hover:underline cursor-pointer font-medium"
               >
-                {isRegisterMode ? 'Giriş Yap' : 'Kayıt Ol'}
+                {isRegisterMode ? t('cloud.auth.switchLogin') : t('cloud.auth.switchRegister')}
               </button>
             </div>
           </div>
@@ -836,41 +861,36 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
           >
             <div className="space-y-3">
               <span className="font-semibold text-[13px] text-cyan-400 block">
-                Bulut Telemetrisi & Paylaşımlı Paneller
+                {t('cloud.auth.sideTitle')}
               </span>
               <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
-                NexusCANCloud; masaüstü `.nexusproj.json` çalışma alanlarınızı,
-                CAN bağlantı profillerinizi, TX mesaj şablonlarınızı ve etkileşimli
-                simülasyon panellerinizi ekibinizle çift yönlü eşitler.
+                {t('cloud.auth.sideDesc')}
               </p>
 
               <div className="space-y-2 pt-1">
                 <div className="flex items-center gap-2">
                   <LayoutGrid className="w-4 h-4 text-cyan-400 shrink-0" />
                   <span>
-                    <strong>Paylaşımlı Paneller:</strong> Sanal enstrüman ve simülasyon
-                    panellerini bulutta saklayın ve doğrudan sekme içinden çalıştırın.
+                    <strong>{t('cloud.auth.sideSharedPanels')}:</strong> {t('cloud.auth.sideSharedPanelsDesc')}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
                   <Radio className="w-4 h-4 text-emerald-400 shrink-0" />
                   <span>
-                    <strong>Canlı Telemetri:</strong> 20–60Hz hızla yerel CAN hattını
-                    tarayıcıdaki ekibe canlı yayınlayın.
+                    <strong>{t('cloud.auth.sideLiveTelemetry')}:</strong> {t('cloud.auth.sideLiveTelemetryDesc')}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
                   <Lock className="w-4 h-4 text-amber-400 shrink-0" />
                   <span>
-                    <strong>Saha Güvenliği:</strong> Çekilen projeler her zaman Listen-Only
-                    modunda açılır, fiziksel hatta asla izinsiz paket basılmaz.
+                    <strong>{t('cloud.auth.sideFieldSafety')}:</strong> {t('cloud.auth.sideFieldSafetyDesc')}
                   </span>
                 </div>
               </div>
             </div>
 
             <div className="text-[10px] text-[var(--text-muted)] font-mono">
-              Version 0.1.0 • Desktop Client
+              {t('cloud.auth.versionLabel')}
             </div>
           </div>
         </div>
@@ -890,27 +910,27 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
       className="flex-1 min-h-0 flex flex-col select-none overflow-hidden"
     >
       {/* ==================================================================== */}
-      {/* 1. TOP CLOUD STATUS TOOLBAR (34px)                                   */}
+      {/* 1. TOP CLOUD STATUS TOOLBAR (40px)                                   */}
       {/* ==================================================================== */}
       <div
         style={{
           backgroundColor: 'var(--bg-toolbar)',
           borderBottom: '1px solid var(--border-strong)',
         }}
-        className="h-[34px] px-3 flex items-center justify-between gap-2 shrink-0 text-[11px]"
+        className="min-h-[40px] px-3 py-1 flex flex-wrap items-center justify-between gap-2.5 shrink-0 text-[12px]"
       >
         {/* Left: Server Status & Organization Selector */}
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
           <div className="flex items-center gap-1.5 font-semibold text-cyan-400 shrink-0">
-            <Cloud className="w-3.5 h-3.5" />
+            <Cloud className="w-4 h-4" />
             <span className="hidden sm:inline">NexusCANCloud</span>
           </div>
 
-          <div className="h-3 w-px bg-[var(--border-strong)] shrink-0" />
+          <div className="h-4 w-px bg-[var(--border-strong)] shrink-0" />
 
           {/* Org Selector */}
-          <div className="flex items-center gap-1">
-            <Building2 className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+          <div className="flex items-center gap-1.5">
+            <Building2 className="w-4 h-4 text-cyan-400 shrink-0" />
             <select
               value={cloudState.selectedOrgId ?? ''}
               onChange={(e) => cloudBridgeStore.selectOrganization(e.target.value)}
@@ -919,8 +939,8 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 borderColor: 'var(--border-strong)',
                 color: 'var(--text-primary)',
               }}
-              className="h-[22px] px-1.5 border text-[11px] cursor-pointer max-w-[150px] truncate focus:outline-none"
-              title="Aktif Organizasyon"
+              className="h-[28px] px-2 border text-[12px] cursor-pointer max-w-[170px] truncate focus:outline-none"
+              title={t('cloud.toolbar.activeOrgTitle')}
             >
               {cloudState.organizations.map((org) => (
                 <option key={org.id} value={org.id}>
@@ -932,47 +952,47 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
 
           {/* Live Status Pill */}
           {cloudHeader.status === 'streaming' ? (
-            <div className="flex items-center gap-1 text-[10px] font-mono font-semibold px-2 py-0.5 border border-emerald-500/40 bg-emerald-500/10 text-emerald-400 rounded-[2px] shrink-0">
+            <div className="flex items-center gap-1 text-[11px] font-mono font-semibold px-2 py-0.5 border border-emerald-500/40 bg-emerald-500/10 text-emerald-400 rounded-[2px] shrink-0">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span>LIVE • {cloudHeader.targetHz}Hz</span>
+              <span>{t('cloud.toolbar.livePill', { hz: cloudHeader.targetHz })}</span>
             </div>
           ) : (
-            <div className="flex items-center gap-1 text-[10px] font-mono text-[var(--text-muted)] px-1.5 py-0.5 border border-[var(--border-strong)] rounded-[2px] shrink-0">
+            <div className="flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] px-2 py-0.5 border border-[var(--border-strong)] rounded-[2px] shrink-0">
               <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
-              <span>{isBridgeActive ? 'BAĞLANIYOR…' : 'OFFLINE'}</span>
+              <span>{isBridgeActive ? t('cloud.toolbar.connecting') : t('cloud.toolbar.offline')}</span>
             </div>
           )}
           {isBridgeActive ? (
             <button
               type="button"
               onClick={handleStopLiveStream}
-              title="Canlı telemetri yayınını kapat (Cloud oturumu açık kalır)"
-              className="h-[22px] px-2 border text-[10px] font-mono font-semibold cursor-pointer flex items-center gap-1 shrink-0 hover:opacity-90"
+              title={t('cloud.toolbar.stopStreamTitle')}
+              className="h-[28px] px-2.5 border text-[11px] font-mono font-semibold cursor-pointer flex items-center gap-1.5 shrink-0 hover:opacity-90"
               style={{ borderColor: 'var(--status-critical)', color: 'var(--status-critical)' }}
             >
-              <Square className="w-3 h-3" />
-              YAYINI KAPAT
+              <Square className="w-3.5 h-3.5" />
+              {t('cloud.toolbar.stopStream')}
             </button>
           ) : (
             cloudState.selectedProjectId && (
               <button
                 type="button"
                 onClick={() => void cloudBridgeStore.resumeLiveStream()}
-                title={`Canlı yayını ${cloudState.selectedProjectName ?? 'seçili projeye'} yeniden başlat`}
-                className="h-[22px] px-2 border text-[10px] font-mono font-semibold cursor-pointer flex items-center gap-1 shrink-0 hover:opacity-90"
+                title={t('cloud.toolbar.startStreamTitle', { name: cloudState.selectedProjectName ?? '' })}
+                className="h-[28px] px-2.5 border text-[11px] font-mono font-semibold cursor-pointer flex items-center gap-1.5 shrink-0 hover:opacity-90"
                 style={{ borderColor: 'var(--status-nominal)', color: 'var(--status-nominal)' }}
               >
-                <Play className="w-3 h-3" />
-                YAYINI BAŞLAT
+                <Play className="w-3.5 h-3.5" />
+                {t('cloud.toolbar.startStream')}
               </button>
             )
           )}
         </div>
 
         {/* Right: User / Rate / Web Link / Logout */}
-        <div className="flex items-center gap-2 shrink-0">
-          <div className="hidden lg:flex items-center gap-1 text-[10px] font-mono text-[var(--text-secondary)]">
-            <span>Hız:</span>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <div className="hidden lg:flex items-center gap-1.5 text-[11px] font-mono text-[var(--text-secondary)]">
+            <span>{t('cloud.toolbar.rate')}</span>
             <select
               value={cloudState.desiredHz}
               onChange={(e) =>
@@ -983,7 +1003,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 borderColor: 'var(--border-strong)',
                 color: 'var(--text-primary)',
               }}
-              className="h-[20px] px-1 border text-[10px] cursor-pointer focus:outline-none"
+              className="h-[26px] px-1.5 border text-[11px] cursor-pointer focus:outline-none"
             >
               {TARGET_HZ_OPTIONS.map((hz) => (
                 <option key={hz} value={hz}>
@@ -1001,11 +1021,11 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
               backgroundColor: 'rgba(6, 182, 212, 0.10)',
               borderColor: 'rgba(6, 182, 212, 0.40)',
             }}
-            className="h-[22px] px-2 border flex items-center gap-1 text-[10px] font-semibold text-cyan-400 hover:bg-cyan-500/20 cursor-pointer"
-            title="WebCAN Canlı Görünümünü Aç"
+            className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[11.5px] font-semibold text-cyan-400 hover:bg-cyan-500/20 cursor-pointer"
+            title={t('cloud.toolbar.webInterfaceTitle')}
           >
-            <ExternalLink className="w-3 h-3" />
-            <span className="hidden md:inline">Web Arayüzü ↗</span>
+            <ExternalLink className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">{t('cloud.toolbar.webInterface')}</span>
           </a>
 
           <button
@@ -1016,13 +1036,13 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
               backgroundColor: 'var(--bg-panel)',
               borderColor: 'var(--border-strong)',
             }}
-            className="h-[22px] px-2 border flex items-center gap-1.5 text-[10px] hover:border-cyan-500/50 hover:text-cyan-400 cursor-pointer disabled:opacity-50"
-            title="Tüm Cloud projelerini ve seçili projeyi derinlemesine eşitle"
+            className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[11.5px] hover:border-cyan-500/50 hover:text-cyan-400 cursor-pointer disabled:opacity-50"
+            title={t('cloud.toolbar.cloudSyncTitle')}
           >
-            <RefreshCw className={`w-3 h-3 text-[var(--text-secondary)] ${isSyncingCloud ? 'animate-spin text-cyan-400' : ''}`} />
-            <span className="font-semibold text-cyan-400">Cloud Sync</span>
+            <RefreshCw className={`w-3.5 h-3.5 text-[var(--text-secondary)] ${isSyncingCloud ? 'animate-spin text-cyan-400' : ''}`} />
+            <span className="font-semibold text-cyan-400">{t('cloud.toolbar.cloudSync')}</span>
             {lastSyncedAt && (
-              <span className="hidden md:inline font-mono tabular-nums text-[9px] text-[var(--text-muted)]">
+              <span className="hidden md:inline font-mono tabular-nums text-[10px] text-[var(--text-muted)]">
                 {lastSyncedAt}
               </span>
             )}
@@ -1034,15 +1054,15 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
               backgroundColor: 'var(--bg-panel)',
               borderColor: 'var(--border-strong)',
             }}
-            className="hidden md:flex items-center gap-1.5 px-2 h-[22px] border text-[10px] font-mono tabular-nums text-slate-300 shrink-0"
-            title={`Oturum: ${cloudState.userFullName || cloudState.userEmail}`}
+            className="hidden md:flex items-center gap-1.5 px-2.5 h-[28px] border text-[11px] font-mono tabular-nums text-slate-300 shrink-0"
+            title={t('cloud.toolbar.sessionTooltip', { user: cloudState.userFullName || cloudState.userEmail })}
           >
-            <span className="truncate max-w-[120px] text-slate-200">
+            <span className="truncate max-w-[130px] text-slate-200">
               {cloudState.userFullName || cloudState.userEmail}
             </span>
             {activeOrg && (
-              <span className="px-1 py-0.2 rounded bg-cyan-950/70 border border-cyan-800/60 text-cyan-300 text-[9px] flex items-center gap-1">
-                <Building2 className="w-2.5 h-2.5 text-cyan-400 shrink-0" />
+              <span className="px-1.5 py-0.5 rounded bg-cyan-950/70 border border-cyan-800/60 text-cyan-300 text-[10px] flex items-center gap-1">
+                <Building2 className="w-3 h-3 text-cyan-400 shrink-0" />
                 <span>{activeOrg.name}</span>
                 <span className="text-cyan-400/70">[{activeOrg.myRole}]</span>
               </span>
@@ -1056,11 +1076,11 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
               backgroundColor: 'rgba(239, 68, 68, 0.10)',
               borderColor: 'rgba(239, 68, 68, 0.40)',
             }}
-            className="h-[22px] px-2 border flex items-center gap-1 text-[10px] text-red-400 hover:border-red-500 cursor-pointer"
-            title="NexusCANCloud Oturumunu Kapat"
+            className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[11.5px] text-red-400 hover:border-red-500 cursor-pointer"
+            title={t('cloud.toolbar.logoutTitle')}
           >
-            <LogOut className="w-3 h-3" />
-            <span className="hidden sm:inline">Çıkış Yap</span>
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">{t('cloud.toolbar.logout')}</span>
           </button>
         </div>
       </div>
@@ -1088,14 +1108,14 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
             className="p-2 space-y-1.5 shrink-0"
           >
             <div className="flex items-center justify-between text-[11px] font-semibold text-[var(--text-secondary)]">
-              <span>Cloud Projeleri ({filteredProjects.length})</span>
+              <span>{t('cloud.projects.title', { count: filteredProjects.length })}</span>
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
                   disabled={isSyncingCloud}
                   onClick={() => void handleDeepCloudSync()}
                   className="text-[var(--text-muted)] hover:text-cyan-400 cursor-pointer flex items-center p-0.5 rounded-[2px]"
-                  title="Projeleri ve Aktif Projeyi Eşitle"
+                  title={t('cloud.projects.syncTooltip')}
                 >
                   <RefreshCw className={`w-3 h-3 ${isSyncingCloud ? 'animate-spin text-cyan-400' : ''}`} />
                 </button>
@@ -1105,7 +1125,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                   className="text-cyan-400 hover:underline cursor-pointer flex items-center gap-0.5 text-[10px]"
                 >
                   <Plus className="w-3 h-3" />
-                  <span>Yeni</span>
+                  <span>{t('cloud.projects.newBtn')}</span>
                 </button>
               </div>
             </div>
@@ -1114,7 +1134,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
               <Search className="w-3 h-3 text-[var(--text-muted)] absolute left-2 top-1.5 pointer-events-none" />
               <input
                 type="text"
-                placeholder="Proje ara..."
+                placeholder={t('cloud.projects.searchPlaceholder')}
                 value={projectSearch}
                 onChange={(e) => setProjectSearch(e.target.value)}
                 style={{
@@ -1137,7 +1157,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
               className="p-2 space-y-2 shrink-0 text-[10px]"
             >
               <div className="font-semibold text-cyan-400 flex items-center justify-between">
-                <span>+ Yeni Cloud Projesi</span>
+                <span>{t('cloud.projects.newProjectTitle')}</span>
                 <button
                   type="button"
                   onClick={() => setNewProjectOpen(false)}
@@ -1149,12 +1169,12 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
 
               <div>
                 <label className="block text-[9px] text-[var(--text-muted)] mb-0.5">
-                  Proje Adı
+                  {t('cloud.projects.nameLabel')}
                 </label>
                 <input
                   type="text"
                   required
-                  placeholder="EV Inverter Bench 01"
+                  placeholder={t('cloud.projects.namePlaceholder')}
                   value={newProjectName}
                   onChange={(e) => setNewProjectName(e.target.value)}
                   style={{
@@ -1168,7 +1188,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
               <div className="grid grid-cols-2 gap-1.5">
                 <div>
                   <label className="block text-[9px] text-[var(--text-muted)] mb-0.5">
-                    Proje Kodu
+                    {t('cloud.projects.codeLabel')}
                   </label>
                   <input
                     type="text"
@@ -1185,7 +1205,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 </div>
                 <div>
                   <label className="block text-[9px] text-[var(--text-muted)] mb-0.5">
-                    Protokol
+                    {t('cloud.projects.protoLabel')}
                   </label>
                   <select
                     value={newProjectProto}
@@ -1212,7 +1232,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                     checked={newProjectUseLocal}
                     onChange={(e) => setNewProjectUseLocal(e.target.checked)}
                   />
-                  <span>Mevcut yerel çalışma alanını şablon olarak yükle</span>
+                  <span>{t('cloud.projects.useLocalTemplate')}</span>
                 </label>
               )}
 
@@ -1225,7 +1245,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 }}
                 className="w-full h-[24px] border flex items-center justify-center font-semibold text-cyan-300 hover:opacity-90 cursor-pointer disabled:opacity-50"
               >
-                {busyAction === 'create_project' ? 'Oluşturuluyor...' : 'Projeyi Oluştur'}
+                {busyAction === 'create_project' ? t('cloud.projects.creating') : t('cloud.projects.createBtn')}
               </button>
             </form>
           )}
@@ -1234,7 +1254,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
           <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-[var(--border-grid)]">
             {filteredProjects.length === 0 ? (
               <div className="p-4 text-center text-[10px] text-[var(--text-muted)] italic">
-                Bulut projesi bulunamadı. "+ Yeni" ile oluşturabilirsiniz.
+                {t('cloud.projects.emptyList')}
               </div>
             ) : (
               filteredProjects.map((p) => {
@@ -1273,12 +1293,12 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                         {p.latestRevisionNumber !== null && <span>Rev #{p.latestRevisionNumber}</span>}
                         {isStreaming && (
                           <span className="px-1 rounded-[2px] bg-emerald-500/20 text-emerald-400 font-bold text-[9px]">
-                            LIVE
+                            {t('cloud.projects.badgeLive')}
                           </span>
                         )}
                         {isLinked && (
                           <span className="px-1 rounded-[2px] bg-cyan-500/20 text-cyan-400 font-bold text-[9px]">
-                            LINKED
+                            {t('cloud.projects.badgeLinked')}
                           </span>
                         )}
                         {hasPendingRemote && (
@@ -1303,50 +1323,57 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
             <FolderGit2 className="w-10 h-10 text-cyan-400/50" />
             <div className="space-y-1">
               <h3 className="font-semibold text-[14px] text-[var(--text-primary)]">
-                Proje Seçilmedi
+                {t('cloud.noProject.title')}
               </h3>
               <p className="text-[11px] text-[var(--text-secondary)] max-w-sm">
-                İçine girip panellerini, canlı telemetri köprüsünü, veritabanlarını ve
-                CAN ayarlarını yönetmek için sol listeden bir proje seçin.
+                {t('cloud.noProject.desc')}
               </p>
             </div>
           </div>
         ) : (
           <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-            {/* 30px Navigation Bar & Quick Actions */}
+            {/* 40px Navigation Bar & Quick Actions */}
             <div
               style={{
                 backgroundColor: 'var(--bg-toolbar)',
                 borderBottom: '1px solid var(--border-strong)',
               }}
-              className="h-[30px] px-3 flex items-center justify-between gap-2 shrink-0 text-[11px]"
+              className="min-h-[40px] px-3 py-1 flex flex-wrap items-center justify-between gap-2.5 shrink-0 text-[12px]"
             >
               {/* Breadcrumbs & Module Buttons */}
-              <div className="flex items-center gap-1 min-w-0 overflow-x-auto no-scrollbar">
-                <span className="font-mono text-[10px] font-bold text-cyan-400 shrink-0">
+              <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                <span className="font-mono text-[11px] font-bold text-cyan-400 shrink-0">
                   [{inspectedProject.code}]
                 </span>
-                <span className="font-semibold text-[var(--text-primary)] truncate max-w-[140px] shrink-0">
+                <span className="font-semibold text-[var(--text-primary)] truncate max-w-[160px] shrink-0">
                   {inspectedProject.name}
                 </span>
                 {cloudState.remoteRevisionNumber !== null && (
-                  <span className="font-mono text-[9px] text-[var(--text-muted)] shrink-0">
+                  <span className="font-mono text-[10px] text-[var(--text-muted)] shrink-0">
                     #Rev{cloudState.remoteRevisionNumber}
                   </span>
                 )}
 
-                <ChevronRight className="w-3 h-3 text-[var(--text-muted)] shrink-0" />
+                <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
 
                 {/* Module Selector Buttons */}
-                <div className="flex items-center gap-0.5 shrink-0">
+                <div className="flex flex-wrap items-center gap-1 shrink-0">
                   {[
-                    { id: 'overview', label: 'Genel Bakış', icon: Grid },
-                    { id: 'panels', label: `Paneller (${cloudPanels.length})`, icon: LayoutGrid },
-                    { id: 'live_bridge', label: 'Canlı Köprü', icon: Radio },
-                    { id: 'databases', label: 'Veritabanları', icon: Database },
-                    { id: 'connections', label: 'Bağlantılar', icon: Cable },
-                    { id: 'tx_plotter', label: 'TX & Plotter', icon: Send },
-                    { id: 'sync_diff', label: 'Diff & Sync', icon: GitCompare },
+                    { id: 'overview' as const, label: t('cloud.module.overview'), icon: Grid },
+                    ...(isSimEnabled
+                      ? [
+                          {
+                            id: 'panels' as const,
+                            label: t('cloud.module.panels', { count: cloudPanels.length }),
+                            icon: LayoutGrid,
+                          },
+                        ]
+                      : []),
+                    { id: 'live_bridge' as const, label: t('cloud.module.liveBridge'), icon: Radio },
+                    { id: 'databases' as const, label: t('cloud.module.databases'), icon: Database },
+                    { id: 'connections' as const, label: t('cloud.module.connections'), icon: Cable },
+                    { id: 'tx_plotter' as const, label: t('cloud.module.txPlotter'), icon: Send },
+                    { id: 'sync_diff' as const, label: t('cloud.module.syncDiff'), icon: GitCompare },
                   ].map((m) => {
                     const isActive = activeModule === m.id;
                     const IconComp = m.icon;
@@ -1368,11 +1395,11 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                           borderColor: isActive ? 'var(--border-strong)' : 'transparent',
                           color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
                         }}
-                        className={`h-[22px] px-2 border flex items-center gap-1 rounded-[2px] cursor-pointer text-[10px] font-medium transition-colors ${
+                        className={`h-[28px] px-2.5 border flex items-center gap-1.5 rounded-[2px] cursor-pointer text-[12px] font-medium transition-colors ${
                           isActive ? 'border-cyan-500/50 text-cyan-300 font-semibold' : 'hover:text-[var(--text-primary)]'
                         }`}
                       >
-                        <IconComp className="w-3 h-3 shrink-0" />
+                        <IconComp className="w-3.5 h-3.5 shrink-0" />
                         <span>{m.label}</span>
                       </button>
                     );
@@ -1380,7 +1407,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 </div>
               </div>
 
-              <div className="flex items-center gap-1.5 shrink-0">
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <button
                   type="button"
                   disabled={isSyncingCloud}
@@ -1389,11 +1416,11 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                     backgroundColor: 'var(--bg-panel)',
                     borderColor: 'var(--border-strong)',
                   }}
-                  className="h-[22px] px-2 border flex items-center gap-1 text-[10px] text-[var(--text-secondary)] hover:text-cyan-400 hover:border-cyan-500/50 cursor-pointer disabled:opacity-50"
-                  title="Bu projeyi ve altındaki tüm modülleri (Paneller, DB, vb.) Cloud'dan eşitle"
+                  className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[12px] text-[var(--text-secondary)] hover:text-cyan-400 hover:border-cyan-500/50 cursor-pointer disabled:opacity-50"
+                  title={t('cloud.toolbar.refreshBtnTitle')}
                 >
-                  <RefreshCw className={`w-3 h-3 ${isSyncingCloud ? 'animate-spin text-cyan-400' : ''}`} />
-                  <span className="hidden sm:inline">Eşitle / Yenile</span>
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncingCloud ? 'animate-spin text-cyan-400' : ''}`} />
+                  <span className="hidden sm:inline">{t('cloud.toolbar.refreshBtn')}</span>
                 </button>
 
                 {/* Quick Action: Pull to Desktop */}
@@ -1405,11 +1432,11 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                     backgroundColor: 'rgba(6, 182, 212, 0.12)',
                     borderColor: 'rgba(6, 182, 212, 0.45)',
                   }}
-                  className="h-[22px] px-2.5 border flex items-center gap-1 text-[10px] font-semibold text-cyan-400 hover:bg-cyan-500/20 cursor-pointer shrink-0 disabled:opacity-50"
-                  title="Tüm Cloud projesini masaüstüne çek ve aç (Listen-Only güvenliğiyle)"
+                  className="h-[28px] px-3 border flex items-center gap-1.5 text-[12px] font-semibold text-cyan-400 hover:bg-cyan-500/20 cursor-pointer shrink-0 disabled:opacity-50"
+                  title={t('cloud.toolbar.pullBtnTitle')}
                 >
-                  <CloudDownload className="w-3 h-3" />
-                  <span className="hidden sm:inline">Masaüstüne Çek & Aç</span>
+                  <CloudDownload className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">{t('cloud.toolbar.pullBtn')}</span>
                 </button>
               </div>
             </div>
@@ -1440,13 +1467,13 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       </span>
                     </div>
                     <span className="text-[10px] text-[var(--text-secondary)]">
-                      {inspectedProject.description || 'Açıklama girilmemiş.'}
+                      {inspectedProject.description || t('cloud.overview.noDesc')}
                     </span>
                   </div>
 
                   <div className="flex items-center gap-2 font-mono text-[10px]">
                     <span className="text-[var(--text-muted)]">
-                      Son Revizyon: <strong>#{cloudState.remoteRevisionNumber ?? 1}</strong>
+                      {t('cloud.overview.lastRev')} <strong>#{cloudState.remoteRevisionNumber ?? 1}</strong>
                     </span>
                     <span
                       className={`px-2 py-0.5 rounded-[2px] font-bold ${
@@ -1455,7 +1482,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                           : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
                       }`}
                     >
-                      {!diffReport.hasDifferences ? 'Masaüstü ile Eşit' : 'Masaüstü ile Fark Var'}
+                      {!diffReport.hasDifferences ? t('cloud.overview.diffIdentical') : t('cloud.overview.diffDifferent')}
                     </span>
                   </div>
                 </div>
@@ -1475,22 +1502,22 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       <div className="flex items-center gap-2">
                         <LayoutGrid className="w-4 h-4 text-cyan-400" />
                         <span className="font-semibold text-[12px] group-hover:text-cyan-300">
-                          Simülasyon Panelleri
+                          {t('cloud.card.panels.title')}
                         </span>
                       </div>
                       <span className="font-mono text-[10px] px-1.5 py-0.2 bg-cyan-950/40 text-cyan-400 border border-cyan-500/30">
-                        {cloudPanels.length} Panel
+                        {t('cloud.card.panels.badge', { count: cloudPanels.length })}
                       </span>
                     </div>
 
                     <p className="text-[11px] text-[var(--text-secondary)] line-clamp-2">
                       {cloudPanels.length > 0
                         ? cloudPanels.map((p) => p.name).join(', ')
-                        : 'Kayıtlı enstrüman paneli yok. İçeri girip yeni panel oluşturabilirsiniz.'}
+                        : t('cloud.card.panels.empty')}
                     </p>
 
                     <div className="pt-2 border-t border-[var(--border-grid)] flex items-center justify-between text-[10px] text-cyan-400 font-semibold">
-                      <span>Panelleri Aç & Çalıştır</span>
+                      <span>{t('cloud.card.panels.action')}</span>
                       <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
                     </div>
                   </div>
@@ -1514,7 +1541,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                           }`}
                         />
                         <span className="font-semibold text-[12px] group-hover:text-emerald-300">
-                          Canlı Telemetri Köprüsü
+                          {t('cloud.card.bridge.title')}
                         </span>
                       </div>
                       <span
@@ -1524,18 +1551,21 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                             : 'bg-slate-700/30 text-[var(--text-muted)]'
                         }`}
                       >
-                        {isInspectedStreaming ? 'CANLI YAYINDA' : 'PASİF'}
+                        {isInspectedStreaming ? t('cloud.card.bridge.streaming') : t('cloud.card.bridge.passive')}
                       </span>
                     </div>
 
                     <p className="text-[11px] text-[var(--text-secondary)]">
                       {isInspectedStreaming
-                        ? `${cloudState.sentSnapshotsCount} paket aktarıldı • RTT: ${cloudState.latencyMs}ms`
-                        : 'Masaüstü CAN telemetrisini bu projeye 20–60Hz hızla yayınlayın.'}
+                        ? t('cloud.card.bridge.streamingDesc', {
+                            count: cloudState.sentSnapshotsCount,
+                            latency: cloudState.latencyMs,
+                          })
+                        : t('cloud.card.bridge.passiveDesc')}
                     </p>
 
                     <div className="pt-2 border-t border-[var(--border-grid)] flex items-center justify-between text-[10px] text-emerald-400 font-semibold">
-                      <span>Yayın ve Kayıt Kontrolü</span>
+                      <span>{t('cloud.card.bridge.action')}</span>
                       <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
                     </div>
                   </div>
@@ -1553,23 +1583,25 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       <div className="flex items-center gap-2">
                         <Database className="w-4 h-4 text-cyan-400" />
                         <span className="font-semibold text-[12px] group-hover:text-cyan-300">
-                          Sembol Veritabanları
+                          {t('cloud.card.db.title')}
                         </span>
                       </div>
                       <span className="font-mono text-[10px] text-[var(--text-muted)]">
-                        {(stagedWorkspace?.databases?.customFiles ?? []).length} Dosya
+                        {t('cloud.card.db.filesCount', {
+                          count: (stagedWorkspace?.databases?.customFiles ?? []).length,
+                        })}
                       </span>
                     </div>
 
                     <p className="text-[11px] text-[var(--text-secondary)] line-clamp-2">
-                      {stagedWorkspace?.databases?.usePresetDb ? 'Preset EV/BMS Aktif. ' : ''}
+                      {stagedWorkspace?.databases?.usePresetDb ? t('cloud.card.db.presetActive') : ''}
                       {(stagedWorkspace?.databases?.customFiles ?? []).length > 0
                         ? (stagedWorkspace?.databases?.customFiles ?? []).map((f) => f.fileName).join(', ')
-                        : 'Gömülü DBC/KCD dosyası yok.'}
+                        : t('cloud.card.db.noFiles')}
                     </p>
 
                     <div className="pt-2 border-t border-[var(--border-grid)] flex items-center justify-between text-[10px] text-cyan-400 font-semibold">
-                      <span>DBC Dosyalarını Yönet</span>
+                      <span>{t('cloud.card.db.action')}</span>
                       <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
                     </div>
                   </div>
@@ -1587,22 +1619,24 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       <div className="flex items-center gap-2">
                         <Cable className="w-4 h-4 text-cyan-400" />
                         <span className="font-semibold text-[12px] group-hover:text-cyan-300">
-                          CAN Bağlantıları
+                          {t('cloud.card.conn.title')}
                         </span>
                       </div>
                       <span className="font-mono text-[10px] text-[var(--text-muted)]">
-                        {(stagedWorkspace?.connections?.profiles ?? []).length} Profil
+                        {t('cloud.card.conn.profilesCount', {
+                          count: (stagedWorkspace?.connections?.profiles ?? []).length,
+                        })}
                       </span>
                     </div>
 
                     <p className="text-[11px] text-[var(--text-secondary)] line-clamp-2">
                       {(stagedWorkspace?.connections?.profiles ?? []).length > 0
                         ? (stagedWorkspace?.connections?.profiles ?? []).map((p) => p.name).join(', ')
-                        : 'Kayıtlı bağlantı profili yok.'}
+                        : t('cloud.card.conn.noProfiles')}
                     </p>
 
                     <div className="pt-2 border-t border-[var(--border-grid)] flex items-center justify-between text-[10px] text-cyan-400 font-semibold">
-                      <span>Profilleri İncele & Düzenle</span>
+                      <span>{t('cloud.card.conn.action')}</span>
                       <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
                     </div>
                   </div>
@@ -1620,21 +1654,25 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       <div className="flex items-center gap-2">
                         <Send className="w-4 h-4 text-amber-400" />
                         <span className="font-semibold text-[12px] group-hover:text-amber-300">
-                          TX & Plotter Ayarları
+                          {t('cloud.card.tx.title')}
                         </span>
                       </div>
                       <span className="font-mono text-[10px] text-[var(--text-muted)]">
-                        {(stagedWorkspace?.transmitList?.entries ?? []).length} TX
+                        {t('cloud.card.tx.badge', {
+                          count: (stagedWorkspace?.transmitList?.entries ?? []).length,
+                        })}
                       </span>
                     </div>
 
                     <p className="text-[11px] text-[var(--text-secondary)]">
-                      {(stagedWorkspace?.transmitList?.entries ?? []).length} periyodik TX şablonu,{' '}
-                      {(stagedWorkspace?.plotter?.watchedSignals ?? []).length} izlenen osiloskop sinyali.
+                      {t('cloud.card.tx.desc', {
+                        txCount: (stagedWorkspace?.transmitList?.entries ?? []).length,
+                        plotCount: (stagedWorkspace?.plotter?.watchedSignals ?? []).length,
+                      })}
                     </p>
 
                     <div className="pt-2 border-t border-[var(--border-grid)] flex items-center justify-between text-[10px] text-amber-400 font-semibold">
-                      <span>Şablonları Düzenle</span>
+                      <span>{t('cloud.card.tx.action')}</span>
                       <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
                     </div>
                   </div>
@@ -1652,11 +1690,11 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       <div className="flex items-center gap-2">
                         <GitCompare className="w-4 h-4 text-emerald-400" />
                         <span className="font-semibold text-[12px] group-hover:text-emerald-300">
-                          Farklar & Senkronizasyon
+                          {t('cloud.card.diff.title')}
                         </span>
                       </div>
                       <span className="font-mono text-[10px] text-[var(--text-muted)]">
-                        6 Bölüm
+                        {t('cloud.card.diff.badge')}
                       </span>
                     </div>
 
@@ -1665,7 +1703,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                     </p>
 
                     <div className="pt-2 border-t border-[var(--border-grid)] flex items-center justify-between text-[10px] text-emerald-400 font-semibold">
-                      <span>Farkları İncele / Push / Pull</span>
+                      <span>{t('cloud.card.diff.action')}</span>
                       <ChevronRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
                     </div>
                   </div>
@@ -1705,7 +1743,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                         }`}
                       />
                       <span className="font-semibold text-[13px] text-[var(--text-primary)]">
-                        Canlı Telemetri Köprüsü Durumu
+                        {t('cloud.live.statusTitle')}
                       </span>
                     </div>
 
@@ -1717,15 +1755,13 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       }`}
                     >
                       {isInspectedStreaming
-                        ? `YAYINDA (${cloudState.targetHz} Hz)`
-                        : 'BU PROJEYE YAYIN YAPILMIYOR'}
+                        ? t('cloud.live.badgeActive', { hz: cloudState.targetHz })
+                        : t('cloud.live.badgeInactive')}
                     </span>
                   </div>
 
                   <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
-                    Masaüstünde bağlı SocketCAN, USB-CAN veya mock0 veriyolu çerçeveleri,
-                    seçilen frekans kadansında NexusCANCloud sunucusuna güvenli salt-okunur
-                    WebSocket akışıyla gönderilir.
+                    {t('cloud.live.desc')}
                   </p>
 
                   <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -1740,7 +1776,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                         className="h-[26px] px-3 border font-semibold text-emerald-300 hover:opacity-90 cursor-pointer flex items-center gap-1.5"
                       >
                         <Play className="w-3.5 h-3.5" />
-                        <span>Canlı Yayını Bu Projeye Yönlendir & Başlat</span>
+                        <span>{t('cloud.live.startBtn')}</span>
                       </button>
                     ) : (
                       <>
@@ -1751,12 +1787,12 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                           style={{ borderColor: 'var(--status-critical)', color: 'var(--status-critical)' }}
                         >
                           <Square className="w-3.5 h-3.5" />
-                          <span>Canlı Yayını Kapat</span>
+                          <span>{t('cloud.live.stopBtn')}</span>
                         </button>
                         <div className="flex items-center gap-2 font-mono text-[10px] tabular-nums text-emerald-400">
-                          <span>Gönderilen Paketler: {cloudState.sentSnapshotsCount}</span>
+                          <span>{t('cloud.live.sentPackets', { count: cloudState.sentSnapshotsCount })}</span>
                           <span>•</span>
-                          <span>RTT Gecikme: {cloudState.latencyMs} ms</span>
+                          <span>{t('cloud.live.rttLatency', { latency: cloudState.latencyMs })}</span>
                         </div>
                       </>
                     )}
@@ -1768,7 +1804,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       className="h-[26px] px-3 border border-cyan-500/40 text-cyan-400 flex items-center gap-1 text-[11px] font-semibold hover:bg-cyan-500/10 cursor-pointer"
                     >
                       <ExternalLink className="w-3.5 h-3.5" />
-                      <span>Tarayıcıda Canlı Görünüm ↗</span>
+                      <span>{t('cloud.live.browserLive')}</span>
                     </a>
                   </div>
                 </div>
@@ -1783,9 +1819,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 >
                   <Lock className="w-4 h-4 text-cyan-400 shrink-0" />
                   <span>
-                    <strong>Salt-Okunur Saha Güvenliği (Listen-Only Mirror):</strong> NexusCANCloud
-                    sunucusundan yerel masaüstü donanımına asla yetkisiz <code className="font-mono">TX</code> veya{' '}
-                    <code className="font-mono">Arm Active Bus</code> komutu basılamaz.
+                    {t('cloud.live.safetyBanner')}
                   </span>
                 </div>
               </div>
@@ -1801,10 +1835,10 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                     <div className="flex items-center gap-2">
                       <Database className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
                       <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-ink">
-                        CLOUD PROJE VERİTABANLARI ({cloudDbEntries.length})
+                        {t('cloud.db.title', { count: cloudDbEntries.length })}
                       </span>
                       {loadingCloudDbs && (
-                        <span className="font-mono text-[10px] text-muted">YÜKLENİYOR...</span>
+                        <span className="font-mono text-[10px] text-muted">{t('cloud.db.loading')}</span>
                       )}
                     </div>
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -1833,14 +1867,14 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                           });
                           onStatusMessage({
                             kind: 'success',
-                            message: `${dbState.databases.length} yerel katalog dosyası Cloud çalışma alanına eklendi (kaydetmek için "Değişiklikleri Cloud'a Kaydet").`,
+                            message: t('cloud.status.dbsAddedToStaged', { count: dbState.databases.length }),
                           });
                         }}
                         disabled={!stagedWorkspace || dbState.databases.length === 0}
                         className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-canvas px-2.5 font-mono text-[10px] font-semibold uppercase text-ink hover:border-strong disabled:opacity-50"
                       >
                         <CloudUpload className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
-                        YEREL KATALOĞU PROJEYE EKLE ({dbState.databases.length})
+                        {t('cloud.db.addLocalCatalog', { count: dbState.databases.length })}
                       </button>
                       <button
                         type="button"
@@ -1849,32 +1883,32 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                         className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[2px] px-3 font-mono text-[10px] font-semibold uppercase text-white disabled:opacity-50"
                         style={{ backgroundColor: 'var(--status-focus)' }}
                       >
-                        Değişiklikleri Cloud&apos;a Kaydet
+                        {t('cloud.db.saveChanges')}
                       </button>
                     </div>
                   </div>
 
                   {cloudDbError && (
                     <div className="px-3.5 py-2 font-mono text-[10px]" style={{ color: 'var(--status-warn)' }}>
-                      Cloud veritabanı kayıt defteri okunamadı: {cloudDbError}
+                      {t('cloud.db.registryError', { error: cloudDbError })}
                     </div>
                   )}
 
                   {cloudDbEntries.length === 0 ? (
                     <div className="px-4 py-8 text-center font-mono text-xs text-muted">
                       {loadingCloudDbs
-                        ? 'VERİTABANLARI YÜKLENİYOR...'
-                        : 'BU CLOUD PROJESİNDE HENÜZ .DBC / .KCD YOK.'}
+                        ? t('cloud.db.loadingLong')
+                        : t('cloud.db.empty')}
                     </div>
                   ) : (
                     <table className="w-full border-collapse text-left text-xs">
                       <thead>
                         <tr className="border-b border-hairline bg-elevated font-mono text-[10px] uppercase tracking-wider text-muted">
-                          <th className="py-2 px-3">FORMAT</th>
-                          <th className="py-2 px-3">VERİTABANI & DOSYA</th>
-                          <th className="py-2 px-3">HAT ATAMASI</th>
-                          <th className="py-2 px-3 text-right">MSG / SİNYAL / ECU</th>
-                          <th className="py-2 px-3 text-right">İŞLEMLER</th>
+                          <th className="py-2 px-3">{t('cloud.db.thFormat')}</th>
+                          <th className="py-2 px-3">{t('cloud.db.thDbFile')}</th>
+                          <th className="py-2 px-3">{t('cloud.db.thBusAssign')}</th>
+                          <th className="py-2 px-3 text-right">{t('cloud.db.thStats')}</th>
+                          <th className="py-2 px-3 text-right">{t('cloud.db.thActions')}</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-hairline">
@@ -1912,8 +1946,8 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                                   disabled={!rawFile || inLocalCatalog}
                                   title={
                                     rawFile
-                                      ? 'Dosyayı masaüstü Databases kataloğuna ekle'
-                                      : 'Ham dosya içeriği çalışma alanında yok'
+                                      ? t('cloud.db.addTooltip')
+                                      : t('cloud.db.noContentTooltip')
                                   }
                                   onClick={() => {
                                     if (!rawFile) return;
@@ -1931,13 +1965,13 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                                     });
                                     onStatusMessage({
                                       kind: 'success',
-                                      message: `"${rawFile.fileName}" masaüstü kataloğuna eklendi. Bağlantılar sekmesinden bir hatta bağlayabilirsiniz.`,
+                                      message: t('cloud.status.dbAddedToDesktop', { name: rawFile.fileName }),
                                     });
                                   }}
                                   className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-elevated px-2 font-mono text-[10px] font-semibold text-ink hover:border-strong disabled:cursor-not-allowed disabled:opacity-50"
                                 >
                                   <CloudDownload className="h-3 w-3 text-focus" aria-hidden="true" />
-                                  {inLocalCatalog ? 'Katalogda' : 'Masaüstü Kataloğuna Ekle'}
+                                  {inLocalCatalog ? t('cloud.db.inCatalog') : t('cloud.db.addToCatalog')}
                                 </button>
                               </td>
                             </tr>
@@ -1951,7 +1985,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 {/* Staged workspace-embedded files (synced via .nexusproj.json) */}
                 <section className="rounded-[2px] border border-hairline bg-surface">
                   <div className="border-b border-hairline bg-elevated px-3.5 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-ink">
-                    ÇALIŞMA ALANINA GÖMÜLÜ DOSYALAR ({(stagedWorkspace?.databases?.customFiles ?? []).length})
+                    {t('cloud.db.embeddedFiles', { count: (stagedWorkspace?.databases?.customFiles ?? []).length })}
                   </div>
                   <div className="divide-y divide-hairline">
                     {(stagedWorkspace?.databases?.customFiles ?? []).map((file, idx) => (
@@ -1965,7 +1999,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                         </span>
                         <button
                           type="button"
-                          aria-label={`${file.fileName} dosyasını çalışma alanından çıkar`}
+                          aria-label={t('cloud.db.removeEmbeddedAria', { file: file.fileName })}
                           onClick={() => {
                             if (!stagedWorkspace) return;
                             const remaining = stagedWorkspace.databases.customFiles.filter(
@@ -2002,8 +2036,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 >
                   <div className="flex items-center justify-between">
                     <span className="font-semibold text-[13px] text-[var(--text-primary)]">
-                      Kayıtlı CAN / CAN-FD Bağlantı Profilleri (
-                      {(stagedWorkspace?.connections?.profiles ?? []).length})
+                      {t('cloud.conn.title', { count: (stagedWorkspace?.connections?.profiles ?? []).length })}
                     </span>
                     <button
                       type="button"
@@ -2015,18 +2048,18 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       }}
                       className="h-[24px] px-2.5 border font-semibold text-cyan-300 hover:opacity-90 cursor-pointer disabled:opacity-50"
                     >
-                      Değişiklikleri Cloud'a Kaydet
+                      {t('cloud.conn.saveChanges')}
                     </button>
                   </div>
 
                   <table className="pcan-grid w-full text-[11px] font-mono tabular-nums">
                     <thead>
                       <tr>
-                        <th className="font-sans">Bus</th>
-                        <th className="font-sans">Profil Adı</th>
-                        <th className="font-sans">Sürücü</th>
-                        <th className="font-sans">Arayüz / Cihaz</th>
-                        <th className="font-sans">Bitrate / FD</th>
+                        <th className="font-sans">{t('cloud.conn.thBus')}</th>
+                        <th className="font-sans">{t('cloud.conn.thName')}</th>
+                        <th className="font-sans">{t('cloud.conn.thDriver')}</th>
+                        <th className="font-sans">{t('cloud.conn.thDevice')}</th>
+                        <th className="font-sans">{t('cloud.conn.thBitrate')}</th>
                         <th className="font-sans" style={{ width: '40px' }} />
                       </tr>
                     </thead>
@@ -2083,7 +2116,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 >
                   <div className="flex items-center justify-between">
                     <span className="font-semibold text-[13px] text-[var(--text-primary)]">
-                      TX Mesaj Şablonları ({(stagedWorkspace?.transmitList?.entries ?? []).length})
+                      {t('cloud.tx.title', { count: (stagedWorkspace?.transmitList?.entries ?? []).length })}
                     </span>
                     <button
                       type="button"
@@ -2095,18 +2128,18 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       }}
                       className="h-[24px] px-2.5 border font-semibold text-cyan-300 hover:opacity-90 cursor-pointer disabled:opacity-50"
                     >
-                      Değişiklikleri Cloud'a Kaydet
+                      {t('cloud.tx.saveChanges')}
                     </button>
                   </div>
 
                   <table className="pcan-grid w-full text-[11px] font-mono tabular-nums">
                     <thead>
                       <tr>
-                        <th className="font-sans">Bus</th>
-                        <th className="font-sans">CAN ID</th>
-                        <th className="font-sans">Sembol</th>
-                        <th className="font-sans">DLC</th>
-                        <th className="font-sans">Periyot (ms)</th>
+                        <th className="font-sans">{t('cloud.tx.thBus')}</th>
+                        <th className="font-sans">{t('cloud.tx.thCanId')}</th>
+                        <th className="font-sans">{t('cloud.tx.thSymbol')}</th>
+                        <th className="font-sans">{t('cloud.tx.thDlc')}</th>
+                        <th className="font-sans">{t('cloud.tx.thCycle')}</th>
                         <th className="font-sans" style={{ width: '40px' }} />
                       </tr>
                     </thead>
@@ -2161,10 +2194,10 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 >
                   <div className="flex items-center gap-2">
                     <span className="font-semibold text-[var(--text-secondary)]">
-                      {diffSubMode === 'diff' ? '6-Bölümlü Semantic Diff' : 'Ham JSON Editörü'}
+                      {diffSubMode === 'diff' ? t('cloud.diff.diffTitle') : t('cloud.diff.rawJsonTitle')}
                     </span>
                     <span className="font-mono text-[9px] text-[var(--text-muted)]">
-                      Local: {localHash} • Staged: {stagedHash} • Cloud: {cloudHash}
+                      {t('cloud.diff.hashes', { local: localHash, staged: stagedHash, cloud: cloudHash })}
                     </span>
                   </div>
 
@@ -2178,7 +2211,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                           : 'border-transparent text-[var(--text-secondary)]'
                       }`}
                     >
-                      Farklar (Diff)
+                      {t('cloud.diff.tabDiff')}
                     </button>
                     <button
                       type="button"
@@ -2189,7 +2222,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                           : 'border-transparent text-[var(--text-secondary)]'
                       }`}
                     >
-                      Raw JSON
+                      {t('cloud.diff.tabJson')}
                     </button>
                   </div>
                 </div>
@@ -2224,7 +2257,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                                       : 'bg-amber-500/20 text-amber-400'
                                   }`}
                                 >
-                                  {secDiff.status === 'identical' ? 'Eşit' : 'Farklı'}
+                                  {secDiff.status === 'identical' ? t('cloud.diff.identical') : t('cloud.diff.different')}
                                 </span>
                               </div>
 
@@ -2239,7 +2272,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                                         : 'border-[var(--border-strong)] text-[var(--text-muted)]'
                                     }`}
                                   >
-                                    [Yereli Al]
+                                    {t('cloud.diff.pickLocal')}
                                   </button>
                                   <button
                                     type="button"
@@ -2250,7 +2283,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                                         : 'border-[var(--border-strong)] text-[var(--text-muted)]'
                                     }`}
                                   >
-                                    [Cloud'u Al]
+                                    {t('cloud.diff.pickCloud')}
                                   </button>
                                 </div>
                               )}
@@ -2317,7 +2350,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                   <div className="flex items-center gap-2 flex-1 min-w-[200px]">
                     <input
                       type="text"
-                      placeholder="Commit mesajı girin..."
+                      placeholder={t('cloud.diff.commitPlaceholder')}
                       value={commitMessage}
                       onChange={(e) => setCommitMessage(e.target.value)}
                       style={{
@@ -2333,7 +2366,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                         checked={bindLocalOnPush}
                         onChange={(e) => setBindLocalOnPush(e.target.checked)}
                       />
-                      <span>Yerel Projeye Bağla</span>
+                      <span>{t('cloud.diff.bindLocal')}</span>
                     </label>
 
                     <label className="flex items-center gap-1 cursor-pointer text-[10px] shrink-0">
@@ -2342,7 +2375,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                         checked={forcePush}
                         onChange={(e) => setForcePush(e.target.checked)}
                       />
-                      <span>Zorla Gönder (Force)</span>
+                      <span>{t('cloud.diff.forcePush')}</span>
                     </label>
                   </div>
 
@@ -2358,7 +2391,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       className="h-[26px] px-3 border font-semibold text-cyan-300 hover:opacity-90 cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                     >
                       <CloudUpload className="w-3.5 h-3.5" />
-                      <span>{busyAction === 'push' ? 'Gönderiliyor...' : 'Cloud\'a Gönder (Push)'}</span>
+                      <span>{busyAction === 'push' ? t('cloud.diff.pushing') : t('cloud.diff.pushBtn')}</span>
                     </button>
 
                     <button
@@ -2372,7 +2405,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                       className="h-[26px] px-3 border font-semibold text-emerald-300 hover:opacity-90 cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                     >
                       <CloudDownload className="w-3.5 h-3.5" />
-                      <span>Masaüstüne Çek (Pull)</span>
+                      <span>{t('cloud.diff.pullBtn')}</span>
                     </button>
                   </div>
                 </div>

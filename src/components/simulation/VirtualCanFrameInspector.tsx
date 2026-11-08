@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { ChevronDown, ChevronUp, Cpu, Lock } from 'lucide-react';
+import { useI18n } from '../../i18n';
 import {
   type SimulationRuntimeBus,
   useRuntimePackedFrames,
@@ -21,11 +22,12 @@ export function VirtualCanFrameInspector({
   open,
   onToggleOpen,
 }: VirtualCanFrameInspectorProps): React.JSX.Element {
+  const { t } = useI18n();
   const frames = useRuntimePackedFrames(runtimeBus);
 
   return (
     <section
-      aria-label="Sanal CAN Çerçeve Denetçisi"
+      aria-label={t('simWdg.inspector.sectionAria')}
       className="shrink-0 border-t border-hairline bg-surface"
     >
       <div className="flex h-8 items-center justify-between gap-2 bg-elevated px-3 font-mono text-[10px] tabular-nums">
@@ -43,16 +45,16 @@ export function VirtualCanFrameInspector({
           <Cpu className="h-3 w-3 text-nominal" aria-hidden="true" />
           <span>
             {telemetrySource === 'virtual'
-              ? `VIRTUAL CAN / CAN-FD FRAME INSPECTOR (${frames.length} FRAMES)`
-              : `LIVE BRIDGE FRAME MIRROR (${frames.length} FRAMES)`}
+              ? t('simWdg.inspector.virtualTitle', { count: frames.length })
+              : t('simWdg.inspector.liveMirrorTitle', { count: frames.length })}
           </span>
         </button>
 
         <div className="flex items-center gap-2">
           <span className="hidden text-muted sm:inline">
             {telemetrySource === 'virtual'
-              ? 'INTEL (@1) & MOTOROLA (@0) BIT-PACKED IN BROWSER MEMORY'
-              : 'PASSIVE LISTEN-ONLY STREAM MIRROR'}
+              ? t('simWdg.inspector.virtualSubtext')
+              : t('simWdg.inspector.liveMirrorSubtext')}
           </span>
           <span
             className="inline-flex items-center gap-1 rounded-[2px] border px-1.5 py-0.5 text-[9px] font-semibold uppercase"
@@ -63,7 +65,7 @@ export function VirtualCanFrameInspector({
             }}
           >
             <Lock className="h-2.5 w-2.5" aria-hidden="true" />
-            NO REMOTE TX
+            {t('simWdg.inspector.noRemoteTx')}
           </span>
         </div>
       </div>
@@ -73,22 +75,22 @@ export function VirtualCanFrameInspector({
           {frames.length === 0 ? (
             <div className="px-4 py-6 text-center font-mono text-[11px] text-muted">
               {telemetrySource === 'virtual'
-                ? 'HENÜZ PAKETLENECEK SANAL CAN ÇERÇEVESİ YOK // WIDGET VEYA ÜRETEÇ SİNYALİ BAĞLAYIN.'
-                : 'CANLI KÖPRÜDEN AKTİF CAN ÇERÇEVESİ BEKLENİYOR...'}
+                ? t('simWdg.inspector.emptyVirtual')
+                : t('simWdg.inspector.emptyLive')}
             </div>
           ) : (
             <table className="w-full border-collapse text-left font-mono text-[11px] tabular-nums">
               <thead className="sticky top-0 z-10 border-b border-hairline bg-surface text-[9px] uppercase tracking-wider text-muted">
                 <tr>
-                  <th className="px-3 py-1.5 font-semibold">BUS</th>
-                  <th className="px-3 py-1.5 font-semibold">KEY / ARB ID</th>
-                  <th className="px-3 py-1.5 font-semibold">SYMBOL</th>
-                  <th className="px-3 py-1.5 font-semibold">DLC</th>
+                  <th className="px-3 py-1.5 font-semibold">{t('simWdg.inspector.thBus')}</th>
+                  <th className="px-3 py-1.5 font-semibold">{t('simWdg.inspector.thKeyArb')}</th>
+                  <th className="px-3 py-1.5 font-semibold">{t('simWdg.inspector.thSymbol')}</th>
+                  <th className="px-3 py-1.5 font-semibold">{t('simWdg.inspector.thDlc')}</th>
                   <th className="px-3 py-1.5 font-semibold">
-                    RAW PAYLOAD (HEX)
+                    {t('simWdg.inspector.thPayload')}
                   </th>
                   <th className="px-3 py-1.5 font-semibold">
-                    DECODED / PACKED SIGNALS
+                    {t('simWdg.inspector.thSignals')}
                   </th>
                 </tr>
               </thead>

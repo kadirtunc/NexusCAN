@@ -17,6 +17,7 @@ import {
   Square,
   Trash2,
 } from 'lucide-react';
+import { useI18n } from '../../i18n';
 import type { DatabaseSchemaDto } from '../../types/netdb';
 import type {
   SimulationMapTileStyle,
@@ -298,6 +299,7 @@ export function SimulationMapWidget({
   activeSchema,
   allBindings,
 }: SimulationMapWidgetProps): React.JSX.Element {
+  const { t } = useI18n();
   const theme = useDatabaseStore().theme;
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1262,7 +1264,7 @@ export function SimulationMapWidget({
               ? 'cursor-crosshair'
               : 'cursor-grab active:cursor-grabbing'
         }`}
-        aria-label={`${widget.title} OpenStreetMap GNSS Haritası`}
+        aria-label={t('simWdg.map.ariaLabel', { title: widget.title })}
       />
 
       {/* Top-Left Compact GNSS Coordinate HUD Overlay (font-mono tabular-nums, 0-2px geometry) */}
@@ -1270,11 +1272,11 @@ export function SimulationMapWidget({
         <div className="rounded-[2px] border border-strong bg-surface/95 px-2 py-1 font-mono text-[10px] tabular-nums">
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
             <span>
-              <span className="text-muted">LAT:</span>{' '}
+              <span className="text-muted">{t('simWdg.map.lat')}</span>{' '}
               <strong className="text-ink">{hud.lat.toFixed(6)}°</strong>
             </span>
             <span>
-              <span className="text-muted">LON:</span>{' '}
+              <span className="text-muted">{t('simWdg.map.lon')}</span>{' '}
               <strong className="text-ink">{hud.lon.toFixed(6)}°</strong>
             </span>
           </div>
@@ -1283,7 +1285,7 @@ export function SimulationMapWidget({
             <div className="mt-0.5 flex flex-wrap items-center gap-x-2.5 border-t border-hairline pt-0.5 text-[9px]">
               {hud.headingDeg !== null && (
                 <span>
-                  <span className="text-muted">HDG:</span>{' '}
+                  <span className="text-muted">{t('simWdg.map.hdg')}</span>{' '}
                   <strong className="text-focus">
                     {hud.headingDeg.toFixed(1).padStart(5, '0')}°
                   </strong>
@@ -1291,7 +1293,7 @@ export function SimulationMapWidget({
               )}
               {hud.speedVal !== null && (
                 <span>
-                  <span className="text-muted">SPD:</span>{' '}
+                  <span className="text-muted">{t('simWdg.map.spd')}</span>{' '}
                   <strong className="text-nominal">
                     {hud.speedVal.toFixed(1)}
                   </strong>{' '}
@@ -1299,7 +1301,7 @@ export function SimulationMapWidget({
                 </span>
               )}
               {cfgShowTrail && hud.trailCount > 1 && (
-                <span className="text-subtle">TRK:{hud.trailCount}</span>
+                <span className="text-subtle">{t('simWdg.map.trk')}{hud.trailCount}</span>
               )}
             </div>
           )}
@@ -1316,7 +1318,7 @@ export function SimulationMapWidget({
                 color: 'var(--status-warn)',
               }}
             >
-              UNBOUND · BIND LAT & LON IN INSPECTOR
+              {t('simWdg.map.unboundPill')}
             </span>
           )}
           {isLiveBridgeReadOnly && (
@@ -1329,7 +1331,7 @@ export function SimulationMapWidget({
               }}
             >
               <Lock className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
-              [READ-ONLY CLOUD]
+              {t('simWdg.map.readOnlyCloud')}
             </span>
           )}
         </div>
@@ -1348,7 +1350,7 @@ export function SimulationMapWidget({
             disabled={!isRunMode}
             onClick={() => setActiveTileStyle('osm_standard')}
             aria-pressed={activeTileStyle !== 'osm_dark'}
-            title="OpenStreetMap Standard katmanı"
+            title={t('simWdg.map.osmStandardTitle')}
             className={`h-full cursor-pointer rounded-[1px] px-1.5 font-semibold uppercase ${
               activeTileStyle !== 'osm_dark'
                 ? 'bg-elevated text-focus'
@@ -1362,7 +1364,7 @@ export function SimulationMapWidget({
             disabled={!isRunMode}
             onClick={() => setActiveTileStyle('osm_dark')}
             aria-pressed={activeTileStyle === 'osm_dark'}
-            title="Düşük parlamalı koyu harita katmanı"
+            title={t('simWdg.map.osmDarkTitle')}
             className={`h-full cursor-pointer rounded-[1px] px-1.5 font-semibold uppercase ${
               activeTileStyle === 'osm_dark'
                 ? 'bg-elevated text-focus'
@@ -1386,7 +1388,7 @@ export function SimulationMapWidget({
             }
           }}
           aria-pressed={followLocked}
-          title="Canlı GNSS konumunu otomatik takip et / merkeze kilitle"
+          title={t('simWdg.map.followTitle')}
           className={`inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border px-1.5 font-semibold uppercase ${
             followLocked
               ? 'border-focus bg-surface text-focus'
@@ -1394,7 +1396,7 @@ export function SimulationMapWidget({
           }`}
         >
           <Crosshair className="h-2.5 w-2.5" aria-hidden="true" />
-          FOLLOW
+          {t('simWdg.map.followBtn')}
         </button>
 
         {/* [DRIVE LOOP] Virtual Test-Track Stimulus (VIRTUAL BUS Mode ONLY!) */}
@@ -1411,7 +1413,7 @@ export function SimulationMapWidget({
               }
             }}
             aria-pressed={driveLoopActive}
-            title="Sanal CAN hattında ~50 km/h hızla kapalı pist GPS test sürüşünü başlat/durdur"
+            title={t('simWdg.map.driveLoopTitle')}
             className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border px-1.5 font-semibold uppercase"
             style={
               driveLoopActive
@@ -1432,7 +1434,7 @@ export function SimulationMapWidget({
             ) : (
               <Play className="h-2.5 w-2.5 text-nominal" aria-hidden="true" />
             )}
-            [DRIVE LOOP]
+            {t('simWdg.map.driveLoopBtn')}
           </button>
         )}
 
@@ -1441,11 +1443,11 @@ export function SimulationMapWidget({
           type="button"
           disabled={!isRunMode}
           onClick={handleClearTrail}
-          title="GPS rota izini temizle"
+          title={t('simWdg.map.clearTrailTitle')}
           className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border border-strong bg-surface/95 px-1.5 font-semibold uppercase text-muted hover:text-ink"
         >
           <Trash2 className="h-2.5 w-2.5" aria-hidden="true" />
-          CLR
+          {t('simWdg.map.clearTrailBtn')}
         </button>
 
         {/* Zoom - / Z{n} / + */}
@@ -1454,8 +1456,8 @@ export function SimulationMapWidget({
             type="button"
             disabled={!isRunMode || zoom <= MIN_INTERACTIVE_ZOOM}
             onClick={() => handleStepZoom(-1)}
-            aria-label="Haritayı uzaklaştır"
-            title="Uzaklaştır (-)"
+            aria-label={t('simWdg.map.zoomOutAria')}
+            title={t('simWdg.map.zoomOutTitle')}
             className="inline-flex h-full w-5 cursor-pointer items-center justify-center border-r border-hairline text-ink hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Minus className="h-2.5 w-2.5" />
@@ -1465,8 +1467,8 @@ export function SimulationMapWidget({
             type="button"
             disabled={!isRunMode || zoom >= MAX_INTERACTIVE_ZOOM}
             onClick={() => handleStepZoom(1)}
-            aria-label="Haritayı yakınlaştır"
-            title="Yakınlaştır (+)"
+            aria-label={t('simWdg.map.zoomInAria')}
+            title={t('simWdg.map.zoomInTitle')}
             className="inline-flex h-full w-5 cursor-pointer items-center justify-center border-l border-hairline text-ink hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Plus className="h-2.5 w-2.5" />
@@ -1480,8 +1482,8 @@ export function SimulationMapWidget({
           <Navigation className="h-2.5 w-2.5 text-focus" aria-hidden="true" />
           <span>
             {driveLoopActive
-              ? 'VIRTUAL LOOP ~50 KM/H · CLICK MAP TO OVERRIDE'
-              : 'CLICK MAP TO SET VIRTUAL GPS'}
+              ? t('simWdg.map.hintLoop')
+              : t('simWdg.map.hintClick')}
           </span>
         </div>
       )}

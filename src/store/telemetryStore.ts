@@ -4,6 +4,7 @@ import type {
   ChronologicalFrameDto,
   FrameTelemetryDto,
   TelemetrySnapshotDto,
+  TraceReplayStatusDto,
 } from '../types/telemetry';
 import { plotStore } from './plotStore';
 import { buildFrameInstanceKey } from '../utils/muxFormat';
@@ -105,6 +106,25 @@ export class ChronoRingBuffer {
   }
 }
 
+export const DEFAULT_REPLAY_STATUS: TraceReplayStatusDto = {
+  state: 'idle',
+  sourceName: '',
+  currentIndex: 0,
+  totalFrames: 0,
+  elapsedUs: 0,
+  durationUs: 0,
+  speedFactor: 1,
+  loopPlayback: false,
+  busOverride: null,
+  transmitToHardware: false,
+  filterMode: 'all',
+  filterKeys: [],
+  directionFilter: 'all',
+  dispatchedFrames: 0,
+  filteredOutFrames: 0,
+  hwTxFrames: 0,
+};
+
 export interface TelemetryHeaderSlice {
   seq: number;
   timestampUs: number;
@@ -119,6 +139,7 @@ export interface TelemetryHeaderSlice {
   txPanicLatched: boolean;
   buses: readonly BusHealthDto[];
   transportConnected: boolean;
+  replay: TraceReplayStatusDto;
 }
 
 export interface TelemetryFramesSlice {
@@ -153,6 +174,7 @@ let headerSlice: TelemetryHeaderSlice = {
   txPanicLatched: false,
   buses: [],
   transportConnected: false,
+  replay: DEFAULT_REPLAY_STATUS,
 };
 
 let framesSlice: TelemetryFramesSlice = {
@@ -180,7 +202,7 @@ let chronoSlice: TelemetryChronoSlice = {
   originTimestampUs: 0,
 };
 
-// Lightweight O(1) tracker for 300ms PCAN-Explorer signal value green highlights
+// Lightweight O(1) tracker for 300ms Industrial CAN signal value green highlights
 const prevSignalRawMap = new Map<string, number>();
 const signalChangedUntilMs = new Map<string, number>();
 
@@ -402,6 +424,18 @@ export const telemetryStore = {
       txPanicLatched: snap.txPanicLatched,
       buses: snap.buses,
       transportConnected: true,
+      replay: snap.replay
+        ? {
+            ...DEFAULT_REPLAY_STATUS,
+            ...snap.replay,
+            filterMode: snap.replay.filterMode ?? 'all',
+            filterKeys: snap.replay.filterKeys ?? [],
+            directionFilter: snap.replay.directionFilter ?? 'all',
+            dispatchedFrames: snap.replay.dispatchedFrames ?? snap.replay.currentIndex ?? 0,
+            filteredOutFrames: snap.replay.filteredOutFrames ?? 0,
+            hwTxFrames: snap.replay.hwTxFrames ?? 0,
+          }
+        : DEFAULT_REPLAY_STATUS,
     };
     notifySet(headerListeners);
 

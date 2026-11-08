@@ -54,7 +54,11 @@ import {
 } from '../../store/databaseStore';
 import { useConnectionStore } from '../../store/connectionStore';
 import { projectStore, useProjectStore } from '../../store/projectStore';
-import { simulationPanelStore } from '../../store/simulationPanelStore';
+import {
+  simulationPanelStore,
+  useSimulationPanelStore,
+} from '../../store/simulationPanelStore';
+import { useWorkbenchStore } from '../../store/workbenchStore';
 import {
   cloudBridgeStore,
   useCloudBridgeStore,
@@ -65,6 +69,7 @@ import {
   apiTransmitSignalFrame,
 } from '../../services/ipcClient';
 import { fileToBase64 } from '../../utils/formatters';
+import { useI18n } from '../../i18n';
 import {
   SimulationGenerateFromDbcModal,
   type GenerateFromDbcConfirmPayload,
@@ -77,6 +82,10 @@ import {
   type SimulationTelemetrySource,
 } from './SimulationWidgets';
 import { SimulationRuntimeBus } from './simulationRuntimeBus';
+import {
+  isEditableActiveElement,
+  matchesConfiguredHotkey,
+} from './buttonControlUtils';
 import { buildLocalCatalogEntries, makeDatabaseEntry } from './desktopDbEntries';
 import { VirtualCanFrameInspector } from './VirtualCanFrameInspector';
 import {
@@ -200,9 +209,13 @@ export function SimulationWorkbenchView({
   onNavigateToTab,
   onBack,
 }: SimulationWorkbenchViewProps): React.JSX.Element {
+  const { t } = useI18n();
   const projState = useProjectStore();
   const cloudState = useCloudBridgeStore();
   const telemetryHeader = useTelemetryHeader();
+  const simStoreState = useSimulationPanelStore();
+  const workbench = useWorkbenchStore();
+  const workbenchSelection = workbench.selection;
   const dbcFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const connectedBuses = useMemo(
@@ -210,10 +223,8 @@ export function SimulationWorkbenchView({
     [telemetryHeader.buses]
   );
   const isLiveBusArmed = useMemo(() => {
-    const active = connectedBuses[0];
-    return Boolean(
-      active && !active.listenOnly && active.txArmed && !telemetryHeader.txPanicLatched
-    );
+    if (telemetryHeader.txPanicLatched) return false;
+    return connectedBuses.some((b) => !b.listenOnly && b.txArmed);
   }, [connectedBuses, telemetryHeader.txPanicLatched]);
 
   const resolvedProject = useMemo<CloudProjectDto>(() => {
@@ -222,7 +233,7 @@ export function SimulationWorkbenchView({
     return {
       id: projectId ?? cb?.projectId ?? 'desktop',
       orgId: cb?.orgId ?? 'local',
-      name: projState.currentName || projState.currentFileStem || 'Yerel Çalışma Alanı',
+      name: projState.currentName || projState.currentFileStem || t('simWb.localWorkspace'),
       slug: cb?.projectSlug ?? 'desktop',
       code: cb?.projectCode ?? 'CAN',
       description: projState.notes || '',
@@ -531,7 +542,7 @@ export function SimulationWorkbenchView({
       if (cloudProjectContext) {
         loadedPanels = [...(contextPanels ?? [])];
       } else {
-        loadedPanels = [...simulationPanelStore.getState().panels];
+        loadedPanels = [...simStoreState.panels];
       }
 
       if (cancelled) return;
@@ -575,7 +586,33 @@ export function SimulationWorkbenchView({
     return () => {
       cancelled = true;
     };
-  }, [cloudProjectContext, contextPanels, effectiveProjectId, syncNonce]);
+  }, [
+    cloudProjectContext,
+    contextPanels,
+    effectiveProjectId,
+    simStoreState.configRev,
+    simStoreState.panels,
+    syncNonce,
+  ]);
+
+  // Activate panel immediately if ProjectExplorerDock selection points to a simulation panel
+  useEffect(() => {
+    if (cloudProjectContext) return;
+    if (workbenchSelection.kind === 'panel' && workbenchSelection.panelId) {
+      const targetId = workbenchSelection.panelId;
+      const exists =
+        panels.some((p) => p.id === targetId) ||
+        simStoreState.panels.some((p) => p.id === targetId);
+      if (exists) {
+        setActivePanelId(targetId);
+        setSelectedWidgetId(null);
+        setSimPaused(false);
+        setWorkbenchMode('design');
+        setViewState('workbench');
+        syncPanelQueryInUrl(targetId, 'design', true);
+      }
+    }
+  }, [cloudProjectContext, workbenchSelection, panels, simStoreState.panels]);
 
   // Database catalog entries (Cloud project catalog OR desktop catalog + per-connection bus binding)
   const contextDbEntries = cloudProjectContext?.databases;
@@ -615,15 +652,25 @@ export function SimulationWorkbenchView({
 
   const handleLiveTransmitSignal = useCallback(
     (binding: SimulationSignalBindingDto, value: number, txCycleMs?: number) => {
-      if (!isLiveBusArmed) return;
-      const schema = databaseStore.getBusSchema(binding.busId || 0);
+      if (!isLiveBusArmed || telemetryHeader.txPanicLatched) return;
+      const requestedBusId = binding.busId ?? 0;
+      const exactBus = connectedBuses.find((b) => b.busId === requestedBusId);
+      const targetBus =
+        exactBus ??
+        connectedBuses.find((b) => !b.listenOnly && b.txArmed) ??
+        null;
+      if (!targetBus || targetBus.listenOnly || !targetBus.txArmed) {
+        return;
+      }
+
+      const schema = databaseStore.getBusSchema(targetBus.busId) ?? loadedSchema;
       const sigId = schema?.signals.find(
         (s) => s.messageKey === binding.messageKey && s.name === binding.signalName
       )?.signalId;
       if (sigId === undefined) return;
 
       void apiTransmitSignalFrame({
-        busId: binding.busId || 0,
+        busId: targetBus.busId,
         arbId: binding.arbId,
         isExtended: binding.isExtended,
         signalValues: [[sigId, value]],
@@ -633,7 +680,7 @@ export function SimulationWorkbenchView({
         console.warn('[SimulationWorkbench] Live TX failed:', err);
       });
     },
-    [isLiveBusArmed]
+    [connectedBuses, isLiveBusArmed, loadedSchema, telemetryHeader.txPanicLatched]
   );
 
   // Seed runtimeBus whenever active panel or loaded schema changes in workbench
@@ -928,6 +975,82 @@ export function SimulationWorkbenchView({
     workbenchMode,
   ]);
 
+  // 4b. RUN Mode Button Hotkey Dispatch (`keydown` / `keyup` on Virtual Simulation Bus or Live Bus)
+  useEffect(() => {
+    if (
+      viewState !== 'workbench' ||
+      workbenchMode !== 'run' ||
+      simPaused ||
+      !activePanel
+    ) {
+      return;
+    }
+    if (telemetrySource === 'live_bridge' && !isLiveBusArmed) {
+      return;
+    }
+
+    const onRunKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (
+        isEditableActiveElement(document.activeElement) ||
+        isEditableActiveElement(e.target as Element | null)
+      ) {
+        return;
+      }
+
+      const matchedButtons = activePanel.widgets.filter(
+        (w) =>
+          w.kind === 'button' &&
+          w.binding !== null &&
+          Boolean(w.config.hotkey) &&
+          matchesConfiguredHotkey(w.config.hotkey, e)
+      );
+      if (matchedButtons.length === 0) return;
+
+      e.preventDefault();
+      for (const btn of matchedButtons) {
+        runtimeBus.triggerButtonHotkeyDown(btn.id);
+      }
+    };
+
+    const onRunKeyUp = (e: KeyboardEvent) => {
+      const matchedButtons = activePanel.widgets.filter(
+        (w) =>
+          w.kind === 'button' &&
+          w.binding !== null &&
+          Boolean(w.config.hotkey) &&
+          matchesConfiguredHotkey(w.config.hotkey, e)
+      );
+      if (matchedButtons.length === 0) return;
+
+      const editableFocused =
+        isEditableActiveElement(document.activeElement) ||
+        isEditableActiveElement(e.target as Element | null);
+      if (!editableFocused) {
+        e.preventDefault();
+      }
+      for (const btn of matchedButtons) {
+        runtimeBus.triggerButtonHotkeyUp(btn.id);
+      }
+    };
+
+    window.addEventListener('keydown', onRunKeyDown);
+    window.addEventListener('keyup', onRunKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onRunKeyDown);
+      window.removeEventListener('keyup', onRunKeyUp);
+    };
+  }, [
+    activePanel,
+    isLiveBusArmed,
+    runtimeBus,
+    simPaused,
+    telemetrySource,
+    viewState,
+    workbenchMode,
+  ]);
+
   // 5. Pointer Drag-to-Move & Corner Drag-to-Resize on 24-Col Grid
   useEffect(() => {
     const onPointerMove = (e: PointerEvent) => {
@@ -1213,7 +1336,7 @@ export function SimulationWorkbenchView({
       }
     } catch (err: unknown) {
       setErrorBanner(
-        err instanceof Error ? err.message : 'Yeni panel oluşturulamadı.'
+        err instanceof Error ? err.message : t('simWb.errCreatePanel')
       );
     } finally {
       setSavingPanel(false);
@@ -1286,7 +1409,7 @@ export function SimulationWorkbenchView({
       setModalTargetPanelId(null);
     } catch (err: unknown) {
       setErrorBanner(
-        err instanceof Error ? err.message : 'Panel yeniden adlandırılamadı.'
+        err instanceof Error ? err.message : t('simWb.errRenamePanel')
       );
     } finally {
       setSavingPanel(false);
@@ -1325,7 +1448,7 @@ export function SimulationWorkbenchView({
       setPanelModalMode('none');
       setModalTargetPanelId(null);
     } catch (err: unknown) {
-      setErrorBanner(err instanceof Error ? err.message : 'Panel silinemedi.');
+      setErrorBanner(err instanceof Error ? err.message : t('simWb.errDeletePanel'));
     } finally {
       setSavingPanel(false);
     }
@@ -1385,9 +1508,7 @@ export function SimulationWorkbenchView({
       ) {
         importedPanel = parsedJson as SimulationPanelDto;
       } else {
-        throw new Error(
-          'Geçersiz .nexuspanel.json formatı (schemaVersion: 1 veya SimulationPanelDto bekleniyor).'
-        );
+        throw new Error(t('simWb.errInvalidJson'));
       }
 
       setSavingPanel(true);
@@ -1428,7 +1549,7 @@ export function SimulationWorkbenchView({
       setErrorBanner(
         err instanceof Error
           ? err.message
-          : '.nexuspanel.json içe aktarma başarısız.'
+          : t('simWb.errImportFailed')
       );
     } finally {
       setSavingPanel(false);
@@ -1952,10 +2073,10 @@ export function SimulationWorkbenchView({
         <div className="mx-auto max-w-2xl rounded-[2px] border border-hairline bg-surface p-8 text-center">
           <Gauge className="mx-auto h-6 w-6 text-focus" aria-hidden="true" />
           <h1 className="mt-3 font-mono text-sm font-bold uppercase tracking-wider text-ink">
-            INSTRUMENT PANELS & VIRTUAL SIMULATION
+            {t('simWb.noProject.title')}
           </h1>
           <p className="mt-2 text-xs text-muted">
-            Sanal gösterge paneli ve simülasyon tezgahını açmak için önce bir mühendislik projesi oluşturun.
+            {t('simWb.noProject.desc')}
           </p>
           <button
             type="button"
@@ -1964,7 +2085,7 @@ export function SimulationWorkbenchView({
             style={{ backgroundColor: 'var(--status-focus)' }}
           >
             <FolderGit2 className="h-3.5 w-3.5" aria-hidden="true" />
-            PROJELERE GİT
+            {t('simWb.noProject.btn')}
           </button>
         </div>
       </div>
@@ -2026,10 +2147,10 @@ export function SimulationWorkbenchView({
               className="font-mono text-xs font-semibold uppercase tracking-wider text-ink"
             >
               {panelModalMode === 'create'
-                ? 'YENİ SİMÜLASYON PANELİ OLUŞTUR'
+                ? t('simWb.modal.createTitle')
                 : panelModalMode === 'rename'
-                  ? 'PANELİ YENİDEN ADLANDIR'
-                  : 'PANELİ SİL'}
+                  ? t('simWb.modal.renameTitle')
+                  : t('simWb.modal.deleteTitle')}
             </h2>
             <button
               type="button"
@@ -2037,7 +2158,7 @@ export function SimulationWorkbenchView({
                 setPanelModalMode('none');
                 setModalTargetPanelId(null);
               }}
-              aria-label="Kapat"
+              aria-label={t('simWb.modal.closeAria')}
               className="cursor-pointer rounded-[2px] p-1 text-muted hover:text-ink"
             >
               <X className="h-3.5 w-3.5" />
@@ -2047,10 +2168,7 @@ export function SimulationWorkbenchView({
           {panelModalMode === 'delete' && modalTargetPanel ? (
             <div className="space-y-3 p-4 text-xs text-muted">
               <p>
-                <strong className="text-ink">{modalTargetPanel.name}</strong>{' '}
-                paneli kalıcı olarak silinecek ve{' '}
-                <span className="font-mono text-ink">.nexusproj.json</span>{' '}
-                çalışma alanından kaldırılacaktır.
+                {t('simWb.modal.deleteConfirm', { name: modalTargetPanel.name })}
               </p>
               <div className="flex justify-end gap-2 border-t border-hairline pt-3">
                 <button
@@ -2059,18 +2177,18 @@ export function SimulationWorkbenchView({
                     setPanelModalMode('none');
                     setModalTargetPanelId(null);
                   }}
-                  className="h-7 cursor-pointer rounded-[2px] border border-hairline bg-elevated px-3 font-mono text-[11px] text-ink"
+                  className="h-[30px] cursor-pointer rounded-[2px] border border-hairline bg-elevated px-3.5 font-mono text-[12px] text-ink"
                 >
-                  İPTAL
+                  {t('simWb.modal.cancel')}
                 </button>
                 <button
                   type="button"
                   disabled={savingPanel}
                   onClick={() => void handleDeleteTargetPanel()}
-                  className="h-7 cursor-pointer rounded-[2px] px-3.5 font-mono text-[11px] font-semibold uppercase text-white disabled:opacity-50"
+                  className="h-[30px] cursor-pointer rounded-[2px] px-4 font-mono text-[12px] font-semibold uppercase text-white disabled:opacity-50"
                   style={{ backgroundColor: 'var(--status-critical)' }}
                 >
-                  {savingPanel ? 'SİLİNİYOR...' : 'PANELİ SİL'}
+                  {savingPanel ? t('simWb.modal.deleting') : t('simWb.modal.deleteBtn')}
                 </button>
               </div>
             </div>
@@ -2089,44 +2207,44 @@ export function SimulationWorkbenchView({
                   );
                 }
               }}
-              className="space-y-3 p-4"
+              className="space-y-3.5 p-4 text-[12px]"
             >
               <label className="block space-y-1">
-                <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted">
-                  PANEL ADI
+                <span className="font-mono text-[11.5px] font-semibold uppercase tracking-wider text-muted">
+                  {t('simWb.modal.nameLabel')}
                 </span>
                 <input
                   type="text"
                   required
                   value={panelNameInput}
                   onChange={(e) => setPanelNameInput(e.target.value)}
-                  placeholder="Powertrain & GNSS Bench Deck"
-                  className="h-8 w-full rounded-[2px] border border-hairline bg-canvas px-2.5 text-xs text-ink"
+                  placeholder={t('simWb.modal.namePlaceholder')}
+                  className="h-[32px] w-full rounded-[2px] border border-hairline bg-canvas px-2.5 text-[12.5px] text-ink"
                 />
               </label>
 
               <label className="block space-y-1">
-                <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted">
-                  AÇIKLAMA (OPSİYONEL)
+                <span className="font-mono text-[11.5px] font-semibold uppercase tracking-wider text-muted">
+                  {t('simWb.modal.descLabel')}
                 </span>
                 <input
                   type="text"
                   value={panelDescInput}
                   onChange={(e) => setPanelDescInput(e.target.value)}
-                  placeholder="24-sütunlu operatör göstergeleri, OSM haritası ve sanal kontroller"
-                  className="h-8 w-full rounded-[2px] border border-hairline bg-canvas px-2.5 text-xs text-ink"
+                  placeholder={t('simWb.modal.descPlaceholder')}
+                  className="h-[32px] w-full rounded-[2px] border border-hairline bg-canvas px-2.5 text-[12.5px] text-ink"
                 />
               </label>
 
               {panelModalMode === 'create' && (
-                <label className="flex cursor-pointer items-center gap-2 rounded-[2px] border border-hairline bg-canvas px-2.5 py-2 text-xs text-ink">
+                <label className="flex cursor-pointer items-center gap-2 rounded-[2px] border border-hairline bg-canvas px-2.5 py-2 text-[12px] text-ink">
                   <input
                     type="checkbox"
                     checked={enterAfterCreate}
                     onChange={(e) => setEnterAfterCreate(e.target.checked)}
-                    className="h-3.5 w-3.5 rounded-[2px] accent-[var(--status-focus)]"
+                    className="h-4 w-4 rounded-[2px] accent-[var(--status-focus)]"
                   />
-                  <span>Oluşturduktan sonra doğrudan panel tezgahına gir</span>
+                  <span>{t('simWb.modal.enterAfterCreate')}</span>
                 </label>
               )}
 
@@ -2137,9 +2255,9 @@ export function SimulationWorkbenchView({
                     setPanelModalMode('none');
                     setModalTargetPanelId(null);
                   }}
-                  className="h-7 cursor-pointer rounded-[2px] border border-hairline bg-elevated px-3 font-mono text-[11px] text-ink"
+                  className="h-[30px] cursor-pointer rounded-[2px] border border-hairline bg-elevated px-3.5 font-mono text-[12px] text-ink"
                 >
-                  İPTAL
+                  {t('simWb.modal.cancel')}
                 </button>
                 {panelModalMode === 'create' &&
                   loadedDbEntries.length > 0 && (
@@ -2154,22 +2272,22 @@ export function SimulationWorkbenchView({
                           enterAfterCreate
                         )
                       }
-                      className="h-7 cursor-pointer rounded-[2px] border border-strong bg-elevated px-3 font-mono text-[10px] font-semibold uppercase text-focus hover:bg-hover disabled:opacity-50"
+                      className="h-[30px] cursor-pointer rounded-[2px] border border-strong bg-elevated px-3 font-mono text-[11.5px] font-semibold uppercase text-focus hover:bg-hover disabled:opacity-50"
                     >
-                      DBC&apos;DEN TASLAK OLUŞTUR...
+                      {t('simWb.modal.generateFromDbcBtn')}
                     </button>
                   )}
                 <button
                   type="submit"
                   disabled={savingPanel || !panelNameInput.trim()}
-                  className="h-7 cursor-pointer rounded-[2px] px-3.5 font-mono text-[11px] font-semibold uppercase text-white disabled:opacity-50"
+                  className="h-[30px] cursor-pointer rounded-[2px] px-4 font-mono text-[12px] font-semibold uppercase text-white disabled:opacity-50"
                   style={{ backgroundColor: 'var(--status-focus)' }}
                 >
                   {savingPanel
-                    ? 'KAYDEDİLİYOR...'
+                    ? t('simWb.modal.saving')
                     : panelModalMode === 'create'
-                      ? 'OLUŞTUR'
-                      : 'GÜNCELLE'}
+                      ? t('simWb.modal.createBtn')
+                      : t('simWb.modal.updateBtn')}
                 </button>
               </div>
             </form>
@@ -2297,7 +2415,7 @@ export function SimulationWorkbenchView({
             });
           } catch (err) {
             setErrorBanner(
-              err instanceof Error ? err.message : 'DBC yüklenemedi.'
+              err instanceof Error ? err.message : t('simWb.errLoadDbc')
             );
           }
         }}
@@ -2305,16 +2423,16 @@ export function SimulationWorkbenchView({
       />
 
       {/* 1. Top Instrument Toolbar */}
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-hairline bg-surface px-3 py-2">
+      <div className="flex min-h-[42px] shrink-0 flex-wrap items-center justify-between gap-2.5 border-b border-hairline bg-surface px-3 py-1.5">
         {/* Left: Prominent Back to Panel List + Project Badge + Quick Panel Jump + CRUD */}
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={handleReturnToPanelList}
-            className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[2px] border border-strong bg-elevated px-2.5 font-mono text-[10px] font-bold uppercase tracking-wider text-ink hover:border-focus hover:text-focus"
+            className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-strong bg-elevated px-3 font-mono text-[12px] font-bold uppercase tracking-wider text-ink hover:border-focus hover:text-focus"
           >
             <ArrowLeft className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
-            PANEL LİSTESİ
+            {t('simWb.toolbar.panelList')}
           </button>
 
           {resolvedProject && (
@@ -2324,8 +2442,8 @@ export function SimulationWorkbenchView({
                 if (onBack) onBack();
                 else if (onNavigateToTab) onNavigateToTab('rxtx');
               }}
-              className="inline-flex h-7 items-center rounded-[2px] border border-hairline bg-canvas px-2 font-mono text-[10px] font-semibold uppercase text-muted hover:border-strong hover:text-ink cursor-pointer"
-              title={`${resolvedProject.name} sayfasına git`}
+              className="inline-flex h-[30px] items-center rounded-[2px] border border-hairline bg-canvas px-2.5 font-mono text-[12px] font-semibold uppercase text-muted hover:border-strong hover:text-ink cursor-pointer"
+              title={t('simWb.toolbar.goToProjectTitle', { name: resolvedProject.name })}
             >
               {resolvedProject.code}
             </button>
@@ -2338,7 +2456,7 @@ export function SimulationWorkbenchView({
             <div className="inline-flex items-center gap-1.5">
               <Layers className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
               <select
-                aria-label="Hızlı panel geçişi"
+                aria-label={t('simWb.toolbar.panelJumpAria')}
                 value={activePanelId}
                 onChange={(e) => {
                   const nextId = e.target.value;
@@ -2346,7 +2464,7 @@ export function SimulationWorkbenchView({
                   setSelectedWidgetId(null);
                   syncPanelQueryInUrl(nextId, workbenchMode, false);
                 }}
-                className="h-7 max-w-[240px] rounded-[2px] border border-strong bg-elevated px-2 font-mono text-[11px] font-semibold text-ink"
+                className="h-[30px] max-w-[260px] rounded-[2px] border border-strong bg-elevated px-2.5 font-mono text-[12px] font-semibold text-ink"
               >
                 {panels.map((pan) => (
                   <option key={pan.id} value={pan.id}>
@@ -2369,10 +2487,10 @@ export function SimulationWorkbenchView({
                   setPanelDescInput('');
                   setPanelModalMode('create');
                 }}
-                className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-elevated px-2 font-mono text-[10px] font-semibold uppercase text-focus hover:border-strong"
+                className="inline-flex h-[30px] cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-elevated px-2.5 font-mono text-[12px] font-semibold uppercase text-focus hover:border-strong"
               >
                 <Plus className="h-3 w-3" aria-hidden="true" />
-                NEW PANEL
+                {t('simWb.toolbar.newPanel')}
               </button>
 
               {activePanel && (
@@ -2385,11 +2503,11 @@ export function SimulationWorkbenchView({
                       setPanelDescInput(activePanel.description);
                       setPanelModalMode('rename');
                     }}
-                    title="Paneli yeniden adlandır"
-                    className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-2 font-mono text-[10px] text-muted hover:border-strong hover:text-ink"
+                    title={t('simWb.toolbar.renameTitle')}
+                    className="inline-flex h-[30px] cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-2.5 font-mono text-[12px] text-muted hover:border-strong hover:text-ink"
                   >
                     <Pencil className="h-3 w-3" aria-hidden="true" />
-                    RENAME
+                    {t('simWb.toolbar.rename')}
                   </button>
 
                   <button
@@ -2398,18 +2516,18 @@ export function SimulationWorkbenchView({
                       setModalTargetPanelId(activePanel.id);
                       setPanelModalMode('delete');
                     }}
-                    title="Paneli sil"
-                    className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-2 font-mono text-[10px] text-muted hover:border-critical hover:text-critical"
+                    title={t('simWb.toolbar.deleteTitle')}
+                    className="inline-flex h-[30px] cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-2.5 font-mono text-[12px] text-muted hover:border-critical hover:text-critical"
                   >
-                    <Trash2 className="h-3 w-3" aria-hidden="true" />
+                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                   </button>
 
                   <button
                     type="button"
                     disabled={savingPanel}
                     onClick={() => void handleSaveActivePanel()}
-                    title="Paneli kaydet ve .nexusproj.json ile senkronize et (Ctrl+S)"
-                    className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-[2px] border px-2.5 font-mono text-[10px] font-semibold uppercase transition-colors disabled:opacity-50"
+                    title={t('simWb.toolbar.saveTitle')}
+                    className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border px-3 font-mono text-[12px] font-semibold uppercase transition-colors disabled:opacity-50"
                     style={
                       isActivePanelDirty
                         ? {
@@ -2424,12 +2542,12 @@ export function SimulationWorkbenchView({
                           }
                     }
                   >
-                    <Save className="h-3 w-3" aria-hidden="true" />
+                    <Save className="h-3.5 w-3.5" aria-hidden="true" />
                     {savingPanel
-                      ? 'SAVING...'
+                      ? t('simWb.toolbar.saving')
                       : isActivePanelDirty
-                        ? 'SAVE PANEL *'
-                        : 'SAVED'}
+                        ? t('simWb.toolbar.saveDirty')
+                        : t('simWb.toolbar.saved')}
                   </button>
 
                   {canSyncFromCloud && (
@@ -2437,14 +2555,14 @@ export function SimulationWorkbenchView({
                       type="button"
                       disabled={isSyncingFromCloud}
                       onClick={() => void handleTriggerSyncFromCloud()}
-                      title="Bu paneli ve kardeş panelleri Cloud'dan yeniden yükle / eşitle"
-                      className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-2 font-mono text-[10px] uppercase text-ink hover:border-focus hover:text-focus disabled:opacity-50"
+                      title={t('simWb.toolbar.refreshTitle')}
+                      className="inline-flex h-[30px] cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-2.5 font-mono text-[12px] uppercase text-ink hover:border-focus hover:text-focus disabled:opacity-50"
                     >
                       <RefreshCw
-                        className={`h-3 w-3 text-focus ${isSyncingFromCloud ? 'animate-spin' : ''}`}
+                        className={`h-3.5 w-3.5 text-focus ${isSyncingFromCloud ? 'animate-spin' : ''}`}
                         aria-hidden="true"
                       />
-                      <span>YENİLE</span>
+                      <span>{t('simWb.toolbar.refresh')}</span>
                     </button>
                   )}
                 </>
@@ -2453,24 +2571,24 @@ export function SimulationWorkbenchView({
           )}
 
           {savedToast && (
-            <span className="inline-flex items-center gap-1 font-mono text-[10px] font-semibold text-nominal">
+            <span className="inline-flex items-center gap-1 font-mono text-[11px] font-semibold text-nominal">
               <Check className="h-3 w-3" aria-hidden="true" />
-              SYNCED (.NEXUSPROJ.JSON)
+              {t('simWb.toolbar.synced')}
             </span>
           )}
         </div>
 
         {/* Right: .nexuspanel.json Import/Export + [ DESIGN | RUN ] Switch */}
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-2">
           {canMutate && (
             <button
               type="button"
               onClick={() => importFileInputRef.current?.click()}
-              title=".nexuspanel.json dosyası içe aktar"
-              className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-2 font-mono text-[10px] uppercase text-ink hover:border-strong"
+              title={t('simWb.toolbar.importTitle')}
+              className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-canvas px-2.5 font-mono text-[12px] uppercase text-ink hover:border-strong"
             >
-              <Upload className="h-3 w-3 text-focus" aria-hidden="true" />
-              IMPORT
+              <Upload className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
+              {t('simWb.toolbar.import')}
             </button>
           )}
 
@@ -2478,10 +2596,10 @@ export function SimulationWorkbenchView({
             <button
               type="button"
               onClick={() => handleExportPanelJson(activePanel)}
-              title=".nexuspanel.json dosyası dışa aktar"
-              className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-2 font-mono text-[10px] uppercase text-ink hover:border-strong"
+              title={t('simWb.toolbar.exportTitle')}
+              className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-canvas px-2.5 font-mono text-[12px] uppercase text-ink hover:border-strong"
             >
-              <Download className="h-3 w-3 text-nominal" aria-hidden="true" />
+              <Download className="h-3.5 w-3.5 text-nominal" aria-hidden="true" />
               .NEXUSPANEL.JSON
             </button>
           )}
@@ -2489,8 +2607,8 @@ export function SimulationWorkbenchView({
           {/* Mode Switch: [ DESIGN ] vs [ RUN ] */}
           <div
             role="group"
-            aria-label="Çalışma Modu"
-            className="inline-flex h-7 items-center rounded-[2px] border border-strong bg-canvas p-0.5 font-mono text-[10px] font-bold uppercase tracking-wider"
+            aria-label={t('simWb.toolbar.modeGroupAria')}
+            className="inline-flex h-[30px] items-center rounded-[2px] border border-strong bg-canvas p-0.5 font-mono text-[12px] font-bold uppercase tracking-wider"
           >
             <button
               type="button"
@@ -2501,14 +2619,14 @@ export function SimulationWorkbenchView({
                 }
               }}
               aria-pressed={workbenchMode === 'design'}
-              className={`inline-flex h-full cursor-pointer items-center gap-1 rounded-[2px] px-2.5 transition-colors ${
+              className={`inline-flex h-full cursor-pointer items-center gap-1 rounded-[2px] px-3 transition-colors ${
                 workbenchMode === 'design'
                   ? 'bg-elevated text-ink'
                   : 'text-muted hover:text-ink'
               }`}
             >
-              <Wrench className="h-3 w-3 text-focus" aria-hidden="true" />
-              [ DESIGN ]
+              <Wrench className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
+              {t('simWb.toolbar.modeDesign')}
             </button>
             <button
               type="button"
@@ -2520,7 +2638,7 @@ export function SimulationWorkbenchView({
                 }
               }}
               aria-pressed={workbenchMode === 'run'}
-              className={`inline-flex h-full cursor-pointer items-center gap-1 rounded-[2px] px-2.5 transition-colors ${
+              className={`inline-flex h-full cursor-pointer items-center gap-1 rounded-[2px] px-3 transition-colors ${
                 workbenchMode === 'run'
                   ? 'text-white'
                   : 'text-muted hover:text-ink'
@@ -2531,8 +2649,8 @@ export function SimulationWorkbenchView({
                   : undefined
               }
             >
-              <Play className="h-3 w-3" aria-hidden="true" />
-              [ RUN ]
+              <Play className="h-3.5 w-3.5" aria-hidden="true" />
+              {t('simWb.toolbar.modeRun')}
             </button>
           </div>
         </div>
@@ -2540,57 +2658,57 @@ export function SimulationWorkbenchView({
 
       {/* 2. RUN Mode Operator Sub-Toolbar (Telemetry Source + 60 FPS Readout) */}
       {workbenchMode === 'run' && activePanel && (
-        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-hairline bg-elevated px-3 py-1.5 font-mono text-[10px] tabular-nums">
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="flex shrink-0 min-h-[38px] flex-wrap items-center justify-between gap-2.5 border-b border-hairline bg-elevated px-3 py-1 font-mono text-[11.5px] tabular-nums">
+          <div className="flex flex-wrap items-center gap-2.5">
             <span className="font-semibold uppercase tracking-wider text-muted">
-              TELEMETRY SOURCE:
+              {t('simWb.run.telemetrySource')}
             </span>
 
-            <div className="inline-flex h-6 items-center rounded-[2px] border border-hairline bg-canvas p-0.5">
+            <div className="inline-flex h-[28px] items-center rounded-[2px] border border-hairline bg-canvas p-0.5">
               <button
                 type="button"
                 onClick={() => setTelemetrySource('virtual')}
                 aria-pressed={telemetrySource === 'virtual'}
-                className={`inline-flex h-full cursor-pointer items-center gap-1.5 rounded-[2px] px-2 font-semibold uppercase ${
+                className={`inline-flex h-full cursor-pointer items-center gap-1.5 rounded-[2px] px-2.5 font-semibold uppercase ${
                   telemetrySource === 'virtual'
                     ? 'bg-surface text-focus'
                     : 'text-muted hover:text-ink'
                 }`}
               >
-                <Cpu className="h-3 w-3" aria-hidden="true" />
-                VIRTUAL BUS (LOCAL SIM)
+                <Cpu className="h-3.5 w-3.5" aria-hidden="true" />
+                {t('simWb.run.sourceVirtual')}
               </button>
               <button
                 type="button"
                 onClick={() => setTelemetrySource('live_bridge')}
                 aria-pressed={telemetrySource === 'live_bridge'}
-                className={`inline-flex h-full cursor-pointer items-center gap-1.5 rounded-[2px] px-2 font-semibold uppercase ${
+                className={`inline-flex h-full cursor-pointer items-center gap-1.5 rounded-[2px] px-2.5 font-semibold uppercase ${
                   telemetrySource === 'live_bridge'
                     ? 'bg-surface text-nominal'
                     : 'text-muted hover:text-ink'
                 }`}
               >
-                <Radio className="h-3 w-3" aria-hidden="true" />
-                LIVE BRIDGE (READ-ONLY)
+                <Radio className="h-3.5 w-3.5" aria-hidden="true" />
+                {t('simWb.run.sourceLive')}
               </button>
             </div>
 
             {telemetrySource === 'virtual' ? (
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setSimPaused((prev) => !prev)}
-                  className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-surface px-2 text-ink hover:border-strong"
+                  className="inline-flex h-[28px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-surface px-2.5 text-ink hover:border-strong"
                 >
                   {simPaused ? (
                     <>
-                      <Play className="h-3 w-3 text-nominal" />
-                      RESUME
+                      <Play className="h-3.5 w-3.5 text-nominal" />
+                      {t('simWb.run.resume')}
                     </>
                   ) : (
                     <>
-                      <Pause className="h-3 w-3 text-warn" />
-                      FREEZE
+                      <Pause className="h-3.5 w-3.5 text-warn" />
+                      {t('simWb.run.freeze')}
                     </>
                   )}
                 </button>
@@ -2599,38 +2717,36 @@ export function SimulationWorkbenchView({
                   onClick={() =>
                     runtimeBus.reset(allActiveBindings, loadedSchema)
                   }
-                  className="inline-flex h-6 cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-surface px-2 text-muted hover:border-strong hover:text-ink"
+                  className="inline-flex h-[28px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-surface px-2.5 text-muted hover:border-strong hover:text-ink"
                 >
-                  <RotateCcw className="h-3 w-3" />
-                  RESET BUS
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  {t('simWb.run.resetBus')}
                 </button>
                 <span className="text-muted">
-                  GENERATORS:{' '}
-                  <strong className="text-ink">
-                    {activePanel.generators.filter((g) => g.enabled).length}
-                  </strong>{' '}
-                  ACTIVE
+                  {t('simWb.run.generatorsActive', {
+                    active: activePanel.generators.filter((g) => g.enabled).length,
+                  })}
                 </span>
               </div>
             ) : (
               <div className="flex flex-wrap items-center gap-2">
                 {connectedBuses.length > 0 ? (
-                  <span className="inline-flex items-center gap-1.5 rounded-[2px] border border-hairline bg-surface px-2 py-0.5 text-[10px] text-ink font-mono tabular-nums">
-                    <Radio className="h-3 w-3 text-focus animate-pulse" />
+                  <span className="inline-flex items-center gap-1.5 rounded-[2px] border border-hairline bg-surface px-2.5 py-1 text-[11px] text-ink font-mono tabular-nums">
+                    <Radio className="h-3.5 w-3.5 text-focus animate-pulse" />
                     <span>
                       Bus {connectedBuses[0].busId}: {connectedBuses[0].channelName}
                     </span>
-                    <span className="text-muted">· {telemetryHeader.fpsRx} fps</span>
+                    <span className="text-muted">· {t('simWb.run.fps', { fps: telemetryHeader.fpsRx })}</span>
                   </span>
                 ) : (
-                  <span className="inline-flex items-center gap-1 text-warn text-[10px] font-mono">
-                    <WifiOff className="h-3 w-3" aria-hidden="true" />
-                    NO PHYSICAL CAN BUS CONNECTED
+                  <span className="inline-flex items-center gap-1.5 text-warn text-[11px] font-mono">
+                    <WifiOff className="h-3.5 w-3.5" aria-hidden="true" />
+                    {t('simWb.run.noPhysicalBus')}
                   </span>
                 )}
 
                 <span
-                  className="inline-flex items-center gap-1 rounded-[2px] border px-1.5 py-0.5 font-semibold uppercase text-[10px]"
+                  className="inline-flex items-center gap-1 rounded-[2px] border px-2 py-0.5 font-semibold uppercase text-[11px]"
                   style={{
                     backgroundColor: isLiveBusArmed
                       ? 'var(--status-nominal-bg)'
@@ -2643,16 +2759,16 @@ export function SimulationWorkbenchView({
                       : 'var(--status-warning)',
                   }}
                 >
-                  <Lock className="h-2.5 w-2.5" aria-hidden="true" />
-                  {isLiveBusArmed ? 'ACTIVE TX ARMED' : 'LISTEN-ONLY // TX LOCKED'}
+                  <Lock className="h-3 w-3" aria-hidden="true" />
+                  {isLiveBusArmed ? t('simWb.run.txArmed') : t('simWb.run.txLocked')}
                 </span>
               </div>
             )}
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="rounded-[2px] border border-hairline bg-surface px-2 py-0.5 font-semibold text-nominal">
-              {measuredFps} FPS rAF
+            <span className="rounded-[2px] border border-hairline bg-surface px-2.5 py-1 font-semibold text-nominal text-[11.5px]">
+              {t('simWb.run.raf', { fps: measuredFps })}
             </span>
           </div>
         </div>
@@ -2677,7 +2793,7 @@ export function SimulationWorkbenchView({
             type="button"
             onClick={() => setErrorBanner(null)}
             className="cursor-pointer p-0.5"
-            aria-label="Hatayı kapat"
+            aria-label={t('simWb.modal.closeErrorAria')}
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -2687,7 +2803,7 @@ export function SimulationWorkbenchView({
       {/* 3. Main 3-Pane Design / Full-Width Run Workspace */}
       {loadingPanels ? (
         <div className="flex flex-1 items-center justify-center font-mono text-xs text-muted">
-          LOADING INSTRUMENT PANELS...
+          {t('simWb.canvas.loading')}
         </div>
       ) : panels.length === 0 || !activePanel ? (
         /* Guided Clean Empty State (Zero Mock Startup Data) */
@@ -2695,15 +2811,13 @@ export function SimulationWorkbenchView({
           <div className="w-full max-w-xl rounded-[2px] border border-hairline bg-surface p-6">
             <div className="flex items-center gap-2 border-b border-hairline pb-3 font-mono text-xs font-bold uppercase tracking-wider text-ink">
               <Gauge className="h-4 w-4 text-focus" aria-hidden="true" />
-              NO SIMULATION PANELS CONFIGURED YET
+              {t('simWb.canvas.emptyTitle')}
             </div>
             <p className="mt-3 text-xs leading-relaxed text-muted">
-              Bu projede henüz kayıtlı bir sanal enstrüman veya simülasyon paneli bulunmuyor. Oluşturacağınız tüm paneller otomatik olarak{' '}
-              <span className="font-mono text-ink">.nexusproj.json</span> ile senkronize edilir ve masaüstü{' '}
-              <span className="font-mono text-ink">NexusCAN</span> istemcisinde birebir açılır.
+              {t('simWb.canvas.emptyDesc')}
             </p>
 
-            <div className="mt-5 flex flex-wrap gap-2">
+            <div className="mt-5 flex flex-wrap gap-2.5">
               {canMutate && (
                 <button
                   type="button"
@@ -2716,11 +2830,11 @@ export function SimulationWorkbenchView({
                       true
                     )
                   }
-                  className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[2px] px-3.5 font-mono text-[11px] font-semibold uppercase text-white disabled:opacity-50"
+                  className="inline-flex h-[32px] cursor-pointer items-center gap-1.5 rounded-[2px] px-3.5 font-mono text-[12px] font-semibold uppercase text-white disabled:opacity-50"
                   style={{ backgroundColor: 'var(--status-focus)' }}
                 >
                   <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                  CREATE BLANK 24-COL PANEL
+                  {t('simWb.canvas.createBlank')}
                 </button>
               )}
 
@@ -2732,13 +2846,13 @@ export function SimulationWorkbenchView({
                     onClick={() =>
                       setGenerateModalState({ open: true, mode: 'create_new' })
                     }
-                    className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[2px] border border-strong bg-elevated px-3.5 font-mono text-[11px] font-semibold uppercase text-ink hover:bg-hover disabled:opacity-50"
+                    className="inline-flex h-[32px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-strong bg-elevated px-3.5 font-mono text-[12px] font-semibold uppercase text-ink hover:bg-hover disabled:opacity-50"
                   >
                     <Database
                       className="h-3.5 w-3.5 text-nominal"
                       aria-hidden="true"
                     />
-                    DBC&apos;DEN TASLAK OLUŞTUR... ({loadedDbEntries.length} VERİTABANI)
+                    {t('simWb.canvas.generateFromDbc', { count: loadedDbEntries.length })}
                   </button>
                 )}
 
@@ -2746,10 +2860,10 @@ export function SimulationWorkbenchView({
                 <button
                   type="button"
                   onClick={() => importFileInputRef.current?.click()}
-                  className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-canvas px-3 font-mono text-[11px] uppercase text-muted hover:border-strong hover:text-ink"
+                  className="inline-flex h-[32px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-canvas px-3 font-mono text-[12px] uppercase text-muted hover:border-strong hover:text-ink"
                 >
                   <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-                  IMPORT .NEXUSPANEL.JSON
+                  {t('simWb.canvas.importJson')}
                 </button>
               )}
             </div>
@@ -2824,10 +2938,10 @@ export function SimulationWorkbenchView({
                   <div className="absolute inset-0 flex items-center justify-center p-6">
                     <div className="max-w-md rounded-[2px] border border-hairline bg-surface p-5 text-center">
                       <p className="font-mono text-xs font-semibold uppercase tracking-wider text-ink">
-                        EMPTY 24-COLUMN INSTRUMENT GRID
+                        {t('simWb.canvas.gridEmptyTitle')}
                       </p>
                       <p className="mt-1.5 text-xs text-muted">
-                        Sol paletten gösterge, OSM/GNSS haritası, 60 FPS osiloskop veya sanal kontrol ekleyebilir; ya da yüklü .dbc şemasından başlangıç panelini tek tıkla üretebilirsiniz.
+                        {t('simWb.canvas.gridEmptyDesc')}
                       </p>
                       {canMutate &&
                         loadedSchema &&
@@ -2841,7 +2955,7 @@ export function SimulationWorkbenchView({
                               className="h-3.5 w-3.5 text-nominal"
                               aria-hidden="true"
                             />
-                            DBC&apos;DEN TASLAK DOLDUR... ({loadedDbEntries.length} VERİTABANI)
+                            {t('simWb.canvas.populateDbc', { count: loadedDbEntries.length })}
                           </button>
                         )}
                     </div>
@@ -2993,12 +3107,12 @@ export function SimulationWorkbenchView({
                                       borderColor: 'var(--status-focus)',
                                     }}
                                   >
-                                    [+ GRUBA BIRAK]
+                                    {t('simWb.widget.dropToGroup')}
                                   </span>
                                 )}
                                 {isGroup && (
                                   <span className="rounded-[2px] border border-hairline bg-canvas px-1 py-0.5 font-mono text-[9px] font-semibold tabular-nums text-muted">
-                                    [{groupChildCount} ÖĞE]
+                                    {t('simWb.widget.itemCount', { count: groupChildCount })}
                                   </span>
                                 )}
                                 {headerDbName && (
@@ -3018,8 +3132,8 @@ export function SimulationWorkbenchView({
                                         e.stopPropagation();
                                         handleDuplicateWidget(widget.id);
                                       }}
-                                      title="Widget kopyala"
-                                      aria-label="Widget kopyala"
+                                      title={t('simWb.widget.copy')}
+                                      aria-label={t('simWb.widget.copy')}
                                       className="cursor-pointer rounded-[2px] p-0.5 text-muted hover:bg-surface hover:text-ink"
                                     >
                                       <Copy className="h-2.5 w-2.5" />
@@ -3030,8 +3144,8 @@ export function SimulationWorkbenchView({
                                         e.stopPropagation();
                                         handleDeleteWidget(widget.id);
                                       }}
-                                      title="Widget sil"
-                                      aria-label="Widget sil"
+                                      title={t('simWb.widget.delete')}
+                                      aria-label={t('simWb.widget.delete')}
                                       className="cursor-pointer rounded-[2px] p-0.5 text-muted hover:bg-surface hover:text-critical"
                                     >
                                       <Trash2 className="h-2.5 w-2.5" />
@@ -3092,7 +3206,7 @@ export function SimulationWorkbenchView({
                                 childOffsets: [],
                               };
                             }}
-                            title="Boyutlandırmak için sürükleyin (w, h)"
+                            title={t('simWb.widget.resizeTitle')}
                             className="pointer-events-auto absolute right-[3px] bottom-[3px] z-20 flex h-3.5 w-3.5 cursor-se-resize items-end justify-end border-t border-l border-strong bg-elevated p-0.5 hover:border-focus"
                           >
                             <span

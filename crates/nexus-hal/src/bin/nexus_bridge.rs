@@ -15,7 +15,10 @@ use axum::{
     Json, Router,
 };
 use nexus_hal::{
-    dto::{ChannelConfigDto, DbFileInputDto},
+    dto::{
+        ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto, StartTraceReplayArgsDto,
+        TraceReplayControlArgsDto,
+    },
     pipeline::PipelineEngine,
 };
 use serde::Deserialize;
@@ -144,6 +147,32 @@ struct SaveProjectArgs {
 struct ProjectStemArgs {
     #[serde(alias = "file_stem")]
     file_stem: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceFileNameArgs {
+    #[serde(alias = "file_name")]
+    file_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceFileContentArgs {
+    #[serde(alias = "file_name")]
+    file_name: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default, alias = "content_base64")]
+    content_base64: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportTraceBlfArgs {
+    #[serde(default, alias = "file_name")]
+    file_name: String,
+    frames: Vec<ChronologicalFrameDto>,
 }
 
 fn build_router(engine: Arc<PipelineEngine>) -> Router {
@@ -475,6 +504,103 @@ async fn handle_invoke(
                 Err(e) => bad_request(e.to_string()),
             }
         }
+        "cmd_list_traces" => match engine.cmd_list_traces() {
+            Ok(info) => ok_json(info),
+            Err(e) => bad_request(e.to_string()),
+        },
+        "cmd_save_trace_file" => {
+            let args: TraceFileContentArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => {
+                    return bad_request(format!("Invalid arguments for cmd_save_trace_file: {e}"))
+                }
+            };
+            match engine.cmd_save_trace_file(args.file_name, args.content, args.content_base64) {
+                Ok(summary) => ok_json(summary),
+                Err(e) => bad_request(e.to_string()),
+            }
+        }
+        "cmd_load_trace_file" => {
+            let args: TraceFileNameArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => {
+                    return bad_request(format!("Invalid arguments for cmd_load_trace_file: {e}"))
+                }
+            };
+            match engine.cmd_load_trace_file(args.file_name) {
+                Ok(loaded) => ok_json(loaded),
+                Err(e) => bad_request(e.to_string()),
+            }
+        }
+        "cmd_delete_trace_file" => {
+            let args: TraceFileNameArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => {
+                    return bad_request(format!("Invalid arguments for cmd_delete_trace_file: {e}"))
+                }
+            };
+            match engine.cmd_delete_trace_file(args.file_name) {
+                Ok(()) => ok_json(Value::Null),
+                Err(e) => bad_request(e.to_string()),
+            }
+        }
+        "cmd_parse_trace_content" => {
+            let args: TraceFileContentArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => {
+                    return bad_request(format!(
+                        "Invalid arguments for cmd_parse_trace_content: {e}"
+                    ))
+                }
+            };
+            match engine.cmd_parse_trace_content(args.file_name, args.content, args.content_base64)
+            {
+                Ok(loaded) => ok_json(loaded),
+                Err(e) => bad_request(e.to_string()),
+            }
+        }
+        "cmd_export_trace_blf" => {
+            let args: ExportTraceBlfArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => {
+                    return bad_request(format!("Invalid arguments for cmd_export_trace_blf: {e}"))
+                }
+            };
+            match engine.cmd_export_trace_blf(args.file_name, args.frames) {
+                Ok(b64) => ok_json(b64),
+                Err(e) => bad_request(e.to_string()),
+            }
+        }
+        "cmd_start_trace_replay" => {
+            let raw_args = payload.get("args").cloned().unwrap_or(payload);
+            let args: StartTraceReplayArgsDto = match serde_json::from_value(raw_args) {
+                Ok(a) => a,
+                Err(e) => {
+                    return bad_request(format!(
+                        "Invalid arguments for cmd_start_trace_replay: {e}"
+                    ))
+                }
+            };
+            match engine.cmd_start_trace_replay(args) {
+                Ok(status) => ok_json(status),
+                Err(e) => bad_request(e.to_string()),
+            }
+        }
+        "cmd_control_trace_replay" => {
+            let raw_args = payload.get("args").cloned().unwrap_or(payload);
+            let args: TraceReplayControlArgsDto = match serde_json::from_value(raw_args) {
+                Ok(a) => a,
+                Err(e) => {
+                    return bad_request(format!(
+                        "Invalid arguments for cmd_control_trace_replay: {e}"
+                    ))
+                }
+            };
+            match engine.cmd_control_trace_replay(args) {
+                Ok(status) => ok_json(status),
+                Err(e) => bad_request(e.to_string()),
+            }
+        }
         unknown => bad_request(format!("Unknown NexusCAN IPC command: '{unknown}'")),
     }
 }
@@ -506,11 +632,17 @@ mod tests {
             "nexuscan-bridge-projects-{}",
             std::process::id()
         ));
+        let tmp_traces = std::env::temp_dir().join(format!(
+            "nexuscan-bridge-traces-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tmp_projects);
+        let _ = std::fs::remove_dir_all(&tmp_traces);
 
-        let engine = Arc::new(PipelineEngine::with_projects_dir(
+        let engine = Arc::new(PipelineEngine::with_storage_dirs(
             DriverRegistry::with_builtin_drivers(),
             tmp_projects.clone(),
+            tmp_traces.clone(),
         ));
         let _router = build_router(Arc::clone(&engine));
 
@@ -715,7 +847,134 @@ mod tests {
         let (st_clear_db, _) = call_invoke(&engine, "cmd_clear_database", "").await;
         assert_eq!(st_clear_db, StatusCode::OK);
 
+        // 7. Trace persistent CRUD + parse + replay start/control via HTTP invoke (both wrapped {args} & flat)
+        let sample_trc = ";$FILEVERSION=2.1\n1 0.000 DT 1 0101 Rx 8 10 20 30 40 50 60 70 80\n2 40.000 DT 1 0101 Rx 8 11 22 33 44 55 66 77 88\n";
+        let (st_t_save, saved_trace) = call_invoke(
+            &engine,
+            "cmd_save_trace_file",
+            &serde_json::to_string(&json!({
+                "fileName": "bridge_run.trc",
+                "content": sample_trc,
+            }))
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(st_t_save, StatusCode::OK);
+        assert_eq!(saved_trace["fileName"], "bridge_run.trc");
+        assert_eq!(saved_trace["frameCount"], 2);
+        assert_eq!(saved_trace["durationUs"], 40_000);
+
+        let (st_t_list, listed_traces) = call_invoke(&engine, "cmd_list_traces", "").await;
+        assert_eq!(st_t_list, StatusCode::OK);
+        assert_eq!(listed_traces["files"].as_array().unwrap().len(), 1);
+
+        let (st_t_load, loaded_trace) = call_invoke(
+            &engine,
+            "cmd_load_trace_file",
+            r#"{"fileName":"bridge_run.trc"}"#,
+        )
+        .await;
+        assert_eq!(st_t_load, StatusCode::OK);
+        assert_eq!(loaded_trace["frames"].as_array().unwrap().len(), 2);
+
+        let (st_t_parse, parsed_trace) = call_invoke(
+            &engine,
+            "cmd_parse_trace_content",
+            &serde_json::to_string(&json!({
+                "file_name": "inline.log",
+                "content": "(1700000000.000000) vcan0 123#AABBCCDD\n",
+            }))
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(st_t_parse, StatusCode::OK);
+        assert_eq!(parsed_trace["summary"]["frameCount"], 1);
+
+        let (st_rep_start, rep_status) = call_invoke(
+            &engine,
+            "cmd_start_trace_replay",
+            r#"{"args":{"sourceName":"bridge_run.trc","fileName":"bridge_run.trc","speedFactor":0.5,"filterMode":"exclude","filterKeys":["std:0x102"],"directionFilter":"rx"}}"#,
+        )
+        .await;
+        assert_eq!(st_rep_start, StatusCode::OK);
+        assert_eq!(rep_status["state"], "playing");
+        assert_eq!(rep_status["filterMode"], "exclude");
+        assert_eq!(rep_status["filterKeys"], json!(["STD:0x102"]));
+        assert_eq!(rep_status["directionFilter"], "rx");
+
+        let (st_rep_cfg, rep_cfg) = call_invoke(
+            &engine,
+            "cmd_control_trace_replay",
+            r#"{"action":"configure","filterMode":"include","updateFilterKeys":true,"filterKeys":["STD:0x101"],"directionFilter":"all"}"#,
+        )
+        .await;
+        assert_eq!(st_rep_cfg, StatusCode::OK);
+        assert_eq!(rep_cfg["filterMode"], "include");
+        assert_eq!(rep_cfg["filterKeys"], json!(["STD:0x101"]));
+        assert_eq!(rep_cfg["directionFilter"], "all");
+
+        let (st_rep_stop, rep_stopped) = call_invoke(
+            &engine,
+            "cmd_control_trace_replay",
+            r#"{"action":"stop"}"#,
+        )
+        .await;
+        assert_eq!(st_rep_stop, StatusCode::OK);
+        assert_eq!(rep_stopped["state"], "idle");
+
+        // 8. Binary Vector `.blf` export + `contentBase64` save & stateless parse via HTTP invoke
+        let (st_blf_exp, blf_b64_val) = call_invoke(
+            &engine,
+            "cmd_export_trace_blf",
+            &serde_json::to_string(&json!({
+                "fileName": "bridge_export.blf",
+                "frames": loaded_trace["frames"],
+            }))
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(st_blf_exp, StatusCode::OK);
+        let blf_b64 = blf_b64_val.as_str().expect("base64 string");
+        assert!(!blf_b64.is_empty());
+
+        let (st_blf_save, saved_blf) = call_invoke(
+            &engine,
+            "cmd_save_trace_file",
+            &serde_json::to_string(&json!({
+                "fileName": "bridge_export.blf",
+                "contentBase64": blf_b64,
+            }))
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(st_blf_save, StatusCode::OK);
+        assert_eq!(saved_blf["format"], "blf");
+        assert_eq!(saved_blf["frameCount"], 2);
+
+        let (st_blf_parse, parsed_blf) = call_invoke(
+            &engine,
+            "cmd_parse_trace_content",
+            &serde_json::to_string(&json!({
+                "fileName": "bridge_export.blf",
+                "contentBase64": blf_b64,
+            }))
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(st_blf_parse, StatusCode::OK);
+        assert_eq!(parsed_blf["summary"]["format"], "blf");
+        assert_eq!(parsed_blf["frames"].as_array().unwrap().len(), 2);
+
+        let (st_t_del, _) = call_invoke(
+            &engine,
+            "cmd_delete_trace_file",
+            r#"{"fileName":"bridge_run.trc"}"#,
+        )
+        .await;
+        assert_eq!(st_t_del, StatusCode::OK);
+
         let _ = std::fs::remove_dir_all(&tmp_projects);
+        let _ = std::fs::remove_dir_all(&tmp_traces);
     }
 }
 

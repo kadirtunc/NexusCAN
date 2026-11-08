@@ -13,13 +13,15 @@
 /src-tauri/target/
 /src-tauri/WixTools/
 
-# Temporary CAN Trace Dumps & Captures (keep sample scripts/ fixtures tracked!)
+# Temporary CAN Trace Dumps & Captures (keep sample scripts/ and test/ fixtures tracked!)
 /*.blf
 /*.mf4
 /*.mdf
 /*.asc
 /*.candump
 /captures/
+/traces/
+/projects/
 
 # OS & Editor
 .DS_Store

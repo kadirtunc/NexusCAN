@@ -42,7 +42,27 @@ export async function ensureMockPresetDatabasesLoaded(): Promise<string[]> {
   }
 }
 
-const MAX_DESKTOP_BUSES = 8;
+const DEFAULT_PRIMARY_BUSES = 8;
+
+/** Collects bus IDs to synchronize: 0..7 baseline + all active connection profile busIds + previously bound busIds */
+function collectAllTargetBusIds(): number[] {
+  const set = new Set<number>();
+  for (let i = 0; i < DEFAULT_PRIMARY_BUSES; i++) {
+    set.add(i);
+  }
+  const profiles = connectionStore.getState().profiles;
+  for (const p of profiles) {
+    if (typeof p.busId === 'number' && p.busId >= 0 && p.busId <= 255) {
+      set.add(p.busId);
+    }
+  }
+  for (const busId of appliedSignatures.keys()) {
+    if (typeof busId === 'number' && busId >= 0 && busId <= 255) {
+      set.add(busId);
+    }
+  }
+  return Array.from(set).sort((a, b) => a - b);
+}
 
 /** Per-bus signature of the bound files (ids + payload length) used to skip redundant backend calls. */
 function computeBusSignature(busId: number): string {
@@ -80,7 +100,8 @@ let forceNext = false;
 
 async function runSyncPass(force: boolean): Promise<void> {
   let changed = false;
-  for (let busId = 0; busId < MAX_DESKTOP_BUSES; busId++) {
+  const targetBusIds = collectAllTargetBusIds();
+  for (const busId of targetBusIds) {
     const sig = computeBusSignature(busId);
     if (!force && appliedSignatures.get(busId) === sig) continue;
     changed = true;
@@ -103,7 +124,7 @@ async function runSyncPass(force: boolean): Promise<void> {
 }
 
 /**
- * Synchronizes the databases bound to each connection profile (busId 0..7) with the Rust HAL
+ * Synchronizes the databases bound to each connection profile (unlimited buses 0..255) with the Rust HAL
  * (`cmd_set_bus_databases`) and mirrors the compiled per-bus schema into `databaseStore.busSchemas`.
  * Calls are serialized: overlapping requests coalesce into one trailing pass (last state wins).
  */
@@ -141,7 +162,8 @@ export function installBusDatabaseAutoSync(): void {
   let lastKey = '';
   const check = (): void => {
     let key = '';
-    for (let busId = 0; busId < MAX_DESKTOP_BUSES; busId++) {
+    const busIds = collectAllTargetBusIds();
+    for (const busId of busIds) {
       key += `${busId}:${computeBusSignature(busId)};`;
     }
     if (key === lastKey) return;

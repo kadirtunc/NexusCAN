@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useI18n } from '../../i18n';
 import type {
   SimulationSignalBindingDto,
   SimulationWidgetDto,
@@ -33,6 +34,7 @@ export function SimulationGraphCanvas({
   runtimeBus,
   isRunMode,
 }: SimulationGraphCanvasProps): React.JSX.Element {
+  const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const hoverNormXRef = useRef<number | null>(null);
@@ -353,7 +355,7 @@ export function SimulationGraphCanvas({
   if (allBindings.length === 0) {
     return (
       <div className="flex h-full w-full items-center justify-center bg-canvas px-3 text-center font-mono text-[11px] uppercase tracking-wider text-subtle">
-        NO SIGNAL BOUND // BIND PRIMARY SIGNAL IN INSPECTOR
+        {t('simWdg.graph.noSignal')}
       </div>
     );
   }
@@ -398,7 +400,7 @@ export function SimulationGraphCanvas({
             ))}
           </div>
           <span className="font-mono text-[9px] uppercase tracking-wider tabular-nums text-subtle">
-            {timeWindowSec}S · {autoScaleY ? 'AUTO-Y' : 'FIXED-Y'}
+            {timeWindowSec}S · {autoScaleY ? t('simWdg.graph.autoY') : t('simWdg.graph.fixedY')}
           </span>
         </div>
       )}
@@ -409,7 +411,7 @@ export function SimulationGraphCanvas({
           onMouseMove={handleMouseMove}
           onMouseLeave={handleMouseLeave}
           className="block h-full w-full cursor-crosshair"
-          aria-label={`${widget.title} 60 FPS Osiloskop Grafiği`}
+          aria-label={t('simWdg.graph.ariaLabel', { title: widget.title })}
         />
       </div>
     </div>

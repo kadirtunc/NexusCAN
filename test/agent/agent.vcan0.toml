@@ -1,0 +1,33 @@
+# NexusCAN Headless Field Telemetry Agent — Linux SocketCAN (vcan0 CAN-FD) HIL Yapılandırması
+# Ön hazırlık (vcan0 henüz açık değilse):
+#   sudo modprobe vcan
+#   sudo ip link add dev vcan0 type vcan
+#   sudo ip link set vcan0 mtu 72 up
+#
+# Çalıştırma komutu:
+#   ./target/release/nexuscan agent run --config test/agent/agent.vcan0.toml
+
+[agent]
+name = "NexusCAN HIL Edge Node (vcan0)"
+hostname = "hil-rig-vcan0"
+listen_only = true
+auto_sync_dbc = false
+dbc_path = "test/databases/ev_powertrain_full_test.dbc"
+
+[cloud]
+url = "http://localhost:3000"
+ws_bridge_url = "ws://localhost:3000/api/bridge/ws"
+project_id = "demo-ev-powertrain"
+project_slug = "ev-powertrain-hil"
+token = "nxc_tok_replace_with_provisioned_device_token"
+
+[can]
+interface = "vcan0"
+bitrate = 500000
+enable_fd = true
+data_bitrate = 2000000
+listen_only = true
+
+[web]
+enabled = true
+bind = "127.0.0.1:8091"

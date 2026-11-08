@@ -1,5 +1,6 @@
 import React from 'react';
 import type { BusHealthDto } from '../types/hal';
+import { useI18n } from '../i18n';
 
 export interface BusStateBadgeProps {
   busState?: BusHealthDto['busState'] | 'offline' | string;
@@ -84,6 +85,8 @@ export const BusStateBadge: React.FC<BusStateBadgeProps> = ({
   compact = false,
   className = '',
 }) => {
+  const { t } = useI18n();
+
   const { label, dotClass, textClass, borderClass, bgClass } = formatBusStateLabel(
     busState,
     connected,
@@ -92,16 +95,18 @@ export const BusStateBadge: React.FC<BusStateBadgeProps> = ({
   const modeText =
     listenOnly !== undefined
       ? listenOnly
-        ? 'Listen-Only'
+        ? t('rxtx.busBadge.listenOnly')
         : txArmed
-          ? 'Active TX Armed'
-          : 'TX Disarmed'
+          ? t('rxtx.busBadge.txArmed')
+          : t('rxtx.busBadge.txDisarmed')
       : undefined;
 
-  const tooltipParts = [`State: ${label}`];
-  if (modeText) tooltipParts.push(`Mode: ${modeText}`);
+  const tooltipParts = [t('rxtx.busBadge.tooltipState', { state: label })];
+  if (modeText) tooltipParts.push(t('rxtx.busBadge.tooltipMode', { mode: modeText }));
   if (connected) {
-    tooltipParts.push(`TEC: ${txErrorCount} | REC: ${rxErrorCount}`);
+    tooltipParts.push(
+      t('rxtx.busBadge.tooltipErrors', { tec: txErrorCount, rec: rxErrorCount }),
+    );
   }
 
   return (

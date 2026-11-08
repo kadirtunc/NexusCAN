@@ -18,6 +18,7 @@ import {
   Loader2,
   Check,
 } from 'lucide-react';
+import { useI18n } from '../i18n';
 
 export interface CloudPushPromptModalProps {
   quickBarState?: QuickBarConnectionState;
@@ -31,6 +32,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
   quickBarState,
   onStatusMessage,
 }) => {
+  const { t } = useI18n();
   const cloudHeader = useCloudBridgeHeader();
   const cloudState = useCloudBridgeStore();
   const projState = useProjectStore();
@@ -56,7 +58,8 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
   useEffect(() => {
     if (!ctx) return;
 
-    const initialName = ctx.projectName.trim() || projState.currentName.trim() || 'Yeni Proje';
+    const initialName =
+      ctx.projectName.trim() || projState.currentName.trim() || t('cloud.prompt.defaultProjectName');
     setProjectNameInput(initialName);
     setProjectCodeInput(suggestCloudProjectCode(initialName));
     setCodeManuallyEdited(false);
@@ -65,10 +68,10 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
 
     const initialCommit =
       ctx.reason === 'opened_project'
-        ? `Açılan yerel proje pushlandı (${initialName})`
+        ? t('cloud.prompt.commitInitialOpened', { name: initialName })
         : ctx.reason === 'new_project'
-          ? `Yeni yerel proje oluşturuldu (${initialName})`
-          : `Yerel çalışma alanı pushlandı (${initialName})`;
+          ? t('cloud.prompt.commitInitialNew', { name: initialName })
+          : t('cloud.prompt.commitInitialManual', { name: initialName });
     setCommitMessageInput(initialCommit);
 
     const initialOrgId =
@@ -92,7 +95,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
         setSelectedProjectId(cloudState.projects[0].id);
       }
     }
-  }, [ctx, cloudState.organizations, cloudState.projects, cloudState.selectedOrgId, projState.cloudBinding, projState.currentName]);
+  }, [ctx, cloudState.organizations, cloudState.projects, cloudState.selectedOrgId, projState.cloudBinding, projState.currentName, t]);
 
   // Clean keyboard handling: Escape closes modal without firing global shortcuts
   useEffect(() => {
@@ -105,7 +108,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
         cloudBridgeStore.closePushPrompt();
         onStatusMessage?.({
           kind: 'info',
-          message: "Proje yalnızca yerelde tutuldu (Cloud'a pushlanmadı).",
+          message: t('cloud.prompt.cancelStatus'),
         });
       }
     };
@@ -114,7 +117,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
     return () => {
       window.removeEventListener('keydown', handleKeyDown, true);
     };
-  }, [ctx, cloudHeader.isAuthenticated, onStatusMessage]);
+  }, [ctx, cloudHeader.isAuthenticated, onStatusMessage, t]);
 
   if (!cloudHeader.hasPushPrompt || !cloudHeader.isAuthenticated || !ctx) {
     return null;
@@ -136,23 +139,23 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
     cloudBridgeStore.closePushPrompt();
     onStatusMessage?.({
       kind: 'info',
-      message: "Proje yalnızca yerelde tutuldu (Cloud'a pushlanmadı).",
+      message: t('cloud.prompt.cancelStatus'),
     });
   };
 
   const handlePushToCloud = async () => {
     if (activeMode === 'create_new') {
       if (!projectNameInput.trim()) {
-        setErrorMessage('Lütfen proje adı girin.');
+        setErrorMessage(t('cloud.prompt.nameRequired'));
         return;
       }
       if (!projectCodeInput.trim()) {
-        setErrorMessage('Lütfen proje kodu girin.');
+        setErrorMessage(t('cloud.prompt.codeRequired'));
         return;
       }
     } else if (activeMode === 'link_existing') {
       if (!selectedProjectId) {
-        setErrorMessage('Lütfen bağlanacak bir bulut projesi seçin.');
+        setErrorMessage(t('cloud.prompt.projectSelectRequired'));
         return;
       }
     }
@@ -175,7 +178,11 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
       cloudBridgeStore.closePushPrompt();
       onStatusMessage?.({
         kind: 'success',
-        message: `"${res.project.name}" projesi NexusCANCloud'a pushlandı ([${res.project.code}] Rev #${res.revisionNumber}).`,
+        message: t('cloud.prompt.pushSuccess', {
+          name: res.project.name,
+          code: res.project.code,
+          rev: res.revisionNumber,
+        }),
       });
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -187,12 +194,12 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
   const reasonDescription = (() => {
     switch (ctx.reason) {
       case 'opened_project':
-        return `NexusCANCloud bağlantınız aktif. Açtığınız "${ctx.projectName}" projesi henüz Cloud ile eşleştirilmemiş. Bu projeyi Cloud'a pushlamak ister misiniz?`;
+        return t('cloud.prompt.reasonOpened', { name: ctx.projectName });
       case 'new_project':
-        return `NexusCANCloud bağlantınız aktif. Oluşturduğunuz "${ctx.projectName}" projesini Cloud'a da pushlamak ister misiniz?`;
+        return t('cloud.prompt.reasonNew', { name: ctx.projectName });
       case 'manual':
       default:
-        return `Açık olan "${ctx.projectName}" yerel projesini NexusCANCloud'a pushlayın veya mevcut bir Cloud projesine bağlayın.`;
+        return t('cloud.prompt.reasonManual', { name: ctx.projectName });
     }
   })();
 
@@ -221,17 +228,17 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
           <div className="flex items-center gap-2 min-w-0">
             <Cloud className="w-4 h-4 text-sky-400 shrink-0" />
             <span className="font-semibold text-[13px] text-slate-100 truncate">
-              NexusCANCloud Proje Eşitleme Tercihi
+              {t('cloud.prompt.title')}
             </span>
             <span className="px-1.5 py-0.5 rounded bg-emerald-950/70 border border-emerald-700/60 text-emerald-300 font-mono tabular-nums text-[10px] shrink-0">
-              {cloudState.cloudBaseUrl} · {cloudState.userEmail || 'Giriş Yapıldı'}
+              {cloudState.cloudBaseUrl} · {cloudState.userEmail || t('cloud.prompt.loggedIn')}
             </span>
           </div>
           <button
             type="button"
             onClick={handleCancelKeepLocal}
             className="text-slate-400 hover:text-slate-200 cursor-pointer p-1"
-            title="Kapat (Sadece Yerel)"
+            title={t('cloud.prompt.closeTitle')}
           >
             <X className="w-4 h-4" />
           </button>
@@ -262,7 +269,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
               }`}
             >
               <PlusCircle className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Yeni Cloud Projesi Olarak Pushla</span>
+              <span>{t('cloud.prompt.tabCreate')}</span>
             </button>
             <button
               type="button"
@@ -270,7 +277,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
               onClick={() => setActiveMode('link_existing')}
               title={
                 cloudState.projects.length === 0
-                  ? 'Hesabınızda mevcut bulut projesi bulunmuyor'
+                  ? t('cloud.prompt.tabLinkDisabledTooltip')
                   : undefined
               }
               className={`flex-1 h-[28px] px-2.5 flex items-center justify-center gap-1.5 text-[11px] font-medium cursor-pointer transition-colors ${
@@ -282,7 +289,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
               }`}
             >
               <Link2 className="w-3.5 h-3.5 text-sky-400" />
-              <span>Mevcut Cloud Projesine Bağla & Üzerine Pushla</span>
+              <span>{t('cloud.prompt.tabLink')}</span>
             </button>
           </div>
 
@@ -293,7 +300,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
               {cloudState.organizations.length > 1 ? (
                 <div>
                   <label className="block text-[11px] text-slate-400 mb-1">
-                    Organizasyon:
+                    {t('cloud.prompt.orgLabel')}
                   </label>
                   <select
                     value={selectedOrgId}
@@ -315,7 +322,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
               ) : cloudState.organizations.length === 1 ? (
                 <div>
                   <label className="block text-[11px] text-slate-400 mb-1">
-                    Organizasyon:
+                    {t('cloud.prompt.orgLabel')}
                   </label>
                   <div
                     style={{
@@ -339,13 +346,13 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
               <div className="grid grid-cols-3 gap-2.5">
                 <div className="col-span-2">
                   <label className="block text-[11px] text-slate-400 mb-1">
-                    Cloud Proje Adı:
+                    {t('cloud.prompt.nameLabel')}
                   </label>
                   <input
                     type="text"
                     value={projectNameInput}
                     onChange={(e) => handleNameChange(e.target.value)}
-                    placeholder="Örn: Araç Test Masası"
+                    placeholder={t('cloud.prompt.namePlaceholder')}
                     style={{
                       backgroundColor: '#0B0F17',
                       borderColor: '#1E293B',
@@ -356,14 +363,14 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
                 </div>
                 <div>
                   <label className="block text-[11px] text-slate-400 mb-1">
-                    Proje Kodu:
+                    {t('cloud.prompt.codeLabel')}
                   </label>
                   <input
                     type="text"
                     maxLength={16}
                     value={projectCodeInput}
                     onChange={(e) => handleCodeChange(e.target.value)}
-                    placeholder="VEH-BENCH-01"
+                    placeholder={t('cloud.prompt.codePlaceholder')}
                     style={{
                       backgroundColor: '#0B0F17',
                       borderColor: '#1E293B',
@@ -377,7 +384,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
               {/* Protocol Selector */}
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">
-                  Varsayılan Bus Protokolü:
+                  {t('cloud.prompt.protoLabel')}
                 </label>
                 <div className="flex gap-2">
                   {(['CAN_FD', 'CAN', 'J1939'] as const).map((proto) => (
@@ -398,10 +405,10 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
                       className="flex-1 h-[26px] px-2 border font-mono tabular-nums text-[11px] font-semibold cursor-pointer"
                     >
                       {proto === 'CAN_FD'
-                        ? 'CAN-FD'
+                        ? t('cloud.prompt.protoCanFd')
                         : proto === 'CAN'
-                          ? 'Klasik CAN'
-                          : 'SAE J1939'}
+                          ? t('cloud.prompt.protoCan')
+                          : t('cloud.prompt.protoJ1939')}
                     </button>
                   ))}
                 </div>
@@ -410,13 +417,13 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
               {/* Commit Note */}
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">
-                  İlk Revizyon / Commit Notu:
+                  {t('cloud.prompt.commitLabel')}
                 </label>
                 <input
                   type="text"
                   value={commitMessageInput}
                   onChange={(e) => setCommitMessageInput(e.target.value)}
-                  placeholder="İlk şablon oluşturuldu"
+                  placeholder={t('cloud.prompt.commitPlaceholder')}
                   style={{
                     backgroundColor: '#0B0F17',
                     borderColor: '#1E293B',
@@ -430,7 +437,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
             <div className="space-y-3 pt-1">
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">
-                  Bağlanacak Bulut Projesi:
+                  {t('cloud.prompt.selectTargetLabel')}
                 </label>
                 <select
                   value={selectedProjectId}
@@ -458,13 +465,13 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
 
               <div>
                 <label className="block text-[11px] text-slate-400 mb-1">
-                  Revizyon / Commit Notu:
+                  {t('cloud.prompt.commitExistingLabel')}
                 </label>
                 <input
                   type="text"
                   value={commitMessageInput}
                   onChange={(e) => setCommitMessageInput(e.target.value)}
-                  placeholder="Yerel çalışma alanı güncellendi"
+                  placeholder={t('cloud.prompt.commitExistingPlaceholder')}
                   style={{
                     backgroundColor: '#0B0F17',
                     borderColor: '#1E293B',
@@ -475,7 +482,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
               </div>
 
               <div className="text-[11px] text-amber-400/90 bg-amber-950/20 border border-amber-900/40 p-2 leading-relaxed">
-                Bu işlem yerel çalışma alanınızı seçili bulut projesinin üzerine yeni bir revizyon olarak pushlayacak ve yerel projeyi bu bulut projesine bağlayacaktır.
+                {t('cloud.prompt.overwriteWarning')}
               </div>
             </div>
           )}
@@ -508,7 +515,7 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
             }}
             className="h-[28px] px-3 border text-[11px] font-medium hover:text-slate-100 hover:border-slate-500 cursor-pointer disabled:opacity-50"
           >
-            Sadece Yerelde Tut (Pushlama)
+            {t('cloud.prompt.keepLocalBtn')}
           </button>
 
           <button
@@ -525,12 +532,12 @@ export const CloudPushPromptModal: React.FC<CloudPushPromptModalProps> = ({
             {isSubmitting ? (
               <>
                 <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400" />
-                <span>Cloud'a Gönderiliyor...</span>
+                <span>{t('cloud.prompt.submitting')}</span>
               </>
             ) : (
               <>
                 <Check className="w-3.5 h-3.5 text-sky-400" />
-                <span>Cloud'a Pushla & Eşitle</span>
+                <span>{t('cloud.prompt.submitBtn')}</span>
               </>
             )}
           </button>

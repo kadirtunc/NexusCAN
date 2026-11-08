@@ -6,9 +6,10 @@
 use crate::pipeline::AppState;
 use nexus_hal::{
     dto::{
-        BusHealthDto, ChannelConfigDto, DbFileInputDto, DeviceDescriptorDto, DriverProbeReportDto,
-        PanicStopResultDto, PeriodicTxJobDto, ProjectSummaryDto, TelemetrySnapshotDto,
-        TxTransmitResultDto,
+        BusHealthDto, ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto, DeviceDescriptorDto,
+        DriverProbeReportDto, LoadedTraceFileDto, PanicStopResultDto, PeriodicTxJobDto,
+        ProjectSummaryDto, StartTraceReplayArgsDto, TelemetrySnapshotDto, TraceFileSummaryDto,
+        TraceReplayControlArgsDto, TraceReplayStatusDto, TraceStorageInfoDto, TxTransmitResultDto,
     },
     error::HalError,
 };
@@ -287,4 +288,76 @@ pub async fn cmd_delete_project(
     file_stem: String,
 ) -> Result<(), AppError> {
     Ok(state.engine.cmd_delete_project(file_stem)?)
+}
+
+#[tauri::command]
+pub async fn cmd_list_traces(
+    state: State<'_, AppState>,
+) -> Result<TraceStorageInfoDto, AppError> {
+    Ok(state.engine.cmd_list_traces()?)
+}
+
+#[tauri::command]
+pub async fn cmd_save_trace_file(
+    state: State<'_, AppState>,
+    file_name: String,
+    content: Option<String>,
+    content_base64: Option<String>,
+) -> Result<TraceFileSummaryDto, AppError> {
+    Ok(state
+        .engine
+        .cmd_save_trace_file(file_name, content, content_base64)?)
+}
+
+#[tauri::command]
+pub async fn cmd_load_trace_file(
+    state: State<'_, AppState>,
+    file_name: String,
+) -> Result<LoadedTraceFileDto, AppError> {
+    Ok(state.engine.cmd_load_trace_file(file_name)?)
+}
+
+#[tauri::command]
+pub async fn cmd_delete_trace_file(
+    state: State<'_, AppState>,
+    file_name: String,
+) -> Result<(), AppError> {
+    Ok(state.engine.cmd_delete_trace_file(file_name)?)
+}
+
+#[tauri::command]
+pub async fn cmd_parse_trace_content(
+    state: State<'_, AppState>,
+    file_name: String,
+    content: Option<String>,
+    content_base64: Option<String>,
+) -> Result<LoadedTraceFileDto, AppError> {
+    Ok(state
+        .engine
+        .cmd_parse_trace_content(file_name, content, content_base64)?)
+}
+
+#[tauri::command]
+pub async fn cmd_export_trace_blf(
+    state: State<'_, AppState>,
+    file_name: String,
+    frames: Vec<ChronologicalFrameDto>,
+) -> Result<String, AppError> {
+    Ok(state.engine.cmd_export_trace_blf(file_name, frames)?)
+}
+
+#[tauri::command]
+pub async fn cmd_start_trace_replay(
+    state: State<'_, AppState>,
+    args: StartTraceReplayArgsDto,
+) -> Result<TraceReplayStatusDto, AppError> {
+    Ok(state.engine.cmd_start_trace_replay(args)?)
+}
+
+#[tauri::command]
+pub async fn cmd_control_trace_replay(
+    state: State<'_, AppState>,
+    args: TraceReplayControlArgsDto,
+) -> Result<TraceReplayStatusDto, AppError> {
+    Ok(state.engine.cmd_control_trace_replay(args)?)
 }

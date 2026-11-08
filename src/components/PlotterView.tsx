@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
+  AlignJustify,
   ChevronDown,
   ChevronRight,
   Columns2,
-  Eye,
-  EyeOff,
+  Download,
   FastForward,
   GitCommitVertical,
   Hand,
@@ -25,8 +25,27 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { useDatabaseStore } from '../store/databaseStore';
-import { MAX_BUS_ID, useConnectionStore } from '../store/connectionStore';
+import {
+  databaseStore,
+  type ProjectDatabaseEntry,
+  useDatabaseStore,
+} from '../store/databaseStore';
+import {
+  connectionStore,
+  MAX_BUS_ID,
+  useConnectionStore,
+} from '../store/connectionStore';
+import { useTraceSessionsStore } from '../store/traceSessionsStore';
+import {
+  telemetryStore,
+  useTelemetryHeader,
+} from '../store/telemetryStore';
+import {
+  apiControlTraceReplay,
+  apiSetBusDatabases,
+} from '../services/ipcClient';
+import { syncAllBusDatabasesWithBackend } from '../utils/busDatabaseSync';
+import type { ChronologicalFrameDto } from '../types/telemetry';
 import {
   PLOT_MAX_SPAN_SEC,
   PLOT_MIN_SPAN_SEC,
@@ -39,8 +58,9 @@ import {
   plotStore,
   usePlotStore,
 } from '../store/plotStore';
-import type { MessageSchemaDto, SignalSchemaDto } from '../types/netdb';
+import type { SignalSchemaDto } from '../types/netdb';
 import { formatPcanIdHex } from '../utils/formatters';
+import { useI18n } from '../i18n';
 
 const TIME_PRESETS_SEC: readonly number[] = [1, 5, 10, 30, 60, 120, 300];
 const SPLIT_HEIGHT_OPTIONS: readonly { label: string; px: PlotSplitRowHeight }[] = [
@@ -147,18 +167,22 @@ function formatDeltaTime(dtSec: number): string {
   return `${sign}${abs.toFixed(3)} s`;
 }
 
-const EMPTY_PICKER_SIGNALS: readonly (SignalSchemaDto | undefined)[] = [];
-
 export const PlotterView: React.FC = () => {
+  const { t, locale } = useI18n();
   const dbState = useDatabaseStore();
   const connState = useConnectionStore();
   const plotState = usePlotStore();
+  const traceState = useTraceSessionsStore();
+  const telemetryHeader = useTelemetryHeader();
+  const replay = telemetryHeader.replay;
 
-  const [pickerOpen, setPickerOpen] = useState<boolean>(true);
-  const [pickerBusId, setPickerBusId] = useState<number>(0);
-  const [pickerFilter, setPickerFilter] = useState<string>('');
+  const pickerOpen = plotState.pickerOpen;
+  const pickerBusId = plotState.pickerBusId;
+  const pickerFilter = plotState.pickerFilter;
+
   const [expandedMsgs, setExpandedMsgs] = useState<Set<string>>(() => new Set());
   const [helpOpen, setHelpOpen] = useState<boolean>(false);
+  const [csvFeedback, setCsvFeedback] = useState<string | null>(null);
   const [, setHudTick] = useState<number>(0);
 
   // Synchronized time-cursor X fraction (0..1) across Combined & all Split scopes
@@ -279,8 +303,63 @@ export const PlotterView: React.FC = () => {
     };
   }, []);
 
+  // Active trace session for instant waveform loading
+  const activeTraceSession =
+    traceState.sessions.find((s) => s.id === traceState.activeSessionId) ??
+    traceState.sessions[0];
+
+  const handlePlotActiveTrace = useCallback((): void => {
+    if (!activeTraceSession || activeTraceSession.count === 0) return;
+    const frames: ChronologicalFrameDto[] = [];
+    const ring = activeTraceSession.displayRing;
+    for (let i = 0; i < ring.length; i++) {
+      const f = ring.getAt(i);
+      if (f) frames.push(f);
+    }
+    if (frames.length > 0) {
+      plotStore.loadFromTraceFrames(
+        frames,
+        (bId) =>
+          databaseStore.getBusSchema(bId) ??
+          databaseStore.getState().schema ??
+          databaseStore.getState().databases.find((d) => d.schema)?.schema ??
+          null,
+      );
+    }
+  }, [activeTraceSession]);
+
+  const handleBindDbcToBus = async (
+    busId: number,
+    targetDb: ProjectDatabaseEntry,
+  ): Promise<void> => {
+    const profile = connState.profiles.find((p) => p.busId === busId);
+    if (profile) {
+      const existing = new Set(profile.databaseIds ?? []);
+      existing.add(targetDb.id);
+      connectionStore.upsertProfile({
+        ...profile,
+        databaseIds: Array.from(existing),
+      });
+      await syncAllBusDatabasesWithBackend({ force: true });
+    } else {
+      if (targetDb.schema) {
+        databaseStore.setBusSchema(busId, targetDb.schema);
+      }
+      try {
+        await apiSetBusDatabases(busId, [
+          {
+            fileName: targetDb.fileName,
+            contentBase64: targetDb.contentBase64,
+          },
+        ]);
+      } catch (err) {
+        console.warn('[PlotterView] apiSetBusDatabases error:', err);
+      }
+    }
+  };
+
   const pickerBusOptions = useMemo(() => {
-    let maxBus = Math.max(7, pickerBusId);
+    let maxBus = Math.max(7, pickerBusId >= 0 ? pickerBusId : 0);
     for (const p of connState.profiles) {
       if (p.busId > maxBus) maxBus = p.busId;
     }
@@ -289,44 +368,167 @@ export const PlotterView: React.FC = () => {
     }
     const maxBusId = Math.min(MAX_BUS_ID, maxBus);
     const out: { busId: number; label: string }[] = [];
+    out.push({
+      busId: -1,
+      label: t('plotter.bus.allCatalog'),
+    });
     for (let b = 0; b <= maxBusId; b++) {
       const prof = connState.profiles.find((p) => p.busId === b);
       const dbCount = dbState.busSchemas.get(b) ? ' · DB' : '';
       out.push({
         busId: b,
-        label: prof ? `${b + 1} · ${prof.name}${dbCount}` : `Bus ${b + 1}`,
+        label: prof
+          ? `${b + 1} · ${prof.name}${dbCount}`
+          : t('plotter.bus.busN', { bus: b + 1 }),
       });
     }
     return out;
-  }, [connState.profiles, dbState.busSchemas, pickerBusId]);
+  }, [connState.profiles, dbState.busSchemas, pickerBusId, t]);
 
-  // Signal tree comes only from databases bound to the selected picker bus
-  const pickerLookup = dbState.busSchemas.get(pickerBusId);
-  const schema = pickerLookup?.schema ?? null;
-  const pickerSignalsById: readonly (SignalSchemaDto | undefined)[] = pickerLookup?.signalsById ?? EMPTY_PICKER_SIGNALS;
+  // One-time initial fallback: if user has not explicitly chosen a bus yet, pick first bound bus
   useEffect(() => {
-    if (dbState.busSchemas.has(pickerBusId)) return;
-    const firstBound = Array.from(dbState.busSchemas.keys()).sort((a, b) => a - b)[0];
-    if (firstBound !== undefined) setPickerBusId(firstBound);
-  }, [dbState.busSchemas, pickerBusId]);
+    if (plotState.pickerUserSelectedBus) return;
+    if (pickerBusId >= 0 && !dbState.busSchemas.has(pickerBusId)) {
+      const firstBound = Array.from(dbState.busSchemas.keys()).sort((a, b) => a - b)[0];
+      if (firstBound !== undefined) {
+        plotStore.setPickerBusId(firstBound, false);
+      }
+    }
+  }, [dbState.busSchemas, pickerBusId, plotState.pickerUserSelectedBus]);
+
+  // Unified signal tree bundle: solves multi-DBC catalog aggregation & prevents signalId collisions!
+  interface SignalTreeMessageItem {
+    uniqueKey: string;
+    messageKey: string;
+    name: string;
+    arbId: number;
+    isExtended: boolean;
+    dbName: string;
+    effectiveBusId: number;
+    signals: SignalSchemaDto[];
+  }
+
+  const signalTreeBundle = useMemo<{
+    hasAnySchema: boolean;
+    items: readonly SignalTreeMessageItem[];
+  }>(() => {
+    const items: SignalTreeMessageItem[] = [];
+
+    if (pickerBusId >= 0) {
+      const lookup = dbState.busSchemas.get(pickerBusId);
+      const s = lookup?.schema ?? null;
+      if (lookup && s) {
+        for (const msg of s.messages) {
+          const sigs: SignalSchemaDto[] = [];
+          for (const sId of msg.signalIds) {
+            const sig = lookup.signalsById[sId];
+            if (sig) sigs.push(sig);
+          }
+          items.push({
+            uniqueKey: msg.messageKey,
+            messageKey: msg.messageKey,
+            name: msg.name,
+            arbId: msg.arbId,
+            isExtended: msg.isExtended,
+            dbName: `Bus ${pickerBusId + 1}`,
+            effectiveBusId: pickerBusId,
+            signals: sigs,
+          });
+        }
+      }
+      return {
+        hasAnySchema: Boolean(s),
+        items,
+      };
+    }
+
+    // pickerBusId === -1: Aggregate across all project databases (or dbState.schema fallback)
+    let hasAny = false;
+    for (const db of dbState.databases) {
+      if (!db.schema) continue;
+      hasAny = true;
+      for (const msg of db.schema.messages) {
+        const sigs: SignalSchemaDto[] = [];
+        for (const sId of msg.signalIds) {
+          const sig = db.schema.signals.find((s) => s.signalId === sId);
+          if (sig) sigs.push(sig);
+        }
+        const assignedBus = databaseStore.findBusForMessage(msg.messageKey) ?? 0;
+        items.push({
+          uniqueKey: `${db.id}:${msg.messageKey}`,
+          messageKey: msg.messageKey,
+          name: msg.name,
+          arbId: msg.arbId,
+          isExtended: msg.isExtended,
+          dbName: db.name,
+          effectiveBusId: assignedBus,
+          signals: sigs,
+        });
+      }
+    }
+
+    if (!hasAny && dbState.schema) {
+      hasAny = true;
+      for (const msg of dbState.schema.messages) {
+        const sigs: SignalSchemaDto[] = [];
+        for (const sId of msg.signalIds) {
+          const sig = dbState.signalsById[sId];
+          if (sig) sigs.push(sig);
+        }
+        const assignedBus = databaseStore.findBusForMessage(msg.messageKey) ?? 0;
+        items.push({
+          uniqueKey: msg.messageKey,
+          messageKey: msg.messageKey,
+          name: msg.name,
+          arbId: msg.arbId,
+          isExtended: msg.isExtended,
+          dbName: 'Katalog',
+          effectiveBusId: assignedBus,
+          signals: sigs,
+        });
+      }
+    }
+
+    return {
+      hasAnySchema: hasAny,
+      items,
+    };
+  }, [
+    pickerBusId,
+    dbState.busSchemas,
+    dbState.databases,
+    dbState.schema,
+    dbState.signalsById,
+  ]);
+
   const q = pickerFilter.trim().toLowerCase();
 
-  const filteredMessages: readonly MessageSchemaDto[] = useMemo(() => {
-    if (!schema) return [];
-    if (q.length === 0) return schema.messages;
-    return schema.messages.filter((m) => {
-      const idStr = formatPcanIdHex(m.arbId, m.isExtended).toLowerCase();
-      if (idStr.includes(q) || m.name.toLowerCase().includes(q)) return true;
-      for (const sigId of m.signalIds) {
-        const s = pickerSignalsById[sigId];
-        if (s && s.name.toLowerCase().includes(q)) return true;
+  const filteredTreeItems = useMemo<readonly SignalTreeMessageItem[]>(() => {
+    if (q.length === 0) return signalTreeBundle.items;
+    return signalTreeBundle.items.filter((item) => {
+      const idStr = formatPcanIdHex(item.arbId, item.isExtended).toLowerCase();
+      if (
+        idStr.includes(q) ||
+        item.name.toLowerCase().includes(q) ||
+        item.dbName.toLowerCase().includes(q)
+      ) {
+        return true;
+      }
+      for (const sig of item.signals) {
+        if (sig.name.toLowerCase().includes(q)) return true;
       }
       return false;
     });
-  }, [schema, pickerSignalsById, q]);
+  }, [signalTreeBundle.items, q]);
 
   const handleAddQuickDemoSignals = (): void => {
-    if (!schema) return;
+    const targetSchema =
+      (pickerBusId >= 0 ? dbState.busSchemas.get(pickerBusId)?.schema : null) ??
+      dbState.schema ??
+      dbState.databases.find((d) => d.schema)?.schema ??
+      null;
+    if (!targetSchema) return;
+    const targetBus = pickerBusId >= 0 ? pickerBusId : 0;
     const preferredNames = [
       'MotorSpeedRpm',
       'MotorTorqueNm',
@@ -336,18 +538,18 @@ export const PlotterView: React.FC = () => {
     ];
     let added = 0;
     for (const target of preferredNames) {
-      const found = schema.signals.find(
+      const found = targetSchema.signals.find(
         (s) => s.name.toLowerCase() === target.toLowerCase(),
       );
       if (found) {
-        plotStore.addSignal(pickerBusId, found);
+        plotStore.addSignal(targetBus, found);
         added += 1;
       }
       if (added >= 4) break;
     }
     if (added === 0) {
-      for (const s of schema.signals.slice(0, 3)) {
-        plotStore.addSignal(pickerBusId, s);
+      for (const s of targetSchema.signals.slice(0, 3)) {
+        plotStore.addSignal(targetBus, s);
       }
     }
   };
@@ -356,6 +558,19 @@ export const PlotterView: React.FC = () => {
     () => plotState.series.filter((s) => s.visible),
     [plotState.series, plotState.configRev],
   );
+
+  const hasAnySamples = useMemo(
+    () => plotState.series.some((s) => s.count > 0),
+    [plotState.series, plotState.configRev],
+  );
+
+  const handleExportCsv = (): void => {
+    const ok = plotStore.downloadWatchedSignalsCsv();
+    if (ok) {
+      setCsvFeedback(t('plotter.csv.downloaded'));
+      setTimeout(() => setCsvFeedback(null), 1500);
+    }
+  };
 
   const vp = plotStore.getViewport();
   const cursorA = vp.cursorATimeSec;
@@ -371,41 +586,44 @@ export const PlotterView: React.FC = () => {
       className="relative flex flex-col flex-1 min-h-0 overflow-hidden select-none"
     >
       {/* ==================================================================== */}
-      {/* 1. OSCILLOSCOPE COMMAND TOOLBAR (30px)                               */}
+      {/* 1. OSCILLOSCOPE COMMAND TOOLBAR (Scaled & Responsive)                */}
       {/* ==================================================================== */}
       <div
         style={{
           backgroundColor: 'var(--bg-toolbar)',
           borderBottom: '1px solid var(--border-strong)',
         }}
-        className="shrink-0 h-[30px] min-h-[30px] max-h-[30px] px-2 flex items-center justify-between gap-1.5 overflow-x-auto overflow-y-hidden whitespace-nowrap text-[11px]"
+        className="shrink-0 min-h-[40px] py-1 px-3 flex items-center justify-between gap-2 select-none flex-wrap text-[12px]"
       >
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
           <button
             type="button"
-            onClick={() => setPickerOpen((v) => !v)}
+            onClick={() => plotStore.setPickerOpen(!pickerOpen)}
             style={{
               backgroundColor: 'var(--bg-panel)',
               borderColor: 'var(--border-strong)',
               color: 'var(--text-primary)',
             }}
-            className="h-[22px] px-2 border flex items-center gap-1 cursor-pointer shrink-0"
-            title="Show or hide Signal Picker tree"
+            className="h-[28px] px-2.5 border flex items-center gap-1.5 cursor-pointer shrink-0 font-medium"
+            title={t('plotter.toolbar.signalsToggleTitle')}
           >
             {pickerOpen ? (
-              <PanelLeftClose className="w-3 h-3 text-[var(--text-secondary)]" />
+              <PanelLeftClose className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
             ) : (
-              <PanelLeftOpen className="w-3 h-3 text-[var(--text-secondary)]" />
+              <PanelLeftOpen className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
             )}
-            <span>Signals</span>
+            <span>
+              {t('plotter.toolbar.signals')}
+              {plotState.series.length > 0 ? ` (${plotState.series.length})` : ''}
+            </span>
           </button>
 
-          <div className="h-3.5 w-[1px] bg-[var(--border-strong)] mx-0.5" />
+          <div className="h-4 w-[1px] bg-[var(--border-strong)] mx-0.5" />
 
           {/* Combined vs Split Oscilloscope Mode */}
           <div
             style={{ borderColor: 'var(--border-strong)' }}
-            className="h-[22px] border inline-flex items-center shrink-0 overflow-hidden"
+            className="h-[28px] border inline-flex items-center shrink-0 overflow-hidden"
           >
             <button
               type="button"
@@ -420,11 +638,32 @@ export const PlotterView: React.FC = () => {
                     ? 'var(--text-primary)'
                     : 'var(--text-muted)',
               }}
-              className="h-full px-2 flex items-center gap-1 font-medium cursor-pointer"
-              title="Overlay signals onto unified multi-trace oscilloscope"
+              className="h-full px-2.5 flex items-center gap-1 font-medium cursor-pointer"
+              title={t('plotter.layout.combinedTitle')}
             >
-              <Layers className="w-3 h-3 text-[var(--text-secondary)]" />
-              <span>Combined</span>
+              <Layers className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+              <span>{t('plotter.layout.combined')}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => plotStore.setLayoutMode('compactSplit')}
+              style={{
+                backgroundColor:
+                  plotState.layoutMode === 'compactSplit'
+                    ? 'var(--bg-header)'
+                    : 'var(--bg-input)',
+                color:
+                  plotState.layoutMode === 'compactSplit'
+                    ? 'var(--text-primary)'
+                    : 'var(--text-muted)',
+                borderLeft: '1px solid var(--border-strong)',
+              }}
+              className="h-full px-2.5 flex items-center gap-1 font-medium cursor-pointer"
+              title={t('plotter.layout.compactSplitTitle')}
+            >
+              <AlignJustify className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+              <span>{t('plotter.layout.compactSplit')}</span>
             </button>
 
             <button
@@ -441,17 +680,17 @@ export const PlotterView: React.FC = () => {
                     : 'var(--text-muted)',
                 borderLeft: '1px solid var(--border-strong)',
               }}
-              className="h-full px-2 flex items-center gap-1 font-medium cursor-pointer"
-              title="Stack independent time-synchronized Y-axis scopes vertically"
+              className="h-full px-2.5 flex items-center gap-1 font-medium cursor-pointer"
+              title={t('plotter.layout.splitTitle')}
             >
-              <Columns2 className="w-3 h-3 text-[var(--text-secondary)]" />
-              <span>Split</span>
+              <Columns2 className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+              <span>{t('plotter.layout.split')}</span>
             </button>
           </div>
 
           {plotState.layoutMode === 'combined' ? (
             <select
-              aria-label="Combined Chart Y-Axis Scaling"
+              aria-label={t('plotter.yScale.ariaLabel')}
               value={plotState.yScaleMode}
               onChange={(e) =>
                 plotStore.setYScaleMode(e.target.value as PlotYScaleMode)
@@ -461,15 +700,17 @@ export const PlotterView: React.FC = () => {
                 borderColor: 'var(--border-strong)',
                 color: 'var(--text-primary)',
               }}
-              className="h-[22px] px-1.5 border text-[11px] focus:outline-none"
+              className="h-[28px] px-2 border text-[12px] focus:outline-none"
             >
-              <option value="multiAxis">Multi-Y</option>
-              <option value="normalized">Normalized %</option>
-              <option value="shared">Shared Y</option>
+              <option value="multiAxis">{t('plotter.yScale.multiAxis')}</option>
+              <option value="normalized">{t('plotter.yScale.normalized')}</option>
+              <option value="shared">{t('plotter.yScale.shared')}</option>
             </select>
-          ) : (
+          ) : plotState.layoutMode === 'split' ? (
             <div className="flex items-center gap-0.5 font-mono">
-              <span className="text-[var(--text-muted)] font-sans mr-0.5">H:</span>
+              <span className="text-[var(--text-muted)] font-sans mr-0.5 text-[11px]">
+                {t('plotter.split.heightPrefix')}
+              </span>
               {SPLIT_HEIGHT_OPTIONS.map((opt) => {
                 const active = plotState.splitRowHeight === opt.px;
                 return (
@@ -484,22 +725,34 @@ export const PlotterView: React.FC = () => {
                         : 'var(--border-grid)',
                       color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
                     }}
-                    className="h-[22px] px-1.5 border cursor-pointer"
-                    title={`Split scope row height: ${opt.px}px`}
+                    className="h-[28px] px-2 border cursor-pointer text-[11.5px]"
+                    title={t('plotter.split.heightTitle', { px: opt.px })}
                   >
                     {opt.label}
                   </button>
                 );
               })}
             </div>
+          ) : (
+            <span
+              style={{
+                backgroundColor: 'var(--bg-panel)',
+                borderColor: 'var(--border-grid)',
+                color: 'var(--text-secondary)',
+              }}
+              className="h-[28px] px-2.5 border flex items-center text-[11px] font-mono shrink-0"
+              title={t('plotter.layout.autoLanesTitle')}
+            >
+              {t('plotter.layout.autoLanes', { count: visibleSeries.length })}
+            </span>
           )}
 
-          <div className="h-3.5 w-[1px] bg-[var(--border-strong)] mx-0.5" />
+          <div className="h-4 w-[1px] bg-[var(--border-strong)] mx-0.5" />
 
           {/* Pointer Drag Tool: Pan vs Box Zoom */}
           <div
             style={{ borderColor: 'var(--border-strong)' }}
-            className="h-[22px] border inline-flex items-center shrink-0 overflow-hidden"
+            className="h-[28px] border inline-flex items-center shrink-0 overflow-hidden"
           >
             <button
               type="button"
@@ -514,11 +767,11 @@ export const PlotterView: React.FC = () => {
                     ? 'var(--text-primary)'
                     : 'var(--text-muted)',
               }}
-              className="h-full px-2 flex items-center gap-1 font-medium cursor-pointer"
-              title="Pan Tool (H) — Drag to pan; Right-Drag or Shift+Drag for Box Zoom"
+              className="h-full px-2.5 flex items-center gap-1 font-medium cursor-pointer"
+              title={t('plotter.tool.panTitle')}
             >
-              <Hand className="w-3 h-3 text-[var(--text-secondary)]" />
-              <span>Pan</span>
+              <Hand className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+              <span>{t('plotter.tool.pan')}</span>
             </button>
 
             <button
@@ -535,11 +788,11 @@ export const PlotterView: React.FC = () => {
                     : 'var(--text-muted)',
                 borderLeft: '1px solid var(--border-strong)',
               }}
-              className="h-full px-2 flex items-center gap-1 font-medium cursor-pointer"
-              title="Box Zoom Tool (Z) — Drag horizontally for 1D Time Zoom or diagonally for 2D XY Zoom"
+              className="h-full px-2.5 flex items-center gap-1 font-medium cursor-pointer"
+              title={t('plotter.tool.boxZoomTitle')}
             >
-              <ScanSearch className="w-3 h-3 text-[var(--text-secondary)]" />
-              <span>Box Zoom</span>
+              <ScanSearch className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+              <span>{t('plotter.tool.boxZoom')}</span>
             </button>
           </div>
 
@@ -554,8 +807,8 @@ export const PlotterView: React.FC = () => {
               borderColor: 'var(--border-strong)',
               color: 'var(--text-secondary)',
             }}
-            className="h-[22px] px-1.5 border flex items-center hover:text-[var(--text-primary)] cursor-pointer"
-            title="Zoom In Time (+)"
+            className="h-[28px] px-2 border flex items-center hover:text-[var(--text-primary)] cursor-pointer"
+            title={t('plotter.zoom.inTitle')}
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
@@ -570,8 +823,8 @@ export const PlotterView: React.FC = () => {
               borderColor: 'var(--border-strong)',
               color: 'var(--text-secondary)',
             }}
-            className="h-[22px] px-1.5 border flex items-center hover:text-[var(--text-primary)] cursor-pointer"
-            title="Zoom Out Time (-)"
+            className="h-[28px] px-2 border flex items-center hover:text-[var(--text-primary)] cursor-pointer"
+            title={t('plotter.zoom.outTitle')}
           >
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
@@ -587,12 +840,12 @@ export const PlotterView: React.FC = () => {
               borderColor: 'var(--border-strong)',
               color: 'var(--text-secondary)',
             }}
-            className="h-[22px] px-1.5 border flex items-center gap-0.5 hover:text-[var(--text-primary)] disabled:opacity-40 cursor-pointer font-mono tabular-nums"
-            title="Undo Zoom (Backspace)"
+            className="h-[28px] px-2 border flex items-center gap-1 hover:text-[var(--text-primary)] disabled:opacity-40 cursor-pointer font-mono tabular-nums text-[11px]"
+            title={t('plotter.zoom.undoTitle')}
           >
-            <Undo2 className="w-3 h-3" />
+            <Undo2 className="w-3.5 h-3.5" />
             {plotState.zoomHistoryDepth > 0 && (
-              <span className="text-[10px]">{plotState.zoomHistoryDepth}</span>
+              <span>{plotState.zoomHistoryDepth}</span>
             )}
           </button>
 
@@ -604,17 +857,17 @@ export const PlotterView: React.FC = () => {
               borderColor: 'var(--border-strong)',
               color: 'var(--text-primary)',
             }}
-            className="h-[22px] px-1.5 border flex items-center gap-1 cursor-pointer"
-            title="Fit & Reset X/Y Zoom + Follow Live (R or Double-Click)"
+            className="h-[28px] px-2.5 border flex items-center gap-1.5 cursor-pointer font-medium"
+            title={t('plotter.zoom.resetTitle')}
           >
-            <RotateCcw className="w-3 h-3 text-[var(--text-secondary)]" />
-            <span>Reset</span>
+            <RotateCcw className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+            <span>{t('plotter.zoom.reset')}</span>
           </button>
 
-          <div className="h-3.5 w-[1px] bg-[var(--border-strong)] mx-0.5" />
+          <div className="h-4 w-[1px] bg-[var(--border-strong)] mx-0.5" />
 
           {/* Time Span Presets + Continuous Span Badge */}
-          <div className="flex items-center gap-0.5 font-mono tabular-nums">
+          <div className="flex items-center gap-1 font-mono tabular-nums">
             {TIME_PRESETS_SEC.map((sec) => {
               const active = Math.abs(plotState.viewSpanSec - sec) < 0.005;
               return (
@@ -629,7 +882,7 @@ export const PlotterView: React.FC = () => {
                       : 'var(--border-grid)',
                     color: active ? 'var(--text-primary)' : 'var(--text-muted)',
                   }}
-                  className={`h-[22px] px-1.5 border cursor-pointer text-[10px] ${
+                  className={`h-[28px] px-2 border cursor-pointer text-[11.5px] ${
                     active ? 'font-semibold' : 'hover:text-[var(--text-secondary)]'
                   }`}
                 >
@@ -643,8 +896,8 @@ export const PlotterView: React.FC = () => {
                 borderColor: 'var(--border-grid)',
                 color: 'var(--text-secondary)',
               }}
-              className="h-[22px] w-[62px] px-1 border inline-flex items-center justify-center text-[10px] tabular-nums shrink-0"
-              title="Visible X Time Span (50 ms .. 300 s)"
+              className="h-[28px] w-[68px] px-1 border inline-flex items-center justify-center text-[11px] tabular-nums shrink-0 font-mono"
+              title={t('plotter.timeSpan.badgeTitle')}
             >
               {formatSpanBadge(plotState.viewSpanSec)}
             </span>
@@ -652,7 +905,7 @@ export const PlotterView: React.FC = () => {
         </div>
 
         {/* Right Controls: Delta Cursors, Follow Live, Auto-Y, Pause, Clear, Shortcuts */}
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
           <button
             type="button"
             onClick={() =>
@@ -667,11 +920,11 @@ export const PlotterView: React.FC = () => {
                 : 'var(--border-strong)',
               color: 'var(--text-primary)',
             }}
-            className="h-[22px] px-2 border flex items-center gap-1 font-medium cursor-pointer shrink-0"
-            title="Toggle Dual Measurement Cursors A & B (Δt, 1/Δt Hz, ΔY)"
+            className="h-[28px] px-2.5 border flex items-center gap-1.5 font-medium cursor-pointer shrink-0 text-[12px]"
+            title={t('plotter.cursor.deltaTitle')}
           >
-            <GitCommitVertical className="w-3 h-3 text-[var(--text-secondary)]" />
-            <span>Δ Cursors</span>
+            <GitCommitVertical className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+            <span>{t('plotter.cursor.delta')}</span>
           </button>
 
           <button
@@ -690,19 +943,19 @@ export const PlotterView: React.FC = () => {
                     color: '#E3B341',
                   }
             }
-            className="h-[22px] w-[88px] px-2 border flex items-center justify-center gap-1 font-medium cursor-pointer shrink-0"
+            className="h-[28px] w-[96px] px-2 border flex items-center justify-center gap-1 font-semibold cursor-pointer shrink-0 text-[12px]"
             title={
               plotState.liveFollow
-                ? 'Following live incoming edge'
-                : 'History Pan Mode — click or press F to resume Live Follow'
+                ? t('plotter.live.followingTitle')
+                : t('plotter.live.historyTitle')
             }
           >
             <FastForward
-              className={`w-3 h-3 shrink-0 ${
+              className={`w-3.5 h-3.5 shrink-0 ${
                 plotState.liveFollow ? 'text-emerald-500' : 'text-amber-400'
               }`}
             />
-            <span>{plotState.liveFollow ? 'Live' : 'Follow (F)'}</span>
+            <span>{plotState.liveFollow ? t('plotter.live.live') : t('plotter.live.follow')}</span>
           </button>
 
           <button
@@ -713,11 +966,11 @@ export const PlotterView: React.FC = () => {
               borderColor: 'var(--border-strong)',
               color: 'var(--text-primary)',
             }}
-            className="h-[22px] px-2 border flex items-center gap-1 cursor-pointer"
-            title="Re-fit all Y-axes to visible signal range"
+            className="h-[28px] px-2.5 border flex items-center gap-1.5 cursor-pointer text-[12px]"
+            title={t('plotter.autoY.title')}
           >
-            <Maximize2 className="w-3 h-3 text-[var(--text-secondary)]" />
-            <span>Auto-Y</span>
+            <Maximize2 className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+            <span>{t('plotter.autoY.button')}</span>
           </button>
 
           <button
@@ -728,18 +981,18 @@ export const PlotterView: React.FC = () => {
               borderColor: 'var(--border-strong)',
               color: 'var(--text-primary)',
             }}
-            className="h-[22px] px-2 border flex items-center gap-1 font-medium cursor-pointer"
-            title="Pause / Resume acquisition (Space)"
+            className="h-[28px] px-2.5 border flex items-center gap-1.5 font-medium cursor-pointer text-[12px]"
+            title={t('plotter.playPause.title')}
           >
             {plotState.paused ? (
               <>
-                <Play className="w-3 h-3 text-[var(--text-secondary)]" />
-                <span>Resume</span>
+                <Play className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                <span>{t('plotter.playPause.resume')}</span>
               </>
             ) : (
               <>
-                <Pause className="w-3 h-3 text-[var(--text-secondary)]" />
-                <span>Pause</span>
+                <Pause className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                <span>{t('plotter.playPause.pause')}</span>
               </>
             )}
           </button>
@@ -752,12 +1005,93 @@ export const PlotterView: React.FC = () => {
               borderColor: 'var(--border-strong)',
               color: 'var(--text-primary)',
             }}
-            className="h-[22px] px-2 border flex items-center gap-1 cursor-pointer"
-            title="Clear 300s waveform history buffers"
+            className="h-[28px] px-2.5 border flex items-center gap-1.5 cursor-pointer text-[12px]"
+            title={t('plotter.clear.title')}
           >
-            <Trash2 className="w-3 h-3 text-[var(--text-secondary)]" />
-            <span>Clear</span>
+            <Trash2 className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+            <span>{t('plotter.clear.button')}</span>
           </button>
+
+          <button
+            type="button"
+            disabled={!hasAnySamples}
+            onClick={handleExportCsv}
+            style={{
+              backgroundColor: csvFeedback ? 'rgba(16, 185, 129, 0.15)' : 'var(--bg-panel)',
+              borderColor: csvFeedback ? 'rgba(16, 185, 129, 0.5)' : 'var(--border-strong)',
+              color: csvFeedback ? '#34d399' : 'var(--text-primary)',
+            }}
+            className="h-[28px] px-2.5 border flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed text-[12px]"
+            title={t('plotter.csv.title')}
+          >
+            <Download className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+            <span>{csvFeedback ?? t('plotter.csv.button')}</span>
+          </button>
+
+          {/* Instant Waveform Plot from Trace Session */}
+          {activeTraceSession && activeTraceSession.count > 0 && (
+            <button
+              type="button"
+              onClick={handlePlotActiveTrace}
+              style={{
+                backgroundColor: 'rgba(56, 189, 248, 0.12)',
+                borderColor: 'rgba(56, 189, 248, 0.45)',
+                color: '#38BDF8',
+              }}
+              className="h-[28px] px-2.5 border flex items-center gap-1.5 font-semibold hover:bg-sky-500/20 cursor-pointer shrink-0 text-[12px]"
+              title={t('plotter.trace.plotSessionTitle', {
+                sessionName: activeTraceSession.name,
+                count: activeTraceSession.count.toLocaleString(locale === 'tr' ? 'tr-TR' : 'en-US'),
+              })}
+            >
+              <Activity className="w-3.5 h-3.5 text-sky-400" />
+              <span>
+                {t('plotter.trace.plotSession', {
+                  count: activeTraceSession.count.toLocaleString(locale === 'tr' ? 'tr-TR' : 'en-US'),
+                })}
+              </span>
+            </button>
+          )}
+
+          {/* Live Replay Indicator & Mini-Controls */}
+          {replay && replay.state !== 'idle' && (
+            <div
+              style={{
+                backgroundColor: 'rgba(6, 182, 212, 0.12)',
+                borderColor: 'rgba(6, 182, 212, 0.45)',
+                color: '#22D3EE',
+              }}
+              className="h-[28px] px-2.5 border flex items-center gap-1.5 font-mono text-[11px] tabular-nums shrink-0"
+            >
+              <span className="font-bold">{t('plotter.replay.badge')}</span>
+              <span>
+                {(replay.elapsedUs / 1_000_000).toFixed(1)}s / {(replay.durationUs / 1_000_000).toFixed(1)}s
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (replay.state === 'playing') void apiControlTraceReplay({ action: 'pause' });
+                  else if (replay.state === 'paused') void apiControlTraceReplay({ action: 'resume' });
+                }}
+                className="px-0.5 hover:text-white cursor-pointer"
+                title={replay.state === 'playing' ? t('plotter.replay.pauseTitle') : t('plotter.replay.resumeTitle')}
+              >
+                {replay.state === 'playing' ? (
+                  <Pause className="w-3 h-3" />
+                ) : (
+                  <Play className="w-3 h-3 fill-current" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => void apiControlTraceReplay({ action: 'stop' })}
+                className="px-0.5 hover:text-red-400 cursor-pointer"
+                title={t('plotter.replay.stopTitle')}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          )}
 
           <button
             type="button"
@@ -767,8 +1101,8 @@ export const PlotterView: React.FC = () => {
               borderColor: 'var(--border-strong)',
               color: 'var(--text-secondary)',
             }}
-            className="h-[22px] w-[22px] border flex items-center justify-center hover:text-[var(--text-primary)] cursor-pointer shrink-0"
-            title="Oscilloscope Navigation & Shortcuts"
+            className="h-[28px] w-[28px] border flex items-center justify-center hover:text-[var(--text-primary)] cursor-pointer shrink-0"
+            title={t('plotter.help.buttonTitle')}
           >
             <HelpCircle className="w-3.5 h-3.5" />
           </button>
@@ -786,7 +1120,7 @@ export const PlotterView: React.FC = () => {
           className="absolute right-2 top-[32px] z-30 w-[330px] border p-2.5 shadow-xl text-[11px] space-y-1.5"
         >
           <div className="flex items-center justify-between font-semibold border-b border-[var(--border-grid)] pb-1">
-            <span>Oscilloscope Controls</span>
+            <span>{t('plotter.help.title')}</span>
             <button
               type="button"
               onClick={() => setHelpOpen(false)}
@@ -796,25 +1130,25 @@ export const PlotterView: React.FC = () => {
             </button>
           </div>
           <div className="grid grid-cols-2 gap-x-2 gap-y-1 font-mono text-[10px] text-[var(--text-secondary)]">
-            <span>Wheel</span>
-            <span className="text-[var(--text-primary)]">Zoom X (Time)</span>
-            <span>Shift + Wheel / Y-Strip</span>
-            <span className="text-[var(--text-primary)]">Zoom Y Axis</span>
-            <span>Ctrl + Wheel</span>
-            <span className="text-[var(--text-primary)]">Zoom XY</span>
-            <span>Drag / Space+Drag</span>
-            <span className="text-[var(--text-primary)]">Pan X/Y (H)</span>
-            <span>Right-Drag / Shift+Drag</span>
-            <span className="text-[var(--text-primary)]">Box Zoom (Z)</span>
-            <span>Drag X or Y Axis Strip</span>
-            <span className="text-[var(--text-primary)]">Pan Single Axis</span>
-            <span>Double-Click / R</span>
-            <span className="text-[var(--text-primary)]">Reset &amp; Auto-Fit</span>
-            <span>Backspace / F / Space</span>
-            <span className="text-[var(--text-primary)]">Undo / Follow / Pause</span>
+            <span>{t('plotter.help.wheel')}</span>
+            <span className="text-[var(--text-primary)]">{t('plotter.help.zoomX')}</span>
+            <span>{t('plotter.help.shiftWheel')}</span>
+            <span className="text-[var(--text-primary)]">{t('plotter.help.zoomY')}</span>
+            <span>{t('plotter.help.ctrlWheel')}</span>
+            <span className="text-[var(--text-primary)]">{t('plotter.help.zoomXY')}</span>
+            <span>{t('plotter.help.drag')}</span>
+            <span className="text-[var(--text-primary)]">{t('plotter.help.panXY')}</span>
+            <span>{t('plotter.help.rightDrag')}</span>
+            <span className="text-[var(--text-primary)]">{t('plotter.help.boxZoom')}</span>
+            <span>{t('plotter.help.axisDrag')}</span>
+            <span className="text-[var(--text-primary)]">{t('plotter.help.panAxis')}</span>
+            <span>{t('plotter.help.doubleClick')}</span>
+            <span className="text-[var(--text-primary)]">{t('plotter.help.resetFit')}</span>
+            <span>{t('plotter.help.keys')}</span>
+            <span className="text-[var(--text-primary)]">{t('plotter.help.keyActions')}</span>
           </div>
           <div className="pt-1 border-t border-[var(--border-grid)] text-[10px] font-mono text-[var(--text-muted)]">
-            Ring Buffer: 300 s (18,000 samples/channel @ 60 Hz)
+            {t('plotter.help.ringBuffer')}
           </div>
         </div>
       )}
@@ -827,26 +1161,26 @@ export const PlotterView: React.FC = () => {
         {pickerOpen && (
           <aside
             style={{ borderRight: '1px solid var(--border-strong)' }}
-            className="w-[275px] shrink-0 flex flex-col min-h-0 overflow-hidden"
+            className="w-[270px] lg:w-[300px] xl:w-[330px] shrink-0 flex flex-col min-h-0 overflow-hidden"
           >
             <div
               style={{
                 backgroundColor: 'var(--bg-row-alt)',
                 borderBottom: '1px solid var(--border-grid)',
               }}
-              className="p-1.5 space-y-1.5 text-[11px]"
+              className="p-2 space-y-2 text-[12px]"
             >
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1.5">
                 <select
-                  aria-label="Plot Signal Bus"
+                  aria-label={t('plotter.picker.busAriaLabel')}
                   value={pickerBusId}
-                  onChange={(e) => setPickerBusId(Number(e.target.value))}
+                  onChange={(e) => plotStore.setPickerBusId(Number(e.target.value), true)}
                   style={{
                     backgroundColor: 'var(--bg-input)',
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="h-[21px] px-1 border font-mono text-[11px]"
+                  className="h-[28px] px-2 border font-mono text-[12px]"
                 >
                   {pickerBusOptions.map((opt) => (
                     <option key={opt.busId} value={opt.busId}>
@@ -859,45 +1193,108 @@ export const PlotterView: React.FC = () => {
                   <input
                     type="text"
                     value={pickerFilter}
-                    onChange={(e) => setPickerFilter(e.target.value)}
-                    placeholder="Search message or signal..."
+                    onChange={(e) => plotStore.setPickerFilter(e.target.value)}
+                    placeholder={t('plotter.picker.searchPlaceholder')}
                     style={{
                       backgroundColor: 'var(--bg-input)',
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-primary)',
                     }}
-                    className="w-full h-[21px] px-1.5 pr-5 border text-[11px] focus:outline-none"
+                    className="w-full h-[28px] px-2 pr-6 border text-[12px] focus:outline-none"
                   />
                   {pickerFilter && (
                     <button
                       type="button"
-                      onClick={() => setPickerFilter('')}
-                      className="absolute right-1 text-[var(--text-muted)] cursor-pointer"
+                      onClick={() => plotStore.setPickerFilter('')}
+                      className="absolute right-1.5 text-[var(--text-muted)] cursor-pointer"
                     >
-                      <X className="w-3 h-3" />
+                      <X className="w-3.5 h-3.5" />
                     </button>
                   )}
                 </div>
               </div>
+
+              {plotState.series.length > 0 && (
+                <div className="flex items-center justify-between pt-0.5 px-0.5 text-[11px]">
+                  <span className="font-mono tabular-nums text-emerald-400 font-medium">
+                    {t('plotter.picker.signalsSelected', { count: plotState.series.length })}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => plotStore.clearAllSeries()}
+                    style={{
+                      backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                      borderColor: 'rgba(239, 68, 68, 0.3)',
+                      color: '#f87171',
+                    }}
+                    className="h-[22px] px-2 border hover:bg-red-500/20 hover:text-red-300 flex items-center gap-1 font-sans text-[11px] cursor-pointer"
+                    title={t('plotter.picker.clearAllTitle')}
+                  >
+                    <X className="w-3 h-3" />
+                    <span>{t('plotter.picker.clearAll')}</span>
+                  </button>
+                </div>
+              )}
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto text-[11px]">
-              {!schema ? (
-                <div className="p-4 text-center text-[var(--text-muted)]">
-                  Bus {pickerBusId + 1} hattına bağlı .dbc / .kcd yok (Bağlantılar sekmesinden bağlayın).
+            <div className="flex-1 min-h-0 overflow-y-auto text-[12px]">
+              {!signalTreeBundle.hasAnySchema ? (
+                <div className="p-4 text-center text-[var(--text-muted)] flex flex-col gap-2 items-center">
+                  <div>
+                    {pickerBusId >= 0
+                      ? t('plotter.picker.noDbOnBus', { bus: pickerBusId + 1 })
+                      : t('plotter.picker.noDbInProject')}
+                  </div>
+                  {pickerBusId >= 0 && dbState.databases.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const firstDb = dbState.databases[0];
+                        if (firstDb) {
+                          void handleBindDbcToBus(pickerBusId, firstDb);
+                        }
+                      }}
+                      style={{
+                        backgroundColor: 'var(--bg-toolbar)',
+                        borderColor: 'var(--border-strong)',
+                        color: 'var(--text-primary)',
+                      }}
+                      className="h-[28px] px-3 border hover:border-sky-500 text-[12px] cursor-pointer"
+                    >
+                      {t('plotter.picker.bindDbToBus', {
+                        dbName: dbState.databases[0].name,
+                        bus: pickerBusId + 1,
+                      })}
+                    </button>
+                  )}
+                  {pickerBusId >= 0 && (
+                    <button
+                      type="button"
+                      onClick={() => plotStore.setPickerBusId(-1, true)}
+                      style={{
+                        backgroundColor: 'var(--bg-panel)',
+                        borderColor: 'var(--border-strong)',
+                        color: 'var(--text-secondary)',
+                      }}
+                      className="h-[28px] px-3 border hover:border-amber-400 text-[12px] cursor-pointer"
+                    >
+                      {t('plotter.picker.switchToCatalog')}
+                    </button>
+                  )}
                 </div>
               ) : (
-                filteredMessages.map((msg) => {
-                  const isExp = expandedMsgs.has(msg.messageKey) || q.length > 0;
-                  const allMsgSignals: SignalSchemaDto[] = [];
+                filteredTreeItems.map((item) => {
+                  const isExp = expandedMsgs.has(item.uniqueKey) || q.length > 0;
+                  const allMsgSignals = item.signals;
                   let plottedInMsg = 0;
-                  for (const sigId of msg.signalIds) {
-                    const s = pickerSignalsById[sigId];
-                    if (s) {
-                      allMsgSignals.push(s);
-                      if (plotState.plottedKeys.has(makePlotSeriesKey(pickerBusId, s.signalId))) {
-                        plottedInMsg += 1;
-                      }
+                  for (let i = 0; i < allMsgSignals.length; i++) {
+                    const s = allMsgSignals[i];
+                    if (
+                      plotState.plottedKeys.has(
+                        makePlotSeriesKey(item.effectiveBusId, s.signalId),
+                      )
+                    ) {
+                      plottedInMsg += 1;
                     }
                   }
                   const allPlotted =
@@ -906,19 +1303,19 @@ export const PlotterView: React.FC = () => {
 
                   return (
                     <div
-                      key={msg.messageKey}
+                      key={item.uniqueKey}
                       style={{ borderBottom: '1px solid var(--border-grid)' }}
                     >
                       <div
                         onClick={() =>
                           setExpandedMsgs((prev) => {
                             const next = new Set(prev);
-                            if (next.has(msg.messageKey)) next.delete(msg.messageKey);
-                            else next.add(msg.messageKey);
+                            if (next.has(item.uniqueKey)) next.delete(item.uniqueKey);
+                            else next.add(item.uniqueKey);
                             return next;
                           })
                         }
-                        className="h-[25px] px-2 flex items-center justify-between gap-1 hover:bg-[var(--bg-row-hover)] cursor-pointer font-medium"
+                        className="h-[30px] px-2.5 flex items-center justify-between gap-1 hover:bg-[var(--bg-row-hover)] cursor-pointer font-medium text-[12px]"
                       >
                         <div className="flex items-center gap-1.5 min-w-0">
                           <input
@@ -933,33 +1330,44 @@ export const PlotterView: React.FC = () => {
                             onClick={(e) => e.stopPropagation()}
                             onChange={() =>
                               plotStore.setSignalsPlottedBatch(
-                                pickerBusId,
+                                item.effectiveBusId,
                                 allMsgSignals,
                                 !allPlotted,
                               )
                             }
                             title={
                               allPlotted
-                                ? `Unplot all ${allMsgSignals.length} signals in ${msg.name}`
-                                : `Plot all ${allMsgSignals.length} signals in ${msg.name}`
+                                ? t('plotter.picker.unplotAllMsg', {
+                                    count: allMsgSignals.length,
+                                    name: item.name,
+                                  })
+                                : t('plotter.picker.plotAllMsg', {
+                                    count: allMsgSignals.length,
+                                    name: item.name,
+                                  })
                             }
                             className="accent-emerald-600 cursor-pointer shrink-0"
                           />
                           {isExp ? (
-                            <ChevronDown className="w-3 h-3 shrink-0" />
+                            <ChevronDown className="w-3.5 h-3.5 shrink-0" />
                           ) : (
-                            <ChevronRight className="w-3 h-3 text-[var(--text-muted)] shrink-0" />
+                            <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
                           )}
                           <span className="font-mono text-[var(--text-secondary)] shrink-0">
-                            {formatPcanIdHex(msg.arbId, msg.isExtended)}h
+                            {formatPcanIdHex(item.arbId, item.isExtended)}h
                           </span>
-                          <span className="truncate" title={msg.name}>
-                            {msg.name}
+                          <span className="truncate" title={item.name}>
+                            {item.name}
                           </span>
+                          {pickerBusId === -1 && item.dbName && (
+                            <span className="px-1 text-[10px] font-sans rounded-xs bg-[var(--bg-panel)] border border-[var(--border-grid)] text-[var(--text-muted)] shrink-0">
+                              {item.dbName}
+                            </span>
+                          )}
                         </div>
 
                         {plottedInMsg > 0 && (
-                          <span className="font-mono tabular-nums text-[10px] text-emerald-500 shrink-0">
+                          <span className="font-mono tabular-nums text-[11px] text-emerald-500 shrink-0">
                             {plottedInMsg}/{allMsgSignals.length}
                           </span>
                         )}
@@ -967,17 +1375,18 @@ export const PlotterView: React.FC = () => {
 
                       {isExp && (
                         <div style={{ backgroundColor: 'var(--bg-row-signal)' }}>
-                          {msg.signalIds.map((sigId) => {
-                            const sig = pickerSignalsById[sigId];
-                            if (!sig) return null;
+                          {allMsgSignals.map((sig) => {
                             if (
                               q.length > 0 &&
                               !sig.name.toLowerCase().includes(q) &&
-                              !msg.name.toLowerCase().includes(q)
+                              !item.name.toLowerCase().includes(q)
                             ) {
                               return null;
                             }
-                            const seriesKey = makePlotSeriesKey(pickerBusId, sig.signalId);
+                            const seriesKey = makePlotSeriesKey(
+                              item.effectiveBusId,
+                              sig.signalId,
+                            );
                             const isChecked = plotState.plottedKeys.has(seriesKey);
                             const activeEntry = plotState.series.find(
                               (s) => s.key === seriesKey,
@@ -985,21 +1394,21 @@ export const PlotterView: React.FC = () => {
 
                             return (
                               <label
-                                key={sigId}
-                                className="h-[23px] pl-7 pr-2 flex items-center justify-between gap-1 hover:bg-[var(--bg-row-hover)] cursor-pointer"
+                                key={sig.signalId}
+                                className="h-[28px] pl-7 pr-2.5 flex items-center justify-between gap-1 hover:bg-[var(--bg-row-hover)] cursor-pointer text-[12px]"
                               >
                                 <span className="flex items-center gap-1.5 min-w-0">
                                   <input
                                     type="checkbox"
                                     checked={isChecked}
                                     onChange={() =>
-                                      plotStore.toggleSignal(pickerBusId, sig)
+                                      plotStore.toggleSignal(item.effectiveBusId, sig)
                                     }
                                     className="accent-emerald-600 cursor-pointer shrink-0"
                                   />
                                   {activeEntry && (
                                     <span
-                                      className="w-2 h-2 rounded-full shrink-0"
+                                      className="w-2.5 h-2.5 rounded-full shrink-0"
                                       style={{ backgroundColor: activeEntry.colorHex }}
                                     />
                                   )}
@@ -1007,10 +1416,17 @@ export const PlotterView: React.FC = () => {
                                     {sig.name}
                                   </span>
                                 </span>
-                                {sig.unit && (
-                                  <span className="font-mono text-[10px] text-[var(--text-muted)] shrink-0">
-                                    {sig.unit}
+                                {activeEntry && activeEntry.latestValue !== null ? (
+                                  <span className="font-mono tabular-nums text-[11px] text-emerald-400 font-semibold shrink-0">
+                                    {formatAxisNum(activeEntry.latestValue)}
+                                    {sig.unit ? ` ${sig.unit}` : ''}
                                   </span>
+                                ) : (
+                                  sig.unit && (
+                                    <span className="font-mono text-[11px] text-[var(--text-muted)] shrink-0">
+                                      {sig.unit}
+                                    </span>
+                                  )
                                 )}
                               </label>
                             );
@@ -1025,103 +1441,9 @@ export const PlotterView: React.FC = () => {
           </aside>
         )}
 
-        {/* RIGHT: Active Series Strip + Delta Cursor Bar + 60 FPS Scopes + 40px Minimap */}
+        {/* RIGHT: Delta Cursor Bar + 60 FPS Scopes + 40px Minimap */}
         <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
-          {/* Watched Channels Legend & Digital Readout Strip (Locked 28px height — never wraps!) */}
-          {plotState.series.length > 0 && (
-            <div
-              style={{
-                backgroundColor: 'var(--bg-row-alt)',
-                borderBottom: '1px solid var(--border-strong)',
-              }}
-              className="shrink-0 h-[28px] min-h-[28px] max-h-[28px] px-2 flex items-center gap-1.5 overflow-x-auto overflow-y-hidden whitespace-nowrap text-[11px]"
-            >
-              {plotState.series.map((entry) => {
-                const latestVal = entry.latestValue;
-                const latestTxt =
-                  latestVal !== null
-                    ? `${formatAxisNum(latestVal)}${
-                        entry.unit ? ` ${entry.unit}` : ''
-                      }`
-                    : '—';
-                const displayName =
-                  entry.busId > 0
-                    ? `B${entry.busId + 1}:${entry.signalName}`
-                    : entry.signalName;
-                return (
-                  <div
-                    key={entry.key}
-                    style={{
-                      backgroundColor: 'var(--bg-panel)',
-                      borderColor: 'var(--border-grid)',
-                      borderLeftWidth: '3px',
-                      borderLeftColor: entry.visible
-                        ? entry.colorHex
-                        : 'var(--border-strong)',
-                    }}
-                    className={`h-[22px] px-2 border flex items-center gap-1.5 font-mono tabular-nums shrink-0 ${
-                      entry.visible ? '' : 'opacity-50'
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      onClick={() =>
-                        plotStore.setSeriesVisible(entry.key, !entry.visible)
-                      }
-                      className="cursor-pointer flex items-center shrink-0 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                      title={entry.visible ? 'Hide trace' : 'Show trace'}
-                    >
-                      {entry.visible ? (
-                        <Eye className="w-3 h-3" />
-                      ) : (
-                        <EyeOff className="w-3 h-3 text-[var(--text-muted)]" />
-                      )}
-                    </button>
-
-                    <span className="font-sans font-medium text-[var(--text-primary)] shrink-0">
-                      {displayName}
-                    </span>
-
-                    <span className="min-w-[66px] text-right font-semibold text-[var(--text-primary)] tabular-nums shrink-0">
-                      {latestTxt}
-                    </span>
-
-                    <button
-                      type="button"
-                      onClick={() => plotStore.resetScopeAutoY(entry.key)}
-                      className={`px-1 text-[9px] border cursor-pointer shrink-0 ${
-                        entry.autoScale
-                          ? 'hidden'
-                          : 'bg-amber-500/15 text-amber-400 border-amber-500/40'
-                      }`}
-                      title="Manual Y scale active — click to restore Auto-Y"
-                    >
-                      Auto-Y↺
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => plotStore.removeSeries(entry.key)}
-                      className="text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer shrink-0"
-                      title="Remove signal"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                );
-              })}
-
-              <button
-                type="button"
-                onClick={() => plotStore.clearAllSeries()}
-                className="h-[22px] px-2 text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer shrink-0"
-              >
-                Remove All
-              </button>
-            </div>
-          )}
-
-          {/* Dual Measurement Cursors A & B Readout Bar (Locked 24px height — never wraps!) */}
+          {/* Dual Measurement Cursors A & B Readout Bar (Locked 28px height) */}
           {plotState.deltaCursorsEnabled &&
             plotState.series.length > 0 &&
             cursorA !== null &&
@@ -1132,7 +1454,7 @@ export const PlotterView: React.FC = () => {
                   backgroundColor: 'var(--bg-toolbar)',
                   borderBottom: '1px solid var(--border-strong)',
                 }}
-                className="shrink-0 h-[24px] min-h-[24px] max-h-[24px] px-2 flex items-center justify-between gap-2 overflow-x-auto overflow-y-hidden whitespace-nowrap text-[11px] font-mono tabular-nums"
+                className="shrink-0 h-[28px] min-h-[28px] max-h-[28px] px-2.5 flex items-center justify-between gap-2 overflow-x-auto overflow-y-hidden whitespace-nowrap text-[12px] font-mono tabular-nums"
               >
                 <div className="flex items-center gap-3 shrink-0">
                   <span className="text-amber-400 font-semibold">
@@ -1157,7 +1479,7 @@ export const PlotterView: React.FC = () => {
                     const dY = vB - vA;
                     const sign = dY >= 0 ? '+' : '';
                     return (
-                      <span key={entry.key} className="text-[10px] shrink-0">
+                      <span key={entry.key} className="text-[11px] shrink-0">
                         <strong style={{ color: entry.colorHex }}>
                           Δ{entry.signalName}:
                         </strong>{' '}
@@ -1176,10 +1498,10 @@ export const PlotterView: React.FC = () => {
                     backgroundColor: 'var(--bg-panel)',
                     borderColor: 'var(--border-grid)',
                   }}
-                  className="h-[19px] px-1.5 border text-[10px] font-sans text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] shrink-0"
-                  title="Center Cursors A & B in visible window"
+                  className="h-[22px] px-2 border text-[11px] font-sans text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)] shrink-0"
+                  title={t('plotter.cursor.centerTitle')}
                 >
-                  Center A &amp; B
+                  {t('plotter.cursor.center')}
                 </button>
               </div>
             )}
@@ -1187,28 +1509,52 @@ export const PlotterView: React.FC = () => {
           {/* Oscilloscope Canvas Workspace */}
           {plotState.series.length === 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center p-6 text-center gap-2">
-              <Activity className="w-6 h-6 text-[var(--text-muted)]" />
-              <div className="text-[12px] font-semibold text-[var(--text-primary)]">
-                No signals selected
+              <Activity className="w-8 h-8 text-[var(--text-muted)]" />
+              <div className="text-[13px] font-semibold text-[var(--text-primary)]">
+                {t('plotter.empty.title')}
               </div>
-              <div className="text-[11px] text-[var(--text-muted)]">
-                Select signals in the left tree to plot.
+              <div className="text-[12px] text-[var(--text-muted)]">
+                {t('plotter.empty.subtitle')}
               </div>
-              {schema && (
-                <button
-                  type="button"
-                  onClick={handleAddQuickDemoSignals}
-                  style={{
-                    backgroundColor: 'var(--bg-toolbar)',
-                    borderColor: 'var(--border-strong)',
-                    color: 'var(--text-primary)',
-                  }}
-                  className="mt-1 h-[24px] px-3 border hover:border-[var(--text-secondary)] flex items-center gap-1.5 text-[11px] font-medium cursor-pointer"
-                >
-                  <Plus className="w-3 h-3 text-[var(--text-secondary)]" />
-                  <span>Load Sample Signals</span>
-                </button>
-              )}
+              <div className="flex items-center gap-2 mt-1">
+                {signalTreeBundle.hasAnySchema && (
+                  <button
+                    type="button"
+                    onClick={handleAddQuickDemoSignals}
+                    style={{
+                      backgroundColor: 'var(--bg-toolbar)',
+                      borderColor: 'var(--border-strong)',
+                      color: 'var(--text-primary)',
+                    }}
+                    className="h-[28px] px-3.5 border hover:border-[var(--text-secondary)] flex items-center gap-1.5 text-[12px] font-medium cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                    <span>{t('plotter.empty.loadSamples')}</span>
+                  </button>
+                )}
+                {activeTraceSession && activeTraceSession.count > 0 && (
+                  <button
+                    type="button"
+                    onClick={handlePlotActiveTrace}
+                    style={{
+                      backgroundColor: 'rgba(56, 189, 248, 0.15)',
+                      borderColor: '#38BDF8',
+                      color: '#7DD3FC',
+                    }}
+                    className="h-[28px] px-3.5 border hover:bg-sky-500/25 flex items-center gap-1.5 text-[12px] font-semibold cursor-pointer"
+                  >
+                    <Activity className="w-3.5 h-3.5 text-sky-400" />
+                    <span>
+                      {t('plotter.empty.plotFromTrace', {
+                        name: activeTraceSession.name,
+                        count: activeTraceSession.count.toLocaleString(
+                          locale === 'tr' ? 'tr-TR' : 'en-US',
+                        ),
+                      })}
+                    </span>
+                  </button>
+                )}
+              </div>
             </div>
           ) : (
             <>
@@ -1225,6 +1571,18 @@ export const PlotterView: React.FC = () => {
                     spaceHeldRef={spaceHeldRef}
                     spaceUsedForDragRef={spaceUsedForDragRef}
                     title=""
+                  />
+                </div>
+              ) : plotState.layoutMode === 'compactSplit' ? (
+                <div className="flex-1 min-h-0 p-2 pb-1 flex flex-col">
+                  <CompactStackedScopeCanvas
+                    entries={visibleSeries}
+                    dragTool={plotState.dragTool}
+                    deltaCursorsEnabled={plotState.deltaCursorsEnabled}
+                    theme={dbState.theme}
+                    sharedCursorRatioRef={sharedCursorRatioRef}
+                    spaceHeldRef={spaceHeldRef}
+                    spaceUsedForDragRef={spaceUsedForDragRef}
                   />
                 </div>
               ) : (
@@ -1457,6 +1815,846 @@ type ActivePointerDrag =
       kind: 'cursor';
       which: 'A' | 'B';
     };
+
+// ============================================================================
+// Compact Split Multi-Lane Stacked Oscilloscope
+// Single unified 60 FPS HTML5 Canvas with stacked zero-gap lanes, common bottom
+// time X-axis, compact left Y-strip per lane, and global crosshairs & cursors.
+// ============================================================================
+
+interface CompactStackedScopeCanvasProps {
+  entries: readonly PlotSeriesEntry[];
+  dragTool: 'pan' | 'boxZoom';
+  deltaCursorsEnabled: boolean;
+  theme: 'dark' | 'light';
+  sharedCursorRatioRef: React.MutableRefObject<number | null>;
+  spaceHeldRef: React.MutableRefObject<boolean>;
+  spaceUsedForDragRef: React.MutableRefObject<boolean>;
+}
+
+const CompactStackedScopeCanvas: React.FC<CompactStackedScopeCanvasProps> = ({
+  entries,
+  dragTool,
+  deltaCursorsEnabled,
+  theme,
+  sharedCursorRatioRef,
+  spaceHeldRef,
+  spaceUsedForDragRef,
+}) => {
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const sizeRef = useRef<{ w: number; h: number }>({ w: 800, h: 400 });
+  const localHoverRef = useRef<{ x: number; y: number } | null>(null);
+  const dragRef = useRef<ActivePointerDrag | null>(null);
+  const [cursorCss, setCursorCss] = useState<string>('crosshair');
+
+  const propsRef = useRef({
+    entries,
+    dragTool,
+    deltaCursorsEnabled,
+    theme,
+  });
+  propsRef.current = {
+    entries,
+    dragTool,
+    deltaCursorsEnabled,
+    theme,
+  };
+
+  const PAD_TOP = 4;
+  const PAD_BOTTOM = 22;
+  const PLOT_LEFT = 150;
+  const PAD_RIGHT = 8;
+
+  useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el) return;
+    const updateSize = (): void => {
+      sizeRef.current = {
+        w: Math.max(200, el.clientWidth),
+        h: Math.max(120, el.clientHeight),
+      };
+    };
+    updateSize();
+    const ro = new ResizeObserver(updateSize);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Non-passive wheel handler: Wheel over left strip zooms that lane's Y; Wheel over plot zooms time X
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const onWheel = (ev: WheelEvent): void => {
+      ev.preventDefault();
+      ev.stopPropagation();
+
+      const rect = canvas.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      const y = ev.clientY - rect.top;
+      const curEntries = propsRef.current.entries;
+      if (curEntries.length === 0) return;
+
+      const { w, h } = sizeRef.current;
+      const totalH = Math.max(20, h - PAD_TOP - PAD_BOTTOM);
+      const laneH = totalH / curEntries.length;
+      const plotW = Math.max(20, w - PLOT_LEFT - PAD_RIGHT);
+
+      // Horizontal touchpad swipe -> smooth time pan
+      if (
+        !ev.ctrlKey &&
+        !ev.altKey &&
+        !ev.shiftKey &&
+        Math.abs(ev.deltaX) > Math.abs(ev.deltaY) &&
+        Math.abs(ev.deltaX) > 1
+      ) {
+        const { span } = plotStore.getEffectiveTimeWindow();
+        const dt = (ev.deltaX / plotW) * span;
+        plotStore.panTimeBy(dt, true);
+        return;
+      }
+
+      if (ev.deltaY === 0) return;
+      const zoomFactor = ev.deltaY < 0 ? 0.8 : 1.25;
+
+      const laneIdx = Math.max(
+        0,
+        Math.min(curEntries.length - 1, Math.floor((y - PAD_TOP) / laneH)),
+      );
+      const targetEntry = curEntries[laneIdx];
+
+      // 1. Wheel over Left Strip -> zoom that specific lane's Y scale!
+      if (x < PLOT_LEFT) {
+        if (!targetEntry) return;
+        const bounds = resolveSeriesYBounds(targetEntry);
+        const spanY = Math.max(1e-6, bounds.yMax - bounds.yMin);
+        const laneY0 = PAD_TOP + laneIdx * laneH;
+        const yRatio = Math.max(0, Math.min(1, 1 - (y - laneY0) / laneH));
+        const anchorVal = bounds.yMin + yRatio * spanY;
+        const nextSpanY = Math.max(1e-6, Math.min(1e9, spanY * zoomFactor));
+        const nextMin = anchorVal - yRatio * nextSpanY;
+        plotStore.setScopeManualY(targetEntry.key, nextMin, nextMin + nextSpanY, {
+          saveHistory: true,
+          fromWheel: true,
+          emit: true,
+        });
+        return;
+      }
+
+      // 2. Wheel over Plot Area -> Zoom common time X (or Shift+wheel zooms lane Y)
+      const doYZoom = ev.shiftKey || ev.ctrlKey || ev.altKey;
+      const doXZoom = !ev.shiftKey || ev.ctrlKey || ev.altKey;
+
+      if (doXZoom) {
+        const xRatio = Math.max(0, Math.min(1, (x - PLOT_LEFT) / plotW));
+        plotStore.zoomTimeAtRatio(zoomFactor, xRatio, true);
+      }
+
+      if (doYZoom && targetEntry) {
+        const bounds = resolveSeriesYBounds(targetEntry);
+        const spanY = Math.max(1e-6, bounds.yMax - bounds.yMin);
+        const laneY0 = PAD_TOP + laneIdx * laneH;
+        const yRatio = Math.max(0, Math.min(1, 1 - (y - laneY0) / laneH));
+        const anchorVal = bounds.yMin + yRatio * spanY;
+        const nextSpanY = Math.max(1e-6, Math.min(1e9, spanY * zoomFactor));
+        const nextMin = anchorVal - yRatio * nextSpanY;
+        plotStore.setScopeManualY(targetEntry.key, nextMin, nextMin + nextSpanY, {
+          saveHistory: !doXZoom,
+          fromWheel: true,
+          emit: true,
+        });
+      }
+    };
+
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener('wheel', onWheel);
+    };
+  }, []);
+
+  // 60 FPS Render Loop for Compact Split
+  useEffect(() => {
+    let rafId = 0;
+    let active = true;
+
+    const renderFrame = (): void => {
+      if (!active) return;
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          const { w, h } = sizeRef.current;
+          const dpr = window.devicePixelRatio || 1;
+          const targetPxW = Math.floor(w * dpr);
+          const targetPxH = Math.floor(h * dpr);
+          if (canvas.width !== targetPxW || canvas.height !== targetPxH) {
+            canvas.width = targetPxW;
+            canvas.height = targetPxH;
+          }
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+          const isDark = theme === 'dark';
+          const bgColor = isDark ? '#14171B' : '#FAFAFB';
+          const gridColor = isDark ? '#22262C' : '#E2E6ED';
+          const borderColor = isDark ? '#313741' : '#B8C0CC';
+          const textMuted = isDark ? '#8B949E' : '#57606A';
+          const textPrimary = isDark ? '#D8DEE6' : '#1F2328';
+
+          ctx.fillStyle = bgColor;
+          ctx.fillRect(0, 0, w, h);
+
+          const curEntries = entries;
+          const N = Math.max(1, curEntries.length);
+          const totalPlotH = Math.max(20, h - PAD_TOP - PAD_BOTTOM);
+          const laneH = totalPlotH / N;
+          const plotW = Math.max(20, w - PLOT_LEFT - PAD_RIGHT);
+          const plotRight = PLOT_LEFT + plotW;
+
+          const vp = plotStore.getViewport();
+          const { tStart, tEnd, span: timeSpan } = plotStore.getEffectiveTimeWindow();
+
+          const localHover = localHoverRef.current;
+          const cursorRatio = sharedCursorRatioRef.current;
+          const tCursor =
+            cursorRatio !== null ? tStart + cursorRatio * timeSpan : null;
+
+          // 1. Draw Common Bottom Time Axis Grid & Numbers
+          ctx.strokeStyle = gridColor;
+          ctx.lineWidth = 1;
+
+          const timeGridStep = computeNiceStep(timeSpan / 6);
+          const firstGridT = Math.ceil(tStart / timeGridStep) * timeGridStep;
+          ctx.font = '10px Consolas, "JetBrains Mono", monospace';
+          ctx.fillStyle = textMuted;
+          ctx.textBaseline = 'top';
+          ctx.textAlign = 'center';
+
+          let gridSafeGuard = 0;
+          for (
+            let tGrid = firstGridT;
+            tGrid <= tEnd + timeGridStep * 1e-6 && gridSafeGuard < 24;
+            tGrid += timeGridStep, gridSafeGuard += 1
+          ) {
+            const cleanT = Math.abs(tGrid) < timeGridStep * 1e-9 ? 0 : tGrid;
+            const frac = (cleanT - tStart) / timeSpan;
+            if (frac < -1e-4 || frac > 1.0001) continue;
+            const x = Math.round(PLOT_LEFT + frac * plotW) + 0.5;
+            ctx.beginPath();
+            ctx.moveTo(x, PAD_TOP);
+            ctx.lineTo(x, PAD_TOP + totalPlotH);
+            ctx.stroke();
+
+            if (x >= PLOT_LEFT + 20 && x <= plotRight - 20) {
+              ctx.fillText(formatTimeTick(cleanT, timeSpan), x, PAD_TOP + totalPlotH + 5);
+            }
+          }
+
+          // 2. Render each lane
+          for (let i = 0; i < curEntries.length; i++) {
+            const entry = curEntries[i];
+            const laneY0 = PAD_TOP + i * laneH;
+            const laneY1 = laneY0 + laneH;
+            const bounds = resolveSeriesYBounds(entry);
+            const yLo = bounds.yMin;
+            const yHi = bounds.yMax > yLo ? bounds.yMax : yLo + 1;
+            const ySpan = Math.max(1e-9, yHi - yLo);
+
+            // Lane Divider
+            ctx.strokeStyle = borderColor;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, Math.round(laneY1) + 0.5);
+            ctx.lineTo(plotRight, Math.round(laneY1) + 0.5);
+            ctx.stroke();
+
+            // Lane Dotted Midline
+            ctx.strokeStyle = gridColor;
+            ctx.setLineDash([2, 4]);
+            ctx.beginPath();
+            ctx.moveTo(PLOT_LEFT, Math.round(laneY0 + laneH * 0.5) + 0.5);
+            ctx.lineTo(plotRight, Math.round(laneY0 + laneH * 0.5) + 0.5);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Left Legend Strip
+            // Color bar
+            ctx.fillStyle = entry.colorHex;
+            ctx.fillRect(2, laneY0 + 2, 3.5, Math.max(2, laneH - 4));
+
+            // Hover highlight on left strip
+            if (
+              localHover &&
+              localHover.x < PLOT_LEFT &&
+              localHover.y >= laneY0 &&
+              localHover.y <= laneY1
+            ) {
+              ctx.fillStyle = entry.colorHex;
+              ctx.globalAlpha = isDark ? 0.12 : 0.08;
+              ctx.fillRect(0, laneY0, PLOT_LEFT, laneH);
+              ctx.globalAlpha = 1;
+            }
+
+            // Signal Name & Bus
+            ctx.font = 'bold 10px Consolas, "JetBrains Mono", monospace';
+            ctx.fillStyle = textPrimary;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            const nameStr = `${entry.busId > 0 ? `B${entry.busId + 1} ` : ''}${entry.signalName}`;
+            ctx.fillText(nameStr, 8, laneY0 + 4, 80);
+
+            // Unit below name if room
+            if (entry.unit && laneH >= 36) {
+              ctx.font = '9px Consolas, "JetBrains Mono", monospace';
+              ctx.fillStyle = textMuted;
+              ctx.fillText(`[${entry.unit}]`, 8, laneY0 + 17, 80);
+            }
+
+            // Value at cursor or latest
+            let displayVal: number | null = entry.latestValue;
+            if (tCursor !== null && entry.count > 0) {
+              // Binary search nearest sample
+              const startPos =
+                (entry.writePos - entry.count + PLOT_RING_CAPACITY) % PLOT_RING_CAPACITY;
+              let lo = 0;
+              let hi = entry.count - 1;
+              while (lo <= hi) {
+                const mid = (lo + hi) >>> 1;
+                const rIdx = (startPos + mid) % PLOT_RING_CAPACITY;
+                const t = entry.timestamps[rIdx];
+                if (t < tCursor) lo = mid + 1;
+                else hi = mid - 1;
+              }
+              const bestIdx = Math.max(0, Math.min(entry.count - 1, lo));
+              const rBest = (startPos + bestIdx) % PLOT_RING_CAPACITY;
+              displayVal = entry.values[rBest];
+            }
+
+            if (displayVal !== null && Number.isFinite(displayVal)) {
+              ctx.font = 'bold 10.5px Consolas, "JetBrains Mono", monospace';
+              ctx.fillStyle = entry.colorHex;
+              ctx.textAlign = 'right';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(
+                formatAxisNum(displayVal, ySpan),
+                PLOT_LEFT - 36,
+                laneY0 + laneH * 0.5,
+              );
+            }
+
+            // Y Bounds (Min / Max indicators on far right of left strip)
+            ctx.font = '8.5px Consolas, "JetBrains Mono", monospace';
+            ctx.fillStyle = textMuted;
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'top';
+            ctx.fillText(formatAxisNum(yHi, ySpan), PLOT_LEFT - 3, laneY0 + 2);
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(formatAxisNum(yLo, ySpan), PLOT_LEFT - 3, laneY1 - 2);
+
+            // Manual scale badge if disabled
+            if (!entry.autoScale) {
+              ctx.fillStyle = '#D97706';
+              ctx.fillRect(PLOT_LEFT - 26, laneY0 + 2, 8, 8);
+              ctx.font = 'bold 7px sans-serif';
+              ctx.fillStyle = '#FFFFFF';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText('M', PLOT_LEFT - 22, laneY0 + 6);
+            }
+
+            // 3. Draw Waveform for this lane (Clipped to lane rectangle)
+            if (entry.count > 0) {
+              ctx.save();
+              ctx.beginPath();
+              ctx.rect(PLOT_LEFT, laneY0, plotW, laneH);
+              ctx.clip();
+
+              const startPos =
+                (entry.writePos - entry.count + PLOT_RING_CAPACITY) % PLOT_RING_CAPACITY;
+
+              let firstIdx = 0;
+              let lo = 0;
+              let hi = entry.count - 1;
+              while (lo <= hi) {
+                const mid = (lo + hi) >>> 1;
+                const rIdx = (startPos + mid) % PLOT_RING_CAPACITY;
+                const t = entry.timestamps[rIdx];
+                if (t < tStart) {
+                  firstIdx = mid;
+                  lo = mid + 1;
+                } else {
+                  hi = mid - 1;
+                }
+              }
+
+              let endIdx = entry.count - 1;
+              lo = firstIdx;
+              hi = entry.count - 1;
+              while (lo <= hi) {
+                const mid = (lo + hi) >>> 1;
+                const rIdx = (startPos + mid) % PLOT_RING_CAPACITY;
+                const t = entry.timestamps[rIdx];
+                if (t > tEnd) {
+                  endIdx = mid;
+                  hi = mid - 1;
+                } else {
+                  lo = mid + 1;
+                }
+              }
+
+              const visiblePts = endIdx - firstIdx + 1;
+              const tracePath = new Path2D();
+              let started = false;
+
+              if (visiblePts <= 4500) {
+                for (let k = firstIdx; k <= endIdx; k++) {
+                  const ringIdx = (startPos + k) % PLOT_RING_CAPACITY;
+                  const t = entry.timestamps[ringIdx];
+                  const v = entry.values[ringIdx];
+                  const x = PLOT_LEFT + ((t - tStart) / timeSpan) * plotW;
+                  const y = laneY0 + (1 - (v - yLo) / ySpan) * laneH;
+                  if (!started) {
+                    tracePath.moveTo(x, y);
+                    started = true;
+                  } else {
+                    tracePath.lineTo(x, y);
+                  }
+                }
+              } else {
+                let curCol = -999999;
+                let firstY = 0;
+                let minY = 0;
+                let maxY = 0;
+                let lastY = 0;
+
+                const flushCol = (col: number): void => {
+                  const xCol = PLOT_LEFT + col + 0.5;
+                  if (!started) {
+                    tracePath.moveTo(xCol, firstY);
+                    started = true;
+                  } else {
+                    tracePath.lineTo(xCol, firstY);
+                  }
+                  if (minY !== firstY || maxY !== firstY) {
+                    tracePath.lineTo(xCol, minY);
+                    tracePath.lineTo(xCol, maxY);
+                  }
+                  if (lastY !== maxY) {
+                    tracePath.lineTo(xCol, lastY);
+                  }
+                };
+
+                for (let k = firstIdx; k <= endIdx; k++) {
+                  const ringIdx = (startPos + k) % PLOT_RING_CAPACITY;
+                  const t = entry.timestamps[ringIdx];
+                  const v = entry.values[ringIdx];
+                  const col = Math.floor(((t - tStart) / timeSpan) * plotW);
+                  const y = laneY0 + (1 - (v - yLo) / ySpan) * laneH;
+
+                  if (col !== curCol) {
+                    if (curCol !== -999999) flushCol(curCol);
+                    curCol = col;
+                    firstY = y;
+                    minY = y;
+                    maxY = y;
+                    lastY = y;
+                  } else {
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                    lastY = y;
+                  }
+                }
+                if (curCol !== -999999) flushCol(curCol);
+              }
+
+              ctx.strokeStyle = entry.colorHex;
+              ctx.lineWidth = 1.6;
+              ctx.stroke(tracePath);
+              ctx.restore();
+            }
+          }
+
+          // Outer plot area border
+          ctx.strokeStyle = borderColor;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(PLOT_LEFT + 0.5, PAD_TOP + 0.5, plotW, totalPlotH);
+
+          // 4. Global Indicators (Cut across ALL lanes!)
+          // 4a. Dual Measurement Cursors A & B
+          if (deltaCursorsEnabled) {
+            const drawDeltaCursor = (
+              tVal: number | null,
+              color: string,
+              tag: 'A' | 'B',
+            ): void => {
+              if (tVal === null || tVal < tStart || tVal > tEnd) return;
+              const x = Math.round(PLOT_LEFT + ((tVal - tStart) / timeSpan) * plotW) + 0.5;
+              ctx.save();
+              ctx.strokeStyle = color;
+              ctx.lineWidth = 1.4;
+              ctx.setLineDash([5, 3]);
+              ctx.beginPath();
+              ctx.moveTo(x, PAD_TOP);
+              ctx.lineTo(x, PAD_TOP + totalPlotH);
+              ctx.stroke();
+              ctx.setLineDash([]);
+
+              ctx.fillStyle = color;
+              ctx.fillRect(x - 7, PAD_TOP, 14, 13);
+              ctx.font = 'bold 9.5px Consolas, "JetBrains Mono", monospace';
+              ctx.fillStyle = '#FFFFFF';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(tag, x, PAD_TOP + 6.5);
+              ctx.restore();
+            };
+
+            drawDeltaCursor(vp.cursorATimeSec, '#F59E0B', 'A');
+            drawDeltaCursor(vp.cursorBTimeSec, '#EC4899', 'B');
+          }
+
+          // 4b. Replay Line
+          const replay = telemetryStore.getHeaderSlice().replay;
+          if (replay && replay.state !== 'idle' && replay.durationUs > 0) {
+            const replaySec = replay.elapsedUs / 1_000_000;
+            if (replaySec >= tStart && replaySec <= tEnd) {
+              const rx = Math.round(PLOT_LEFT + ((replaySec - tStart) / timeSpan) * plotW) + 0.5;
+              ctx.save();
+              ctx.strokeStyle = '#06B6D4';
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.moveTo(rx, PAD_TOP);
+              ctx.lineTo(rx, PAD_TOP + totalPlotH);
+              ctx.stroke();
+
+              ctx.fillStyle = '#06B6D4';
+              ctx.fillRect(rx - 22, PAD_TOP, 44, 13);
+              ctx.font = 'bold 9px Consolas, "JetBrains Mono", monospace';
+              ctx.fillStyle = '#0B0F17';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText('REPLAY', rx, PAD_TOP + 6.5);
+              ctx.restore();
+            }
+          }
+
+          // 4c. Global Vertical Crosshair
+          if (cursorRatio !== null && cursorRatio >= 0 && cursorRatio <= 1) {
+            const cx = Math.round(PLOT_LEFT + cursorRatio * plotW) + 0.5;
+            ctx.save();
+            ctx.strokeStyle = isDark ? 'rgba(248,250,252,0.55)' : 'rgba(15,23,42,0.45)';
+            ctx.setLineDash([3, 3]);
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(cx, PAD_TOP);
+            ctx.lineTo(cx, PAD_TOP + totalPlotH);
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // 4d. Rubber-Band Box Zoom Selection
+          const activeDrag = dragRef.current;
+          if (activeDrag && activeDrag.kind === 'boxZoom') {
+            const bx0 = Math.max(PLOT_LEFT, Math.min(plotRight, activeDrag.startX));
+            const bx1 = Math.max(PLOT_LEFT, Math.min(plotRight, activeDrag.curX));
+            const rx = Math.min(bx0, bx1);
+            const rw = Math.abs(bx1 - bx0);
+            ctx.fillStyle = 'rgba(14, 165, 233, 0.16)';
+            ctx.fillRect(rx, PAD_TOP, rw, totalPlotH);
+            ctx.save();
+            ctx.strokeStyle = '#0EA5E9';
+            ctx.lineWidth = 1.2;
+            ctx.setLineDash([4, 3]);
+            ctx.strokeRect(rx + 0.5, PAD_TOP + 0.5, rw - 1, totalPlotH - 1);
+            ctx.restore();
+          }
+        }
+      }
+
+      rafId = window.requestAnimationFrame(renderFrame);
+    };
+
+    rafId = window.requestAnimationFrame(renderFrame);
+    return () => {
+      active = false;
+      window.cancelAnimationFrame(rafId);
+    };
+  }, [entries, deltaCursorsEnabled, theme, sharedCursorRatioRef]);
+
+  // Pointer interaction handlers (pan, zoom, box-zoom, drag)
+  const onPointerDown = (ev: React.PointerEvent<HTMLCanvasElement>): void => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = ev.clientX - rect.left;
+    const y = ev.clientY - rect.top;
+    const curEntries = propsRef.current.entries;
+    if (curEntries.length === 0) return;
+
+    const { w, h } = sizeRef.current;
+    const totalPlotH = Math.max(20, h - PAD_TOP - PAD_BOTTOM);
+    const laneH = totalPlotH / curEntries.length;
+    const plotW = Math.max(20, w - PLOT_LEFT - PAD_RIGHT);
+
+    canvas.setPointerCapture(ev.pointerId);
+
+    // 1. Click on Left Strip -> Axis Pan of that specific lane
+    if (x < PLOT_LEFT && y >= PAD_TOP && y <= PAD_TOP + totalPlotH) {
+      const laneIdx = Math.max(
+        0,
+        Math.min(curEntries.length - 1, Math.floor((y - PAD_TOP) / laneH)),
+      );
+      const targetEntry = curEntries[laneIdx];
+      if (targetEntry) {
+        const bounds = resolveSeriesYBounds(targetEntry);
+        dragRef.current = {
+          kind: 'axisPanY',
+          targetKey: targetEntry.key,
+          startY: y,
+          initialYMin: bounds.yMin,
+          initialYMax: bounds.yMax,
+        };
+        plotStore.pushZoomHistory();
+        return;
+      }
+    }
+
+    // 2. Click on Delta Cursors A or B
+    if (deltaCursorsEnabled && x >= PLOT_LEFT && x <= PLOT_LEFT + plotW) {
+      const vp = plotStore.getViewport();
+      const { tStart, span } = plotStore.getEffectiveTimeWindow();
+      if (vp.cursorATimeSec !== null) {
+        const ax = PLOT_LEFT + ((vp.cursorATimeSec - tStart) / span) * plotW;
+        if (Math.abs(x - ax) <= 8) {
+          dragRef.current = { kind: 'cursor', which: 'A' };
+          return;
+        }
+      }
+      if (vp.cursorBTimeSec !== null) {
+        const bx = PLOT_LEFT + ((vp.cursorBTimeSec - tStart) / span) * plotW;
+        if (Math.abs(x - bx) <= 8) {
+          dragRef.current = { kind: 'cursor', which: 'B' };
+          return;
+        }
+      }
+    }
+
+    // 3. Click on Bottom Time Axis -> Axis Pan Time
+    if (y > PAD_TOP + totalPlotH && x >= PLOT_LEFT && x <= PLOT_LEFT + plotW) {
+      const { tEnd, span } = plotStore.getEffectiveTimeWindow();
+      dragRef.current = {
+        kind: 'axisPanX',
+        startX: x,
+        initialRightSec: tEnd,
+        initialSpanSec: span,
+      };
+      plotStore.pushZoomHistory();
+      return;
+    }
+
+    // 4. Click inside Plot Area -> Pan or BoxZoom
+    if (
+      x >= PLOT_LEFT &&
+      x <= PLOT_LEFT + plotW &&
+      y >= PAD_TOP &&
+      y <= PAD_TOP + totalPlotH
+    ) {
+      const tool = spaceHeldRef.current ? 'pan' : propsRef.current.dragTool;
+      if (spaceHeldRef.current) {
+        spaceUsedForDragRef.current = true;
+      }
+
+      if (tool === 'boxZoom') {
+        dragRef.current = {
+          kind: 'boxZoom',
+          startX: x,
+          startY: y,
+          curX: x,
+          curY: y,
+        };
+      } else {
+        const { tEnd, span } = plotStore.getEffectiveTimeWindow();
+        const laneIdx = Math.max(
+          0,
+          Math.min(curEntries.length - 1, Math.floor((y - PAD_TOP) / laneH)),
+        );
+        const targetEntry = curEntries[laneIdx];
+        const bounds = targetEntry
+          ? resolveSeriesYBounds(targetEntry)
+          : { yMin: -1, yMax: 1 };
+        dragRef.current = {
+          kind: 'pan',
+          startX: x,
+          startY: y,
+          initialRightSec: tEnd,
+          initialSpanSec: span,
+          panYTarget: targetEntry?.key ?? null,
+          initialYMin: bounds.yMin,
+          initialYMax: bounds.yMax,
+          initialMultiY: {},
+        };
+        plotStore.pushZoomHistory();
+      }
+    }
+  };
+
+  const onPointerMove = (ev: React.PointerEvent<HTMLCanvasElement>): void => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = ev.clientX - rect.left;
+    const y = ev.clientY - rect.top;
+    localHoverRef.current = { x, y };
+
+    const { w, h } = sizeRef.current;
+    const totalPlotH = Math.max(20, h - PAD_TOP - PAD_BOTTOM);
+    const plotW = Math.max(20, w - PLOT_LEFT - PAD_RIGHT);
+
+    // Update shared crosshair ratio
+    if (x >= PLOT_LEFT && x <= PLOT_LEFT + plotW) {
+      sharedCursorRatioRef.current = Math.max(0, Math.min(1, (x - PLOT_LEFT) / plotW));
+    }
+
+    const curDrag = dragRef.current;
+    if (!curDrag) {
+      if (x < PLOT_LEFT) setCursorCss('ns-resize');
+      else if (y > PAD_TOP + totalPlotH) setCursorCss('ew-resize');
+      else setCursorCss(propsRef.current.dragTool === 'boxZoom' ? 'crosshair' : 'grab');
+      return;
+    }
+
+    if (curDrag.kind === 'boxZoom') {
+      curDrag.curX = x;
+      curDrag.curY = y;
+      return;
+    }
+
+    if (curDrag.kind === 'cursor') {
+      const { tStart, span } = plotStore.getEffectiveTimeWindow();
+      const nextT = tStart + Math.max(0, Math.min(1, (x - PLOT_LEFT) / plotW)) * span;
+      plotStore.setDeltaCursorTime(curDrag.which, nextT, false);
+      return;
+    }
+
+    if (curDrag.kind === 'axisPanX' || curDrag.kind === 'pan') {
+      const dxPx = x - curDrag.startX;
+      const dt = -(dxPx / plotW) * curDrag.initialSpanSec;
+      plotStore.setViewRightTimeSec(curDrag.initialRightSec + dt, false);
+
+      if (curDrag.kind === 'pan' && curDrag.panYTarget) {
+        const curEntries = propsRef.current.entries;
+        const totalPlotH2 = Math.max(20, h - PAD_TOP - PAD_BOTTOM);
+        const laneH = totalPlotH2 / Math.max(1, curEntries.length);
+        const dyPx = y - curDrag.startY;
+        const spanY = curDrag.initialYMax - curDrag.initialYMin;
+        const dVal = (dyPx / laneH) * spanY;
+        plotStore.setScopeManualY(
+          curDrag.panYTarget,
+          curDrag.initialYMin + dVal,
+          curDrag.initialYMax + dVal,
+          { emit: false },
+        );
+      }
+      return;
+    }
+
+    if (curDrag.kind === 'axisPanY') {
+      const curEntries = propsRef.current.entries;
+      const laneH = totalPlotH / Math.max(1, curEntries.length);
+      const dyPx = y - curDrag.startY;
+      const spanY = curDrag.initialYMax - curDrag.initialYMin;
+      const dVal = (dyPx / laneH) * spanY;
+      plotStore.setScopeManualY(
+        curDrag.targetKey,
+        curDrag.initialYMin + dVal,
+        curDrag.initialYMax + dVal,
+        { emit: false },
+      );
+    }
+  };
+
+  const onPointerUp = (ev: React.PointerEvent<HTMLCanvasElement>): void => {
+    const canvas = canvasRef.current;
+    if (canvas && canvas.hasPointerCapture(ev.pointerId)) {
+      canvas.releasePointerCapture(ev.pointerId);
+    }
+    const curDrag = dragRef.current;
+    dragRef.current = null;
+
+    if (!curDrag) return;
+
+    if (curDrag.kind === 'boxZoom') {
+      const { w } = sizeRef.current;
+      const plotW = Math.max(20, w - PLOT_LEFT - PAD_RIGHT);
+      const bx0 = Math.max(PLOT_LEFT, Math.min(PLOT_LEFT + plotW, curDrag.startX));
+      const bx1 = Math.max(PLOT_LEFT, Math.min(PLOT_LEFT + plotW, curDrag.curX));
+      const rw = Math.abs(bx1 - bx0);
+      if (rw > 8) {
+        const { tStart, span } = plotStore.getEffectiveTimeWindow();
+        const tA = tStart + ((Math.min(bx0, bx1) - PLOT_LEFT) / plotW) * span;
+        const tB = tStart + ((Math.max(bx0, bx1) - PLOT_LEFT) / plotW) * span;
+        plotStore.setTimeRange(tA, tB, true, true);
+      }
+    } else {
+      plotStore.notifyInteractionEnd();
+    }
+  };
+
+  const onDoubleClick = (ev: React.MouseEvent<HTMLCanvasElement>): void => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = ev.clientX - rect.left;
+    const y = ev.clientY - rect.top;
+    const curEntries = propsRef.current.entries;
+    if (curEntries.length === 0) return;
+
+    const { h } = sizeRef.current;
+    const totalPlotH = Math.max(20, h - PAD_TOP - PAD_BOTTOM);
+    const laneH = totalPlotH / curEntries.length;
+
+    // Double click on Left Strip of lane i -> reset Auto-Y for that lane!
+    if (x < PLOT_LEFT) {
+      const laneIdx = Math.max(
+        0,
+        Math.min(curEntries.length - 1, Math.floor((y - PAD_TOP) / laneH)),
+      );
+      const targetEntry = curEntries[laneIdx];
+      if (targetEntry) {
+        plotStore.resetScopeAutoY(targetEntry.key);
+      }
+      return;
+    }
+
+    // Double click inside Plot Area -> Reset full oscilloscope view!
+    plotStore.resetFullView();
+  };
+
+  return (
+    <div
+      ref={wrapperRef}
+      style={{
+        backgroundColor: theme === 'dark' ? '#14171B' : '#FAFAFB',
+        borderColor: 'var(--border-strong)',
+      }}
+      className="relative flex-1 min-h-0 border overflow-hidden select-none"
+    >
+      <canvas
+        ref={canvasRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onDoubleClick={onDoubleClick}
+        onPointerLeave={() => {
+          localHoverRef.current = null;
+          sharedCursorRatioRef.current = null;
+        }}
+        style={{ cursor: cursorCss }}
+        className="block w-full h-full touch-none"
+      />
+    </div>
+  );
+};
 
 interface ScopeCanvasProps {
   scopeMode: 'combined' | 'split';
@@ -2108,6 +3306,31 @@ const ScopeCanvas: React.FC<ScopeCanvasProps> = ({
 
             drawMeasCursor(vp.cursorATimeSec, '#F59E0B', 'A');
             drawMeasCursor(vp.cursorBTimeSec, '#EC4899', 'B');
+          }
+
+          // 4b. Draw Replay Progress Indicator if replaying
+          const replay = telemetryStore.getHeaderSlice().replay;
+          if (replay && replay.state !== 'idle' && replay.durationUs > 0) {
+            const replaySec = replay.elapsedUs / 1_000_000;
+            if (replaySec >= tStart && replaySec <= tEnd) {
+              const rx = Math.round(plotLeft + ((replaySec - tStart) / timeSpan) * plotW) + 0.5;
+              ctx.save();
+              ctx.strokeStyle = '#06B6D4';
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.moveTo(rx, PAD_TOP);
+              ctx.lineTo(rx, PAD_TOP + plotH);
+              ctx.stroke();
+
+              ctx.fillStyle = '#06B6D4';
+              ctx.fillRect(rx - 22, PAD_TOP, 44, 13);
+              ctx.font = 'bold 9px Consolas, "JetBrains Mono", monospace';
+              ctx.fillStyle = '#0B0F17';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText('REPLAY', rx, PAD_TOP + 6.5);
+              ctx.restore();
+            }
           }
 
           // 5. Draw Synchronized Hover Crosshair + Target Dots on Lines
@@ -2811,6 +4034,7 @@ const TimelineMinimap: React.FC<{
   entries: readonly PlotSeriesEntry[];
   theme: 'dark' | 'light';
 }> = ({ entries, theme }) => {
+  const { t } = useI18n();
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const widthRef = useRef<number>(800);
@@ -3160,7 +4384,7 @@ const TimelineMinimap: React.FC<{
       ref={wrapperRef}
       style={{ borderColor: 'var(--border-strong)' }}
       className="h-[40px] w-full border overflow-hidden"
-      title="Timeline Overview Minimap: Drag window to scrub history, drag left/right handles to resize zoom span, or double-click to Follow Live"
+      title={t('plotter.minimap.title')}
     >
       <canvas
         ref={canvasRef}
@@ -3187,6 +4411,7 @@ export const QuickPlotButton: React.FC<{
   onToggle: () => void;
   hoverReveal?: boolean;
 }> = ({ busId, signalId, onToggle, hoverReveal = false }) => {
+  const { t } = useI18n();
   const plotState = usePlotStore();
   const isPlotted = plotState.plottedKeys.has(makePlotSeriesKey(busId, signalId));
 
@@ -3209,12 +4434,12 @@ export const QuickPlotButton: React.FC<{
       }`}
       title={
         isPlotted
-          ? 'Plotted in Oscilloscope (click to remove)'
-          : 'Add signal to Plotter oscilloscope'
+          ? t('plotter.quickPlot.removeTitle')
+          : t('plotter.quickPlot.addTitle')
       }
     >
       {!isPlotted && <Plus className="w-2.5 h-2.5" />}
-      <span>{isPlotted ? 'Plot✓' : 'Plot'}</span>
+      <span>{isPlotted ? t('plotter.quickPlot.plotted') : t('plotter.quickPlot.plot')}</span>
     </button>
   );
 };

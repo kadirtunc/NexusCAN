@@ -39,6 +39,14 @@ pub fn run() {
             commands::cmd_save_project,
             commands::cmd_load_project,
             commands::cmd_delete_project,
+            commands::cmd_list_traces,
+            commands::cmd_save_trace_file,
+            commands::cmd_load_trace_file,
+            commands::cmd_delete_trace_file,
+            commands::cmd_parse_trace_content,
+            commands::cmd_export_trace_blf,
+            commands::cmd_start_trace_replay,
+            commands::cmd_control_trace_replay,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexusCAN Tauri application");

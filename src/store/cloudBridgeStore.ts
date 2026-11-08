@@ -1,6 +1,11 @@
 import { useSyncExternalStore } from 'react';
 import type { DatabaseSchemaDto } from '../types/netdb';
-import type { TelemetrySnapshotDto } from '../types/telemetry';
+import type {
+  ChronologicalFrameDto,
+  FrameTelemetryDto,
+  LiveSignalDto,
+  TelemetrySnapshotDto,
+} from '../types/telemetry';
 import { connectionStore } from './connectionStore';
 import { type ActiveDocumentTab, databaseStore } from './databaseStore';
 import { type NexusProjectFileV1, type QuickBarConnectionState, projectStore } from './projectStore';
@@ -16,6 +21,10 @@ import {
   sanitizeCloudWorkspaceForLocalApply,
   validateAndNormalizeWorkspaceJson,
 } from '../utils/workspaceDiff';
+import {
+  type EngineeringToolpackId,
+  normalizeEnabledToolpacks,
+} from '../types/toolpacks';
 
 export type CloudBridgeStatus =
   | 'disconnected'
@@ -116,12 +125,24 @@ export function toCloudCompatibleWorkspace(
     rawSnapshot.workspace.traceMaxBufferRows ?? 100,
   );
 
+  const mappedPlotter = rawSnapshot.plotter
+    ? {
+        ...rawSnapshot.plotter,
+        layoutMode:
+          rawSnapshot.plotter.layoutMode === 'compactSplit'
+            ? ('split' as const)
+            : rawSnapshot.plotter.layoutMode,
+      }
+    : rawSnapshot.plotter;
+
   return {
     ...rawSnapshot,
+    plotter: mappedPlotter,
     workspace: {
       ...rawSnapshot.workspace,
       activeDocTab: mappedTab,
       traceMaxBufferRows,
+      enabledToolpacks: normalizeEnabledToolpacks(rawSnapshot.workspace.enabledToolpacks),
     },
   };
 }
@@ -609,7 +630,10 @@ function buildStandbyOrCurrentSnapshot(): TelemetrySnapshotDto {
   const connectedBuses = header.buses.filter((b) => b.connected);
 
   if (connectedBuses.length > 0 && latestRaw) {
-    return latestRaw;
+    return {
+      ...latestRaw,
+      frames: coalesceFramesForCloudSnapshot(latestRaw.frames),
+    };
   }
 
   const seq = header.seq > 0 ? header.seq : syntheticSeqCounter++;
@@ -671,13 +695,124 @@ function pushSchemaUpdateToCloud(schema: DatabaseSchemaDto | null): void {
   }
 }
 
+const MAX_PENDING_CLOUD_CHRONO = 320;
+let pendingOutboundChrono: ChronologicalFrameDto[] = [];
+let lastPingSentPerfMs = 0;
+
+/**
+ * Coalesces multi-row multiplexed frames (e.g. `STD:0x105` pages `m0..m3`) into a single
+ * authoritative `FrameTelemetryDto` per `messageKey` for `NexusCANCloud`:
+ * - Guarantees `frameByKey[messageKey]` always displays the newest mux frame (`lastTimestampUs`),
+ * - Prevents duplicate mux-switch `signalId` samples from pushing 4 conflicting values at the
+ *   same `tSec` into Cloud's live oscilloscope,
+ * - Preserves Retained Mux State across all inactive mux pages (`activeInLastFrame: false`).
+ */
+function coalesceFramesForCloudSnapshot(
+  frames: readonly FrameTelemetryDto[],
+): FrameTelemetryDto[] {
+  if (frames.length <= 1) {
+    return [...frames];
+  }
+
+  // Fast path: check if any duplicate messageKey exists
+  const seenKeys = new Set<string>();
+  let hasDuplicateKey = false;
+  for (let i = 0; i < frames.length; i++) {
+    const mk = frames[i].messageKey;
+    if (seenKeys.has(mk)) {
+      hasDuplicateKey = true;
+      break;
+    }
+    seenKeys.add(mk);
+  }
+  if (!hasDuplicateKey) {
+    return [...frames];
+  }
+
+  const groups = new Map<string, FrameTelemetryDto[]>();
+  for (let i = 0; i < frames.length; i++) {
+    const f = frames[i];
+    const existing = groups.get(f.messageKey);
+    if (existing) {
+      existing.push(f);
+    } else {
+      groups.set(f.messageKey, [f]);
+    }
+  }
+
+  const out: FrameTelemetryDto[] = [];
+  for (const list of groups.values()) {
+    if (list.length === 1) {
+      out.push(list[0]);
+      continue;
+    }
+
+    // Sort oldest -> newest so newest mux page wins rawBytes, lastTimestampUs, activeMuxSwitches, and switch signals
+    const sorted = [...list].sort((a, b) => a.lastTimestampUs - b.lastTimestampUs);
+    const newest = sorted[sorted.length - 1];
+    let totalRxCount = 0;
+    const mergedSignals = new Map<number, LiveSignalDto>();
+
+    for (let i = 0; i < sorted.length; i++) {
+      const row = sorted[i];
+      totalRxCount += row.rxCount;
+      const isNewestRow = i === sorted.length - 1;
+      for (let j = 0; j < row.signals.length; j++) {
+        const sig = row.signals[j];
+        mergedSignals.set(
+          sig.signalId,
+          isNewestRow
+            ? sig
+            : {
+                ...sig,
+                activeInLastFrame: false,
+              },
+        );
+      }
+    }
+
+    out.push({
+      ...newest,
+      rxCount: totalRxCount,
+      signals: Array.from(mergedSignals.values()),
+    });
+  }
+
+  return out;
+}
+
 function handleOutboundSnapshot(snap: TelemetrySnapshotDto, isLiveStreamTick: boolean): void {
   const ws = activeWs;
   if (!ws || ws.readyState !== WebSocket.OPEN) {
+    pendingOutboundChrono = [];
     return;
   }
 
   const nowPerf = performance.now();
+
+  // Background-tab immune heartbeat: piggyback 2s RTT PING on incoming native I/O wakeups
+  if (isLiveStreamTick && nowPerf - lastPingSentPerfMs >= HEARTBEAT_INTERVAL_MS) {
+    lastPingSentPerfMs = nowPerf;
+    sendJsonOverWs({
+      type: 'PING',
+      timestampMs: Date.now(),
+      latencyMs: currentState.latencyMs,
+    });
+  }
+
+  if (snap.recentChronological.length > 0) {
+    if (pendingOutboundChrono.length === 0) {
+      pendingOutboundChrono = [...snap.recentChronological];
+    } else {
+      pendingOutboundChrono.push(...snap.recentChronological);
+    }
+    if (pendingOutboundChrono.length > MAX_PENDING_CLOUD_CHRONO) {
+      pendingOutboundChrono = pendingOutboundChrono.slice(
+        pendingOutboundChrono.length - MAX_PENDING_CLOUD_CHRONO,
+      );
+    }
+  }
+
   if (isLiveStreamTick) {
     const effectiveHz = currentState.targetHz;
     const minIntervalMs = 1_000 / effectiveHz;
@@ -690,11 +825,18 @@ function handleOutboundSnapshot(snap: TelemetrySnapshotDto, isLiveStreamTick: bo
     return;
   }
 
+  const outboundSnap: TelemetrySnapshotDto = {
+    ...snap,
+    frames: coalesceFramesForCloudSnapshot(snap.frames),
+    recentChronological: pendingOutboundChrono,
+  };
+  pendingOutboundChrono = [];
+
   try {
     ws.send(
       JSON.stringify({
         type: 'TELEMETRY_SNAPSHOT',
-        snapshot: snap,
+        snapshot: outboundSnap,
       }),
     );
     if (isLiveStreamTick) {
@@ -707,32 +849,40 @@ function handleOutboundSnapshot(snap: TelemetrySnapshotDto, isLiveStreamTick: bo
   }
 }
 
+const storeUnsubscribers: Array<() => void> = [];
+
 function bindLocalStoresOnce(): void {
   if (storesBound) return;
   storesBound = true;
 
-  telemetryStore.subscribeRawSnapshots((snap) => {
-    handleOutboundSnapshot(snap, true);
-  });
+  storeUnsubscribers.push(
+    telemetryStore.subscribeRawSnapshots((snap) => {
+      handleOutboundSnapshot(snap, true);
+    }),
+  );
 
-  telemetryStore.subscribeHeader(() => {
-    const connectedCount = telemetryStore
-      .getHeaderSlice()
-      .buses.filter((b) => b.connected).length;
-    if (connectedCount !== prevConnectedBusCount) {
-      prevConnectedBusCount = connectedCount;
-      if (activeWs && activeWs.readyState === WebSocket.OPEN && connectedCount === 0) {
-        // Immediately notify NexusCANCloud when buses disconnect locally
-        handleOutboundSnapshot(buildStandbyOrCurrentSnapshot(), false);
+  storeUnsubscribers.push(
+    telemetryStore.subscribeHeader(() => {
+      const connectedCount = telemetryStore
+        .getHeaderSlice()
+        .buses.filter((b) => b.connected).length;
+      if (connectedCount !== prevConnectedBusCount) {
+        prevConnectedBusCount = connectedCount;
+        if (activeWs && activeWs.readyState === WebSocket.OPEN && connectedCount === 0) {
+          // Immediately notify NexusCANCloud when buses disconnect locally
+          handleOutboundSnapshot(buildStandbyOrCurrentSnapshot(), false);
+        }
       }
-    }
-  });
+    }),
+  );
 
-  databaseStore.subscribeSchemaChanges((schema) => {
-    if (activeWs && activeWs.readyState === WebSocket.OPEN) {
-      pushSchemaUpdateToCloud(schema);
-    }
-  });
+  storeUnsubscribers.push(
+    databaseStore.subscribeSchemaChanges((schema) => {
+      if (activeWs && activeWs.readyState === WebSocket.OPEN) {
+        pushSchemaUpdateToCloud(schema);
+      }
+    }),
+  );
 }
 
 async function fetchCloudJson<T>(
@@ -2344,6 +2494,75 @@ export const cloudBridgeStore = {
     throw new Error(`Veritabanı içeriği bulunamadı: ${item.fileName}`);
   },
 
+  async fetchProjectToolpacks(projectId?: string): Promise<EngineeringToolpackId[]> {
+    const { sessionToken, cloudBaseUrl } = currentState;
+    const targetId = projectId ?? currentState.inspectedProjectId ?? currentState.selectedProjectId;
+    if (!sessionToken || !targetId) {
+      throw new Error('Proje paketlerini çekmek için oturum açılmalı ve proje seçilmelidir.');
+    }
+
+    const res = await fetchCloudJson<{ enabledToolpacks?: unknown }>(
+      `${cloudBaseUrl}/api/projects/${encodeURIComponent(targetId)}/toolpacks`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${sessionToken}`,
+        },
+      },
+    );
+
+    if (!res.ok || !res.data) {
+      throw new Error(res.errorMessage ?? 'Proje mühendislik paketleri alınamadı.');
+    }
+
+    const rawList = Array.isArray(res.data.enabledToolpacks)
+      ? (res.data.enabledToolpacks as readonly string[])
+      : undefined;
+    return normalizeEnabledToolpacks(rawList);
+  },
+
+  async updateProjectToolpacksOnCloud(
+    enabledToolpacks: readonly (EngineeringToolpackId | string)[],
+    projectId?: string,
+  ): Promise<{ enabledToolpacks: EngineeringToolpackId[]; revisionNumber?: number }> {
+    const { sessionToken, cloudBaseUrl } = currentState;
+    const targetId = projectId ?? currentState.inspectedProjectId ?? currentState.selectedProjectId;
+    if (!sessionToken || !targetId) {
+      throw new Error('Proje paketlerini bulutta güncellemek için oturum açılmalı ve proje seçilmelidir.');
+    }
+
+    const normalized = normalizeEnabledToolpacks(enabledToolpacks);
+
+    const res = await fetchCloudJson<{
+      enabledToolpacks?: unknown;
+      revisionNumber?: number;
+    }>(
+      `${cloudBaseUrl}/api/projects/${encodeURIComponent(targetId)}/toolpacks`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${sessionToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ enabledToolpacks: normalized }),
+      },
+    );
+
+    if (!res.ok || !res.data) {
+      throw new Error(res.errorMessage ?? 'Proje mühendislik paketleri bulutta güncellenemedi.');
+    }
+
+    const returnedList = Array.isArray(res.data.enabledToolpacks)
+      ? (res.data.enabledToolpacks as readonly string[])
+      : normalized;
+
+    return {
+      enabledToolpacks: normalizeEnabledToolpacks(returnedList),
+      revisionNumber:
+        typeof res.data.revisionNumber === 'number' ? res.data.revisionNumber : undefined,
+    };
+  },
+
   async fetchRemoteWorkspace(
     projectId?: string,
   ): Promise<{ workspace: NexusProjectFileV1; revisionNumber: number }> {
@@ -2895,4 +3114,33 @@ export function useCloudBridgeHeader(): CloudBridgeHeaderSlice {
     cloudBridgeStore.getHeaderSlice,
     cloudBridgeStore.getHeaderSlice,
   );
+}
+
+interface ViteHotContext {
+  readonly data: Record<string, unknown>;
+  dispose(cb: (data: Record<string, unknown>) => void): void;
+}
+
+const viteHot = (import.meta as unknown as { hot?: ViteHotContext }).hot;
+
+if (viteHot) {
+  const prevWasInitialized = Boolean(viteHot.data?.wasInitialized);
+
+  viteHot.dispose((data: Record<string, unknown>) => {
+    data.wasInitialized = lifecycleInitialized;
+    shouldMaintainConnection = false;
+    clearTimers();
+    closeActiveSocketCleanly('HMR_RELOAD');
+    while (storeUnsubscribers.length > 0) {
+      const unsub = storeUnsubscribers.pop();
+      unsub?.();
+    }
+    storesBound = false;
+  });
+
+  if (prevWasInitialized) {
+    queueMicrotask(() => {
+      cloudBridgeStore.initializeLifecycle();
+    });
+  }
 }

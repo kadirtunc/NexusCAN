@@ -1,5 +1,5 @@
 /**
- * Shared PCAN-Explorer / CANoe-Style Virtual Instrument & Simulation Panel Contracts
+ * Shared Industrial Virtual Instrument & Simulation Panel Contracts
  * 1:1 Portable between NexusCANCloud and NexusCAN Desktop Client (.nexusproj.json & REST API)
  */
 
@@ -16,6 +16,13 @@ export type SimulationWidgetKind =
   | 'combobox'
   | 'slider'
   | 'group';
+
+export type SimulationButtonMode =
+  | 'momentary'
+  | 'toggle'
+  | 'pulse'
+  | 'step'
+  | 'cycle';
 
 export type SimulationMapTileStyle = 'osm_standard' | 'osm_dark' | 'osm_hot' | 'custom';
 
@@ -104,10 +111,17 @@ export interface SimulationWidgetConfigDto {
   mapClickToSimulate?: boolean;
 
   // Interactive Button options
-  buttonMode?: 'momentary' | 'toggle';
+  buttonMode?: SimulationButtonMode;
   pressValue?: number;
   releaseValue?: number;
   buttonLabel?: string;
+  pulseDurationMs?: number;
+  stepDelta?: number;
+  stepWrap?: boolean;
+  cycleOptions?: SimulationComboOptionDto[];
+  hotkey?: string;
+  requireConfirm?: boolean;
+  confirmPrompt?: string;
 
   // Interactive Checkbox options
   checkedValue?: number;

@@ -40,7 +40,7 @@ export interface FormattedMuxSymbol {
 }
 
 /**
- * Formats a multiplexed message symbol in PCAN-Explorer style:
+ * Formats a multiplexed message symbol in Industrial CAN style:
  * `BaseMessageName` (if non-multiplexed) or `BaseMessageName.OuterMux.InnerMux` (if multiplexed).
  */
 export function formatMultiplexedSymbol(
@@ -79,7 +79,7 @@ export function formatMultiplexedSymbol(
 }
 
 /**
- * Resolves active switches, active signal IDs, and PCAN-Explorer formatted symbol from signal physical values.
+ * Resolves active switches, active signal IDs, and formatted symbol from signal physical values.
  * Used for symbolic Transmit (TX) rows and TxMessageModal.
  */
 export function resolveMuxChainFromSignalValues(

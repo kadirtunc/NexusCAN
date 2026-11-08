@@ -3,6 +3,7 @@ import { GitBranch, Layers, Radio, SlidersHorizontal } from 'lucide-react';
 import { databaseStore, useDatabaseStore } from '../store/databaseStore';
 import { plotStore } from '../store/plotStore';
 import { useTelemetryFrames } from '../store/telemetryStore';
+import { useI18n } from '../i18n';
 import type { BitCellDto, MessageSchemaDto, SignalSchemaDto } from '../types/netdb';
 import {
   formatByteHex,
@@ -33,6 +34,7 @@ function rangeContains(ranges: readonly [number, number][], val: number): boolea
 }
 
 export const BitLayoutMatrix: React.FC = () => {
+  const { t } = useI18n();
   const dbState = useDatabaseStore();
   const framesSlice = useTelemetryFrames();
 
@@ -342,7 +344,7 @@ export const BitLayoutMatrix: React.FC = () => {
         style={{ backgroundColor: 'var(--bg-panel)', color: 'var(--text-muted)' }}
         className="flex items-center justify-center h-full p-6 text-center text-[12px]"
       >
-        No symbol database loaded
+        {t('netdb.matrix.noDbLoaded')}
       </div>
     );
   }
@@ -374,23 +376,23 @@ export const BitLayoutMatrix: React.FC = () => {
       const sw = c.switchSignalId !== null ? dbState.signalsById[c.switchSignalId] : null;
       const muxDesc = c.isMuxSwitch
         ? subSwitchIds.has(c.signalId)
-          ? ` [Cascaded Sub-Switch m${formatMuxRanges(c.muxRanges)} · M]`
-          : ' [Master Switch M]'
+          ? t('netdb.matrix.cascadedSubSwitchTooltip', { ranges: formatMuxRanges(c.muxRanges) })
+          : t('netdb.matrix.masterSwitchTooltip')
         : c.isMultiplexed
-          ? ` [Mux m${formatMuxRanges(c.muxRanges)} via ${sw?.name ?? 'Switch'}]`
+          ? t('netdb.matrix.muxTooltip', { ranges: formatMuxRanges(c.muxRanges), parent: sw?.name ?? 'Switch' })
           : '';
       return `${s?.name ?? `Sig#${c.signalId}`}${muxDesc} · bit[${c.signalBitIndex}] (Byte ${byteIdx}, Bit ${bitInByte})`;
     }
 
     const lines = [
-      `Shared Multiplexed Bit — Byte ${byteIdx}, Bit ${bitInByte} (${cells.length} signals):`,
+      t('netdb.matrix.sharedBitHeader', { byteIdx, bitInByte, count: cells.length }),
     ];
     for (const c of cells) {
       const s = dbState.signalsById[c.signalId];
       const sw = c.switchSignalId !== null ? dbState.signalsById[c.switchSignalId] : null;
       const cond = c.isMultiplexed
         ? `${sw?.name ?? 'Switch'} = m${formatMuxRanges(c.muxRanges)}`
-        : 'Static / Master';
+        : t('netdb.matrix.staticOrMaster');
       lines.push(
         `• ${s?.name ?? `Sig#${c.signalId}`} [bit ${c.signalBitIndex}] — ${cond}`,
       );
@@ -403,18 +405,18 @@ export const BitLayoutMatrix: React.FC = () => {
       style={{ backgroundColor: 'var(--bg-panel)' }}
       className="flex flex-col h-full min-h-0"
     >
-      {/* Slim 26px Matrix Header */}
+      {/* Slim 38px Matrix Header */}
       <div
         style={{
           backgroundColor: 'var(--bg-toolbar)',
           borderBottom: '1px solid var(--border-strong)',
         }}
-        className="shrink-0 h-[26px] px-2 flex items-center justify-between gap-2 text-[11px]"
+        className="shrink-0 min-h-[38px] px-3 py-1 flex items-center justify-between gap-2 text-[12px] flex-wrap"
       >
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="font-semibold text-[var(--text-secondary)]">Symbol:</span>
+        <div className="flex items-center gap-2 min-w-0 flex-wrap">
+          <span className="font-semibold text-[var(--text-secondary)]">{t('netdb.matrix.symbolLabel')}</span>
           <select
-            aria-label="Select Symbol for Bit Layout"
+            aria-label={t('netdb.matrix.selectSymbolAria')}
             value={selectedMessage.messageKey}
             onChange={(e) => databaseStore.setSelectedMessageKey(e.target.value)}
             style={{
@@ -422,7 +424,7 @@ export const BitLayoutMatrix: React.FC = () => {
               borderColor: 'var(--border-strong)',
               color: 'var(--text-primary)',
             }}
-            className="h-[20px] px-1.5 border font-mono text-[11px]"
+            className="h-[28px] px-2 border font-mono text-[12px]"
           >
             {messages.map((m) => (
               <option key={m.messageKey} value={m.messageKey}>
@@ -432,15 +434,18 @@ export const BitLayoutMatrix: React.FC = () => {
             ))}
           </select>
 
-          <span className="font-mono text-[var(--text-muted)] truncate">
-            {selectedMessage.protocol} · {selectedMessage.dlc} Bytes ·{' '}
-            {selectedMessage.signalIds.length} Signals
+          <span className="font-mono text-[var(--text-muted)] truncate text-[12px]">
+            {t('netdb.matrix.symbolMeta', {
+              protocol: selectedMessage.protocol,
+              dlc: selectedMessage.dlc,
+              signals: selectedMessage.signalIds.length,
+            })}
           </span>
         </div>
 
         {selectedMessage.isMultiplexed && (
-          <span className="px-1.5 h-[18px] leading-[16px] text-[10px] font-mono font-bold border border-amber-500/50 bg-amber-500/15 text-amber-500 shrink-0">
-            {subSwitchCount > 0 ? 'CASCADED MUX (SG_MUL_VAL_)' : 'MULTIPLEXED SYMBOL'}
+          <span className="px-2 h-[22px] leading-[20px] text-[11px] font-mono font-bold border border-amber-500/50 bg-amber-500/15 text-amber-500 shrink-0">
+            {subSwitchCount > 0 ? t('netdb.matrix.cascadedMuxBadge') : t('netdb.matrix.multiplexedBadge')}
           </span>
         )}
       </div>
@@ -454,19 +459,19 @@ export const BitLayoutMatrix: React.FC = () => {
             backgroundColor: 'var(--bg-toolbar)',
             borderBottom: '1px solid var(--border-strong)',
           }}
-          className="shrink-0 px-3 py-2 space-y-2 text-[11px] select-none"
+          className="shrink-0 px-3 py-2 space-y-2 text-[12px] select-none"
         >
           {/* Row 1: Segmented Mux View Mode Control + Mux Summary Telemetry Strip */}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <span className="font-semibold text-[var(--text-secondary)] flex items-center gap-1">
                 <GitBranch className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
-                <span>Mux:</span>
+                <span>{t('netdb.matrix.muxLabel')}</span>
               </span>
 
               <div
                 style={{ borderColor: 'var(--border-strong)' }}
-                className="h-[22px] border inline-flex items-center overflow-hidden"
+                className="h-[26px] border inline-flex items-center overflow-hidden"
               >
                 <button
                   type="button"
@@ -481,11 +486,11 @@ export const BitLayoutMatrix: React.FC = () => {
                         ? 'var(--text-primary)'
                         : 'var(--text-muted)',
                   }}
-                  className="h-full px-2 flex items-center gap-1 font-medium cursor-pointer"
-                  title="Select multiplexer switch branches step-by-step (supports cascaded switches)"
+                  className="h-full px-2.5 flex items-center gap-1 font-medium cursor-pointer text-[12px]"
+                  title={t('netdb.matrix.interactiveTitle')}
                 >
-                  <SlidersHorizontal className="w-3 h-3 text-[var(--text-secondary)]" />
-                  <span>Interactive</span>
+                  <SlidersHorizontal className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>{t('netdb.matrix.interactiveBtn')}</span>
                 </button>
 
                 <button
@@ -502,11 +507,11 @@ export const BitLayoutMatrix: React.FC = () => {
                         : 'var(--text-muted)',
                     borderLeft: '1px solid var(--border-strong)',
                   }}
-                  className="h-full px-2 flex items-center gap-1 font-medium cursor-pointer"
-                  title="Follow live CAN bus activeMuxSwitches in real time"
+                  className="h-full px-2.5 flex items-center gap-1 font-medium cursor-pointer text-[12px]"
+                  title={t('netdb.matrix.liveBusTitle')}
                 >
-                  <Radio className="w-3 h-3 text-[var(--text-secondary)]" />
-                  <span>Live Bus</span>
+                  <Radio className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>{t('netdb.matrix.liveBusBtn')}</span>
                 </button>
 
                 <button
@@ -523,29 +528,30 @@ export const BitLayoutMatrix: React.FC = () => {
                         : 'var(--text-muted)',
                     borderLeft: '1px solid var(--border-strong)',
                   }}
-                  className="h-full px-2 flex items-center gap-1 font-medium cursor-pointer"
-                  title="Overlay all static, switch, and multiplexed branches simultaneously; shared payload bits are badged MUX ×N (hover any shared bit cell to inspect all overlapping mux signals)"
+                  className="h-full px-2.5 flex items-center gap-1 font-medium cursor-pointer text-[12px]"
+                  title={t('netdb.matrix.overlayTitle')}
                 >
-                  <Layers className="w-3 h-3 text-[var(--text-secondary)]" />
-                  <span>Overlay</span>
+                  <Layers className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>{t('netdb.matrix.overlayBtn')}</span>
                 </button>
               </div>
             </div>
 
             {/* Mux Summary Strip */}
-            <div className="flex items-center gap-3 font-mono tabular-nums text-[11px] text-[var(--text-secondary)]">
+            <div className="flex items-center gap-3 font-mono tabular-nums text-[12px] text-[var(--text-secondary)] flex-wrap">
               <span>
-                Static: <strong className="text-[var(--text-primary)]">{muxSummary.staticCount}</strong>
+                {t('netdb.matrix.summaryStatic')}{' '}
+                <strong className="text-[var(--text-primary)]">{muxSummary.staticCount}</strong>
               </span>
               <span>
-                Switches:{' '}
+                {t('netdb.matrix.summarySwitches')}{' '}
                 <strong className="text-amber-400">
                   {masterSwitchCount} M
                   {subSwitchCount > 0 ? ` + ${subSwitchCount} Sub-M` : ''}
                 </strong>
               </span>
               <span>
-                Page:{' '}
+                {t('netdb.matrix.summaryPage')}{' '}
                 <strong className="text-[var(--text-primary)]">
                   {muxViewMode === 'overlay'
                     ? selectedMessage.signalIds.length
@@ -554,7 +560,7 @@ export const BitLayoutMatrix: React.FC = () => {
                 /{selectedMessage.signalIds.length}
               </span>
               <span>
-                Shared Bits:{' '}
+                {t('netdb.matrix.summarySharedBits')}{' '}
                 <strong className="text-[var(--text-primary)]">
                   {muxSummary.overlappingBitsCount}
                 </strong>
@@ -593,15 +599,14 @@ export const BitLayoutMatrix: React.FC = () => {
                   >
                     <span className="font-mono text-[11px] font-semibold text-amber-500">
                       {desc.isSubSwitch
-                        ? `Level ${desc.level + 1} Sub-Switch [m${formatMuxRanges(desc.signal.muxRanges)} · M]`
-                        : 'Level 1 Master [M]'}
-                      :
+                        ? t('netdb.matrix.levelSubSwitch', { level: desc.level + 1, ranges: formatMuxRanges(desc.signal.muxRanges) })
+                        : t('netdb.matrix.levelMaster')}
                     </span>
                     <span
                       className="font-semibold text-[var(--text-primary)] mr-1"
                       title={
                         parentSw
-                          ? `Activated when ${parentSw.name} in [${formatMuxRanges(desc.signal.muxRanges)}]`
+                          ? t('netdb.matrix.activatedWhen', { parent: parentSw.name, ranges: formatMuxRanges(desc.signal.muxRanges) })
                           : undefined
                       }
                     >
@@ -635,7 +640,7 @@ export const BitLayoutMatrix: React.FC = () => {
                               ? 'var(--text-primary)'
                               : 'var(--text-secondary)',
                           }}
-                          className={`h-[21px] px-2 border font-mono tabular-nums text-[11px] cursor-pointer ${
+                          className={`h-[26px] px-2.5 border font-mono tabular-nums text-[11.5px] cursor-pointer ${
                             isSelected ? 'font-bold' : 'hover:text-[var(--text-primary)]'
                           }`}
                         >
@@ -653,11 +658,8 @@ export const BitLayoutMatrix: React.FC = () => {
           {muxViewMode === 'live' && (
             <div className="flex flex-wrap items-center gap-2 font-mono tabular-nums">
               {!liveFrame ? (
-                <span className="font-sans text-[var(--text-muted)]">
-                  No live traffic on{' '}
-                  <strong className="font-mono">
-                    {formatPcanIdHex(selectedMessage.arbId, selectedMessage.isExtended)}h
-                  </strong>
+                <span className="font-sans text-[var(--text-muted)] text-[12px]">
+                  {t('netdb.matrix.noLiveTraffic', { id: formatPcanIdHex(selectedMessage.arbId, selectedMessage.isExtended) })}
                 </span>
               ) : (
                 switchDescriptors.map((desc) => {
@@ -676,7 +678,7 @@ export const BitLayoutMatrix: React.FC = () => {
                           ? 'var(--border-strong)'
                           : 'var(--border-grid)',
                       }}
-                      className={`px-2 py-0.5 border text-[11px] ${
+                      className={`px-2.5 py-1 border text-[12px] ${
                         isActiveSw ? 'text-[var(--text-primary)]' : 'text-[var(--text-muted)]'
                       }`}
                     >
@@ -690,7 +692,7 @@ export const BitLayoutMatrix: React.FC = () => {
                           {enumName ? ` (${enumName})` : ''}
                         </strong>
                       ) : (
-                        <span>inactive</span>
+                        <span>{t('netdb.matrix.inactive')}</span>
                       )}
                     </span>
                   );
@@ -707,24 +709,24 @@ export const BitLayoutMatrix: React.FC = () => {
           style={{ borderColor: 'var(--border-strong)' }}
           className="border overflow-x-auto"
         >
-          <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums select-none">
+          <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums select-none text-[12px]">
             <colgroup>
-              <col style={{ width: '64px' }} />
+              <col style={{ width: '68px' }} />
               {BIT_COLUMNS.map((bitCol) => (
                 <col key={bitCol} />
               ))}
-              <col style={{ width: '54px' }} />
+              <col style={{ width: '58px' }} />
             </colgroup>
             <thead>
               <tr>
-                <th>Byte</th>
+                <th>{t('netdb.matrix.thByte')}</th>
                 {BIT_COLUMNS.map((bitCol) => (
                   <th key={bitCol} className="text-center">
-                    Bit {bitCol}
+                    {t('netdb.matrix.thBit', { bitCol })}
                     {bitCol === 7 ? ' (MSB)' : bitCol === 0 ? ' (LSB)' : ''}
                   </th>
                 ))}
-                <th className="text-center">Hex</th>
+                <th className="text-center">{t('netdb.matrix.thHex')}</th>
               </tr>
             </thead>
             <tbody>
@@ -733,7 +735,7 @@ export const BitLayoutMatrix: React.FC = () => {
                 return (
                   <tr key={byteIdx}>
                     <td style={{ backgroundColor: 'var(--bg-row-alt)' }}>
-                      <div className="pcan-cell text-[var(--text-secondary)]">
+                      <div className="pcan-cell text-[var(--text-secondary)] text-[12px]">
                         Byte {byteIdx}
                       </div>
                     </td>
@@ -748,10 +750,10 @@ export const BitLayoutMatrix: React.FC = () => {
                       if (matchingCells.length === 0) {
                         return (
                           <td key={bitInByte}>
-                            <div className="pcan-cell pcan-cell-center text-[10px] text-[var(--text-muted)]">
+                            <div className="pcan-cell pcan-cell-center text-[11px] text-[var(--text-muted)]">
                               <span>{globalBitNum}</span>
                               {liveBitVal !== null && (
-                                <span className="ml-1.5 font-semibold">{liveBitVal}</span>
+                                <span className="ml-1.5 font-semibold text-[var(--text-primary)]">{liveBitVal}</span>
                               )}
                             </div>
                           </td>
@@ -800,30 +802,30 @@ export const BitLayoutMatrix: React.FC = () => {
                           }`}
                         >
                           <div
-                            className={`pcan-cell justify-between gap-1 text-[10px] ${
+                            className={`pcan-cell justify-between gap-1 text-[11px] ${
                               isSwitchCell
                                 ? 'px-1 border border-dashed border-amber-500/80'
                                 : ''
                             }`}
                           >
                             <span
-                              className={`font-semibold truncate ${palette.text}`}
+                              className={`font-semibold truncate text-[11.5px] ${palette.text}`}
                             >
                               {sigSchema
-                                ? sigSchema.name.slice(0, 8)
+                                ? sigSchema.name.slice(0, 10)
                                 : `S${primaryCell.signalId}`}
                             </span>
 
                             {isConflictOverlay ? (
-                              <span className="px-1 h-[14px] leading-[12px] text-[9px] font-bold border border-amber-500/60 bg-amber-500/20 text-amber-500 shrink-0">
+                              <span className="px-1.5 h-[16px] leading-[14px] text-[10px] font-bold border border-amber-500/60 bg-amber-500/20 text-amber-500 shrink-0">
                                 MUX ×{matchingCells.length}
                               </span>
                             ) : isSwitchCell ? (
-                              <span className="px-1 h-[14px] leading-[12px] text-[9px] font-bold bg-amber-500/20 text-amber-500 shrink-0">
+                              <span className="px-1.5 h-[16px] leading-[14px] text-[10px] font-bold bg-amber-500/20 text-amber-500 shrink-0">
                                 {isSubSwitchCell ? 'Sub-M' : 'M'}
                               </span>
                             ) : (
-                              <span className="text-[9px] text-[var(--text-secondary)] shrink-0">
+                              <span className="text-[10px] text-[var(--text-secondary)] shrink-0">
                                 {primaryCell.isMsb
                                   ? 'MSB'
                                   : primaryCell.isLsb
@@ -837,7 +839,7 @@ export const BitLayoutMatrix: React.FC = () => {
                     })}
 
                     <td style={{ backgroundColor: 'var(--bg-row-alt)' }}>
-                      <div className="pcan-cell pcan-cell-center">
+                      <div className="pcan-cell pcan-cell-center text-[12px]">
                         {liveByte !== undefined ? formatByteHex(liveByte) : '—'}
                       </div>
                     </td>
@@ -848,7 +850,7 @@ export const BitLayoutMatrix: React.FC = () => {
           </table>
         </div>
 
-        {/* Clean PCAN Symbol Editor Variables & Signals Table with Mux / Page Column */}
+        {/* DBC Studio Signals & Multiplexer Layout Table */}
         <div style={{ borderColor: 'var(--border-strong)' }} className="border">
           {/* Table Subheader + Quick Mux Page Filter */}
           <div
@@ -856,15 +858,15 @@ export const BitLayoutMatrix: React.FC = () => {
               backgroundColor: 'var(--bg-toolbar)',
               borderBottom: '1px solid var(--border-strong)',
             }}
-            className="h-[26px] px-2 flex items-center justify-between text-[11px] select-none"
+            className="min-h-[38px] px-3 py-1 flex items-center justify-between text-[12px] select-none flex-wrap gap-2"
           >
             <span className="font-semibold text-[var(--text-secondary)]">
-              Signals &amp; Variables ({displayedTableSignalIds.length} shown)
+              {t('netdb.matrix.signalsAndVars', { count: displayedTableSignalIds.length })}
             </span>
 
             {selectedMessage.isMultiplexed && (
-              <div className="flex items-center gap-1">
-                <span className="text-[var(--text-muted)] mr-1">Show:</span>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[var(--text-muted)] mr-1">{t('netdb.matrix.showFilter')}</span>
                 <button
                   type="button"
                   onClick={() => setSignalTableScope('all')}
@@ -880,9 +882,9 @@ export const BitLayoutMatrix: React.FC = () => {
                         ? 'var(--text-primary)'
                         : 'var(--text-secondary)',
                   }}
-                  className="h-[20px] px-2 border font-medium cursor-pointer"
+                  className="h-[28px] px-2.5 border font-medium cursor-pointer text-[12px]"
                 >
-                  All Signals ({selectedMessage.signalIds.length})
+                  {t('netdb.matrix.allSignals', { count: selectedMessage.signalIds.length })}
                 </button>
                 <button
                   type="button"
@@ -901,15 +903,15 @@ export const BitLayoutMatrix: React.FC = () => {
                         ? 'var(--text-primary)'
                         : 'var(--text-secondary)',
                   }}
-                  className="h-[20px] px-2 border font-medium cursor-pointer"
+                  className="h-[28px] px-2.5 border font-medium cursor-pointer text-[12px]"
                 >
-                  Current Mux Page Only ({activeSignalIdsOnPage.size})
+                  {t('netdb.matrix.currentMuxPageOnly', { count: activeSignalIdsOnPage.size })}
                 </button>
               </div>
             )}
           </div>
 
-          <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums">
+          <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums text-[12px]">
             <colgroup>
               <col />
               <col style={{ width: '195px' }} />
@@ -922,14 +924,14 @@ export const BitLayoutMatrix: React.FC = () => {
             </colgroup>
             <thead>
               <tr>
-                <th className="font-sans">Signal Name</th>
-                <th className="font-sans">Mux / Page</th>
-                <th>Start | Len</th>
-                <th className="font-sans">Byte Order</th>
-                <th className="font-sans">Type</th>
-                <th>Scale / Off</th>
-                <th>Range</th>
-                <th className="text-right">Live Value</th>
+                <th className="font-sans">{t('netdb.matrix.thSignalName')}</th>
+                <th className="font-sans">{t('netdb.matrix.thMuxPage')}</th>
+                <th>{t('netdb.matrix.thStartLen')}</th>
+                <th className="font-sans">{t('netdb.matrix.thByteOrder')}</th>
+                <th className="font-sans">{t('netdb.matrix.thType')}</th>
+                <th>{t('netdb.matrix.thScaleOff')}</th>
+                <th>{t('netdb.matrix.thRange')}</th>
+                <th className="text-right">{t('netdb.matrix.thLiveValue')}</th>
               </tr>
             </thead>
             <tbody>
@@ -987,14 +989,14 @@ export const BitLayoutMatrix: React.FC = () => {
                       <div className="pcan-cell text-[11px]">
                         {sig.muxRole === 'masterSwitch' ? (
                           <span className="text-amber-500 font-semibold truncate">
-                            Master Switch [M]
+                            {t('netdb.matrix.sigMasterSwitch')}
                           </span>
                         ) : isSubSw ? (
                           <span
                             className="text-amber-400 font-semibold truncate"
                             title={`Sub-Switch [m${formatMuxRanges(sig.muxRanges)} -> M] gated by ${parentSw?.name ?? 'Switch'}`}
                           >
-                            Sub-Switch [m{formatMuxRanges(sig.muxRanges)} → M]
+                            {t('netdb.matrix.sigSubSwitch', { ranges: formatMuxRanges(sig.muxRanges) })}
                           </span>
                         ) : sig.muxRole === 'multiplexed' ? (
                           <span
@@ -1015,7 +1017,7 @@ export const BitLayoutMatrix: React.FC = () => {
                           </span>
                         ) : (
                           <span className="text-[var(--text-muted)] font-sans">
-                            Static
+                            {t('netdb.matrix.sigStatic')}
                           </span>
                         )}
                       </div>

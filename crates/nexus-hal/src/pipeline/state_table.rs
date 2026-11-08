@@ -4,6 +4,7 @@
 
 use crate::dto::{
     BusHealthDto, ChronologicalFrameDto, FrameTelemetryDto, LiveSignalDto, TelemetrySnapshotDto,
+    TraceReplayStatusDto,
 };
 use indexmap::IndexMap;
 use nexus_core::{estimate_frame_wire_bits, BusId, CanIdKey, RawCanFrame};
@@ -213,6 +214,7 @@ impl ChronologicalRing {
                 arb_id: can_id.raw_id(),
                 is_extended: f.is_extended(),
                 is_fd: f.is_fd(),
+                is_brs: f.is_brs(),
                 is_tx: f.is_tx(),
                 dlc: f.dlc,
                 raw_bytes: f.payload().to_vec(),
@@ -671,6 +673,7 @@ impl StateTable {
             buses,
             frames,
             recent_chronological,
+            replay: TraceReplayStatusDto::default(),
         }
     }
 }

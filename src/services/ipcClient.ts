@@ -9,9 +9,16 @@ import type {
 } from '../types/hal';
 import type { DatabaseSchemaDto } from '../types/netdb';
 import type {
+  ChronologicalFrameDto,
+  LoadedTraceFileDto,
   PanicStopResultDto,
   PeriodicTxJobDto,
+  StartTraceReplayArgsDto,
   TelemetrySnapshotDto,
+  TraceFileSummaryDto,
+  TraceReplayControlArgsDto,
+  TraceReplayStatusDto,
+  TraceStorageInfoDto,
   TxTransmitResultDto,
 } from '../types/telemetry';
 
@@ -90,19 +97,103 @@ export function subscribeTelemetry(
   let disposed = false;
   let rafId: number | null = null;
   let pendingSnapshot: TelemetrySnapshotDto | null = null;
+  let pendingChrono: ChronologicalFrameDto[] = [];
+  let pendingSinceMs = 0;
+  let lastFlushMs = 0;
+
+  const flushNow = (): void => {
+    if (rafId !== null) {
+      window.cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    if (disposed || pendingSnapshot === null) {
+      pendingChrono = [];
+      pendingSinceMs = 0;
+      return;
+    }
+    const latest =
+      pendingChrono.length > 0 &&
+      pendingChrono.length !== pendingSnapshot.recentChronological.length
+        ? {
+            ...pendingSnapshot,
+            recentChronological: pendingChrono,
+          }
+        : pendingSnapshot;
+    pendingSnapshot = null;
+    pendingChrono = [];
+    pendingSinceMs = 0;
+    lastFlushMs = performance.now();
+    onSnapshot(latest);
+  };
 
   const scheduleFlush = (snap: TelemetrySnapshotDto): void => {
     if (disposed) return;
+    const now = performance.now();
+
+    if (snap.recentChronological.length > 0) {
+      if (pendingChrono.length === 0) {
+        pendingChrono = [...snap.recentChronological];
+      } else {
+        pendingChrono.push(...snap.recentChronological);
+        if (pendingChrono.length > 2048) {
+          pendingChrono = pendingChrono.slice(pendingChrono.length - 2048);
+        }
+      }
+    }
+
     pendingSnapshot = snap;
+    if (pendingSinceMs === 0) {
+      pendingSinceMs = now;
+    }
+
+    const isHidden =
+      typeof document !== 'undefined' && document.visibilityState === 'hidden';
+
+    // CRITICAL LIVE-STREAM INVARIANT:
+    // Browsers suspend `requestAnimationFrame` in background tabs AND occluded windows!
+    // Flush directly from network/IPC I/O callbacks when hidden or if rAF stalls >= 24ms
+    // so Cloud Live Bridge, Trace recording, and Plotter rings NEVER freeze!
+    if (isHidden) {
+      if (now - lastFlushMs >= 15) {
+        flushNow();
+      }
+      return;
+    }
+
+    if (now - pendingSinceMs >= 24) {
+      flushNow();
+      return;
+    }
+
     if (rafId === null) {
       rafId = window.requestAnimationFrame(() => {
         rafId = null;
-        if (disposed || pendingSnapshot === null) return;
-        const latest = pendingSnapshot;
-        pendingSnapshot = null;
-        onSnapshot(latest);
+        flushNow();
       });
     }
+  };
+
+  const onVisibilityChange = (): void => {
+    if (!disposed && pendingSnapshot !== null) {
+      flushNow();
+    }
+  };
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onVisibilityChange);
+  }
+
+  const cleanupFlushState = (): void => {
+    disposed = true;
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    }
+    if (rafId !== null) {
+      window.cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    pendingSnapshot = null;
+    pendingChrono = [];
+    pendingSinceMs = 0;
   };
 
   if (isTauri) {
@@ -124,12 +215,7 @@ export function subscribeTelemetry(
       });
 
     return () => {
-      disposed = true;
-      if (rafId !== null) {
-        window.cancelAnimationFrame(rafId);
-        rafId = null;
-      }
-      pendingSnapshot = null;
+      cleanupFlushState();
     };
   }
 
@@ -193,13 +279,8 @@ export function subscribeTelemetry(
   connectWebSocket();
 
   return () => {
-    disposed = true;
+    cleanupFlushState();
     clearReconnectTimer();
-    if (rafId !== null) {
-      window.cancelAnimationFrame(rafId);
-      rafId = null;
-    }
-    pendingSnapshot = null;
     if (ws !== null) {
       ws.onopen = null;
       ws.onmessage = null;
@@ -382,4 +463,63 @@ export function apiLoadProject(fileStem: string): Promise<string> {
 
 export function apiDeleteProject(fileStem: string): Promise<void> {
   return invokeCmd<void>('cmd_delete_project', { fileStem });
+}
+
+// ============================================================================
+// Workspace Trace Persistence & Time-Controlled Replay Commands (`traces/`)
+// ============================================================================
+
+export function apiListTraces(): Promise<TraceStorageInfoDto> {
+  return invokeCmd<TraceStorageInfoDto>('cmd_list_traces', {});
+}
+
+export function apiSaveTraceFile(
+  fileName: string,
+  content: string,
+  contentBase64?: string,
+): Promise<TraceFileSummaryDto> {
+  const payload =
+    contentBase64 !== undefined && contentBase64 !== null && contentBase64 !== ''
+      ? { fileName, content: '', contentBase64 }
+      : { fileName, content };
+  return invokeCmd<TraceFileSummaryDto>('cmd_save_trace_file', payload);
+}
+
+export function apiLoadTraceFile(fileName: string): Promise<LoadedTraceFileDto> {
+  return invokeCmd<LoadedTraceFileDto>('cmd_load_trace_file', { fileName });
+}
+
+export function apiDeleteTraceFile(fileName: string): Promise<void> {
+  return invokeCmd<void>('cmd_delete_trace_file', { fileName });
+}
+
+export function apiParseTraceContent(
+  fileName: string,
+  content: string,
+  contentBase64?: string,
+): Promise<LoadedTraceFileDto> {
+  const payload =
+    contentBase64 !== undefined && contentBase64 !== null && contentBase64 !== ''
+      ? { fileName, content: '', contentBase64 }
+      : { fileName, content };
+  return invokeCmd<LoadedTraceFileDto>('cmd_parse_trace_content', payload);
+}
+
+export function apiExportTraceBlf(
+  fileName: string,
+  frames: ChronologicalFrameDto[],
+): Promise<string> {
+  return invokeCmd<string>('cmd_export_trace_blf', { fileName, frames });
+}
+
+export function apiStartTraceReplay(
+  args: StartTraceReplayArgsDto,
+): Promise<TraceReplayStatusDto> {
+  return invokeCmd<TraceReplayStatusDto>('cmd_start_trace_replay', { args });
+}
+
+export function apiControlTraceReplay(
+  args: TraceReplayControlArgsDto,
+): Promise<TraceReplayStatusDto> {
+  return invokeCmd<TraceReplayStatusDto>('cmd_control_trace_replay', { args });
 }

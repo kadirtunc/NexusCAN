@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RotateCcw } from 'lucide-react';
+import { useI18n } from '../i18n';
 
 export type HeroConceptId = '01' | '02' | '03' | '04';
 
@@ -9,33 +10,6 @@ interface ConceptMeta {
   shortName: string;
   description: string;
 }
-
-const CONCEPTS: readonly ConceptMeta[] = [
-  {
-    id: '01',
-    label: '01 · Signal Lock',
-    shortName: 'Signal Lock',
-    description: 'Oscilloscope Reticle & Differential CAN Beam Synchronization',
-  },
-  {
-    id: '02',
-    label: '02 · Silicon ECU',
-    shortName: 'Silicon ECU',
-    description: 'QFN-32 Transceiver Chip & 45° Angle PCB Differential Bus',
-  },
-  {
-    id: '03',
-    label: '03 · Eye Diagram',
-    shortName: 'Eye Diagram',
-    description: '60 FPS Physical Layer CAN-FD Eye Pattern & Bit-Timing Analysis',
-  },
-  {
-    id: '04',
-    label: '04 · Tactical Boot',
-    shortName: 'Tactical Boot',
-    description: 'Aerospace Instrument Laser Calibration & Subsystem Verification',
-  },
-];
 
 const LOCAL_STORAGE_KEY = 'nexuscan_hero_concept';
 
@@ -918,6 +892,7 @@ const ConceptTacticalBoot: React.FC<ConceptTacticalBootProps> = ({ replayNonce }
 // 6. MAIN HERO SHOWCASE CONTAINER WITH LIVE CONCEPT SWITCHER
 // ============================================================================
 export const StartHeroShowcase: React.FC = () => {
+  const { t } = useI18n();
   const [activeConcept, setActiveConcept] = useState<HeroConceptId>(() => {
     if (typeof window !== 'undefined') {
       const saved = window.localStorage.getItem(LOCAL_STORAGE_KEY) as HeroConceptId | null;
@@ -929,6 +904,36 @@ export const StartHeroShowcase: React.FC = () => {
   });
 
   const [replayNonce, setReplayNonce] = useState<number>(0);
+
+  const concepts = useMemo<readonly ConceptMeta[]>(
+    () => [
+      {
+        id: '01' as const,
+        label: `01 · ${t('shell.hero.c01.name')}`,
+        shortName: t('shell.hero.c01.name'),
+        description: t('shell.hero.c01.desc'),
+      },
+      {
+        id: '02' as const,
+        label: `02 · ${t('shell.hero.c02.name')}`,
+        shortName: t('shell.hero.c02.name'),
+        description: t('shell.hero.c02.desc'),
+      },
+      {
+        id: '03' as const,
+        label: `03 · ${t('shell.hero.c03.name')}`,
+        shortName: t('shell.hero.c03.name'),
+        description: t('shell.hero.c03.desc'),
+      },
+      {
+        id: '04' as const,
+        label: `04 · ${t('shell.hero.c04.name')}`,
+        shortName: t('shell.hero.c04.name'),
+        description: t('shell.hero.c04.desc'),
+      },
+    ],
+    [t],
+  );
 
   const handleSelectConcept = (id: HeroConceptId) => {
     setActiveConcept(id);
@@ -948,16 +953,16 @@ export const StartHeroShowcase: React.FC = () => {
       <div className="flex items-center justify-between gap-2 text-[11px]">
         <div className="flex items-center gap-1 text-[var(--text-secondary)]">
           <span className="font-mono text-[10px] text-cyan-400 uppercase tracking-wider font-semibold">
-            Hero Concept:
+            {t('shell.hero.conceptLabel')}
           </span>
           <span className="font-medium text-[var(--text-primary)]">
-            {CONCEPTS.find((c) => c.id === activeConcept)?.label}
+            {concepts.find((c) => c.id === activeConcept)?.label}
           </span>
         </div>
 
         {/* 4 Concept Buttons + Replay */}
         <div className="flex items-center gap-1">
-          {CONCEPTS.map((c) => {
+          {concepts.map((c) => {
             const isSelected = c.id === activeConcept;
             return (
               <button
@@ -985,7 +990,7 @@ export const StartHeroShowcase: React.FC = () => {
           <button
             type="button"
             onClick={handleReplay}
-            title="Replay Entrance Animation Sequence"
+            title={t('shell.hero.replayTooltip')}
             style={{
               backgroundColor: 'var(--bg-panel)',
               borderColor: 'var(--border-strong)',
@@ -994,7 +999,7 @@ export const StartHeroShowcase: React.FC = () => {
             className="h-[22px] px-2 border rounded flex items-center gap-1 text-[10px] font-mono font-medium hover:border-cyan-400 cursor-pointer transition-colors"
           >
             <RotateCcw className="w-3 h-3 text-cyan-400" />
-            <span>Replay</span>
+            <span>{t('shell.hero.replayBtn')}</span>
           </button>
         </div>
       </div>

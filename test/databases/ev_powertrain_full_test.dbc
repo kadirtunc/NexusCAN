@@ -1,0 +1,173 @@
+VERSION "NexusCAN_EV_Powertrain_HIL_Test_v1.0"
+
+
+NS_ :
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: BMS VCU MCU OBC GNSS
+
+
+BO_ 257 BMS_PackStatus: 8 BMS
+ SG_ PackVoltage_V : 0|16@1+ (0.1,0) [0|1000] "V" VCU,MCU,OBC
+ SG_ PackCurrent_A : 16|16@1- (0.1,0) [-500|500] "A" VCU,MCU,OBC
+ SG_ PackSOC_Pct : 32|8@1+ (0.5,0) [0|100] "%" VCU,MCU,OBC
+ SG_ ContactorState : 40|2@1+ (1,0) [0|3] "" VCU,MCU,OBC
+ SG_ IsolationFaultActive : 42|1@1+ (1,0) [0|1] "" VCU,OBC
+ SG_ PackMaxCellTemp_C : 48|8@1+ (1,-40) [-40|215] "degC" VCU,MCU
+ SG_ BmsAliveCounter : 56|4@1+ (1,0) [0|15] "" VCU
+
+BO_ 258 MCU_MotorDrive: 8 MCU
+ SG_ MotorSpeed_RPM : 7|16@0- (1,0) [-15000|15000] "rpm" VCU,BMS
+ SG_ MotorTorque_Nm : 23|16@0- (0.1,0) [-500|500] "Nm" VCU,BMS
+ SG_ InverterTemp_C : 39|8@0+ (1,-40) [-40|215] "degC" VCU,BMS
+ SG_ DcLinkVoltage_V : 47|16@0+ (0.1,0) [0|1000] "V" VCU,BMS
+ SG_ InverterMode : 63|4@0+ (1,0) [0|7] "" VCU,BMS
+
+BO_ 261 BMS_CellVoltagesMux: 8 BMS
+ SG_ MuxPage M : 0|8@1+ (1,0) [0|3] "" VCU
+ SG_ CellBalanceActive : 8|8@1+ (1,0) [0|255] "" VCU
+ SG_ Cell01_mV m0 : 16|16@1+ (1,0) [2500|4500] "mV" VCU
+ SG_ Cell02_mV m0 : 32|16@1+ (1,0) [2500|4500] "mV" VCU
+ SG_ Cell03_mV m0 : 48|16@1+ (1,0) [2500|4500] "mV" VCU
+ SG_ Cell04_mV m1 : 16|16@1+ (1,0) [2500|4500] "mV" VCU
+ SG_ Cell05_mV m1 : 32|16@1+ (1,0) [2500|4500] "mV" VCU
+ SG_ Cell06_mV m1 : 48|16@1+ (1,0) [2500|4500] "mV" VCU
+ SG_ Cell07_mV m2 : 16|16@1+ (1,0) [2500|4500] "mV" VCU
+ SG_ Cell08_mV m2 : 32|16@1+ (1,0) [2500|4500] "mV" VCU
+ SG_ Cell09_mV m2 : 48|16@1+ (1,0) [2500|4500] "mV" VCU
+ SG_ Cell10_mV m3 : 16|16@1+ (1,0) [2500|4500] "mV" VCU
+ SG_ Cell11_mV m3 : 32|16@1+ (1,0) [2500|4500] "mV" VCU
+ SG_ Cell12_mV m3 : 48|16@1+ (1,0) [2500|4500] "mV" VCU
+
+BO_ 517 MCU_FastDiagnosticsFD: 64 MCU
+ SG_ PhaseCurrentU_A : 0|32@1- (1,0) [-600|600] "A" VCU,BMS
+ SG_ PhaseCurrentV_A : 32|32@1- (1,0) [-600|600] "A" VCU,BMS
+ SG_ PhaseCurrentW_A : 64|32@1- (1,0) [-600|600] "A" VCU,BMS
+ SG_ RotorElectricalAngle_Deg : 96|32@1- (1,0) [0|360] "deg" VCU
+ SG_ StatorWindingTemp_C : 128|16@1- (0.1,0) [-40|250] "degC" VCU,BMS
+ SG_ SiCModuleTemp_C : 144|16@1- (0.1,0) [-40|250] "degC" VCU,BMS
+ SG_ SwitchingFreq_kHz : 160|16@1+ (0.01,0) [0|100] "kHz" VCU
+ SG_ TotalMechanicalEnergy_kWh : 192|64@1- (1,0) [0|100000] "kWh" VCU,BMS
+ SG_ ResolverDiagnosticRaw : 384|32@1+ (1,0) [0|4294967295] "" VCU
+ SG_ FdAliveSeqCounter : 496|8@1+ (1,0) [0|255] "" VCU
+ SG_ FdCrc8Checksum : 504|8@1+ (1,0) [0|255] "" VCU
+
+BO_ 2566869221 OBC_ChargerStatusExt: 8 OBC
+ SG_ ChargerOutput_V : 0|16@1+ (0.1,0) [0|1000] "V" BMS,VCU
+ SG_ ChargerOutput_A : 16|16@1- (0.1,0) [-200|500] "A" BMS,VCU
+ SG_ ChargingStage : 32|4@1+ (1,0) [0|7] "" BMS,VCU
+ SG_ PilotDuty_Pct : 40|8@1+ (0.5,0) [0|100] "%" BMS,VCU
+ SG_ InletTemp_C : 48|8@1+ (1,-40) [-40|215] "degC" BMS,VCU
+
+BO_ 784 VCU_DriverControls: 8 VCU
+ SG_ DriveGearMode : 0|4@1+ (1,0) [0|4] "" MCU,BMS
+ SG_ HornPulseCmd : 4|1@1+ (1,0) [0|1] "" MCU
+ SG_ EmergencyLatchCmd : 5|1@1+ (1,0) [0|1] "" BMS,MCU,OBC
+ SG_ RegenLevelStep : 8|8@1+ (1,0) [0|5] "" MCU,BMS
+ SG_ TargetTorquePct : 16|16@1+ (0.1,0) [0|100] "%" MCU
+ SG_ BrakePedalPct : 32|8@1+ (0.5,0) [0|100] "%" MCU,BMS
+
+BO_ 1040 GNSS_VehiclePose: 8 GNSS
+ SG_ GnssLatitude_Deg : 0|32@1- (0.000001,0) [-90|90] "deg" VCU
+ SG_ GnssLongitude_Deg : 32|32@1- (0.000001,0) [-180|180] "deg" VCU
+
+
+CM_ "NexusCAN Tam Kapsamli EV Powertrain, CAN-FD, J1939/Extended ve HIL Simulasyon Test Veritabani.";
+CM_ BU_ BMS "Yuksek Gerilim Batarya Yonetim Sistemi (800V Li-NMC Paket + 12 Hucre Mux Telemetri)";
+CM_ BU_ VCU "Arac Kontrol Unitesi (Surucu Vites, Tork, Rejeneratif Fren ve Acil Durdurma Komutlari)";
+CM_ BU_ MCU "Traksiyon Motoru & SiC Evirici Kontrol Unitesi (Motorola Big-Endian + 64B CAN-FD)";
+CM_ BU_ OBC "29-bit Extended Yerlesik / Hizli Sarj Kontrol Unitesi (0x18FF50E5)";
+CM_ BU_ GNSS "Yuksek Hassasiyetli RTK/GNSS Konumlandirma Dugumu (Harita Widget Testi)";
+
+CM_ BO_ 257 "BMS ana batarya paketi gerilim, akim, SOC ve kontaktor durum mesaji.";
+CM_ BO_ 258 "MCU Motorola (Big-Endian) motor devri, tork ve sicaklik telemetrisi.";
+CM_ BO_ 261 "4 sayfali (MuxPage 0..3) 12-hucre gerilim izleme multiplexer mesaji.";
+CM_ BO_ 517 "64-byte CAN-FD BRS yuksek hizli IEEE-754 Float32/Float64 evirici tanilama cercevesi.";
+CM_ BO_ 2566869221 "29-bit Extended ID (0x18FF50E5) sarj cihazi cikis gerilim/akim ve durum mesaji.";
+CM_ BO_ 784 "Simulasyon kokpitindeki 5 gelismis buton modu ve tork/fren slider hedef sinyalleri.";
+CM_ BO_ 1040 "OpenStreetMap / GNSS harita widget izleme testi icin enlem/boylam telemetrisi.";
+
+CM_ SG_ 257 PackVoltage_V "Ana batarya terminali DC gerilimi (0.1 V cozunurluk).";
+CM_ SG_ 257 PackCurrent_A "Paket akimi: pozitif = desarj (ivmelenme), negatif = rejeneratif sarj.";
+CM_ SG_ 258 MotorSpeed_RPM "Motorola Big-Endian (@0-) isaretli motor devri.";
+CM_ SG_ 517 PhaseCurrentU_A "IEEE-754 32-bit Float U-fazi anlik akimi.";
+CM_ SG_ 517 TotalMechanicalEnergy_kWh "IEEE-754 64-bit Double toplam aktarilan mekanik enerji (byte 24..31).";
+CM_ SG_ 517 FdCrc8Checksum "64-byte CAN-FD sinir dogrulamasi icin son byte (bit 504..511) CRC8 degeri.";
+CM_ SG_ 784 EmergencyLatchCmd "Cift onay kapakli (requireConfirm) Yuksek Gerilim Acil Kesici mandali.";
+
+
+BA_DEF_  "BusType" STRING ;
+BA_DEF_ BO_  "VFrameFormat" ENUM  "StandardCAN","ExtendedCAN","reserved","J1939PG","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","StandardCAN_FD","ExtendedCAN_FD";
+BA_DEF_ BO_  "GenMsgCycleTime" INT 0 60000;
+BA_DEF_ SG_  "GenSigStartValue" FLOAT -1000000000 1000000000;
+
+BA_DEF_DEF_  "BusType" "CAN FD";
+BA_DEF_DEF_  "VFrameFormat" "StandardCAN";
+BA_DEF_DEF_  "GenMsgCycleTime" 0;
+BA_DEF_DEF_  "GenSigStartValue" 0;
+
+BA_ "BusType" "CAN FD";
+BA_ "VFrameFormat" BO_ 257 0;
+BA_ "GenMsgCycleTime" BO_ 257 60;
+BA_ "VFrameFormat" BO_ 258 0;
+BA_ "GenMsgCycleTime" BO_ 258 60;
+BA_ "VFrameFormat" BO_ 261 0;
+BA_ "GenMsgCycleTime" BO_ 261 160;
+BA_ "VFrameFormat" BO_ 517 14;
+BA_ "GenMsgCycleTime" BO_ 517 250;
+BA_ "VFrameFormat" BO_ 2566869221 1;
+BA_ "GenMsgCycleTime" BO_ 2566869221 300;
+BA_ "VFrameFormat" BO_ 784 0;
+BA_ "GenMsgCycleTime" BO_ 784 500;
+BA_ "VFrameFormat" BO_ 1040 0;
+BA_ "GenMsgCycleTime" BO_ 1040 1000;
+
+BA_ "GenSigStartValue" SG_ 257 PackVoltage_V 7950;
+BA_ "GenSigStartValue" SG_ 257 PackSOC_Pct 168;
+BA_ "GenSigStartValue" SG_ 257 ContactorState 2;
+BA_ "GenSigStartValue" SG_ 784 DriveGearMode 3;
+
+
+VAL_ 257 ContactorState 0 "OPEN" 1 "PRECHARGE" 2 "CLOSED" 3 "FAULT" ;
+VAL_ 257 IsolationFaultActive 0 "OK" 1 "ISO_FAULT" ;
+VAL_ 258 InverterMode 0 "INIT" 1 "STANDBY" 2 "TORQUE_CTRL" 3 "REGEN" 4 "DERATING" 5 "FAULT" ;
+VAL_ 2566869221 ChargingStage 0 "IDLE" 1 "HANDSHAKE" 2 "PRECHARGE" 3 "CC_FAST" 4 "CV_TAPER" 5 "COMPLETE" 6 "V2L_EXPORT" 7 "FAULT" ;
+VAL_ 784 DriveGearMode 0 "PARK" 1 "REVERSE" 2 "NEUTRAL" 3 "DRIVE" 4 "SPORT" ;
+VAL_ 784 HornPulseCmd 0 "OFF" 1 "HORN_ON" ;
+VAL_ 784 EmergencyLatchCmd 0 "ARMED_OK" 1 "EMERGENCY_CUTOFF" ;
+
+
+SIG_VALTYPE_ 517 PhaseCurrentU_A : 1;
+SIG_VALTYPE_ 517 PhaseCurrentV_A : 1;
+SIG_VALTYPE_ 517 PhaseCurrentW_A : 1;
+SIG_VALTYPE_ 517 RotorElectricalAngle_Deg : 1;
+SIG_VALTYPE_ 517 TotalMechanicalEnergy_kWh : 2;

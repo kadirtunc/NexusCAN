@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<NetworkDefinition xmlns="http://kayak.2codeornot2code.org/1.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Document name="NexusCAN Industrial DC Fast Charger Station (CCS2 / ISO 15118)"
+            version="1.0"
+            author="NexusCAN QA &amp; HIL Verification"
+            company="NexusCAN"
+            date="2026-11-08">
+    350 kW Endustriyel DC Hizli Sarj Istasyonu (EVSE + ISO 15118 PLC + DC Enerji Sayaci) Kayak XML (.kcd) ag veritabani.
+    11-bit Standart ve 29-bit Extended mesajlari, Multiplexer sayfalarini, isaretli (signed) akim/sicaklik sinyallerini ve LabelSet enum etiketlerini icerir.
+  </Document>
+
+  <Node id="1" name="EVSE"/>
+  <Node id="2" name="PLC"/>
+  <Node id="3" name="METER"/>
+
+  <Bus name="DCFC_StationBus" baudrate="500000">
+
+    <Message id="0x420" name="EVSE_PowerStageStatus" length="8" interval="50" format="standard">
+      <Notes>EVSE SiC guc kati anlik cikis gerilimi, isaretli akimi, sogutma sivisi sicakligi ve durum makinesi.</Notes>
+      <Producer><NodeRef id="1"/></Producer>
+
+      <Signal name="EvseOutputVoltage_V" offset="0" length="16" endianess="little">
+        <Notes>DC bara cikis gerilimi (0.1 V/bit, 0..1000 V).</Notes>
+        <Consumer><NodeRef id="2"/><NodeRef id="3"/></Consumer>
+        <Value type="unsigned" slope="0.1" intercept="0" unit="V" min="0" max="1000"/>
+      </Signal>
+
+      <Signal name="EvseOutputCurrent_A" offset="16" length="16" endianess="little">
+        <Notes>Cikis akimi (signed, pozitif = araca sarj, negatif = V2G sebekeye geri besleme).</Notes>
+        <Consumer><NodeRef id="2"/><NodeRef id="3"/></Consumer>
+        <Value type="signed" slope="0.1" intercept="0" unit="A" min="-500" max="500"/>
+      </Signal>
+
+      <Signal name="CoolantLoopTemp_C" offset="32" length="8" endianess="little">
+        <Notes>Sivi sogutmali sarj kablosu sicakligi (signed 8-bit, 1 degC/bit).</Notes>
+        <Consumer><NodeRef id="2"/></Consumer>
+        <Value type="signed" slope="1" intercept="0" unit="degC" min="-40" max="125"/>
+      </Signal>
+
+      <Signal name="EvseStateMachine" offset="40" length="4" endianess="little">
+        <Notes>CCS2 guc kati calisma durumu.</Notes>
+        <Consumer><NodeRef id="2"/><NodeRef id="3"/></Consumer>
+        <Value type="unsigned" slope="1" intercept="0" min="0" max="7"/>
+        <LabelSet>
+          <Label name="STANDBY" value="0"/>
+          <Label name="SLAC_MATCHING" value="1"/>
+          <Label name="CABLE_CHECK" value="2"/>
+          <Label name="PRECHARGE" value="3"/>
+          <Label name="CURRENT_DEMAND" value="4"/>
+          <Label name="WELDING_DETECTION" value="5"/>
+          <Label name="SESSION_STOP" value="6"/>
+          <Label name="EMERGENCY_SHUTDOWN" value="7"/>
+        </LabelSet>
+      </Signal>
+
+      <Signal name="ConnectorLockState" offset="44" length="2" endianess="little">
+        <Consumer><NodeRef id="2"/></Consumer>
+        <Value type="unsigned" slope="1" intercept="0" min="0" max="3"/>
+        <LabelSet>
+          <Label name="UNLOCKED" value="0"/>
+          <Label name="LOCKED_SAFE" value="1"/>
+          <Label name="JAMMED_WARN" value="2"/>
+          <Label name="ACTUATOR_FAULT" value="3"/>
+        </LabelSet>
+      </Signal>
+
+      <Signal name="InsulationResistance_kOhm" offset="48" length="16" endianess="little">
+        <Consumer><NodeRef id="2"/></Consumer>
+        <Value type="unsigned" slope="1" intercept="0" unit="kOhm" min="0" max="65535"/>
+      </Signal>
+    </Message>
+
+    <Message id="0x425" name="EVSE_PowerModulesMux" length="8" interval="100" format="standard">
+      <Notes>4 adet paralel 87.5 kW SiC guc modulunun (Mux 0..3) sicaklik ve akim paylasim telemetrisi.</Notes>
+      <Producer><NodeRef id="1"/></Producer>
+
+      <Multiplex name="PowerModuleIndex" offset="0" length="8" endianess="little">
+        <Consumer><NodeRef id="2"/></Consumer>
+        <Value type="unsigned" slope="1" intercept="0" min="0" max="3"/>
+        <LabelSet>
+          <Label name="Module_0_Master" value="0"/>
+          <Label name="Module_1_SlaveA" value="1"/>
+          <Label name="Module_2_SlaveB" value="2"/>
+          <Label name="Module_3_SlaveC" value="3"/>
+        </LabelSet>
+
+        <MuxGroup count="0">
+          <Signal name="Mod0_OutputCurrent_A" offset="16" length="16" endianess="little">
+            <Consumer><NodeRef id="2"/></Consumer>
+            <Value type="signed" slope="0.1" intercept="0" unit="A" min="-150" max="150"/>
+          </Signal>
+          <Signal name="Mod0_HeatsinkTemp_C" offset="32" length="16" endianess="little">
+            <Consumer><NodeRef id="2"/></Consumer>
+            <Value type="signed" slope="0.1" intercept="0" unit="degC" min="-40" max="150"/>
+          </Signal>
+        </MuxGroup>
+
+        <MuxGroup count="1">
+          <Signal name="Mod1_OutputCurrent_A" offset="16" length="16" endianess="little">
+            <Consumer><NodeRef id="2"/></Consumer>
+            <Value type="signed" slope="0.1" intercept="0" unit="A" min="-150" max="150"/>
+          </Signal>
+          <Signal name="Mod1_HeatsinkTemp_C" offset="32" length="16" endianess="little">
+            <Consumer><NodeRef id="2"/></Consumer>
+            <Value type="signed" slope="0.1" intercept="0" unit="degC" min="-40" max="150"/>
+          </Signal>
+        </MuxGroup>
+
+        <MuxGroup count="2">
+          <Signal name="Mod2_OutputCurrent_A" offset="16" length="16" endianess="little">
+            <Consumer><NodeRef id="2"/></Consumer>
+            <Value type="signed" slope="0.1" intercept="0" unit="A" min="-150" max="150"/>
+          </Signal>
+          <Signal name="Mod2_HeatsinkTemp_C" offset="32" length="16" endianess="little">
+            <Consumer><NodeRef id="2"/></Consumer>
+            <Value type="signed" slope="0.1" intercept="0" unit="degC" min="-40" max="150"/>
+          </Signal>
+        </MuxGroup>
+
+        <MuxGroup count="3">
+          <Signal name="Mod3_OutputCurrent_A" offset="16" length="16" endianess="little">
+            <Consumer><NodeRef id="2"/></Consumer>
+            <Value type="signed" slope="0.1" intercept="0" unit="A" min="-150" max="150"/>
+          </Signal>
+          <Signal name="Mod3_HeatsinkTemp_C" offset="32" length="16" endianess="little">
+            <Consumer><NodeRef id="2"/></Consumer>
+            <Value type="signed" slope="0.1" intercept="0" unit="degC" min="-40" max="150"/>
+          </Signal>
+        </MuxGroup>
+      </Multiplex>
+    </Message>
+
+    <Message id="0x18FF60E0" name="PLC_Iso15118SessionExt" length="8" interval="200" format="extended">
+      <Notes>ISO 15118-20 PLC iletisim denetleyicisi 29-bit Extended hedef gerilim/akim ve SoC talebi.</Notes>
+      <Producer><NodeRef id="2"/></Producer>
+
+      <Signal name="EvTargetVoltage_V" offset="0" length="16" endianess="little">
+        <Consumer><NodeRef id="1"/></Consumer>
+        <Value type="unsigned" slope="0.1" intercept="0" unit="V" min="0" max="1000"/>
+      </Signal>
+      <Signal name="EvTargetCurrent_A" offset="16" length="16" endianess="little">
+        <Consumer><NodeRef id="1"/></Consumer>
+        <Value type="signed" slope="0.1" intercept="0" unit="A" min="-500" max="500"/>
+      </Signal>
+      <Signal name="EvDisplaySoc_Pct" offset="32" length="8" endianess="little">
+        <Consumer><NodeRef id="1"/><NodeRef id="3"/></Consumer>
+        <Value type="unsigned" slope="0.5" intercept="0" unit="%" min="0" max="100"/>
+      </Signal>
+      <Signal name="Iso15118AuthMode" offset="40" length="4" endianess="little">
+        <Consumer><NodeRef id="1"/></Consumer>
+        <Value type="unsigned" slope="1" intercept="0" min="0" max="3"/>
+        <LabelSet>
+          <Label name="EIM_RFID" value="0"/>
+          <Label name="PLUG_AND_CHARGE_TLS" value="1"/>
+          <Label name="AUTocharge_MAC" value="2"/>
+          <Label name="FREE_VEND_BENCH" value="3"/>
+        </LabelSet>
+      </Signal>
+    </Message>
+
+    <Message id="0x18FF70F0" name="METER_DcEnergyBillingExt" length="8" interval="500" format="extended">
+      <Notes>Eichrecht uyumlu DC enerji sayaci 29-bit Extended aktif guc ve sayac okuma mesaji.</Notes>
+      <Producer><NodeRef id="3"/></Producer>
+
+      <Signal name="SessionDeliveredEnergy_Wh" offset="0" length="32" endianess="little">
+        <Consumer><NodeRef id="1"/><NodeRef id="2"/></Consumer>
+        <Value type="unsigned" slope="1" intercept="0" unit="Wh" min="0" max="10000000"/>
+      </Signal>
+      <Signal name="MeterActivePower_kW" offset="32" length="16" endianess="little">
+        <Consumer><NodeRef id="1"/><NodeRef id="2"/></Consumer>
+        <Value type="signed" slope="0.1" intercept="0" unit="kW" min="-500" max="500"/>
+      </Signal>
+      <Signal name="MeterTamperStatus" offset="48" length="2" endianess="little">
+        <Consumer><NodeRef id="1"/></Consumer>
+        <Value type="unsigned" slope="1" intercept="0" min="0" max="3"/>
+        <LabelSet>
+          <Label name="SEALED_VALID" value="0"/>
+          <Label name="COVER_OPEN" value="1"/>
+          <Label name="MAGNETIC_ALARM" value="2"/>
+          <Label name="CALIBRATION_ERR" value="3"/>
+        </LabelSet>
+      </Signal>
+    </Message>
+
+  </Bus>
+</NetworkDefinition>

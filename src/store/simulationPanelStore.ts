@@ -75,6 +75,31 @@ function generateUuid(): string {
   return `sim_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function cloneWidgetConfig(
+  config: SimulationWidgetDto['config']
+): SimulationWidgetDto['config'] {
+  return {
+    ...config,
+    ...(config.cycleOptions
+      ? { cycleOptions: config.cycleOptions.map((opt) => ({ ...opt })) }
+      : {}),
+    ...(config.options
+      ? { options: config.options.map((opt) => ({ ...opt })) }
+      : {}),
+    ...(config.extraBindings
+      ? { extraBindings: config.extraBindings.map((b) => ({ ...b })) }
+      : {}),
+    ...(config.enumMap ? { enumMap: { ...config.enumMap } } : {}),
+    ...(config.lonBinding ? { lonBinding: { ...config.lonBinding } } : {}),
+    ...(config.headingBinding
+      ? { headingBinding: { ...config.headingBinding } }
+      : {}),
+    ...(config.speedBinding
+      ? { speedBinding: { ...config.speedBinding } }
+      : {}),
+  };
+}
+
 // ============================================================================
 // 60 FPS Generator & Osiloskop Animation Loop
 // ============================================================================
@@ -360,7 +385,7 @@ export const simulationPanelStore = {
         ...w,
         id: generateUuid(),
         layout: { ...w.layout },
-        config: { ...w.config },
+        config: cloneWidgetConfig(w.config),
       })),
       generators: source.generators.map((g) => ({
         ...g,
@@ -446,7 +471,7 @@ export const simulationPanelStore = {
         ...w,
         id: generateUuid(),
         layout: { ...w.layout },
-        config: { ...w.config },
+        config: cloneWidgetConfig(w.config),
       })),
       generators: (file.panel.generators ?? []).map((g) => ({
         ...g,
@@ -817,7 +842,7 @@ export const simulationPanelStore = {
         ...source.layout,
         row: source.layout.row + source.layout.h,
       },
-      config: { ...source.config },
+      config: cloneWidgetConfig(source.config),
     };
 
     const updatedPanel: SimulationPanelDto = {
@@ -1187,7 +1212,7 @@ export const simulationPanelStore = {
       widgets: p.widgets.map((w) => ({
         ...w,
         layout: { ...w.layout },
-        config: { ...w.config },
+        config: cloneWidgetConfig(w.config),
         binding: w.binding ? { ...w.binding } : null,
       })),
       generators: p.generators.map((g) => ({

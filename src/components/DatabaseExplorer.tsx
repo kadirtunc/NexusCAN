@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Plus, X } from 'lucide-react';
 import { databaseStore, useDatabaseStore } from '../store/databaseStore';
 import { transmitStore } from '../store/transmitStore';
+import { useI18n } from '../i18n';
 import type {
   EcuNodeDto,
   MessageSchemaDto,
@@ -18,6 +19,7 @@ function formatCompactMuxRanges(ranges: readonly [number, number][]): string {
 }
 
 export const DatabaseExplorer: React.FC = () => {
+  const { t } = useI18n();
   const dbState = useDatabaseStore();
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(() => new Set());
@@ -107,10 +109,22 @@ export const DatabaseExplorer: React.FC = () => {
       manualSentCount: 0,
       periodicSentCount: 0,
       creator: 'User',
-      comment: `Added from ${schema?.info.name ?? 'DB'}`,
+      comment: t('netdb.explorer.addedFromDb', { name: schema?.info.name ?? 'DB' }),
     });
     databaseStore.setActiveDocTab('rxtx');
   };
+
+  const navTabs = useMemo(
+    () => [
+      { id: 'messages' as const, label: t('netdb.explorer.tabSymbols', { count: schema?.messages.length ?? 0 }) },
+      { id: 'ecus' as const, label: t('netdb.explorer.tabEcus', { count: schema?.ecus.length ?? 0 }) },
+      {
+        id: 'diagnostics' as const,
+        label: t('netdb.explorer.tabDiagnostics', { count: schema?.info.diagnostics.length ?? 0 }),
+      },
+    ],
+    [t, schema],
+  );
 
   if (!schema) {
     return (
@@ -118,7 +132,7 @@ export const DatabaseExplorer: React.FC = () => {
         style={{ backgroundColor: 'var(--bg-panel)', color: 'var(--text-muted)' }}
         className="flex items-center justify-center h-full p-6 text-center text-[12px]"
       >
-        No Symbol Database Loaded.
+        {t('netdb.explorer.noDatabaseLoaded')}
       </div>
     );
   }
@@ -128,39 +142,30 @@ export const DatabaseExplorer: React.FC = () => {
       style={{ backgroundColor: 'var(--bg-panel)' }}
       className="flex flex-col h-full min-h-0 select-none"
     >
-      {/* Slim 26px Item Navigator Header */}
+      {/* Slim 38px Item Navigator Header */}
       <div
         style={{
           backgroundColor: 'var(--bg-toolbar)',
           borderBottom: '1px solid var(--border-strong)',
         }}
-        className="shrink-0 h-[26px] px-2 flex items-center justify-between gap-1.5 text-[11px]"
+        className="shrink-0 min-h-[38px] px-3 py-1 flex items-center justify-between gap-2 text-[12px] flex-wrap"
       >
-        <div className="flex items-center gap-1">
-          {(
-            [
-              { id: 'messages', label: `Symbols (${schema.messages.length})` },
-              { id: 'ecus', label: `ECUs (${schema.ecus.length})` },
-              {
-                id: 'diagnostics',
-                label: `Diagnostics (${schema.info.diagnostics.length})`,
-              },
-            ] as const
-          ).map((t) => {
-            const active = dbState.explorerSubTab === t.id;
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {navTabs.map((tab) => {
+            const active = dbState.explorerSubTab === tab.id;
             return (
               <button
-                key={t.id}
+                key={tab.id}
                 type="button"
-                onClick={() => databaseStore.setExplorerSubTab(t.id)}
+                onClick={() => databaseStore.setExplorerSubTab(tab.id)}
                 style={{
                   backgroundColor: active ? 'var(--bg-panel)' : 'transparent',
                   borderColor: active ? 'var(--border-strong)' : 'transparent',
                   color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
                 }}
-                className="h-[20px] px-2 border font-medium cursor-pointer"
+                className="h-[28px] px-2.5 border text-[12px] font-medium cursor-pointer"
               >
-                {t.label}
+                {tab.label}
               </button>
             );
           })}
@@ -172,21 +177,21 @@ export const DatabaseExplorer: React.FC = () => {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search ID, symbol, mux..."
+              placeholder={t('netdb.explorer.searchPlaceholder')}
               style={{
                 backgroundColor: 'var(--bg-input)',
                 borderColor: 'var(--border-strong)',
                 color: 'var(--text-primary)',
               }}
-              className="h-[20px] w-36 px-1.5 pr-5 border text-[11px] focus:outline-none"
+              className="h-[28px] w-44 px-2 pr-6 border text-[12px] focus:outline-none"
             />
             {searchQuery && (
               <button
                 type="button"
                 onClick={() => setSearchQuery('')}
-                className="absolute right-1 text-[var(--text-muted)] cursor-pointer"
+                className="absolute right-1.5 text-[var(--text-muted)] cursor-pointer"
               >
-                <X className="w-3 h-3" />
+                <X className="w-3.5 h-3.5" />
               </button>
             )}
           </div>
@@ -196,23 +201,23 @@ export const DatabaseExplorer: React.FC = () => {
       {/* Tree / List Content */}
       <div className="flex-1 min-h-0 overflow-y-auto">
         {dbState.explorerSubTab === 'messages' && (
-          <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums">
+          <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums text-[12px]">
             <colgroup>
-              <col style={{ width: '24px' }} />
-              <col style={{ width: '74px' }} />
+              <col style={{ width: '28px' }} />
+              <col style={{ width: '80px' }} />
               <col />
-              <col style={{ width: '38px' }} />
-              <col style={{ width: '52px' }} />
-              <col style={{ width: '50px' }} />
+              <col style={{ width: '42px' }} />
+              <col style={{ width: '60px' }} />
+              <col style={{ width: '56px' }} />
             </colgroup>
             <thead>
               <tr>
                 <th />
-                <th>ID</th>
-                <th className="font-sans">Symbol</th>
-                <th className="text-right">DLC</th>
-                <th className="font-sans">ECU</th>
-                <th className="text-center font-sans">TX</th>
+                <th>{t('netdb.explorer.thId')}</th>
+                <th className="font-sans">{t('netdb.explorer.thSymbol')}</th>
+                <th className="text-right">{t('netdb.explorer.thDlc')}</th>
+                <th className="font-sans">{t('netdb.explorer.thEcu')}</th>
+                <th className="text-center font-sans">{t('netdb.explorer.thTx')}</th>
               </tr>
             </thead>
             <tbody>
@@ -239,7 +244,7 @@ export const DatabaseExplorer: React.FC = () => {
                             ? 'var(--bg-row-hover)'
                             : 'var(--bg-panel)',
                       }}
-                      className="hover:!bg-[var(--bg-row-hover)] cursor-pointer"
+                      className="hover:!bg-[var(--bg-row-hover)] cursor-pointer text-[12px]"
                     >
                       <td
                         className="px-0"
@@ -263,27 +268,27 @@ export const DatabaseExplorer: React.FC = () => {
                       </td>
 
                       <td>
-                        <div className="pcan-cell">
+                        <div className="pcan-cell text-[12px]">
                           {formatPcanIdHex(msg.arbId, msg.isExtended)}h
                         </div>
                       </td>
 
                       <td>
                         <div
-                          className="pcan-cell font-sans gap-1.5"
+                          className="pcan-cell font-sans gap-1.5 text-[12px]"
                           title={
                             msg.isMultiplexed
                               ? `${msg.name} — ${
                                   hasCascadedMux
-                                    ? 'Cascaded Multi-Level Multiplexed Symbol'
-                                    : 'Multiplexed Symbol'
+                                    ? t('netdb.explorer.cascadedMuxSymbolTitle')
+                                    : t('netdb.explorer.muxSymbolTitle')
                                 }`
                               : msg.name
                           }
                         >
                           <span className="font-medium truncate">{msg.name}</span>
                           {msg.isMultiplexed && (
-                            <span className="px-1 h-[15px] leading-[13px] text-[9px] font-mono font-bold border border-amber-500/50 bg-amber-500/15 text-amber-500 shrink-0">
+                            <span className="px-1.5 h-[18px] leading-[16px] text-[10px] font-mono font-bold border border-amber-500/50 bg-amber-500/15 text-amber-500 shrink-0">
                               {hasCascadedMux ? 'MUX²' : 'MUX'}
                             </span>
                           )}
@@ -291,12 +296,12 @@ export const DatabaseExplorer: React.FC = () => {
                       </td>
 
                       <td>
-                        <div className="pcan-cell pcan-cell-right">{msg.dlc}</div>
+                        <div className="pcan-cell pcan-cell-right text-[12px]">{msg.dlc}</div>
                       </td>
 
                       <td>
                         <div
-                          className="pcan-cell font-sans text-[var(--text-secondary)]"
+                          className="pcan-cell font-sans text-[var(--text-secondary)] text-[12px]"
                           title={msg.transmitters.join(', ')}
                         >
                           <span className="truncate">{msg.transmitters.join(',')}</span>
@@ -312,11 +317,11 @@ export const DatabaseExplorer: React.FC = () => {
                               backgroundColor: 'var(--bg-toolbar)',
                               borderColor: 'var(--border-strong)',
                             }}
-                            className="px-1.5 h-[17px] leading-none border text-[10px] inline-flex items-center gap-0.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--text-secondary)] cursor-pointer"
-                            title="Add symbol to Transmit List"
+                            className="px-2 h-[22px] leading-none border text-[11px] font-medium inline-flex items-center gap-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--text-secondary)] cursor-pointer"
+                            title={t('netdb.explorer.addSymbolToTxList')}
                           >
-                            <Plus className="w-2.5 h-2.5" />
-                            <span>TX</span>
+                            <Plus className="w-3 h-3" />
+                            <span>{t('netdb.explorer.thTx')}</span>
                           </button>
                         </div>
                       </td>
@@ -347,15 +352,31 @@ export const DatabaseExplorer: React.FC = () => {
                                 ? 'var(--bg-row-selected)'
                                 : 'var(--bg-row-signal)',
                             }}
-                            className="text-[11px] hover:!bg-[var(--bg-row-hover)] cursor-pointer"
+                            className="text-[12px] hover:!bg-[var(--bg-row-hover)] cursor-pointer"
                             title={
                               sig.muxRole === 'masterSwitch'
-                                ? `${sig.name} — Master Multiplexer Switch [M] (${sig.startBit}|${sig.bitLength})`
+                                ? t('netdb.explorer.masterSwitchTitle', {
+                                    name: sig.name,
+                                    startBit: sig.startBit,
+                                    bitLength: sig.bitLength,
+                                  })
                                 : isSubSwitch
-                                  ? `${sig.name} — Cascaded Sub-Switch [m${formatCompactMuxRanges(sig.muxRanges)} · M] gated by ${parentSw?.name ?? 'Switch'}`
+                                  ? t('netdb.explorer.subSwitchTitle', {
+                                      name: sig.name,
+                                      ranges: formatCompactMuxRanges(sig.muxRanges),
+                                      parent: parentSw?.name ?? 'Switch',
+                                    })
                                   : sig.muxRole === 'multiplexed'
-                                    ? `${sig.name} — Multiplexed Signal [m${formatCompactMuxRanges(sig.muxRanges)}] via ${parentSw?.name ?? 'Switch'} (Click to activate branch in Bit Layout)`
-                                    : `${sig.name} — Static Signal (${sig.startBit}|${sig.bitLength})`
+                                    ? t('netdb.explorer.muxSignalTitle', {
+                                        name: sig.name,
+                                        ranges: formatCompactMuxRanges(sig.muxRanges),
+                                        parent: parentSw?.name ?? 'Switch',
+                                      })
+                                    : t('netdb.explorer.staticSignalTitle', {
+                                        name: sig.name,
+                                        startBit: sig.startBit,
+                                        bitLength: sig.bitLength,
+                                      })
                             }
                           >
                             <td className="px-0">
@@ -363,22 +384,22 @@ export const DatabaseExplorer: React.FC = () => {
                             </td>
 
                             <td>
-                              <div className="pcan-cell text-[var(--text-muted)]">
+                              <div className="pcan-cell text-[var(--text-muted)] text-[11.5px]">
                                 {sig.startBit}|{sig.bitLength}
                               </div>
                             </td>
 
                             <td colSpan={4}>
-                              <div className="pcan-cell pl-2 border-l-2 border-emerald-500/40 font-sans justify-between gap-1.5">
+                              <div className="pcan-cell pl-2.5 border-l-2 border-emerald-500/40 font-sans justify-between gap-2 text-[12px]">
                                 <div className="flex items-center min-w-0">
-                                  <span className="text-emerald-500 font-mono font-bold mr-1 shrink-0">
+                                  <span className="text-emerald-500 font-mono font-bold mr-1.5 shrink-0">
                                     ~
                                   </span>
                                   <span className="truncate font-medium">
                                     {sig.name}
                                   </span>
                                   {sig.unit && (
-                                    <span className="ml-1 text-[var(--text-muted)] font-mono shrink-0">
+                                    <span className="ml-1 text-[var(--text-muted)] font-mono shrink-0 text-[11px]">
                                       [{sig.unit}]
                                     </span>
                                   )}
@@ -386,23 +407,23 @@ export const DatabaseExplorer: React.FC = () => {
 
                                 {/* Multiplexer Role Badge */}
                                 {sig.muxRole === 'masterSwitch' && (
-                                  <span className="px-1 h-[15px] leading-[13px] text-[10px] font-mono font-bold border border-amber-500/60 bg-amber-500/15 text-amber-500 shrink-0">
+                                  <span className="px-1.5 h-[18px] leading-[16px] text-[10.5px] font-mono font-bold border border-amber-500/60 bg-amber-500/15 text-amber-500 shrink-0">
                                     [M]
                                   </span>
                                 )}
                                 {sig.muxRole === 'multiplexed' && isSubSwitch && (
-                                  <span className="px-1 h-[15px] leading-[13px] text-[10px] font-mono font-bold border border-amber-500/60 bg-violet-500/15 text-amber-400 shrink-0">
+                                  <span className="px-1.5 h-[18px] leading-[16px] text-[10.5px] font-mono font-bold border border-amber-500/60 bg-violet-500/15 text-amber-400 shrink-0">
                                     [m{formatCompactMuxRanges(sig.muxRanges)} · M]
                                   </span>
                                 )}
                                 {sig.muxRole === 'multiplexed' && !isSubSwitch && (
-                                  <span className="px-1 h-[15px] leading-[13px] text-[10px] font-mono border border-sky-500/50 bg-sky-500/10 text-sky-500 shrink-0">
+                                  <span className="px-1.5 h-[18px] leading-[16px] text-[10.5px] font-mono border border-sky-500/50 bg-sky-500/10 text-sky-500 shrink-0">
                                     [m{formatCompactMuxRanges(sig.muxRanges)}]
                                   </span>
                                 )}
                                 {msg.isMultiplexed && sig.muxRole === 'static' && (
-                                  <span className="px-1 h-[15px] leading-[13px] text-[9px] font-mono text-[var(--text-muted)] border border-[var(--border-grid)] shrink-0">
-                                    Static
+                                  <span className="px-1.5 h-[18px] leading-[16px] text-[10px] font-mono text-[var(--text-muted)] border border-[var(--border-grid)] shrink-0">
+                                    {t('netdb.explorer.staticBadge')}
                                   </span>
                                 )}
                               </div>
@@ -418,40 +439,40 @@ export const DatabaseExplorer: React.FC = () => {
         )}
 
         {dbState.explorerSubTab === 'ecus' && (
-          <table className="pcan-grid pcan-grid-fixed">
+          <table className="pcan-grid pcan-grid-fixed text-[12px]">
             <colgroup>
-              <col style={{ width: '96px' }} />
-              <col style={{ width: '64px' }} />
-              <col style={{ width: '64px' }} />
+              <col style={{ width: '110px' }} />
+              <col style={{ width: '75px' }} />
+              <col style={{ width: '75px' }} />
               <col />
             </colgroup>
             <thead>
               <tr>
-                <th>ECU Node</th>
-                <th className="text-right">TX Msgs</th>
-                <th className="text-right">RX Msgs</th>
-                <th>Comment</th>
+                <th>{t('netdb.explorer.thEcuNode')}</th>
+                <th className="text-right">{t('netdb.explorer.thTxMsgs')}</th>
+                <th className="text-right">{t('netdb.explorer.thRxMsgs')}</th>
+                <th>{t('netdb.explorer.thComment')}</th>
               </tr>
             </thead>
             <tbody>
               {filteredEcus.map((ecu) => (
                 <tr key={ecu.name}>
                   <td>
-                    <div className="pcan-cell font-mono font-semibold">{ecu.name}</div>
+                    <div className="pcan-cell font-mono font-semibold text-[12px]">{ecu.name}</div>
                   </td>
                   <td>
-                    <div className="pcan-cell pcan-cell-right font-mono tabular-nums">
+                    <div className="pcan-cell pcan-cell-right font-mono tabular-nums text-[12px]">
                       {ecu.txMessageKeys.length}
                     </div>
                   </td>
                   <td>
-                    <div className="pcan-cell pcan-cell-right font-mono tabular-nums">
+                    <div className="pcan-cell pcan-cell-right font-mono tabular-nums text-[12px]">
                       {ecu.rxMessageKeys.length}
                     </div>
                   </td>
                   <td>
                     <div
-                      className="pcan-cell text-[var(--text-secondary)]"
+                      className="pcan-cell text-[var(--text-secondary)] text-[12px]"
                       title={ecu.comment ?? undefined}
                     >
                       <span className="truncate">{ecu.comment ?? '—'}</span>
@@ -474,10 +495,12 @@ export const DatabaseExplorer: React.FC = () => {
 const DiagnosticsTable: React.FC<{ diagnostics: readonly ParseDiagnosticDto[] }> = ({
   diagnostics,
 }) => {
+  const { t } = useI18n();
+
   if (diagnostics.length === 0) {
     return (
       <div className="p-6 text-center text-[12px] text-emerald-500 font-medium">
-        0 Parser Warnings / 0 Errors — Symbol Schema Verified Clean.
+        {t('netdb.explorer.diagClean')}
       </div>
     );
   }
@@ -492,10 +515,10 @@ const DiagnosticsTable: React.FC<{ diagnostics: readonly ParseDiagnosticDto[] }>
       </colgroup>
       <thead>
         <tr>
-          <th>Severity</th>
-          <th>Code</th>
-          <th>Line</th>
-          <th>Message</th>
+          <th>{t('netdb.explorer.thSeverity')}</th>
+          <th>{t('netdb.explorer.thCode')}</th>
+          <th>{t('netdb.explorer.thLine')}</th>
+          <th>{t('netdb.explorer.thMessage')}</th>
         </tr>
       </thead>
       <tbody>

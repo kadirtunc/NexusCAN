@@ -1,0 +1,80 @@
+VERSION "NexusCAN_Cascaded_Mux_BitMatrix_Stress_v1.0"
+
+
+NS_ :
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	BA_DEF_DEF_
+	VAL_TABLE_
+	SIG_VALTYPE_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: DOMAIN_CTRL SENSOR_HUB ACTUATOR_ECU
+
+
+BO_ 384 CascadedMuxDiag3Level: 8 SENSOR_HUB
+ SG_ RootDomainMux M : 0|4@1+ (1,0) [0|15] "" DOMAIN_CTRL
+ SG_ FrameCrc4 : 4|4@1+ (1,0) [0|15] "" DOMAIN_CTRL
+ SG_ ClusterSubMux m0M : 8|4@1+ (1,0) [0|15] "" DOMAIN_CTRL
+ SG_ ChannelLeafMux m0M : 12|4@1+ (1,0) [0|15] "" DOMAIN_CTRL
+ SG_ Leaf0_CrossByteIntelSigned m0 : 16|12@1- (0.025,0) [-50|50] "mm" DOMAIN_CTRL
+ SG_ Leaf0_CrossByteMotoSawtooth m0 : 35|12@0- (0.05,0) [-100|100] "deg/s" DOMAIN_CTRL
+ SG_ Leaf1_PressureBar m1 : 16|16@1+ (0.01,0) [0|655.35] "bar" DOMAIN_CTRL
+ SG_ Leaf1_ValveDutyPct m1 : 32|16@1+ (0.1,0) [0|100] "%" DOMAIN_CTRL
+ SG_ Cluster2_BusSupplyMv m2 : 16|16@1+ (1,0) [0|36000] "mV" DOMAIN_CTRL
+ SG_ Cluster2_BoardTempC m2 : 32|16@1- (0.01,0) [-55|150] "degC" DOMAIN_CTRL
+ SG_ SafetyDomainStatus m3 : 8|8@1+ (1,0) [0|255] "" DOMAIN_CTRL,ACTUATOR_ECU
+ SG_ SafetyWatchdogUs m3 : 16|32@1+ (1,0) [0|4294967295] "us" DOMAIN_CTRL
+ SG_ SharedHealthBit m3 : 56|8@1+ (1,0) [0|255] "" DOMAIN_CTRL
+
+BO_ 640 UnalignedBitPackingStressFD: 64 ACTUATOR_ECU
+ SG_ MotoSawtooth13Bit_A : 5|13@0- (0.1,0) [-400|400] "Nm" DOMAIN_CTRL
+ SG_ IntelUnaligned11Bit_B : 21|11@1- (0.25,0) [-256|255.75] "A" DOMAIN_CTRL
+ SG_ MotoCross3Byte19Bit_C : 35|19@0+ (0.001,0) [0|524.287] "rad" DOMAIN_CTRL
+ SG_ Float32_KalmanGain : 64|32@1- (1,0) [0|10] "" DOMAIN_CTRL
+ SG_ Float64_HighPrecTimestampS : 128|64@1- (1,0) [0|100000000] "s" DOMAIN_CTRL
+ SG_ HighByteMoto16Bit_D : 423|16@0- (0.01,0) [-327.68|327.67] "degC" DOMAIN_CTRL
+ SG_ Bit511_BoundaryFlag : 511|1@1+ (1,0) [0|1] "" DOMAIN_CTRL
+
+
+CM_ "SG_MUL_VAL_ 3-katmanli kaskad multiplexer (RootDomainMux -> ClusterSubMux -> ChannelLeafMux) ve sinir gecisli Intel/Motorola CAN-FD bit matrisi stres testi.";
+CM_ BO_ 384 "BitLayoutMatrix MUX xN rozetlerini ve dinamik agac dallanmasini test etmek icin 3-seviye kaskad mux cercevesi.";
+CM_ BO_ 640 "Byte sinirlarini kesen 11/13/19-bit Intel & Vector Motorola Sawtooth + Float32/Float64 + Bit 511 sinir testi.";
+
+
+BA_DEF_  "BusType" STRING ;
+BA_DEF_ BO_  "VFrameFormat" ENUM  "StandardCAN","ExtendedCAN","reserved","J1939PG","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","StandardCAN_FD","ExtendedCAN_FD";
+BA_DEF_ BO_  "GenMsgCycleTime" INT 0 60000;
+
+BA_DEF_DEF_  "BusType" "CAN FD";
+BA_DEF_DEF_  "VFrameFormat" "StandardCAN";
+BA_DEF_DEF_  "GenMsgCycleTime" 0;
+
+BA_ "BusType" "CAN FD";
+BA_ "VFrameFormat" BO_ 384 0;
+BA_ "GenMsgCycleTime" BO_ 384 20;
+BA_ "VFrameFormat" BO_ 640 14;
+BA_ "GenMsgCycleTime" BO_ 640 10;
+
+VAL_ 384 RootDomainMux 0 "SENSOR_CLUSTER_A" 1 "SENSOR_CLUSTER_B" 2 "SAFETY_SUPERVISOR" 3 "CALIBRATION" ;
+VAL_ 384 SafetyDomainStatus 0 "ASILD_OK" 1 "DEGRADED" 2 "SAFE_STATE" 3 "LATCHED_FAULT" ;
+
+SIG_VALTYPE_ 640 Float32_KalmanGain : 1;
+SIG_VALTYPE_ 640 Float64_HighPrecTimestampS : 2;
+
+SG_MUL_VAL_ 384 ClusterSubMux RootDomainMux 0-1;
+SG_MUL_VAL_ 384 ChannelLeafMux ClusterSubMux 0-0;
+SG_MUL_VAL_ 384 Leaf0_CrossByteIntelSigned ChannelLeafMux 0-0;
+SG_MUL_VAL_ 384 Leaf0_CrossByteMotoSawtooth ChannelLeafMux 0-0;
+SG_MUL_VAL_ 384 Leaf1_PressureBar ChannelLeafMux 1-1;
+SG_MUL_VAL_ 384 Leaf1_ValveDutyPct ChannelLeafMux 1-1;
+SG_MUL_VAL_ 384 Cluster2_BusSupplyMv ClusterSubMux 2-3;
+SG_MUL_VAL_ 384 Cluster2_BoardTempC ClusterSubMux 2-3;
+SG_MUL_VAL_ 384 SafetyDomainStatus RootDomainMux 2-3;
+SG_MUL_VAL_ 384 SafetyWatchdogUs RootDomainMux 2-3;
+SG_MUL_VAL_ 384 SharedHealthBit RootDomainMux 0-3, 8-10;

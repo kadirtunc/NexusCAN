@@ -1,0 +1,655 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-11-08T20:45:00.000Z",
+  "panel": {
+    "id": "panel-ev-cockpit-hil-v1",
+    "name": "EV Powertrain & Restbus HIL Kokpiti",
+    "description": "5 gelismis buton modu (Momentary, Toggle, Pulse, Step, Cycle + Cift Onayli Acil Kesici), Tork Slider, Osiloskop ve GNSS Harita iceren tam kapsamli HIL paneli.",
+    "gridCols": 24,
+    "rowHeightPx": 42,
+    "targetDatabaseId": "db:ev_powertrain_full_test.dbc",
+    "createdAt": "2026-11-08T20:45:00.000Z",
+    "updatedAt": "2026-11-08T20:45:00.000Z",
+    "widgets": [
+      {
+        "id": "w-grp-telem",
+        "kind": "group",
+        "title": "CAN / CAN-FD CANLI TELEMETRİ GÖSTERGELERİ (BMS + MCU + OBC + GNSS)",
+        "accentColor": "cyan",
+        "layout": {
+          "col": 0,
+          "row": 0,
+          "w": 24,
+          "h": 1
+        },
+        "binding": null,
+        "config": {
+          "subtitle": "0x101 BMS_PackStatus • 0x102 MCU_MotorDrive (Motorola) • 0x18FF50E5 OBC • 0x410 GNSS"
+        }
+      },
+      {
+        "id": "w-gauge-rpm",
+        "kind": "gauge",
+        "title": "Motor Devri (RPM)",
+        "accentColor": "cyan",
+        "layout": {
+          "col": 0,
+          "row": 1,
+          "w": 6,
+          "h": 5
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x102",
+          "messageName": "MCU_MotorDrive",
+          "arbId": 258,
+          "isExtended": false,
+          "signalName": "MotorSpeed_RPM",
+          "unit": "rpm",
+          "min": -15000.0,
+          "max": 15000.0,
+          "factor": 1.0,
+          "offset": 0.0,
+          "decimals": 0,
+          "color": "#38BDF8",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "min": -3000,
+          "max": 12000,
+          "warnHigh": 9000,
+          "critHigh": 10500,
+          "majorTicks": 6,
+          "showNeedle": true,
+          "showDigital": true
+        }
+      },
+      {
+        "id": "w-bar-soc",
+        "kind": "bar",
+        "title": "Batarya SoC (%)",
+        "accentColor": "emerald",
+        "layout": {
+          "col": 6,
+          "row": 1,
+          "w": 4,
+          "h": 5
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x101",
+          "messageName": "BMS_PackStatus",
+          "arbId": 257,
+          "isExtended": false,
+          "signalName": "PackSOC_Pct",
+          "unit": "%",
+          "min": 0.0,
+          "max": 100.0,
+          "factor": 0.5,
+          "offset": 0.0,
+          "decimals": 1,
+          "color": "#3FB980",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "min": 0,
+          "max": 100,
+          "warnLow": 20,
+          "critLow": 10,
+          "orientation": "vertical",
+          "showPeakHold": true,
+          "showDigital": true
+        }
+      },
+      {
+        "id": "w-num-pack-v",
+        "kind": "numeric",
+        "title": "HV Paket Gerilimi",
+        "accentColor": "amber",
+        "layout": {
+          "col": 10,
+          "row": 1,
+          "w": 4,
+          "h": 2
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x101",
+          "messageName": "BMS_PackStatus",
+          "arbId": 257,
+          "isExtended": false,
+          "signalName": "PackVoltage_V",
+          "unit": "V",
+          "min": 0.0,
+          "max": 1000.0,
+          "factor": 0.1,
+          "offset": 0.0,
+          "decimals": 1,
+          "color": "#E3B341",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "min": 0,
+          "max": 1000,
+          "showRawHex": true,
+          "fontSize": "lg"
+        }
+      },
+      {
+        "id": "w-led-contactor",
+        "kind": "led",
+        "title": "HV Ana Kontaktör",
+        "accentColor": "emerald",
+        "layout": {
+          "col": 10,
+          "row": 3,
+          "w": 4,
+          "h": 3
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x101",
+          "messageName": "BMS_PackStatus",
+          "arbId": 257,
+          "isExtended": false,
+          "signalName": "ContactorState",
+          "unit": "",
+          "min": 0.0,
+          "max": 3.0,
+          "factor": 1.0,
+          "offset": 0.0,
+          "decimals": 0,
+          "color": "#3FB980",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "ledOperator": "gte",
+          "ledThreshold": 2,
+          "onLabel": "CLOSED (HV AKTİF)",
+          "offLabel": "OPEN / PRECHARGE"
+        }
+      },
+      {
+        "id": "w-graph-drive",
+        "kind": "graph",
+        "title": "RPM & Paket Akımı Osiloskobu",
+        "accentColor": "blue",
+        "layout": {
+          "col": 14,
+          "row": 1,
+          "w": 10,
+          "h": 5
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x102",
+          "messageName": "MCU_MotorDrive",
+          "arbId": 258,
+          "isExtended": false,
+          "signalName": "MotorSpeed_RPM",
+          "unit": "rpm",
+          "min": -15000.0,
+          "max": 15000.0,
+          "factor": 1.0,
+          "offset": 0.0,
+          "decimals": 0,
+          "color": "#58A6FF",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "extraBindings": [
+            {
+              "busId": 0,
+              "messageKey": "STD:0x101",
+              "messageName": "BMS_PackStatus",
+              "arbId": 257,
+              "isExtended": false,
+              "signalName": "PackCurrent_A",
+              "unit": "A",
+              "min": -500.0,
+              "max": 500.0,
+              "factor": 0.1,
+              "offset": 0.0,
+              "decimals": 1,
+              "color": "#E3B341",
+              "databaseId": "db:ev_powertrain_full_test.dbc",
+              "databaseName": "ev_powertrain_full_test.dbc"
+            }
+          ],
+          "timeWindowSec": 10,
+          "autoScaleY": true,
+          "showLegend": true
+        }
+      },
+      {
+        "id": "w-grp-controls",
+        "kind": "group",
+        "title": "VCU ETKİLEŞİMLİ SÜRÜCÜ KOMUTLARI — 5 BUTON MODU + ÇİFT ONAY KAPAĞI (0x310)",
+        "accentColor": "amber",
+        "layout": {
+          "col": 0,
+          "row": 6,
+          "w": 24,
+          "h": 1
+        },
+        "binding": null,
+        "config": {
+          "subtitle": "Momentary (Space) • Toggle • Pulse 350ms (H) • Step (R) • Cycle P/R/N/D/S (G) • Acil Kesici (Çift Onay)"
+        }
+      },
+      {
+        "id": "w-btn-momentary",
+        "kind": "button",
+        "title": "1. Momentary Korna",
+        "accentColor": "cyan",
+        "layout": {
+          "col": 0,
+          "row": 7,
+          "w": 4,
+          "h": 3
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x310",
+          "messageName": "VCU_DriverControls",
+          "arbId": 784,
+          "isExtended": false,
+          "signalName": "HornPulseCmd",
+          "unit": "",
+          "min": 0.0,
+          "max": 1.0,
+          "factor": 1.0,
+          "offset": 0.0,
+          "decimals": 0,
+          "color": "#38BDF8",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "buttonMode": "momentary",
+          "pressValue": 1,
+          "releaseValue": 0,
+          "buttonLabel": "BASILI TUT KORNA",
+          "hotkey": "Space",
+          "txCycleMs": 0
+        }
+      },
+      {
+        "id": "w-btn-toggle",
+        "kind": "button",
+        "title": "2. Toggle Kontaktör",
+        "accentColor": "emerald",
+        "layout": {
+          "col": 4,
+          "row": 7,
+          "w": 4,
+          "h": 3
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x101",
+          "messageName": "BMS_PackStatus",
+          "arbId": 257,
+          "isExtended": false,
+          "signalName": "ContactorState",
+          "unit": "",
+          "min": 0.0,
+          "max": 3.0,
+          "factor": 1.0,
+          "offset": 0.0,
+          "decimals": 0,
+          "color": "#3FB980",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "buttonMode": "toggle",
+          "pressValue": 2,
+          "releaseValue": 0,
+          "buttonLabel": "HV KONTAKTÖR AÇ/KAPA",
+          "txCycleMs": 0
+        }
+      },
+      {
+        "id": "w-btn-pulse",
+        "kind": "button",
+        "title": "3. Pulse Flaşör (350ms)",
+        "accentColor": "blue",
+        "layout": {
+          "col": 8,
+          "row": 7,
+          "w": 4,
+          "h": 3
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x310",
+          "messageName": "VCU_DriverControls",
+          "arbId": 784,
+          "isExtended": false,
+          "signalName": "HornPulseCmd",
+          "unit": "",
+          "min": 0.0,
+          "max": 1.0,
+          "factor": 1.0,
+          "offset": 0.0,
+          "decimals": 0,
+          "color": "#58A6FF",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "buttonMode": "pulse",
+          "pressValue": 1,
+          "releaseValue": 0,
+          "pulseDurationMs": 350,
+          "buttonLabel": "350ms DARBE GÖNDER",
+          "hotkey": "KeyH",
+          "txCycleMs": 0
+        }
+      },
+      {
+        "id": "w-btn-step",
+        "kind": "button",
+        "title": "4. Step Rejenerasyon",
+        "accentColor": "amber",
+        "layout": {
+          "col": 12,
+          "row": 7,
+          "w": 4,
+          "h": 3
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x310",
+          "messageName": "VCU_DriverControls",
+          "arbId": 784,
+          "isExtended": false,
+          "signalName": "RegenLevelStep",
+          "unit": "",
+          "min": 0.0,
+          "max": 5.0,
+          "factor": 1.0,
+          "offset": 0.0,
+          "decimals": 0,
+          "color": "#E3B341",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "buttonMode": "step",
+          "min": 0,
+          "max": 5,
+          "stepDelta": 1,
+          "stepWrap": true,
+          "buttonLabel": "REGEN KADEMESİ +1",
+          "hotkey": "KeyR",
+          "txCycleMs": 0
+        }
+      },
+      {
+        "id": "w-btn-cycle",
+        "kind": "button",
+        "title": "5. Cycle Vites Seçici",
+        "accentColor": "steel",
+        "layout": {
+          "col": 16,
+          "row": 7,
+          "w": 4,
+          "h": 3
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x310",
+          "messageName": "VCU_DriverControls",
+          "arbId": 784,
+          "isExtended": false,
+          "signalName": "DriveGearMode",
+          "unit": "",
+          "min": 0.0,
+          "max": 4.0,
+          "factor": 1.0,
+          "offset": 0.0,
+          "decimals": 0,
+          "color": "#94A3B8",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "buttonMode": "cycle",
+          "buttonLabel": "VİTES DEĞİŞTİR",
+          "hotkey": "KeyG",
+          "cycleOptions": [
+            {
+              "label": "P (PARK)",
+              "value": 0
+            },
+            {
+              "label": "R (REVERSE)",
+              "value": 1
+            },
+            {
+              "label": "N (NEUTRAL)",
+              "value": 2
+            },
+            {
+              "label": "D (DRIVE)",
+              "value": 3
+            },
+            {
+              "label": "S (SPORT)",
+              "value": 4
+            }
+          ],
+          "txCycleMs": 0
+        }
+      },
+      {
+        "id": "w-btn-emergency-confirm",
+        "kind": "button",
+        "title": "HV Acil Kesici (Korumalı)",
+        "accentColor": "red",
+        "layout": {
+          "col": 20,
+          "row": 7,
+          "w": 4,
+          "h": 3
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x310",
+          "messageName": "VCU_DriverControls",
+          "arbId": 784,
+          "isExtended": false,
+          "signalName": "EmergencyLatchCmd",
+          "unit": "",
+          "min": 0.0,
+          "max": 1.0,
+          "factor": 1.0,
+          "offset": 0.0,
+          "decimals": 0,
+          "color": "#EF4444",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "buttonMode": "toggle",
+          "pressValue": 1,
+          "releaseValue": 0,
+          "buttonLabel": "HV ACİL KESİCİ",
+          "requireConfirm": true,
+          "confirmPrompt": "Yüksek gerilim acil kesici mandalı tetiklenecek. Onaylıyor musunuz?",
+          "txCycleMs": 0
+        }
+      },
+      {
+        "id": "w-slider-torque",
+        "kind": "slider",
+        "title": "Hedef Tork Talebi (%)",
+        "accentColor": "emerald",
+        "layout": {
+          "col": 0,
+          "row": 10,
+          "w": 12,
+          "h": 3
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x310",
+          "messageName": "VCU_DriverControls",
+          "arbId": 784,
+          "isExtended": false,
+          "signalName": "TargetTorquePct",
+          "unit": "%",
+          "min": 0.0,
+          "max": 100.0,
+          "factor": 0.1,
+          "offset": 0.0,
+          "decimals": 1,
+          "color": "#3FB980",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "min": 0,
+          "max": 100,
+          "step": 0.5,
+          "showNumericInput": true,
+          "txCycleMs": 100
+        }
+      },
+      {
+        "id": "w-map-gnss",
+        "kind": "map",
+        "title": "GNSS Araç Konumu (İstanbul Park)",
+        "accentColor": "cyan",
+        "layout": {
+          "col": 12,
+          "row": 10,
+          "w": 12,
+          "h": 5
+        },
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x410",
+          "messageName": "GNSS_VehiclePose",
+          "arbId": 1040,
+          "isExtended": false,
+          "signalName": "GnssLatitude_Deg",
+          "unit": "deg",
+          "min": -90.0,
+          "max": 90.0,
+          "factor": 1e-06,
+          "offset": 0.0,
+          "decimals": 2,
+          "color": "#38BDF8",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "config": {
+          "lonBinding": {
+            "busId": 0,
+            "messageKey": "STD:0x410",
+            "messageName": "GNSS_VehiclePose",
+            "arbId": 1040,
+            "isExtended": false,
+            "signalName": "GnssLongitude_Deg",
+            "unit": "deg",
+            "min": -180.0,
+            "max": 180.0,
+            "factor": 1e-06,
+            "offset": 0.0,
+            "decimals": 2,
+            "color": "#38BDF8",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "speedBinding": {
+            "busId": 0,
+            "messageKey": "STD:0x102",
+            "messageName": "MCU_MotorDrive",
+            "arbId": 258,
+            "isExtended": false,
+            "signalName": "MotorSpeed_RPM",
+            "unit": "rpm",
+            "min": -15000.0,
+            "max": 15000.0,
+            "factor": 1.0,
+            "offset": 0.0,
+            "decimals": 0,
+            "color": "#3FB980",
+            "databaseId": "db:ev_powertrain_full_test.dbc",
+            "databaseName": "ev_powertrain_full_test.dbc"
+          },
+          "mapZoom": 15,
+          "mapCenterLat": 40.9531,
+          "mapCenterLon": 29.4068,
+          "mapTileStyle": "osm_dark",
+          "mapAutoFollow": true,
+          "mapShowTrail": true,
+          "mapTrailMaxPoints": 300,
+          "mapClickToSimulate": true
+        }
+      }
+    ],
+    "generators": [
+      {
+        "id": "gen-sine-rpm",
+        "enabled": true,
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x102",
+          "messageName": "MCU_MotorDrive",
+          "arbId": 258,
+          "isExtended": false,
+          "signalName": "MotorSpeed_RPM",
+          "unit": "rpm",
+          "min": -15000.0,
+          "max": 15000.0,
+          "factor": 1.0,
+          "offset": 0.0,
+          "decimals": 0,
+          "color": "#38BDF8",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "waveform": "sine",
+        "min": 800,
+        "max": 8500,
+        "constantValue": 3000,
+        "frequencyHz": 0.2
+      },
+      {
+        "id": "gen-tri-current",
+        "enabled": true,
+        "binding": {
+          "busId": 0,
+          "messageKey": "STD:0x101",
+          "messageName": "BMS_PackStatus",
+          "arbId": 257,
+          "isExtended": false,
+          "signalName": "PackCurrent_A",
+          "unit": "A",
+          "min": -500.0,
+          "max": 500.0,
+          "factor": 0.1,
+          "offset": 0.0,
+          "decimals": 1,
+          "color": "#E3B341",
+          "databaseId": "db:ev_powertrain_full_test.dbc",
+          "databaseName": "ev_powertrain_full_test.dbc"
+        },
+        "waveform": "triangle",
+        "min": -140,
+        "max": 280,
+        "constantValue": 45,
+        "frequencyHz": 0.15
+      }
+    ]
+  }
+}

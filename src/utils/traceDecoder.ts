@@ -277,7 +277,7 @@ export function formatDecodedTraceInline(
 }
 
 /**
- * Resolves the PCAN-Explorer formatted symbol (`BaseMessage.OuterMux.InnerMux`)
+ * Resolves the formatted symbol (`BaseMessage.OuterMux.InnerMux`)
  * for a chronological raw Trace frame by evaluating the active cascaded multiplexer
  * switch chain directly from its `rawBytes`.
  */

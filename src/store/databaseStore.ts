@@ -280,14 +280,22 @@ export const databaseStore = {
 
   /**
    * Schema streamed to NexusCANCloud live bridge (single-schema contract):
-   * the lowest-numbered bus that has databases bound.
+   * the lowest-numbered bus that has databases bound, falling back to any loaded catalog schema.
    */
   getPrimaryLiveSchema(): DatabaseSchemaDto | null {
     let best: number | null = null;
     for (const busId of currentState.busSchemas.keys()) {
       if (best === null || busId < best) best = busId;
     }
-    return best === null ? null : (currentState.busSchemas.get(best)?.schema ?? null);
+    if (best !== null) {
+      const bound = currentState.busSchemas.get(best)?.schema ?? null;
+      if (bound) return bound;
+    }
+    if (currentState.schema) {
+      return currentState.schema;
+    }
+    const firstCatalogWithSchema = currentState.databases.find((d) => d.schema !== null);
+    return firstCatalogWithSchema?.schema ?? null;
   },
 
   /** Finds the first bus (ascending) whose bound schema contains `messageKey`. */
@@ -352,6 +360,9 @@ export const databaseStore = {
     };
 
     emitChange();
+    if (currentState.busSchemas.size === 0) {
+      emitSchemaChange(databaseStore.getPrimaryLiveSchema());
+    }
   },
 
   removeDatabaseEntry(dbId: string): void {

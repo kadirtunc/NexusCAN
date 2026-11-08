@@ -17,6 +17,7 @@ import {
 } from '../store/connectionStore';
 import { apiArmActiveBus, apiConnectBus } from '../services/ipcClient';
 import { telemetryStore } from '../store/telemetryStore';
+import { useI18n, type TranslationKey } from '../i18n';
 import type { DeviceDescriptorDto, DriverFamilyId } from '../types/hal';
 import type { StatusBanner } from './TopBar';
 import { DatabaseBindingPicker } from './DatabaseBindingPicker';
@@ -29,13 +30,13 @@ interface NewConnectionModalProps {
   onStatusMessage?: (msg: StatusBanner) => void;
 }
 
-const DRIVER_OPTIONS: readonly { id: DriverFamilyId; label: string }[] = [
-  { id: 'socketcan', label: 'Linux Native SocketCAN (can* / vcan*)' },
-  { id: 'gs_usb', label: 'USB-CAN gs_usb / candleLight (CANable / CANtact)' },
-  { id: 'slcan', label: 'Serial Lawicel SLCAN (USB-CDC / COM)' },
-  { id: 'pcan', label: 'PEAK-System PCAN-Basic (PCAN_USBBUS1..8)' },
-  { id: 'kvaser', label: 'Kvaser CANlib (0..7)' },
-  { id: 'mock', label: 'Virtual Simulator (mock0 / mock1) [Test Only]' },
+const DRIVER_OPTIONS: readonly { id: DriverFamilyId; labelKey: TranslationKey }[] = [
+  { id: 'socketcan', labelKey: 'conn.driver.socketcan' },
+  { id: 'gs_usb', labelKey: 'conn.driver.gs_usb' },
+  { id: 'slcan', labelKey: 'conn.driver.slcan' },
+  { id: 'pcan', labelKey: 'conn.driver.pcan' },
+  { id: 'kvaser', labelKey: 'conn.driver.kvaser' },
+  { id: 'mock', labelKey: 'conn.driver.mock' },
 ];
 
 export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
@@ -43,6 +44,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
   onClose,
   onStatusMessage,
 }) => {
+  const { t } = useI18n();
   const connState = useConnectionStore();
 
   // Find next free busId (0..255)
@@ -159,7 +161,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
     void syncAllBusDatabasesWithBackend();
     onStatusMessage?.({
       kind: 'success',
-      message: `Created connection profile "${prof.name}" (Bus ${prof.busId + 1}).`,
+      message: t('conn.modal.createdProfile', { name: prof.name, bus: prof.busId + 1 }),
     });
     onClose();
   };
@@ -181,20 +183,23 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
         telemetryStore.upsertBusHealth(armed);
         onStatusMessage?.({
           kind: 'success',
-          message: `Connected & Armed TX on Bus ${prof.busId + 1} (${armed.channelName}).`,
+          message: t('conn.modal.connectedArmed', { bus: prof.busId + 1, channel: armed.channelName }),
         });
       } else {
         telemetryStore.upsertBusHealth(health);
         onStatusMessage?.({
           kind: 'success',
-          message: `Connected Bus ${prof.busId + 1} (${health.channelName}) in Listen-Only mode.`,
+          message: t('conn.modal.connectedListenOnly', { bus: prof.busId + 1, channel: health.channelName }),
         });
       }
       onClose();
     } catch (err) {
       onStatusMessage?.({
         kind: 'error',
-        message: `Failed to connect Bus ${busId + 1}: ${err instanceof Error ? err.message : String(err)}`,
+        message: t('conn.modal.connectFailed', {
+          bus: busId + 1,
+          err: err instanceof Error ? err.message : String(err),
+        }),
       });
     } finally {
       setBusy(false);
@@ -225,7 +230,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
         >
           <div className="flex items-center gap-2">
             <Plug className="w-3.5 h-3.5 text-emerald-500" />
-            <span>New CAN / CAN-FD Connection</span>
+            <span>{t('conn.modal.title')}</span>
           </div>
           <button
             type="button"
@@ -242,7 +247,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
           <div className="grid grid-cols-3 gap-2.5">
             <div>
               <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                Bus Channel Slot
+                {t('conn.modal.busSlot')}
               </label>
               <div className="flex items-center gap-1.5">
                 <select
@@ -269,7 +274,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                     },
                     (_, b) => (
                       <option key={b} value={b}>
-                        Bus {b + 1} {usedBuses.has(b) ? '(Configured)' : '(Free)'}
+                        Bus {b + 1} {usedBuses.has(b) ? t('conn.modal.busConfigured') : t('conn.modal.busFree')}
                       </option>
                     ),
                   )}
@@ -300,7 +305,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
 
             <div className="col-span-2">
               <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                Connection Name
+                {t('conn.modal.connName')}
               </label>
               <input
                 type="text"
@@ -321,7 +326,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
           <div className="grid grid-cols-2 gap-2.5">
             <div>
               <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                Driver Family
+                {t('conn.modal.driverFamily')}
               </label>
               <select
                 value={driverFamily}
@@ -335,7 +340,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
               >
                 {DRIVER_OPTIONS.map((opt) => (
                   <option key={opt.id} value={opt.id}>
-                    {opt.label}
+                    {t(opt.labelKey)}
                   </option>
                 ))}
               </select>
@@ -344,14 +349,14 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
             <div>
               <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
                 {driverFamily === 'slcan'
-                  ? 'Serial Port (COMx / /dev/ttyUSBx)'
+                  ? t('conn.modal.channelSerialPort')
                   : driverFamily === 'pcan'
-                    ? 'PCAN Channel'
+                    ? t('conn.modal.channelPcan')
                     : driverFamily === 'kvaser'
-                      ? 'Kvaser Channel'
+                      ? t('conn.modal.channelKvaser')
                       : driverFamily === 'socketcan'
-                        ? 'Interface Name'
-                        : 'Channel / Device'}
+                        ? t('conn.modal.channelInterface')
+                        : t('conn.modal.channelDevice')}
               </label>
 
               {driverFamily === 'slcan' ? (
@@ -441,7 +446,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                   />
                   {driverFamily === 'socketcan' && (
                     <div className="flex flex-wrap items-center gap-1 mt-1 text-[10px] font-mono">
-                      <span className="text-[var(--text-muted)] text-[9px]">Quick:</span>
+                      <span className="text-[var(--text-muted)] text-[9px]">{t('conn.modal.quickLabel')}</span>
                       {Array.from(
                         new Set([
                           'vcan0',
@@ -482,7 +487,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
           <div className="grid grid-cols-2 gap-2.5">
             <div>
               <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                Nominal Bitrate
+                {t('conn.modal.nominalBitrate')}
               </label>
               <select
                 value={bitrate}
@@ -504,7 +509,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
 
             <div>
               <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                FD Data Bitrate
+                {t('conn.modal.fdDataBitrate')}
               </label>
               <div className="flex items-center gap-1.5">
                 <label className="inline-flex items-center gap-1 text-[11px] cursor-pointer">
@@ -542,7 +547,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
           <div className="grid grid-cols-2 gap-2.5">
             <div>
               <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                Safety Mode
+                {t('conn.modal.safetyMode')}
               </label>
               <div
                 style={{ borderColor: 'var(--border-strong)' }}
@@ -557,7 +562,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                   }}
                   className="flex-1 h-full text-[11px] font-medium cursor-pointer"
                 >
-                  Listen-Only (Safe)
+                  {t('conn.modal.listenOnlySafe')}
                 </button>
                 <button
                   type="button"
@@ -571,14 +576,14 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                   }}
                   className="flex-1 h-full text-[11px] font-medium cursor-pointer"
                 >
-                  Active TX / ACK
+                  {t('conn.modal.activeTxAck')}
                 </button>
               </div>
             </div>
 
             <div>
               <label className="block text-[11px] text-[var(--text-secondary)] mb-1">
-                {driverFamily === 'mock' ? 'Mock Traffic Pacing' : 'Notes'}
+                {driverFamily === 'mock' ? t('conn.modal.mockPacing') : t('conn.modal.notes')}
               </label>
               {driverFamily === 'mock' ? (
                 <select
@@ -595,19 +600,19 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                   }}
                   className="w-full h-[26px] px-2 border text-[11px] font-mono tabular-nums focus:outline-none"
                 >
-                  <option value="calm">16 msg/s (Default Realistic)</option>
-                  <option value="475">475 msg/s (Nominal Timers)</option>
-                  <option value="1000">1k msg/s</option>
-                  <option value="10000">10k msg/s</option>
-                  <option value="25000">25k msg/s</option>
-                  <option value="50000">50k msg/s (Stress)</option>
+                  <option value="calm">{t('conn.editor.pacingCalm')}</option>
+                  <option value="475">{t('conn.editor.pacingNominal')}</option>
+                  <option value="1000">{t('conn.editor.pacingBench1k')}</option>
+                  <option value="10000">{t('conn.editor.pacingStress10k')}</option>
+                  <option value="25000">{t('conn.editor.pacingStress25k')}</option>
+                  <option value="50000">{t('conn.editor.pacingStress50k')}</option>
                 </select>
               ) : (
                 <input
                   type="text"
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
-                  placeholder="Optional channel notes..."
+                  placeholder={t('conn.modal.notesPlaceholder')}
                   style={{
                     backgroundColor: 'var(--bg-input)',
                     borderColor: 'var(--border-strong)',
@@ -646,7 +651,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
             }}
             className="h-[26px] px-3 border text-[11px] hover:text-[var(--text-primary)] cursor-pointer"
           >
-            Cancel
+            {t('conn.modal.cancel')}
           </button>
 
           <div className="flex items-center gap-2">
@@ -662,7 +667,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
               className="h-[26px] px-3 border flex items-center gap-1.5 text-[11px] font-medium hover:border-[var(--text-secondary)] cursor-pointer"
             >
               <Save className="w-3 h-3 text-[var(--text-secondary)]" />
-              <span>Save Profile</span>
+              <span>{t('conn.modal.saveProfile')}</span>
             </button>
 
             <button
@@ -677,7 +682,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
               className="h-[26px] px-3.5 border flex items-center gap-1.5 text-[11px] font-semibold hover:opacity-90 cursor-pointer"
             >
               <Plug className="w-3 h-3 text-emerald-500" />
-              <span>Save & Connect</span>
+              <span>{t('conn.modal.saveAndConnect')}</span>
             </button>
           </div>
         </div>

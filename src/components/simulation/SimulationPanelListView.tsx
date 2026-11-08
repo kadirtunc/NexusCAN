@@ -24,6 +24,7 @@ import type {
   SimulationWidgetKind,
 } from './contracts';
 import type { LoadedSimulationDatabaseEntry } from './virtualCanPacking';
+import { useI18n } from '../../i18n';
 
 const KIND_SHORT_CODE: Record<SimulationWidgetKind, string> = {
   gauge: 'GAUGE',
@@ -131,6 +132,7 @@ export function SimulationPanelListView({
   onRequestRenamePanel,
   onRequestDeletePanel,
 }: SimulationPanelListViewProps): React.JSX.Element {
+  const { t } = useI18n();
   const [query, setQuery] = useState<string>('');
 
   const filteredPanels = useMemo(() => {
@@ -205,7 +207,7 @@ export function SimulationPanelListView({
                   className="inline-flex h-6 items-center gap-1 rounded-[2px] border border-hairline bg-elevated px-2 font-semibold uppercase text-muted hover:border-strong hover:text-ink cursor-pointer"
                 >
                   <ArrowLeft className="h-3 w-3" aria-hidden="true" />
-                  {resolvedProject.code} PROJESİNE DÖN
+                  {t('simWb.list.backToProject', { code: resolvedProject.code })}
                 </button>
               )}
 
@@ -216,10 +218,10 @@ export function SimulationPanelListView({
                     aria-hidden="true"
                   />
                   <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">
-                    PROJE:
+                    {t('simWb.list.projectLabel')}
                   </span>
                   <select
-                    aria-label="Simülasyon projesi seçin"
+                    aria-label={t('simWb.list.selectProjectAria')}
                     value={resolvedProject.slug}
                     onChange={(e) => onSelectProjectSlug(e.target.value)}
                     className="h-7 rounded-[2px] border border-strong bg-elevated px-2.5 font-mono text-[11px] font-semibold text-ink"
@@ -234,15 +236,15 @@ export function SimulationPanelListView({
               )}
 
               <span className="rounded-[2px] border border-hairline bg-canvas px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted">
-                .NEXUSPROJ.JSON 1:1 SENKRON
+                {t('simWb.list.syncedBadge')}
               </span>
             </div>
 
             <h1 className="font-mono text-base font-bold uppercase tracking-wider text-ink">
-              SİMÜLASYON &amp; SANAL ENSTRÜMAN PANELLERİ
+              {t('simWb.list.mainTitle')}
             </h1>
             <p className="max-w-2xl text-xs leading-relaxed text-muted">
-              Tasarlamak veya 60 FPS sanal/canlı telemetri modunda çalıştırmak istediğiniz panele tıklayın. Her panel içinde projedeki tüm .dbc / .kcd veritabanlarından dilediğiniz sinyalleri birlikte seçebilirsiniz.
+              {t('simWb.list.mainDesc')}
             </p>
           </div>
 
@@ -254,13 +256,13 @@ export function SimulationPanelListView({
                 disabled={syncingFromCloud}
                 onClick={() => void onSyncFromCloud()}
                 className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-canvas px-3 font-mono text-[11px] font-semibold uppercase text-ink hover:border-strong hover:bg-elevated disabled:opacity-50"
-                title="Panelleri ve Projeyi Cloud'dan Eşitle"
+                title={t('simWb.list.cloudSyncTitle')}
               >
                 <RefreshCw
                   className={`h-3.5 w-3.5 text-focus ${syncingFromCloud ? 'animate-spin' : ''}`}
                   aria-hidden="true"
                 />
-                CLOUD SYNC / YENİLE
+                {t('simWb.list.cloudSync')}
               </button>
             )}
 
@@ -272,7 +274,7 @@ export function SimulationPanelListView({
                 className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-canvas px-3 font-mono text-[11px] font-semibold uppercase text-ink hover:border-strong hover:bg-elevated disabled:opacity-50"
               >
                 <Upload className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
-                .NEXUSPANEL.JSON İÇE AKTAR
+                {t('simWb.list.importJson')}
               </button>
             )}
 
@@ -287,7 +289,7 @@ export function SimulationPanelListView({
                   className="h-3.5 w-3.5 text-nominal"
                   aria-hidden="true"
                 />
-                DBC&apos;DEN TASLAK OLUŞTUR...
+                {t('simWb.list.generateFromDbc')}
               </button>
             )}
 
@@ -300,7 +302,7 @@ export function SimulationPanelListView({
                 style={{ backgroundColor: 'var(--status-focus)' }}
               >
                 <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                YENİ PANEL OLUŞTUR
+                {t('simWb.list.newPanel')}
               </button>
             )}
           </div>
@@ -310,20 +312,20 @@ export function SimulationPanelListView({
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <div className="rounded-[2px] border border-hairline bg-surface px-4 py-3 font-mono tabular-nums">
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted">
-              <span>KAYITLI PANELLER</span>
+              <span>{t('simWb.list.metricRegistered')}</span>
               <Layers className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
             </div>
             <div className="mt-1 text-xl font-bold text-ink">
               {panels.length}
             </div>
             <div className="mt-0.5 text-[10px] text-subtle">
-              24-SÜTUNLU ENDÜSTRİYEL IZGARA
+              {t('simWb.list.metricRegisteredSub')}
             </div>
           </div>
 
           <div className="rounded-[2px] border border-hairline bg-surface px-4 py-3 font-mono tabular-nums">
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted">
-              <span>TOPLAM ENSTRÜMAN</span>
+              <span>{t('simWb.list.metricInstruments')}</span>
               <Gauge className="h-3.5 w-3.5 text-nominal" aria-hidden="true" />
             </div>
             <div className="mt-1 text-xl font-bold text-ink">
@@ -333,17 +335,17 @@ export function SimulationPanelListView({
               {metrics.mapCount > 0 ? (
                 <span className="inline-flex items-center gap-1 text-focus">
                   <Compass className="h-2.5 w-2.5" aria-hidden="true" />
-                  {metrics.mapCount} GNSS / OSM HARİTA DAHİL
+                  {t('simWb.list.metricInstrumentsSubWithMap', { count: metrics.mapCount })}
                 </span>
               ) : (
-                'GAUGE · PLOT · MAP · STIMULUS'
+                t('simWb.list.metricInstrumentsSubNoMap')
               )}
             </div>
           </div>
 
           <div className="rounded-[2px] border border-hairline bg-surface px-4 py-3 font-mono tabular-nums">
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted">
-              <span>SİNYAL ÜRETEÇLERİ</span>
+              <span>{t('simWb.list.metricGenerators')}</span>
               <Activity className="h-3.5 w-3.5 text-warn" aria-hidden="true" />
             </div>
             <div className="mt-1 text-xl font-bold text-ink">
@@ -353,13 +355,13 @@ export function SimulationPanelListView({
               </span>
             </div>
             <div className="mt-0.5 text-[10px] text-subtle">
-              60HZ SANAL DALGA KAYNAĞI
+              {t('simWb.list.metricGeneratorsSub')}
             </div>
           </div>
 
           <div className="rounded-[2px] border border-hairline bg-surface px-4 py-3 font-mono tabular-nums">
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted">
-              <span>PROJEDEKİ VERİTABANLARI</span>
+              <span>{t('simWb.list.metricDatabases')}</span>
               <Database className="h-3.5 w-3.5 text-nominal" aria-hidden="true" />
             </div>
             <div className="mt-1 flex flex-wrap items-baseline gap-1.5">
@@ -371,13 +373,12 @@ export function SimulationPanelListView({
               </span>
               {databases.length > 0 && (
                 <span className="text-[10px] text-muted">
-                  · {dbTotals.totalMessages} MESAJ · {dbTotals.totalSignals}{' '}
-                  SİNYAL
+                  {t('simWb.list.metricDatabasesStats', { msgs: dbTotals.totalMessages, sigs: dbTotals.totalSignals })}
                 </span>
               )}
             </div>
             <div className="mt-0.5 text-[10px] text-subtle">
-              TÜM VERİTABANLARINDAN SİNYAL SEÇİLEBİLİR
+              {t('simWb.list.metricDatabasesSub')}
             </div>
           </div>
         </div>
@@ -385,23 +386,23 @@ export function SimulationPanelListView({
         {/* 3. Panel Directory Table / Empty State */}
         <div className="rounded-[2px] border border-hairline bg-surface">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-hairline bg-elevated px-4 py-2.5">
-            <div className="flex items-center gap-2 font-mono text-[11px] font-semibold uppercase tracking-wider tabular-nums text-ink">
-              <span>PROJE PANEL DİZİNİ ({filteredPanels.length})</span>
+            <div className="flex items-center gap-2 font-mono text-[12px] font-semibold uppercase tracking-wider tabular-nums text-ink">
+              <span>{t('simWb.list.tableHeader', { count: filteredPanels.length })}</span>
             </div>
 
             {panels.length > 0 && (
-              <div className="relative w-full sm:w-72">
+              <div className="relative w-full sm:w-80">
                 <Search
-                  className="pointer-events-none absolute top-2 left-2.5 h-3.5 w-3.5 text-subtle"
+                  className="pointer-events-none absolute top-2.5 left-2.5 h-3.5 w-3.5 text-subtle"
                   aria-hidden="true"
                 />
                 <input
                   type="text"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Panel adı, veritabanı veya sinyal filtrele..."
-                  aria-label="Panellerde ara"
-                  className="h-7 w-full rounded-[2px] border border-hairline bg-canvas pr-2.5 pl-8 font-mono text-[11px] text-ink placeholder:text-subtle"
+                  placeholder={t('simWb.list.searchPlaceholder')}
+                  aria-label={t('simWb.list.searchAria')}
+                  className="h-[30px] w-full rounded-[2px] border border-hairline bg-canvas pr-2.5 pl-8 font-mono text-[12px] text-ink placeholder:text-subtle"
                 />
               </div>
             )}
@@ -409,7 +410,7 @@ export function SimulationPanelListView({
 
           {loadingPanels ? (
             <div className="px-6 py-14 text-center font-mono text-xs uppercase tracking-wider text-muted">
-              SİMÜLASYON PANELLERİ YÜKLENİYOR...
+              {t('simWb.list.loading')}
             </div>
           ) : panels.length === 0 ? (
             <div className="px-6 py-14 text-center">
@@ -418,15 +419,10 @@ export function SimulationPanelListView({
                 aria-hidden="true"
               />
               <h2 className="mt-3 font-mono text-xs font-bold uppercase tracking-wider text-ink">
-                BU PROJEDE HENÜZ SİMÜLASYON PANELİ YOK
+                {t('simWb.list.emptyTitle')}
               </h2>
               <p className="mx-auto mt-2 max-w-lg text-xs leading-relaxed text-muted">
-                Yeni bir 24-sütunlu boş gösterge paneli oluşturun, yüklü{' '}
-                <span className="font-mono text-ink">.dbc / .kcd</span>{' '}
-                veritabanlarınızdan istediğiniz mesajları seçerek taslak panel
-                oluşturun veya{' '}
-                <span className="font-mono text-ink">.nexuspanel.json</span>{' '}
-                dosyası içe aktarın.
+                {t('simWb.list.emptyDesc')}
               </p>
               {canMutate && (
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
@@ -438,7 +434,7 @@ export function SimulationPanelListView({
                     style={{ backgroundColor: 'var(--status-focus)' }}
                   >
                     <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                    + YENİ PANEL OLUŞTUR
+                    {t('simWb.list.emptyCreateBtn')}
                   </button>
 
                   {databases.length > 0 && (
@@ -452,7 +448,7 @@ export function SimulationPanelListView({
                         className="h-3.5 w-3.5 text-nominal"
                         aria-hidden="true"
                       />
-                      DBC&apos;DEN TASLAK OLUŞTUR...
+                      {t('simWb.list.generateFromDbc')}
                     </button>
                   )}
 
@@ -463,14 +459,14 @@ export function SimulationPanelListView({
                     className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-canvas px-3 font-mono text-[11px] uppercase text-muted hover:border-strong hover:text-ink"
                   >
                     <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-                    .NEXUSPANEL.JSON İÇE AKTAR
+                    {t('simWb.list.importJson')}
                   </button>
                 </div>
               )}
             </div>
           ) : filteredPanels.length === 0 ? (
             <div className="px-6 py-10 text-center font-mono text-xs text-muted">
-              ARAMA KRİTERİYLE EŞLEŞEN PANEL BULUNAMADI.
+              {t('simWb.list.noSearchResult')}
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -478,19 +474,19 @@ export function SimulationPanelListView({
                 <thead className="border-b border-hairline bg-canvas font-mono text-[10px] uppercase tracking-wider text-muted">
                   <tr>
                     <th className="px-4 py-2.5 font-semibold">
-                      PANEL ADI &amp; AÇIKLAMA
+                      {t('simWb.list.thName')}
                     </th>
                     <th className="px-4 py-2.5 font-semibold">
-                      BİLEŞEN ÖZETİ
+                      {t('simWb.list.thComponents')}
                     </th>
                     <th className="px-4 py-2.5 font-semibold">
-                      SİNYAL ÜRETEÇLERİ (GEN)
+                      {t('simWb.list.thGenerators')}
                     </th>
                     <th className="px-4 py-2.5 font-semibold">
-                      SON GÜNCELLEME
+                      {t('simWb.list.thUpdated')}
                     </th>
                     <th className="px-4 py-2.5 text-right font-semibold">
-                      İŞLEMLER
+                      {t('simWb.list.thActions')}
                     </th>
                   </tr>
                 </thead>
@@ -510,7 +506,7 @@ export function SimulationPanelListView({
                         key={panel.id}
                         tabIndex={0}
                         role="button"
-                        aria-label={`${panel.name} panelini aç`}
+                        aria-label={t('simWb.list.rowOpenAria', { name: panel.name })}
                         onClick={() => onEnterPanel(panel.id, 'design')}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
@@ -535,7 +531,7 @@ export function SimulationPanelListView({
                                   color: 'var(--status-warn)',
                                 }}
                               >
-                                KAYDEDİLMEMİŞ *
+                                {t('simWb.list.badgeUnsaved')}
                               </span>
                             )}
                             <span className="rounded-[2px] border border-hairline bg-canvas px-1.5 py-0.5 font-mono text-[9px] tabular-nums text-subtle">
@@ -543,19 +539,18 @@ export function SimulationPanelListView({
                             </span>
                           </div>
                           <p className="mt-1 line-clamp-1 text-xs text-muted">
-                            {panel.description ||
-                              'Açıklama girilmedi — 24-sütunlu sanal enstrüman ve simülasyon paneli'}
+                            {panel.description || t('simWb.list.emptyDescRow')}
                           </p>
                         </td>
 
                         {/* 2. Widget Breakdown Badges */}
                         <td className="px-4 py-3.5 align-middle font-mono text-[10px] tabular-nums">
                           {panel.widgets.length === 0 ? (
-                            <span className="text-subtle">BOŞ PANEL (0)</span>
+                            <span className="text-subtle">{t('simWb.list.emptyPanelBadge')}</span>
                           ) : (
                             <div className="flex flex-wrap items-center gap-1">
                               <span className="rounded-[2px] border border-strong bg-elevated px-1.5 py-0.5 font-semibold text-ink">
-                                {nonGroupCount} WIDGET
+                                {t('simWb.list.widgetCount', { count: nonGroupCount })}
                               </span>
                               {summaryChips.slice(0, 6).map((chip) => (
                                 <span
@@ -581,7 +576,7 @@ export function SimulationPanelListView({
                         {/* 3. Generators */}
                         <td className="px-4 py-3.5 align-middle font-mono text-[10px] tabular-nums">
                           {panel.generators.length === 0 ? (
-                            <span className="text-subtle">0 GEN</span>
+                            <span className="text-subtle">{t('simWb.list.noGen')}</span>
                           ) : (
                             <span
                               className="inline-flex items-center gap-1 rounded-[2px] border px-1.5 py-0.5 font-semibold"
@@ -601,7 +596,7 @@ export function SimulationPanelListView({
                                     }
                               }
                             >
-                              {enabledGenCount}/{panel.generators.length} GEN
+                              {t('simWb.list.genBadge', { enabled: enabledGenCount, total: panel.generators.length })}
                             </span>
                           )}
                         </td>
@@ -616,15 +611,15 @@ export function SimulationPanelListView({
                           className="px-4 py-3.5 text-right align-middle whitespace-nowrap"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          <div className="inline-flex items-center justify-end gap-1.5 font-mono text-[10px] font-semibold uppercase">
+                          <div className="inline-flex items-center justify-end gap-1.5 font-mono text-[11px] font-semibold uppercase">
                             <button
                               type="button"
                               onClick={() => onEnterPanel(panel.id, 'design')}
-                              className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-[2px] border border-strong bg-elevated px-2.5 text-ink hover:border-focus hover:text-focus"
+                              className="inline-flex h-[28px] cursor-pointer items-center gap-1 rounded-[2px] border border-strong bg-elevated px-3 text-ink hover:border-focus hover:text-focus"
                             >
-                              <span>AÇ / DÜZENLE</span>
+                              <span>{t('simWb.list.btnOpenEdit')}</span>
                               <ArrowRight
-                                className="h-3 w-3"
+                                className="h-3.5 w-3.5"
                                 aria-hidden="true"
                               />
                             </button>
@@ -632,48 +627,48 @@ export function SimulationPanelListView({
                             <button
                               type="button"
                               onClick={() => onEnterPanel(panel.id, 'run')}
-                              className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-[2px] border px-2.5 text-white"
+                              className="inline-flex h-[28px] cursor-pointer items-center gap-1 rounded-[2px] border px-3 text-white"
                               style={{
                                 backgroundColor: 'var(--status-nominal)',
                                 borderColor: 'var(--status-nominal)',
                               }}
-                              title="Paneli doğrudan 60 FPS Çalıştırma (RUN) modunda aç"
+                              title={t('simWb.list.btnRunTitle')}
                             >
-                              <Play className="h-3 w-3" aria-hidden="true" />
-                              <span>ÇALIŞTIR</span>
+                              <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                              <span>{t('simWb.list.btnRun')}</span>
                             </button>
 
                             {canMutate && (
                               <button
                                 type="button"
                                 onClick={() => onRequestRenamePanel(panel)}
-                                title="Paneli yeniden adlandır"
-                                aria-label={`${panel.name} panelini yeniden adlandır`}
-                                className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-canvas text-muted hover:border-strong hover:text-ink"
+                                title={t('simWb.list.renameTitle')}
+                                aria-label={t('simWb.list.renameAria', { name: panel.name })}
+                                className="inline-flex h-[28px] w-[28px] cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-canvas text-muted hover:border-strong hover:text-ink"
                               >
-                                <Pencil className="h-3 w-3" />
+                                <Pencil className="h-3.5 w-3.5" />
                               </button>
                             )}
 
                             <button
                               type="button"
                               onClick={() => onExportPanelJson(panel)}
-                              title=".nexuspanel.json olarak dışa aktar"
-                              aria-label={`${panel.name} panelini dışa aktar`}
-                              className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-canvas text-muted hover:border-strong hover:text-ink"
+                              title={t('simWb.list.exportTitle')}
+                              aria-label={t('simWb.list.exportAria', { name: panel.name })}
+                              className="inline-flex h-[28px] w-[28px] cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-canvas text-muted hover:border-strong hover:text-ink"
                             >
-                              <Download className="h-3 w-3" />
+                              <Download className="h-3.5 w-3.5" />
                             </button>
 
                             {canMutate && (
                               <button
                                 type="button"
                                 onClick={() => onRequestDeletePanel(panel)}
-                                title="Paneli sil"
-                                aria-label={`${panel.name} panelini sil`}
-                                className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-canvas text-muted hover:border-critical hover:text-critical"
+                                title={t('simWb.list.deleteTitle')}
+                                aria-label={t('simWb.list.deleteAria', { name: panel.name })}
+                                className="inline-flex h-[28px] w-[28px] cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-canvas text-muted hover:border-critical hover:text-critical"
                               >
-                                <Trash2 className="h-3 w-3" />
+                                <Trash2 className="h-3.5 w-3.5" />
                               </button>
                             )}
                           </div>
