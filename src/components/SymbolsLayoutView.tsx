@@ -33,6 +33,7 @@ import {
   cloudBridgeStore,
   useCloudBridgeStore,
 } from '../store/cloudBridgeStore';
+import { useExperimentalCloud } from '../store/experimentalStore';
 import { useProjectStore } from '../store/projectStore';
 import { fileToBase64 } from '../utils/formatters';
 import { syncAllBusDatabasesWithBackend } from '../utils/busDatabaseSync';
@@ -75,6 +76,7 @@ export const SymbolsLayoutView: React.FC = () => {
   const dbState = useDatabaseStore();
   const connState = useConnectionStore();
   const cloudState = useCloudBridgeStore();
+  const cloudOn = useExperimentalCloud();
   const projState = useProjectStore();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -442,7 +444,8 @@ export const SymbolsLayoutView: React.FC = () => {
           <h1 className="text-[14px] font-semibold text-ink">{t('netdb.symbols.title')}</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {/* CLOUD'DAN ÇEK BUTTON */}
+          {/* CLOUD'DAN ÇEK BUTTON (experimental cloud only) */}
+          {cloudOn && (
           <button
             type="button"
             disabled={busy}
@@ -452,6 +455,7 @@ export const SymbolsLayoutView: React.FC = () => {
             <DownloadCloud className="h-3.5 w-3.5 text-sky-400" aria-hidden="true" />
             {t('netdb.symbols.pullFromCloudBtn')}
           </button>
+          )}
 
           <button
             type="button"
@@ -588,6 +592,7 @@ export const SymbolsLayoutView: React.FC = () => {
                 {t('netdb.symbols.emptyDesc')}
               </p>
               <div className="flex items-center gap-2 pt-2">
+                {cloudOn && (
                 <button
                   type="button"
                   onClick={() => setCloudPullModalOpen(true)}
@@ -596,6 +601,7 @@ export const SymbolsLayoutView: React.FC = () => {
                   <DownloadCloud className="h-3.5 w-3.5 text-sky-400" aria-hidden="true" />
                   {t('netdb.symbols.pullFromCloudBtn')}
                 </button>
+                )}
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
@@ -821,7 +827,7 @@ export const SymbolsLayoutView: React.FC = () => {
       )}
 
       {/* CLOUD PULL MODAL */}
-      {cloudPullModalOpen && (
+      {cloudOn && cloudPullModalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 select-none"
           role="dialog"

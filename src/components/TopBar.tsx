@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { apiControlTraceReplay, apiDisconnectAllBuses } from '../services/ipcClient';
 import { cloudBridgeStore, useCloudBridgeHeader } from '../store/cloudBridgeStore';
+import { experimentalStore, useExperimentalCloud } from '../store/experimentalStore';
 import { databaseStore, useDatabaseStore, type ActiveDocumentTab } from '../store/databaseStore';
 import {
   type QuickBarConnectionState,
@@ -119,6 +120,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   const dbState = useDatabaseStore();
   const projState = useProjectStore();
   const cloudHeader = useCloudBridgeHeader();
+  const cloudOn = useExperimentalCloud();
   const workbench = useWorkbenchStore();
   const traceState = useTraceSessionsStore();
   const activeTrace = traceSessionsStore.getSession(traceState.activeSessionId);
@@ -595,6 +597,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                   >
                     {t('shell.menu.dbcStudio.open')}
                   </button>
+                  {cloudOn && (
                   <button
                     type="button"
                     onClick={() => {
@@ -605,6 +608,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                   >
                     {t('shell.menu.dbcStudio.pullCloud')}
                   </button>
+                  )}
                 </div>
               )}
             </div>
@@ -903,6 +907,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             </div>
 
             {/* 6. Cloud Menu */}
+            {cloudOn && (
             <div className="relative" data-menubar-item>
               <button
                 type="button"
@@ -998,6 +1003,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                 </div>
               )}
             </div>
+            )}
 
             {/* 7. View Menu */}
             <div className="relative" data-menubar-item>
@@ -1128,6 +1134,27 @@ export const TopBar: React.FC<TopBarProps> = ({
                   >
                     {dbState.theme === 'dark' ? t('shell.menu.view.switchToLight') : t('shell.menu.view.switchToDark')}
                   </button>
+                  <div className="my-1.5 border-t border-[var(--border-grid)]" />
+                  <div className="px-3.5 py-1 text-[11px] font-mono text-[var(--text-muted)] uppercase">
+                    {t('shell.menu.view.experimentalHeader')}
+                  </div>
+                  <button
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={cloudOn}
+                    onClick={() => {
+                      experimentalStore.setCloudEnabled(!cloudOn);
+                    }}
+                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)]"
+                  >
+                    <span className="flex items-center gap-2">
+                      <span className="w-4 shrink-0 font-mono text-sky-400">{cloudOn ? '[x]' : '[ ]'}</span>
+                      <span>{t('shell.menu.view.experimentalCloud')}</span>
+                    </span>
+                    <span className="block pl-6 pt-0.5 text-[11px] text-[var(--text-muted)] whitespace-normal max-w-[300px]">
+                      {t('shell.menu.view.experimentalCloudNote')}
+                    </span>
+                  </button>
                 </div>
               )}
             </div>
@@ -1185,7 +1212,7 @@ export const TopBar: React.FC<TopBarProps> = ({
 
         {/* Right Corner of Menu Bar: Fixed Organization & Cloud Identity & Language Switcher */}
         <div className="flex items-center gap-2 shrink-0 text-[12px] font-mono tabular-nums">
-          {cloudHeader.isAuthenticated ? (
+          {!cloudOn ? null : cloudHeader.isAuthenticated ? (
             <>
               {/* Organization Indicator / Selector */}
               {cloudHeader.organizations.length > 1 ? (
@@ -1562,7 +1589,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           <div className="h-5 w-px bg-[var(--border-strong)] mx-1" />
 
           {/* GROUP 3: CLOUD & LIVE BRIDGE */}
-          {cloudHeader.isAuthenticated && (
+          {cloudOn && cloudHeader.isAuthenticated && (
             <>
               <button
                 type="button"

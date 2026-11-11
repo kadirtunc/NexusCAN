@@ -27,6 +27,7 @@ import {
 } from './services/ipcClient';
 import { connectionStore, useConnectionStore } from './store/connectionStore';
 import { cloudBridgeStore, useCloudBridgeHeader } from './store/cloudBridgeStore';
+import { isExperimentalCloudEnabled, useExperimentalCloud } from './store/experimentalStore';
 import { databaseStore, useDatabaseStore, type ActiveDocumentTab } from './store/databaseStore';
 import { plotStore, usePlotStore } from './store/plotStore';
 import { useSimulationPanelStore } from './store/simulationPanelStore';
@@ -57,6 +58,7 @@ export const App: React.FC = () => {
   const plotState = usePlotStore();
   const simState = useSimulationPanelStore();
   const cloudHeader = useCloudBridgeHeader();
+  const cloudOn = useExperimentalCloud();
   const workbench = useWorkbenchStore();
   const traceState = useTraceSessionsStore();
 
@@ -121,6 +123,7 @@ export const App: React.FC = () => {
 
   const coldStartDoneRef = useRef<boolean>(false);
   const coldStartCompletedRef = useRef<boolean>(false);
+  const prevCloudOnRef = useRef<boolean>(false);
 
   useEffect(() => {
     if (!coldStartDoneRef.current) {
@@ -139,9 +142,11 @@ export const App: React.FC = () => {
         }
         await Promise.all([refreshDevices(), projectStore.refreshSavedProjects()]);
         coldStartCompletedRef.current = true;
-        cloudBridgeStore.initializeLifecycle();
+        if (isExperimentalCloudEnabled()) {
+          cloudBridgeStore.initializeLifecycle();
+        }
       })();
-    } else if (coldStartCompletedRef.current) {
+    } else if (coldStartCompletedRef.current && isExperimentalCloudEnabled()) {
       // Idempotent guard: re-initializes if cloudBridgeStore was hot-reloaded via Vite HMR
       cloudBridgeStore.initializeLifecycle();
     }
@@ -389,6 +394,32 @@ export const App: React.FC = () => {
     }
   }, [isDiagEnabled, dbState.activeDocTab]);
 
+  // NexusCloud is experimental (default OFF). Enabling it after cold start
+  // initializes the bridge lifecycle; disabling it stops any live stream and
+  // moves every cloud-only view back to a local one.
+  useEffect(() => {
+    if (cloudOn) {
+      prevCloudOnRef.current = true;
+      if (coldStartCompletedRef.current) {
+        cloudBridgeStore.initializeLifecycle();
+      }
+      return;
+    }
+    if (prevCloudOnRef.current) {
+      cloudBridgeStore.stopLiveStream();
+    }
+    prevCloudOnRef.current = false;
+    if (dbState.activeDocTab === 'cloud') {
+      databaseStore.setActiveDocTab('start');
+    }
+    if (workbenchStore.getState().bottomTab === 'cloud') {
+      workbenchStore.setBottomTab('watch');
+    }
+    if (workbench.splitSecondaryTab === 'cloud') {
+      workbenchStore.setSplitSecondaryTab(null);
+    }
+  }, [cloudOn, dbState.activeDocTab, workbench.splitSecondaryTab]);
+
   const cloudTabLabel =
     cloudHeader.cloudCapturing
       ? `${t('shell.tab.cloud')} (REC)`
@@ -451,6 +482,7 @@ export const App: React.FC = () => {
           />
         );
       case 'cloud':
+        if (!cloudOn) return null;
         return (
           <CloudWorkspaceView
             quickBarState={quickBarState}
@@ -718,7 +750,8 @@ export const App: React.FC = () => {
                 </button>
               )}
 
-              {/* 9. Cloud */}
+              {/* 9. Cloud (experimental, default OFF) */}
+              {cloudOn && (
               <button
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('cloud')}
@@ -734,6 +767,7 @@ export const App: React.FC = () => {
               >
                 {cloudTabLabel}
               </button>
+              )}
             </div>
 
             {/* Right side: Split Indicator + Telemetry FPS */}
@@ -844,7 +878,7 @@ export const App: React.FC = () => {
                         <option value="connections">{t('shell.tab.connections')}</option>
                         {isSimEnabled && <option value="panels">{t('shell.tab.panels')}</option>}
                         {isDiagEnabled && <option value="diagnostics">{t('shell.tab.diagnostics')}</option>}
-                        <option value="cloud">{t('shell.tab.cloud')}</option>
+                        {cloudOn && <option value="cloud">{t('shell.tab.cloud')}</option>}
                       </select>
 
                       {workbench.splitSecondaryTab === 'trace' && (
@@ -951,7 +985,7 @@ export const App: React.FC = () => {
 
         <div className="flex items-center gap-3 shrink-0 text-[var(--text-muted)] text-[11.5px]">
           <span className="font-sans">
-            {cloudHeader.isAuthenticated
+            {cloudOn && cloudHeader.isAuthenticated
               ? projState.cloudBinding
                 ? t('shell.status.cloudBound', { code: projState.cloudBinding.projectCode })
                 : t('shell.status.cloudConnected')
@@ -992,10 +1026,12 @@ export const App: React.FC = () => {
         />
       )}
 
-      <CloudPushPromptModal
-        quickBarState={quickBarState}
-        onStatusMessage={setStatusBanner}
-      />
+      {cloudOn && (
+        <CloudPushPromptModal
+          quickBarState={quickBarState}
+          onStatusMessage={setStatusBanner}
+        />
+      )}
 
       <ToolpacksModal
         quickBarState={quickBarState}

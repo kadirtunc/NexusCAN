@@ -45,6 +45,7 @@ import {
   useCloudBridgeHeader,
   type CloudBridgeTargetHz,
 } from '../store/cloudBridgeStore';
+import { useExperimentalCloud } from '../store/experimentalStore';
 import {
   connectionStore,
   useConnectionStore,
@@ -105,6 +106,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
   const header = useTelemetryHeader();
   const framesSlice = useTelemetryFrames();
   const cloudHeader = useCloudBridgeHeader();
+  const cloudOn = useExperimentalCloud();
   const traceState = useTraceSessionsStore();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -349,6 +351,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
             </button>
           )}
 
+          {cloudOn && (
           <div
             className={`w-2 h-2 rounded-full ${
               cloudHeader.status === 'streaming'
@@ -359,6 +362,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
             }`}
             title={`Cloud: ${cloudHeader.status}`}
           />
+          )}
         </div>
       </aside>
     );
@@ -464,7 +468,8 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
           </div>
         </div>
 
-        {/* Organization Identity Bar (28px) */}
+        {/* Organization Identity Bar (28px, experimental cloud only) */}
+        {cloudOn && (
         <div
           style={{
             backgroundColor: 'var(--bg-toolbar)',
@@ -521,6 +526,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
             </div>
           )}
         </div>
+        )}
 
         {/* Hierarchical Tree View */}
         <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-1 font-sans text-[11px]">
@@ -547,7 +553,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                 <span className="truncate">{projState.currentName}</span>
               </div>
               <span className="text-[11px] font-mono text-[var(--text-muted)] shrink-0">
-                {projState.cloudBinding ? projState.cloudBinding.projectCode : t('shell.dock.unboundLocal')}
+                {cloudOn ? (projState.cloudBinding ? projState.cloudBinding.projectCode : t('shell.dock.unboundLocal')) : ''}
               </span>
             </div>
 
@@ -1128,6 +1134,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                 />
               </div>
 
+              {cloudOn && (
               <div className="grid grid-cols-[85px_1fr] items-center gap-1.5 py-0.5 border-b border-[var(--border-grid)]">
                 <span className="text-[var(--text-secondary)]">{t('shell.dock.propOrg')}</span>
                 <span className="font-mono text-[11px] text-[var(--text-primary)] truncate">
@@ -1136,7 +1143,9 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                     : 'Local / Offline'}
                 </span>
               </div>
+              )}
 
+              {cloudOn && (
               <div className="grid grid-cols-[85px_1fr] items-center gap-1.5 py-0.5 border-b border-[var(--border-grid)]">
                 <span className="text-[var(--text-secondary)]">{t('shell.dock.propCloudBinding')}</span>
                 <span className="font-mono text-[11px] text-[var(--text-primary)] truncate">
@@ -1145,6 +1154,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                     : t('shell.dock.unboundLocal')}
                 </span>
               </div>
+              )}
 
               <div className="grid grid-cols-[85px_1fr] items-center gap-1.5 py-0.5 border-b border-[var(--border-grid)]">
                 <span className="text-[var(--text-secondary)]">{t('shell.dock.propTopology')}</span>
@@ -1182,7 +1192,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                   {t('shell.dock.manageProjects')}
                 </button>
 
-                {cloudHeader.isAuthenticated && (
+                {cloudOn && cloudHeader.isAuthenticated && (
                   <button
                     type="button"
                     onClick={() => {
@@ -1983,6 +1993,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
             </span>
           </button>
 
+          {cloudOn && (
           <button
             type="button"
             onClick={() => workbenchStore.setBottomTab('cloud')}
@@ -1998,11 +2009,12 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse ml-0.5" />
             )}
           </button>
+          )}
         </div>
 
         {/* Tab Body */}
         <div className="flex-1 min-h-0 overflow-y-auto">
-          {workbench.bottomTab === 'watch' && (
+          {(workbench.bottomTab === 'watch' || !cloudOn) && (
             <div className="p-1 font-mono tabular-nums text-[11px]">
               {/* Header row */}
               <div className="grid grid-cols-[40%_30%_30%] px-1.5 py-0.5 text-[10px] font-sans text-[var(--text-muted)] uppercase border-b border-[var(--border-grid)]">
@@ -2106,7 +2118,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
             </div>
           )}
 
-          {workbench.bottomTab === 'cloud' && (
+          {cloudOn && workbench.bottomTab === 'cloud' && (
             <div className="p-2 font-sans text-[11px] space-y-2">
               {!cloudHeader.isAuthenticated ? (
                 <div className="space-y-2 text-center p-2">

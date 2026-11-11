@@ -24,6 +24,7 @@ import {
   useProjectStore,
 } from '../store/projectStore';
 import { cloudBridgeStore, useCloudBridgeStore } from '../store/cloudBridgeStore';
+import { useExperimentalCloud } from '../store/experimentalStore';
 import { useTelemetryChrono } from '../store/telemetryStore';
 import { useTransmitStore } from '../store/transmitStore';
 import type { StatusBanner } from './TopBar';
@@ -50,6 +51,9 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
   const plotState = usePlotStore();
   const chrono = useTelemetryChrono();
   const cloudState = useCloudBridgeStore();
+  const cloudOn = useExperimentalCloud();
+  // Cloud is experimental (default OFF): a stored session is ignored while off.
+  const sessionActive = cloudOn && cloudState.sessionToken !== null && cloudState.sessionToken !== '';
 
   const [nameInput, setNameInput] = useState<string>(projState.currentName);
   const [notesInput, setNotesInput] = useState<string>(projState.notes);
@@ -65,7 +69,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
 
   useEffect(() => {
     void projectStore.refreshSavedProjects();
-    if (Boolean(cloudState.sessionToken)) {
+    if (sessionActive) {
       void cloudBridgeStore.refreshProjects();
     }
   }, []);
@@ -143,8 +147,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
       });
       onClose();
 
-      const cloud = cloudBridgeStore.getState();
-      if (Boolean(cloud.sessionToken) && !loaded.cloudBinding?.projectId) {
+      if (sessionActive && !loaded.cloudBinding?.projectId) {
         cloudBridgeStore.openPushPrompt({
           reason: 'opened_project',
           projectName: loaded.name,
@@ -232,8 +235,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
       });
       onClose();
 
-      const cloud = cloudBridgeStore.getState();
-      if (Boolean(cloud.sessionToken) && !parsed.cloudBinding?.projectId) {
+      if (sessionActive && !parsed.cloudBinding?.projectId) {
         cloudBridgeStore.openPushPrompt({
           reason: 'opened_project',
           projectName: parsed.name,
@@ -263,7 +265,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
       setNotesInput('');
       onClose();
 
-      if (Boolean(cloudState.sessionToken) && newProjectPushToCloud) {
+      if (sessionActive && newProjectPushToCloud) {
         try {
           const res = await cloudBridgeStore.pushActiveLocalProjectToCloud({
             mode: 'create_new',
@@ -347,7 +349,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
         >
           <div className="flex items-center gap-2">
             <span>{t('modal.project.title')}</span>
-            {Boolean(cloudState.sessionToken) && (
+            {sessionActive && (
               <div className="flex items-center gap-1.5 text-[11px] font-normal">
                 <span className="text-[var(--text-muted)]">|</span>
                 <span className="text-slate-300 font-mono text-[10px]">
@@ -452,7 +454,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
             </div>
 
             {/* NexusCANCloud Durumu & Push Section */}
-            {Boolean(cloudState.sessionToken) && (
+            {sessionActive && (
               <div
                 style={{
                   backgroundColor: '#0B0F17',
@@ -622,7 +624,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                     <span>{t('modal.project.newProject')}</span>
                   </button>
 
-                  {Boolean(cloudState.sessionToken) && (
+                  {sessionActive && (
                     <label className="flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer select-none">
                       <input
                         type="checkbox"
@@ -845,7 +847,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
           </div>
 
           {/* Cloud Projects (Organizasyon Projeleri) Section */}
-          {Boolean(cloudState.sessionToken) && (
+          {sessionActive && (
             <div>
               <div className="flex items-center justify-between text-[11px] font-semibold text-[var(--text-secondary)] mb-1">
                 <div className="flex items-center gap-1.5">

@@ -61,6 +61,7 @@ import {
   cloudBridgeStore,
   useCloudBridgeStore,
 } from '../../store/cloudBridgeStore';
+import { isExperimentalCloudEnabled, useExperimentalCloud } from '../../store/experimentalStore';
 import { telemetryStore, useTelemetryHeader } from '../../store/telemetryStore';
 import {
   apiParseDatabaseSchema,
@@ -190,6 +191,7 @@ export function SimulationWorkbenchView({
   const { t } = useI18n();
   const projState = useProjectStore();
   const cloudState = useCloudBridgeStore();
+  const cloudOn = useExperimentalCloud();
   const telemetryHeader = useTelemetryHeader();
   const simStoreState = useSimulationPanelStore();
   const workbench = useWorkbenchStore();
@@ -226,7 +228,7 @@ export function SimulationWorkbenchView({
   }, [cloudProjectContext, projectId, projState.cloudBinding, projState.currentName, projState.currentFileStem, projState.notes]);
 
   const projects = useMemo<readonly CloudProjectDto[]>(() => {
-    if (cloudState.projects.length > 0) {
+    if (cloudOn && cloudState.projects.length > 0) {
       return cloudState.projects.map((p) => ({
         id: p.id,
         orgId: p.orgId,
@@ -244,7 +246,7 @@ export function SimulationWorkbenchView({
       }));
     }
     return [resolvedProject];
-  }, [cloudState.projects, resolvedProject]);
+  }, [cloudOn, cloudState.projects, resolvedProject]);
 
   const effectiveProjectId = resolvedProject.id;
   const canMutate = true;
@@ -325,7 +327,7 @@ export function SimulationWorkbenchView({
 
   const canSyncFromCloud = Boolean(
     cloudProjectContext?.onSyncFromCloud ||
-    (projState.cloudBinding?.projectId && cloudState.sessionToken)
+    (cloudOn && projState.cloudBinding?.projectId && cloudState.sessionToken)
   );
 
   const [localSyncing, setLocalSyncing] = useState<boolean>(false);
@@ -338,7 +340,7 @@ export function SimulationWorkbenchView({
       return;
     }
     const targetProjId = projState.cloudBinding?.projectId;
-    if (targetProjId && cloudState.sessionToken) {
+    if (cloudOn && targetProjId && cloudState.sessionToken) {
       setLocalSyncing(true);
       try {
         const fetched = await cloudBridgeStore.fetchCloudPanels(targetProjId);
@@ -352,7 +354,7 @@ export function SimulationWorkbenchView({
         setLocalSyncing(false);
       }
     }
-  }, [cloudProjectContext, cloudState.sessionToken, isSyncingFromCloud, projState.cloudBinding?.projectId]);
+  }, [cloudOn, cloudProjectContext, cloudState.sessionToken, isSyncingFromCloud, projState.cloudBinding?.projectId]);
 
   const viewStateRef = useRef(viewState);
   viewStateRef.current = viewState;
@@ -771,7 +773,7 @@ export function SimulationWorkbenchView({
       } else {
         simulationPanelStore.upsertPanelFromCloud(activePanel);
         projectStore.scheduleAutoSave();
-        const cb = projectStore.getState().cloudBinding;
+        const cb = isExperimentalCloudEnabled() ? projectStore.getState().cloudBinding : null;
         if (cb?.projectId) {
           void cloudBridgeStore
             .updateCloudPanel(activePanel.id, activePanel, cb.projectId)
@@ -876,7 +878,7 @@ export function SimulationWorkbenchView({
       } else {
         simulationPanelStore.upsertPanelFromCloud(newPanel);
         projectStore.scheduleAutoSave();
-        const cb = projectStore.getState().cloudBinding;
+        const cb = isExperimentalCloudEnabled() ? projectStore.getState().cloudBinding : null;
         if (cb?.projectId) {
           void cloudBridgeStore
             .createCloudPanel(newPanel, cb.projectId)
@@ -961,7 +963,7 @@ export function SimulationWorkbenchView({
           panelDescInput.trim()
         );
         projectStore.scheduleAutoSave();
-        const cb = projectStore.getState().cloudBinding;
+        const cb = isExperimentalCloudEnabled() ? projectStore.getState().cloudBinding : null;
         if (cb?.projectId) {
           void cloudBridgeStore
             .updateCloudPanel(modalTargetPanel.id, updated, cb.projectId)
@@ -995,7 +997,7 @@ export function SimulationWorkbenchView({
       } else {
         simulationPanelStore.deletePanel(deletingId);
         projectStore.scheduleAutoSave();
-        const cb = projectStore.getState().cloudBinding;
+        const cb = isExperimentalCloudEnabled() ? projectStore.getState().cloudBinding : null;
         if (cb?.projectId) {
           void cloudBridgeStore
             .deleteCloudPanel(deletingId, cb.projectId)

@@ -21,6 +21,7 @@ import {
   useProjectStore,
 } from '../store/projectStore';
 import { cloudBridgeStore, useCloudBridgeHeader } from '../store/cloudBridgeStore';
+import { useExperimentalCloud } from '../store/experimentalStore';
 import { useI18n } from '../i18n';
 
 export interface ToolpacksModalProps {
@@ -38,6 +39,7 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
   const { t, locale } = useI18n();
   const projState = useProjectStore();
   const cloudHeader = useCloudBridgeHeader();
+  const cloudOn = useExperimentalCloud();
   const [cloudSyncing, setCloudSyncing] = useState<boolean>(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
 
@@ -71,7 +73,7 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
   };
 
   const handleSyncToCloud = async () => {
-    if (!projState.cloudBinding?.projectId || !cloudHeader.isAuthenticated) return;
+    if (!cloudOn || !projState.cloudBinding?.projectId || !cloudHeader.isAuthenticated) return;
     setCloudSyncing(true);
     setSyncFeedback(null);
     try {
@@ -209,7 +211,7 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
                           {mod}
                         </span>
                       ))}
-                      {pack.cloudModules.length > 0 && (
+                      {cloudOn && pack.cloudModules.length > 0 && (
                         <>
                           <span className="text-[10px] text-sky-400 font-medium ml-2 mr-1">
                             {t('modal.toolpacks.cloudModulesLabel')}
@@ -273,7 +275,7 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
           className="px-4 py-2.5 flex items-center justify-between gap-3 shrink-0"
         >
           <div className="flex items-center gap-2 text-slate-400 text-[11.5px] min-w-0">
-            {isCloudBound ? (
+            {cloudOn && isCloudBound ? (
               <>
                 <Cloud className="w-4 h-4 text-sky-400 shrink-0" />
                 <span className="truncate">
@@ -292,7 +294,7 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            {isCloudBound && cloudHeader.isAuthenticated && (
+            {cloudOn && isCloudBound && cloudHeader.isAuthenticated && (
               <button
                 type="button"
                 onClick={handleSyncToCloud}

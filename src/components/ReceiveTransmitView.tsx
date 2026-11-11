@@ -36,6 +36,7 @@ import { databaseStore, useDatabaseStore } from '../store/databaseStore';
 import { plotStore } from '../store/plotStore';
 import { projectStore, useProjectStore } from '../store/projectStore';
 import { cloudBridgeStore } from '../store/cloudBridgeStore';
+import { isExperimentalCloudEnabled } from '../store/experimentalStore';
 import {
   telemetryStore,
   useTelemetryFrames,
@@ -1529,7 +1530,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                   onAddTx={() => setModalState({ open: true, editing: null })}
                   onCreateProject={async () => {
                     await projectStore.createNewCleanProject('Vehicle Bench 01');
-                    if (Boolean(cloudBridgeStore.getState().sessionToken)) {
+                    if (isExperimentalCloudEnabled() && Boolean(cloudBridgeStore.getState().sessionToken)) {
                       cloudBridgeStore.openPushPrompt({
                         reason: 'new_project',
                         projectName: 'Vehicle Bench 01',

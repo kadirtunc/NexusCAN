@@ -27,6 +27,7 @@ import {
   suggestCloudProjectCode,
   useCloudBridgeStore,
 } from '../store/cloudBridgeStore';
+import { useExperimentalCloud } from '../store/experimentalStore';
 import type { DeviceDescriptorDto } from '../types/hal';
 import type { StatusBanner } from './TopBar';
 import { useI18n } from '../i18n';
@@ -47,6 +48,9 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
   const { t, locale, setLocale } = useI18n();
   const projState = useProjectStore();
   const cloudState = useCloudBridgeStore();
+  const cloudOn = useExperimentalCloud();
+  // Cloud features are experimental (default OFF): a stored session is ignored while off.
+  const sessionActive = cloudOn && cloudState.sessionToken !== null && cloudState.sessionToken !== '';
 
   const [cachedRecent, setCachedRecent] = useState<NexusProjectFileV1 | null>(null);
   const [newProjectName, setNewProjectName] = useState<string>('Vehicle Bench 01');
@@ -63,10 +67,10 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
     void projectStore.refreshSavedProjects();
     const cached = readCachedLastActiveProject();
     setCachedRecent(cached);
-    if (Boolean(cloudState.sessionToken)) {
+    if (sessionActive) {
       void cloudBridgeStore.refreshProjects();
     }
-  }, [cloudState.sessionToken]);
+  }, [sessionActive]);
 
   useEffect(() => {
     if (!newProjectOrgId && (cloudState.selectedOrgId || cloudState.organizations[0]?.id)) {
@@ -105,7 +109,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
       await projectStore.createNewCleanProject(targetName, onApplyQuickBar);
       databaseStore.setActiveDocTab('rxtx');
 
-      if (Boolean(cloudState.sessionToken) && createMode === 'cloud') {
+      if (sessionActive && createMode === 'cloud') {
         try {
           const res = await cloudBridgeStore.pushActiveLocalProjectToCloud({
             mode: 'create_new',
@@ -152,8 +156,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
         message: t('shell.start.recentResumed', { name: cachedRecent.name, count: res.reconnectedCount }),
       });
 
-      const cloud = cloudBridgeStore.getState();
-      if (Boolean(cloud.sessionToken) && !cachedRecent.cloudBinding?.projectId) {
+      if (sessionActive && !cachedRecent.cloudBinding?.projectId) {
         cloudBridgeStore.openPushPrompt({
           reason: 'opened_project',
           projectName: cachedRecent.name,
@@ -188,8 +191,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
         message: t('shell.start.fileProjectOpened', { name: parsed.name, count: res.reconnectedCount }),
       });
 
-      const cloud = cloudBridgeStore.getState();
-      if (Boolean(cloud.sessionToken) && !parsed.cloudBinding?.projectId) {
+      if (sessionActive && !parsed.cloudBinding?.projectId) {
         cloudBridgeStore.openPushPrompt({
           reason: 'opened_project',
           projectName: parsed.name,
@@ -215,8 +217,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
         message: t('shell.start.savedProjectOpened', { name: loaded.name }),
       });
 
-      const cloud = cloudBridgeStore.getState();
-      if (Boolean(cloud.sessionToken) && !loaded.cloudBinding?.projectId) {
+      if (sessionActive && !loaded.cloudBinding?.projectId) {
         cloudBridgeStore.openPushPrompt({
           reason: 'opened_project',
           projectName: loaded.name,
@@ -311,7 +312,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
         }}
         className="p-3 border rounded-[2px] flex flex-wrap items-center justify-between gap-3 shrink-0 min-h-[46px]"
       >
-        {Boolean(cloudState.sessionToken) ? (
+        {sessionActive ? (
           <>
             <div className="flex items-center gap-3.5 flex-wrap">
               {/* Organization Selector */}
@@ -411,7 +412,9 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
             <div className="flex items-center gap-2 text-[12px] text-[var(--text-secondary)]">
               <span className="w-2 h-2 rounded-full bg-slate-500" />
               <span className="font-semibold text-[var(--text-primary)]">{t('shell.start.localWorkMode')}</span>
-              <span className="text-[var(--text-muted)]">{t('shell.start.cloudSignedOutNotice')}</span>
+              {cloudOn && (
+                <span className="text-[var(--text-muted)]">{t('shell.start.cloudSignedOutNotice')}</span>
+              )}
             </div>
 
             <div className="flex items-center gap-2.5 flex-wrap">
@@ -444,6 +447,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                 <span>{t('shell.start.toolpacksBtn', { count: projState.enabledToolpacks.length })}</span>
               </button>
 
+              {cloudOn && (
               <button
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('cloud')}
@@ -457,6 +461,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                 <LogIn className="w-3.5 h-3.5" />
                 <span>{t('shell.start.cloudSignInBtn')}</span>
               </button>
+              )}
 
               {langToggle}
             </div>
@@ -465,9 +470,9 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
       </div>
 
       {/* ==================================================================== */}
-      {/* 2. THREE-COLUMN INDUSTRIAL COMMAND GRID                              */}
+      {/* 2. COMMAND GRID (2 columns; 3 with experimental NexusCloud)             */}
       {/* ==================================================================== */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 flex-1 min-h-0">
+      <div className={`grid grid-cols-1 ${cloudOn ? 'lg:grid-cols-3' : 'lg:grid-cols-2'} gap-4 flex-1 min-h-0`}>
         {/* COLUMN 1: YENİ PROJE OLUŞTUR & HIZLI BAŞLAT */}
         <div
           style={{
@@ -488,7 +493,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
             </div>
 
             {/* Mode Segmented Button (Yerel vs Cloud) */}
-            {Boolean(cloudState.sessionToken) && (
+            {sessionActive && (
               <div className="flex border border-slate-800 rounded bg-[#0B0F17] p-0.5 text-[12px]">
                 <button
                   type="button"
@@ -535,7 +540,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                 />
               </div>
 
-              {createMode === 'cloud' && Boolean(cloudState.sessionToken) && (
+              {createMode === 'cloud' && sessionActive && (
                 <>
                   <div className="grid grid-cols-2 gap-2.5">
                     <div>
@@ -683,6 +688,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
         </div>
 
         {/* COLUMN 2: ORGANİZASYON CLOUD PROJELERİ */}
+        {cloudOn && (
         <div
           style={{
             backgroundColor: 'var(--bg-panel)',
@@ -703,7 +709,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
               </span>
             </div>
 
-            {Boolean(cloudState.sessionToken) ? (
+            {sessionActive ? (
               <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
                 {filteredCloudProjects.length === 0 ? (
                   <div className="py-12 text-center text-[12px] text-[var(--text-muted)] border border-dashed border-[var(--border-grid)] rounded-[2px]">
@@ -786,6 +792,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
             {t('shell.start.col2Footer')}
           </div>
         </div>
+        )}
 
         {/* COLUMN 3: YEREL KAYITLI PROJELER */}
         <div
