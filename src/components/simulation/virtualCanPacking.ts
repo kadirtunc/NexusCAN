@@ -1009,6 +1009,7 @@ export const DEFAULT_WIDGET_SIZES: Record<
   checkbox: { w: 4, h: 3, title: 'Enable Switch', accent: 'emerald' },
   combobox: { w: 6, h: 3, title: 'State Selector', accent: 'blue' },
   slider: { w: 8, h: 3, title: 'Setpoint Fader', accent: 'cyan' },
+  textbox: { w: 8, h: 3, title: 'Text Field', accent: 'cyan' },
   group: { w: 12, h: 8, title: 'ECU Subsystem Group', accent: 'steel' },
 };
 
@@ -1232,6 +1233,7 @@ const VALID_WIDGET_KINDS: ReadonlySet<string> = new Set<SimulationWidgetKind>([
   'checkbox',
   'combobox',
   'slider',
+  'textbox',
   'group',
 ]);
 
@@ -1473,6 +1475,17 @@ export function createDefaultWidget(
           : Math.max(0.1, Number((span / 100).toFixed(2)));
       config.showNumericInput = true;
       break;
+    case 'textbox':
+      config.min = min;
+      config.max = max;
+      config.textMode = 'display';
+      config.textFormat = Object.keys(enumMap).length > 0 ? 'enum' : 'decimal';
+      config.sendOnEnter = true;
+      config.confirmBeforeSend = false;
+      if (Object.keys(enumMap).length > 0) {
+        config.enumMap = { ...enumMap };
+      }
+      break;
     case 'group':
       config.subtitle = 'CAN / CAN-FD SUBSYSTEM';
       break;
@@ -1556,6 +1569,7 @@ function summarizeDraftPanelCounts(
       case 'checkbox':
       case 'combobox':
       case 'slider':
+      case 'textbox':
         controls += 1;
         break;
       case 'group':

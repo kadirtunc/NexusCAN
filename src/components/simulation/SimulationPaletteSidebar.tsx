@@ -16,6 +16,7 @@ import {
   Search,
   SlidersHorizontal,
   Tag,
+  TextCursorInput,
   ToggleLeft,
   UploadCloud,
 } from 'lucide-react';
@@ -57,28 +58,34 @@ const PALETTE_ITEMS: readonly PaletteItemDef[] = [
   { kind: 'checkbox', labelKey: 'simPal.items.checkbox.label', code: 'CHK', group: 'STIMULUS', icon: CheckSquare },
   { kind: 'combobox', labelKey: 'simPal.items.combobox.label', code: 'CMB', group: 'STIMULUS', icon: ListFilter },
   { kind: 'slider', labelKey: 'simPal.items.slider.label', code: 'SLD', group: 'STIMULUS', icon: SlidersHorizontal },
+  { kind: 'textbox', labelKey: 'simPal.items.textbox.label', code: 'TXT', group: 'STIMULUS', icon: TextCursorInput },
   { kind: 'group', labelKey: 'simPal.items.group.label', code: 'GRP', group: 'LAYOUT', icon: BoxSelect },
 ];
 
 export interface SimulationPaletteSidebarProps {
   canMutate: boolean;
-  databases: readonly NetworkDatabaseSummaryDto[];
-  loadedDbEntries: readonly LoadedSimulationDatabaseEntry[];
-  versionsByDbId: Readonly<Record<string, readonly DatabaseVersionDto[]>>;
-  selectedDatabaseFilter: string;
-  selectedVersionByDbId: Readonly<Record<string, string>>;
-  loadingSchema: boolean;
-  hasSelectedBindableWidget: boolean;
+  /** DBC signal browser inputs (ignored when `signalSource` replaces the browser). */
+  databases?: readonly NetworkDatabaseSummaryDto[];
+  loadedDbEntries?: readonly LoadedSimulationDatabaseEntry[];
+  versionsByDbId?: Readonly<Record<string, readonly DatabaseVersionDto[]>>;
+  selectedDatabaseFilter?: string;
+  selectedVersionByDbId?: Readonly<Record<string, string>>;
+  loadingSchema?: boolean;
+  hasSelectedBindableWidget?: boolean;
   targetGroupTitle?: string | null;
   onClearTargetGroup?: () => void;
-  onSelectDatabaseFilter: (filterValue: string) => void;
-  onSelectDatabaseVersion: (dbId: string, versionId: string) => void;
+  onSelectDatabaseFilter?: (filterValue: string) => void;
+  onSelectDatabaseVersion?: (dbId: string, versionId: string) => void;
   onAddWidget: (
     kind: SimulationWidgetKind,
     boundContext?: SignalBoundContextInput | null
   ) => void;
-  onBindSignalToSelected: (ctx: SignalBoundContextInput) => void;
-  onOpenUploadDbc: () => void;
+  onBindSignalToSelected?: (ctx: SignalBoundContextInput) => void;
+  onOpenUploadDbc?: () => void;
+  /** Restrict the instrument list (e.g. UDS panels have no GNSS map). Default: all kinds. */
+  widgetKinds?: readonly SimulationWidgetKind[];
+  /** Replaces the Multi-DBC signal browser (lower half) with a custom data-source browser. */
+  signalSource?: React.ReactNode;
 }
 
 interface GroupedTreeMessageItem {
@@ -88,28 +95,43 @@ interface GroupedTreeMessageItem {
   signals: SignalSchemaDto[];
 }
 
+const NO_DATABASES: readonly NetworkDatabaseSummaryDto[] = [];
+const NO_DB_ENTRIES: readonly LoadedSimulationDatabaseEntry[] = [];
+const NO_VERSIONS: Readonly<Record<string, readonly DatabaseVersionDto[]>> = {};
+const NO_SELECTED_VERSIONS: Readonly<Record<string, string>> = {};
+const noop = (): void => undefined;
+
 export function SimulationPaletteSidebar({
   canMutate,
-  databases,
-  loadedDbEntries,
-  versionsByDbId,
-  selectedDatabaseFilter,
-  selectedVersionByDbId,
-  loadingSchema,
-  hasSelectedBindableWidget,
+  databases = NO_DATABASES,
+  loadedDbEntries = NO_DB_ENTRIES,
+  versionsByDbId = NO_VERSIONS,
+  selectedDatabaseFilter = 'ALL',
+  selectedVersionByDbId = NO_SELECTED_VERSIONS,
+  loadingSchema = false,
+  hasSelectedBindableWidget = false,
   targetGroupTitle,
   onClearTargetGroup,
-  onSelectDatabaseFilter,
-  onSelectDatabaseVersion,
+  onSelectDatabaseFilter = noop,
+  onSelectDatabaseVersion = noop,
   onAddWidget,
-  onBindSignalToSelected,
-  onOpenUploadDbc,
+  onBindSignalToSelected = noop,
+  onOpenUploadDbc = noop,
+  widgetKinds,
+  signalSource,
 }: SimulationPaletteSidebarProps): React.JSX.Element {
   const { t } = useI18n();
   const [search, setSearch] = useState<string>('');
   const [expandedMsgKeys, setExpandedMsgKeys] = useState<Record<string, boolean>>({});
   const [activePair, setActivePair] = useState<SignalBoundContextInput | null>(
     null
+  );
+  const paletteItems = useMemo(
+    () =>
+      widgetKinds
+        ? PALETTE_ITEMS.filter((i) => widgetKinds.includes(i.kind))
+        : PALETTE_ITEMS,
+    [widgetKinds]
   );
 
   const isAllSelected =
@@ -208,7 +230,7 @@ export function SimulationPaletteSidebar({
       <div className="border-b border-hairline">
         <div className="flex items-center justify-between border-b border-hairline bg-elevated px-3 py-2">
           <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-ink">
-            {t('simPal.header.instrumentPalette', { count: PALETTE_ITEMS.length })}
+            {t('simPal.header.instrumentPalette', { count: paletteItems.length })}
           </span>
           {activePair && (
             <span
@@ -252,7 +274,7 @@ export function SimulationPaletteSidebar({
 
         <div className="space-y-2.5 p-2.5">
           {(['DISPLAY', 'STIMULUS', 'LAYOUT'] as const).map((grp) => {
-            const grpItems = PALETTE_ITEMS.filter((i) => i.group === grp);
+            const grpItems = paletteItems.filter((i) => i.group === grp);
             const grpTitle =
               grp === 'DISPLAY'
                 ? t('simPal.group.display')
@@ -316,7 +338,10 @@ export function SimulationPaletteSidebar({
         </div>
       </div>
 
-      {/* 2. Multi-DBC / KCD Signal Browser */}
+      {/* 2. Multi-DBC / KCD Signal Browser (or a custom data-source browser) */}
+      {signalSource ? (
+        <div className="flex min-h-0 flex-1 flex-col">{signalSource}</div>
+      ) : (
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex items-center justify-between border-b border-hairline bg-elevated px-3 py-2">
           <span className="inline-flex items-center gap-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider tabular-nums text-ink">
@@ -565,6 +590,7 @@ export function SimulationPaletteSidebar({
           )}
         </div>
       </div>
+      )}
     </aside>
   );
 }

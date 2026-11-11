@@ -11,13 +11,11 @@ import {
   AlertCircle,
   ArrowLeft,
   Check,
-  Copy,
   Cpu,
   Database,
   Download,
   FolderGit2,
   Gauge,
-  GripHorizontal,
   Layers,
   Lock,
   Pause,
@@ -82,15 +80,18 @@ import {
   type SimulationTelemetrySource,
 } from './SimulationWidgets';
 import { SimulationRuntimeBus } from './simulationRuntimeBus';
+import { InstrumentCanvasGrid } from './InstrumentCanvasGrid';
 import {
-  isEditableActiveElement,
-  matchesConfiguredHotkey,
-} from './buttonControlUtils';
+  planWidgetCopyLayout,
+  useInstrumentGridDrag,
+  useInstrumentGridDrop,
+  useInstrumentGridKeyboard,
+  useRunModeButtonHotkeys,
+} from './instrumentGridInteractions';
 import { buildLocalCatalogEntries, makeDatabaseEntry } from './desktopDbEntries';
 import { VirtualCanFrameInspector } from './VirtualCanFrameInspector';
 import {
   ACCENT_HEX_MAP,
-  SIM_PALETTE_DRAG_MIME,
   TRACE_PALETTE,
   collectPanelBindings,
   createClientUid,
@@ -98,39 +99,16 @@ import {
   enumTableToComboOptions,
   findContainingGroup,
   findGnssSiblingsInMessage,
-  findNextFreeGridSlot,
   inferBusIdFromAssignment,
   isLongitudeSignalName,
-  isWidgetInsideGroup,
   mergeDatabaseSchemas,
-  parsePaletteDragPayload,
   placeWidgetInsideGroup,
   signalSchemaToBinding,
   type LoadedSimulationDatabaseEntry,
+  type PaletteDragPayload,
   type SignalBindingDbMeta,
   type SignalBoundContextInput,
 } from './virtualCanPacking';
-
-interface DragGroupChildOffset {
-  id: string;
-  origCol: number;
-  origRow: number;
-  w: number;
-  h: number;
-}
-
-interface DragInteractionState {
-  mode: 'move' | 'resize';
-  widgetId: string;
-  widgetKind: SimulationWidgetKind;
-  startClientX: number;
-  startClientY: number;
-  origCol: number;
-  origRow: number;
-  origW: number;
-  origH: number;
-  childOffsets: readonly DragGroupChildOffset[];
-}
 
 function serializePanelSnapshot(panel: SimulationPanelDto): string {
   return JSON.stringify({
@@ -339,7 +317,6 @@ export function SimulationWorkbenchView({
   const [selectedWidgetId, setSelectedWidgetId] = useState<string | null>(null);
   const [suppressAutoGroupTarget, setSuppressAutoGroupTarget] =
     useState<boolean>(false);
-  const [dragHoverGroupId, setDragHoverGroupId] = useState<string | null>(null);
   const [telemetrySource, setTelemetrySource] =
     useState<SimulationTelemetrySource>('virtual');
   const [simPaused, setSimPaused] = useState<boolean>(false);
@@ -393,7 +370,6 @@ export function SimulationWorkbenchView({
 
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const gridContainerRef = useRef<HTMLDivElement | null>(null);
-  const dragStateRef = useRef<DragInteractionState | null>(null);
   const runtimeBusRef = useRef<SimulationRuntimeBus | null>(null);
   if (runtimeBusRef.current === null) {
     runtimeBusRef.current = new SimulationRuntimeBus();
@@ -431,19 +407,6 @@ export function SimulationWorkbenchView({
     }
     return findContainingGroup(selectedWidget.layout, activePanel.widgets);
   }, [activePanel, selectedWidget, suppressAutoGroupTarget]);
-
-  const groupChildCountById = useMemo<Record<string, number>>(() => {
-    if (!activePanel) return {};
-    const counts: Record<string, number> = {};
-    for (const w of activePanel.widgets) {
-      if (w.kind === 'group') {
-        counts[w.id] = activePanel.widgets.filter((cand) =>
-          isWidgetInsideGroup(cand, w)
-        ).length;
-      }
-    }
-    return counts;
-  }, [activePanel]);
 
   const dirtyById = useMemo(() => {
     const map: Record<string, boolean> = {};
@@ -831,433 +794,38 @@ export function SimulationWorkbenchView({
     }
   }, [activePanel, cloudProjectContext, savingPanel]);
 
-  // Ctrl+S / Cmd+S + Design Keyboard Shortcuts (Delete / Arrow Nudging)
-  useEffect(() => {
-    if (viewState !== 'workbench') {
-      return;
-    }
+  // Shared instrument-grid interactions (Ctrl+S / Delete / arrows, drag-move & resize, RUN hotkeys)
+  const clearSelectedWidget = useCallback(() => setSelectedWidgetId(null), []);
+  const saveActivePanelFromShortcut = useCallback(() => {
+    void handleSaveActivePanel();
+  }, [handleSaveActivePanel]);
+  const { dragStateRef, dragHoverGroupId, setDragHoverGroupId } =
+    useInstrumentGridDrag<SimulationWidgetDto, SimulationPanelDto>({
+      panel: activePanel,
+      containerRef: gridContainerRef,
+      mutatePanel: mutateActivePanel,
+    });
 
-    const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        void handleSaveActivePanel();
-        return;
-      }
-
-      if (workbenchMode !== 'design' || !selectedWidgetId || !canMutate) {
-        return;
-      }
-
-      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || tag === 'select') {
-        return;
-      }
-
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        e.preventDefault();
-        mutateActivePanel((p) => ({
-          ...p,
-          widgets: p.widgets.filter((w) => w.id !== selectedWidgetId),
-        }));
-        setSelectedWidgetId(null);
-        return;
-      }
-
-      if (
-        e.key === 'ArrowLeft' ||
-        e.key === 'ArrowRight' ||
-        e.key === 'ArrowUp' ||
-        e.key === 'ArrowDown'
-      ) {
-        e.preventDefault();
-        const dCol = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
-        const dRow = e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0;
-        mutateActivePanel((p) => {
-          const target = p.widgets.find((w) => w.id === selectedWidgetId);
-          if (!target) return p;
-
-          if (!e.shiftKey && !e.altKey && target.kind === 'group') {
-            const nextGroupCol = Math.max(
-              0,
-              Math.min(p.gridCols - target.layout.w, target.layout.col + dCol)
-            );
-            const nextGroupRow = Math.max(
-              0,
-              Math.min(399, target.layout.row + dRow)
-            );
-            const actualDeltaCol = nextGroupCol - target.layout.col;
-            const actualDeltaRow = nextGroupRow - target.layout.row;
-            if (actualDeltaCol === 0 && actualDeltaRow === 0) {
-              return p;
-            }
-            const childIds = new Set(
-              p.widgets
-                .filter((cand) => isWidgetInsideGroup(cand, target))
-                .map((cand) => cand.id)
-            );
-            return {
-              ...p,
-              widgets: p.widgets.map((w) => {
-                if (w.id === target.id) {
-                  return {
-                    ...w,
-                    layout: {
-                      ...w.layout,
-                      col: nextGroupCol,
-                      row: nextGroupRow,
-                    },
-                  };
-                }
-                if (childIds.has(w.id)) {
-                  const childNextCol = Math.max(
-                    0,
-                    Math.min(
-                      p.gridCols - w.layout.w,
-                      w.layout.col + actualDeltaCol
-                    )
-                  );
-                  const childNextRow = Math.max(
-                    0,
-                    Math.min(399, w.layout.row + actualDeltaRow)
-                  );
-                  return {
-                    ...w,
-                    layout: {
-                      ...w.layout,
-                      col: childNextCol,
-                      row: childNextRow,
-                    },
-                  };
-                }
-                return w;
-              }),
-            };
-          }
-
-          return {
-            ...p,
-            widgets: p.widgets.map((w) => {
-              if (w.id !== selectedWidgetId) return w;
-              if (e.shiftKey) {
-                const nextW = Math.max(
-                  1,
-                  Math.min(p.gridCols - w.layout.col, w.layout.w + dCol)
-                );
-                const nextH = Math.max(1, Math.min(48, w.layout.h + dRow));
-                return {
-                  ...w,
-                  layout: { ...w.layout, w: nextW, h: nextH },
-                };
-              }
-              const nextCol = Math.max(
-                0,
-                Math.min(p.gridCols - w.layout.w, w.layout.col + dCol)
-              );
-              const nextRow = Math.max(0, Math.min(399, w.layout.row + dRow));
-              return {
-                ...w,
-                layout: { ...w.layout, col: nextCol, row: nextRow },
-              };
-            }),
-          };
-        });
-      }
-    };
-
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [
+  useInstrumentGridKeyboard<SimulationWidgetDto, SimulationPanelDto>({
+    enabled: viewState === 'workbench',
+    isDesignMode: workbenchMode === 'design',
     canMutate,
-    handleSaveActivePanel,
-    mutateActivePanel,
     selectedWidgetId,
-    viewState,
-    workbenchMode,
-  ]);
+    mutatePanel: mutateActivePanel,
+    onClearSelection: clearSelectedWidget,
+    onSave: saveActivePanelFromShortcut,
+  });
 
-  // 4b. RUN Mode Button Hotkey Dispatch (`keydown` / `keyup` on Virtual Simulation Bus or Live Bus)
-  useEffect(() => {
-    if (
-      viewState !== 'workbench' ||
-      workbenchMode !== 'run' ||
-      simPaused ||
-      !activePanel
-    ) {
-      return;
-    }
-    if (telemetrySource === 'live_bridge' && !isLiveBusArmed) {
-      return;
-    }
-
-    const onRunKeyDown = (e: KeyboardEvent) => {
-      if (e.repeat) return;
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (
-        isEditableActiveElement(document.activeElement) ||
-        isEditableActiveElement(e.target as Element | null)
-      ) {
-        return;
-      }
-
-      const matchedButtons = activePanel.widgets.filter(
-        (w) =>
-          w.kind === 'button' &&
-          w.binding !== null &&
-          Boolean(w.config.hotkey) &&
-          matchesConfiguredHotkey(w.config.hotkey, e)
-      );
-      if (matchedButtons.length === 0) return;
-
-      e.preventDefault();
-      for (const btn of matchedButtons) {
-        runtimeBus.triggerButtonHotkeyDown(btn.id);
-      }
-    };
-
-    const onRunKeyUp = (e: KeyboardEvent) => {
-      const matchedButtons = activePanel.widgets.filter(
-        (w) =>
-          w.kind === 'button' &&
-          w.binding !== null &&
-          Boolean(w.config.hotkey) &&
-          matchesConfiguredHotkey(w.config.hotkey, e)
-      );
-      if (matchedButtons.length === 0) return;
-
-      const editableFocused =
-        isEditableActiveElement(document.activeElement) ||
-        isEditableActiveElement(e.target as Element | null);
-      if (!editableFocused) {
-        e.preventDefault();
-      }
-      for (const btn of matchedButtons) {
-        runtimeBus.triggerButtonHotkeyUp(btn.id);
-      }
-    };
-
-    window.addEventListener('keydown', onRunKeyDown);
-    window.addEventListener('keyup', onRunKeyUp);
-    return () => {
-      window.removeEventListener('keydown', onRunKeyDown);
-      window.removeEventListener('keyup', onRunKeyUp);
-    };
-  }, [
-    activePanel,
-    isLiveBusArmed,
+  useRunModeButtonHotkeys({
+    enabled:
+      viewState === 'workbench' &&
+      workbenchMode === 'run' &&
+      !simPaused &&
+      activePanel !== null &&
+      !(telemetrySource === 'live_bridge' && !isLiveBusArmed),
+    widgets: activePanel?.widgets ?? [],
     runtimeBus,
-    simPaused,
-    telemetrySource,
-    viewState,
-    workbenchMode,
-  ]);
-
-  // 5. Pointer Drag-to-Move & Corner Drag-to-Resize on 24-Col Grid
-  useEffect(() => {
-    const onPointerMove = (e: PointerEvent) => {
-      const drag = dragStateRef.current;
-      const container = gridContainerRef.current;
-      if (!drag || !container || !activePanel) return;
-
-      const rect = container.getBoundingClientRect();
-      const colWidth = Math.max(16, rect.width / activePanel.gridCols);
-      const rowHeight = activePanel.rowHeightPx;
-
-      const deltaCols = Math.round((e.clientX - drag.startClientX) / colWidth);
-      const deltaRows = Math.round((e.clientY - drag.startClientY) / rowHeight);
-
-      if (drag.mode === 'move') {
-        const nextCol = Math.max(
-          0,
-          Math.min(activePanel.gridCols - drag.origW, drag.origCol + deltaCols)
-        );
-        const nextRow = Math.max(0, Math.min(399, drag.origRow + deltaRows));
-
-        if (drag.widgetKind === 'group') {
-          setDragHoverGroupId((prev) => (prev === null ? prev : null));
-          const actualDeltaCol = nextCol - drag.origCol;
-          const actualDeltaRow = nextRow - drag.origRow;
-          const childOffsetById = new Map<string, DragGroupChildOffset>();
-          for (const childOff of drag.childOffsets) {
-            childOffsetById.set(childOff.id, childOff);
-          }
-
-          mutateActivePanel((p) => ({
-            ...p,
-            widgets: p.widgets.map((w) => {
-              if (w.id === drag.widgetId) {
-                if (nextCol === w.layout.col && nextRow === w.layout.row) {
-                  return w;
-                }
-                return {
-                  ...w,
-                  layout: { ...w.layout, col: nextCol, row: nextRow },
-                };
-              }
-              const childOff = childOffsetById.get(w.id);
-              if (childOff) {
-                const targetChildCol = e.altKey
-                  ? childOff.origCol
-                  : Math.max(
-                      0,
-                      Math.min(
-                        p.gridCols - childOff.w,
-                        childOff.origCol + actualDeltaCol
-                      )
-                    );
-                const targetChildRow = e.altKey
-                  ? childOff.origRow
-                  : Math.max(
-                      0,
-                      Math.min(399, childOff.origRow + actualDeltaRow)
-                    );
-                if (
-                  targetChildCol === w.layout.col &&
-                  targetChildRow === w.layout.row
-                ) {
-                  return w;
-                }
-                return {
-                  ...w,
-                  layout: {
-                    ...w.layout,
-                    col: targetChildCol,
-                    row: targetChildRow,
-                  },
-                };
-              }
-              return w;
-            }),
-          }));
-          return;
-        }
-
-        const hoveredGroup = findContainingGroup(
-          { col: nextCol, row: nextRow, w: drag.origW, h: drag.origH },
-          activePanel.widgets
-        );
-        const nextHoverId = hoveredGroup?.id ?? null;
-        setDragHoverGroupId((prev) =>
-          prev === nextHoverId ? prev : nextHoverId
-        );
-
-        mutateActivePanel((p) => ({
-          ...p,
-          widgets: p.widgets.map((w) => {
-            if (w.id !== drag.widgetId) return w;
-            if (nextCol === w.layout.col && nextRow === w.layout.row) {
-              return w;
-            }
-            return {
-              ...w,
-              layout: { ...w.layout, col: nextCol, row: nextRow },
-            };
-          }),
-        }));
-        return;
-      }
-
-      mutateActivePanel((p) => ({
-        ...p,
-        widgets: p.widgets.map((w) => {
-          if (w.id !== drag.widgetId) return w;
-          const nextW = Math.max(
-            1,
-            Math.min(p.gridCols - drag.origCol, drag.origW + deltaCols)
-          );
-          const nextH = Math.max(1, Math.min(48, drag.origH + deltaRows));
-          if (nextW === w.layout.w && nextH === w.layout.h) {
-            return w;
-          }
-          return {
-            ...w,
-            layout: { ...w.layout, w: nextW, h: nextH },
-          };
-        }),
-      }));
-    };
-
-    const onPointerUp = () => {
-      const finishedDrag = dragStateRef.current;
-      dragStateRef.current = null;
-      setDragHoverGroupId(null);
-
-      if (
-        finishedDrag &&
-        finishedDrag.mode === 'move' &&
-        finishedDrag.widgetKind !== 'group'
-      ) {
-        mutateActivePanel((p) => {
-          const moved = p.widgets.find((w) => w.id === finishedDrag.widgetId);
-          if (!moved || moved.kind === 'group') return p;
-          const containingGroup = findContainingGroup(moved.layout, p.widgets);
-          if (!containingGroup) return p;
-
-          const adjustedCol = Math.max(
-            containingGroup.layout.col,
-            Math.min(p.gridCols - moved.layout.w, moved.layout.col)
-          );
-          const adjustedRow =
-            moved.layout.row <= containingGroup.layout.row
-              ? Math.min(399, containingGroup.layout.row + 1)
-              : moved.layout.row;
-
-          const maxAllowedGroupW = Math.max(
-            1,
-            Math.min(24, p.gridCols - containingGroup.layout.col)
-          );
-          const neededGroupW =
-            adjustedCol + moved.layout.w - containingGroup.layout.col;
-          const nextGroupW = Math.min(
-            maxAllowedGroupW,
-            Math.max(containingGroup.layout.w, neededGroupW)
-          );
-          const neededGroupH =
-            adjustedRow + moved.layout.h - containingGroup.layout.row;
-          const nextGroupH = Math.min(
-            48,
-            Math.max(2, containingGroup.layout.h, neededGroupH)
-          );
-
-          if (
-            adjustedCol === moved.layout.col &&
-            adjustedRow === moved.layout.row &&
-            nextGroupW === containingGroup.layout.w &&
-            nextGroupH === containingGroup.layout.h
-          ) {
-            return p;
-          }
-
-          return {
-            ...p,
-            widgets: p.widgets.map((w) => {
-              if (w.id === moved.id) {
-                return {
-                  ...w,
-                  layout: { ...w.layout, col: adjustedCol, row: adjustedRow },
-                };
-              }
-              if (w.id === containingGroup.id) {
-                return {
-                  ...w,
-                  layout: { ...w.layout, w: nextGroupW, h: nextGroupH },
-                };
-              }
-              return w;
-            }),
-          };
-        });
-      }
-    };
-
-    window.addEventListener('pointermove', onPointerMove);
-    window.addEventListener('pointerup', onPointerUp);
-    window.addEventListener('pointercancel', onPointerUp);
-    return () => {
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerup', onPointerUp);
-      window.removeEventListener('pointercancel', onPointerUp);
-    };
-  }, [activePanel, mutateActivePanel]);
+  });
 
   // 6. Panel CRUD Handlers
   const handleCreateBlankOrStarterPanel = async (
@@ -1714,85 +1282,15 @@ export function SimulationWorkbenchView({
     [activePanel, canMutate, mutateActivePanel]
   );
 
-  const resolveGridCellFromClientPoint = useCallback(
-    (clientX: number, clientY: number): { col: number; row: number } | null => {
-      const container = gridContainerRef.current;
-      if (!container || !activePanel) return null;
-      const rect = container.getBoundingClientRect();
-      if (rect.width <= 0) return null;
-      const colWidth = rect.width / activePanel.gridCols;
-      const relX = clientX - rect.left;
-      const relY = clientY - rect.top;
-      const col = Math.max(
-        0,
-        Math.min(activePanel.gridCols - 1, Math.floor(relX / colWidth))
-      );
-      const row = Math.max(
-        0,
-        Math.min(399, Math.floor(relY / activePanel.rowHeightPx))
-      );
-      return { col, row };
-    },
-    [activePanel]
-  );
-
-  const handleCanvasDragOver = useCallback(
-    (e: React.DragEvent<HTMLDivElement>) => {
-      if (workbenchMode !== 'design' || !canMutate || !activePanel) return;
-      if (!Array.from(e.dataTransfer.types).includes(SIM_PALETTE_DRAG_MIME)) {
-        return;
-      }
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'copy';
-
-      const cell = resolveGridCellFromClientPoint(e.clientX, e.clientY);
-      const hoveredGroup = cell
-        ? findContainingGroup(
-            { col: cell.col, row: cell.row, w: 1, h: 1 },
-            activePanel.widgets
-          )
-        : null;
-      const nextId = hoveredGroup?.id ?? null;
-      setDragHoverGroupId((prev) => (prev === nextId ? prev : nextId));
-    },
-    [activePanel, canMutate, resolveGridCellFromClientPoint, workbenchMode]
-  );
-
-  const handleCanvasDragLeave = useCallback(
-    (e: React.DragEvent<HTMLDivElement>) => {
-      const related = e.relatedTarget as Node | null;
-      if (!related || !e.currentTarget.contains(related)) {
-        setDragHoverGroupId(null);
-      }
-    },
-    []
-  );
-
-  const handleCanvasDrop = useCallback(
-    (e: React.DragEvent<HTMLDivElement>) => {
-      if (workbenchMode !== 'design' || !canMutate || !activePanel) return;
-      const raw = e.dataTransfer.getData(SIM_PALETTE_DRAG_MIME);
-      setDragHoverGroupId(null);
-      if (!raw) return;
-      e.preventDefault();
-
-      const payload = parsePaletteDragPayload(raw);
-      if (!payload) return;
-
-      const cell = resolveGridCellFromClientPoint(e.clientX, e.clientY) ?? {
-        col: 0,
-        row: 0,
-      };
-      const hoveredGroup =
-        payload.kind !== 'group'
-          ? findContainingGroup(
-              { col: cell.col, row: cell.row, w: 1, h: 1 },
-              activePanel.widgets
-            )
-          : null;
-
-      if (hoveredGroup && payload.kind !== 'group') {
-        handleAddWidgetToGroup(hoveredGroup.id, payload.kind, {
+  const handleDropPayload = useCallback(
+    (
+      payload: PaletteDragPayload,
+      cell: { col: number; row: number },
+      hoveredGroupId: string | null
+    ) => {
+      if (!activePanel) return;
+      if (hoveredGroupId && payload.kind !== 'group') {
+        handleAddWidgetToGroup(hoveredGroupId, payload.kind, {
           boundContext: payload.boundContext,
           preferredCell: cell,
           selectCreated: true,
@@ -1835,15 +1333,25 @@ export function SimulationWorkbenchView({
     },
     [
       activePanel,
-      canMutate,
       handleAddWidgetToGroup,
       loadedDbEntries,
       loadedSchema,
       mutateActivePanel,
-      resolveGridCellFromClientPoint,
-      workbenchMode,
     ]
   );
+
+  const {
+    handleDragOver: handleCanvasDragOver,
+    handleDragLeave: handleCanvasDragLeave,
+    handleDrop: handleCanvasDrop,
+  } = useInstrumentGridDrop<SimulationWidgetDto, SimulationPanelDto>({
+    containerRef: gridContainerRef,
+    panel: activePanel,
+    isDesignMode: workbenchMode === 'design',
+    canMutate,
+    setDragHoverGroupId,
+    onDropPayload: handleDropPayload,
+  });
 
   const handleBindSignalToSelected = useCallback(
     (ctx: SignalBoundContextInput) => {
@@ -1975,32 +1483,11 @@ export function SimulationWorkbenchView({
       const target = activePanel.widgets.find((w) => w.id === widgetId);
       if (!target) return;
 
-      const parentGroup =
-        target.kind !== 'group'
-          ? findContainingGroup(target.layout, activePanel.widgets)
-          : null;
-
-      let copyLayout = target.layout;
-      let updatedGroupLayout = parentGroup?.layout ?? null;
-
-      if (parentGroup) {
-        const placed = placeWidgetInsideGroup(
-          parentGroup,
-          activePanel.widgets,
-          target.layout.w,
-          target.layout.h,
-          activePanel.gridCols
-        );
-        copyLayout = placed.childLayout;
-        updatedGroupLayout = placed.updatedGroupLayout;
-      } else {
-        copyLayout = findNextFreeGridSlot(
-          activePanel.widgets,
-          target.layout.w,
-          target.layout.h,
-          activePanel.gridCols
-        );
-      }
+      const { parentGroup, copyLayout, updatedGroupLayout } = planWidgetCopyLayout(
+        target,
+        activePanel.widgets,
+        activePanel.gridCols
+      );
 
       const copy: SimulationWidgetDto = {
         ...target,
@@ -2095,23 +1582,6 @@ export function SimulationWorkbenchView({
   // Compute grid canvas height dynamically from lowest widget row
   const gridCols = activePanel?.gridCols ?? 24;
   const rowHeightPx = activePanel?.rowHeightPx ?? 42;
-  const maxOccupiedRow = activePanel
-    ? activePanel.widgets.reduce(
-        (maxR, w) => Math.max(maxR, w.layout.row + w.layout.h),
-        14
-      )
-    : 14;
-  const canvasRows = workbenchMode === 'design' ? maxOccupiedRow + 6 : maxOccupiedRow + 1;
-  const canvasMinHeightPx = Math.max(540, canvasRows * rowHeightPx);
-
-  // Render group frames below display/stimulus widgets so inner widgets remain interactive
-  const orderedWidgets = activePanel
-    ? [...activePanel.widgets].sort((a, b) => {
-        if (a.kind === 'group' && b.kind !== 'group') return -1;
-        if (a.kind !== 'group' && b.kind === 'group') return 1;
-        return 0;
-      })
-    : [];
 
   const renderGenerateFromDbcModal = (): React.JSX.Element | null => {
     if (!generateModalState.open) return null;
@@ -2750,13 +2220,13 @@ export function SimulationWorkbenchView({
                   style={{
                     backgroundColor: isLiveBusArmed
                       ? 'var(--status-nominal-bg)'
-                      : 'var(--status-warning-bg)',
+                      : 'var(--status-warn-bg)',
                     borderColor: isLiveBusArmed
                       ? 'var(--status-nominal-border)'
-                      : 'var(--status-warning-border)',
+                      : 'var(--status-warn-border)',
                     color: isLiveBusArmed
                       ? 'var(--status-nominal)'
-                      : 'var(--status-warning)',
+                      : 'var(--status-warn)',
                   }}
                 >
                   <Lock className="h-3 w-3" aria-hidden="true" />
@@ -2895,332 +2365,83 @@ export function SimulationWorkbenchView({
               />
             )}
 
-            {/* Center 24-Col Industrial Grid Canvas */}
-            <div
-              className="min-h-0 flex-1 overflow-auto p-3"
-              onClick={(e) => {
-                if (e.target === e.currentTarget && workbenchMode === 'design') {
-                  setSelectedWidgetId(null);
-                }
+            {/* Center 24-Col Industrial Grid Canvas (shared InstrumentCanvasGrid) */}
+            <InstrumentCanvasGrid<SimulationWidgetDto>
+              widgets={activePanel.widgets}
+              gridCols={gridCols}
+              rowHeightPx={rowHeightPx}
+              isDesignMode={workbenchMode === 'design'}
+              canMutate={canMutate}
+              selectedWidgetId={selectedWidgetId}
+              dragHoverGroupId={dragHoverGroupId}
+              containerRef={gridContainerRef}
+              dragStateRef={dragStateRef}
+              onSelectWidget={(id) => {
+                setSelectedWidgetId(id);
+                if (id !== null) setSuppressAutoGroupTarget(false);
               }}
-            >
-              <div
-                ref={gridContainerRef}
-                onDragOver={handleCanvasDragOver}
-                onDragLeave={handleCanvasDragLeave}
-                onDrop={handleCanvasDrop}
-                onClick={(e) => {
-                  if (
-                    e.target === e.currentTarget &&
-                    workbenchMode === 'design'
-                  ) {
-                    setSelectedWidgetId(null);
-                  }
-                }}
-                style={{
-                  minHeight: `${canvasMinHeightPx}px`,
-                  ...(workbenchMode === 'design'
-                    ? {
-                        backgroundImage:
-                          'linear-gradient(to right, var(--canvas-grid) 1px, transparent 1px), linear-gradient(to bottom, var(--canvas-grid) 1px, transparent 1px)',
-                        backgroundSize: `calc(100% / ${gridCols}) ${rowHeightPx}px`,
-                      }
-                    : {}),
-                }}
-                className={`relative w-full min-w-[720px] rounded-[2px] ${
-                  workbenchMode === 'design'
-                    ? 'border border-hairline bg-canvas'
-                    : 'bg-canvas'
-                }`}
-              >
-                {/* Empty Panel Guided Action inside 24-Col Grid */}
-                {activePanel.widgets.length === 0 && (
-                  <div className="absolute inset-0 flex items-center justify-center p-6">
-                    <div className="max-w-md rounded-[2px] border border-hairline bg-surface p-5 text-center">
-                      <p className="font-mono text-xs font-semibold uppercase tracking-wider text-ink">
-                        {t('simWb.canvas.gridEmptyTitle')}
-                      </p>
-                      <p className="mt-1.5 text-xs text-muted">
-                        {t('simWb.canvas.gridEmptyDesc')}
-                      </p>
-                      {canMutate &&
-                        loadedSchema &&
-                        loadedSchema.signals.length > 0 && (
-                          <button
-                            type="button"
-                            onClick={handlePopulateCurrentEmptyPanelFromDbc}
-                            className="mt-3.5 inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[2px] border border-strong bg-elevated px-3 font-mono text-[10px] font-semibold uppercase text-focus hover:bg-hover"
-                          >
-                            <Database
-                              className="h-3.5 w-3.5 text-nominal"
-                              aria-hidden="true"
-                            />
-                            {t('simWb.canvas.populateDbc', { count: loadedDbEntries.length })}
-                          </button>
-                        )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Positioned Widgets */}
-                {orderedWidgets.map((widget) => {
-                  const isSelected =
-                    workbenchMode === 'design' &&
-                    selectedWidgetId === widget.id;
-                  const isGroup = widget.kind === 'group';
-                  const isDragHoverTarget =
-                    workbenchMode === 'design' &&
-                    isGroup &&
-                    dragHoverGroupId === widget.id;
-                  const groupChildCount = isGroup
-                    ? (groupChildCountById[widget.id] ?? 0)
-                    : 0;
-                  const leftPct = (widget.layout.col / gridCols) * 100;
-                  const widthPct = (widget.layout.w / gridCols) * 100;
-                  const topPx = widget.layout.row * rowHeightPx;
-                  const heightPx = widget.layout.h * rowHeightPx;
-                  const accentHex = ACCENT_HEX_MAP[widget.accentColor];
-                  const headerDbName =
-                    widget.binding?.databaseName ??
-                    widget.config.lonBinding?.databaseName ??
-                    null;
-                  const headerMsgKey =
-                    widget.binding?.messageKey ??
-                    widget.config.lonBinding?.messageKey ??
-                    null;
-
-                  return (
-                    <div
-                      key={widget.id}
-                      style={{
-                        left: `${leftPct}%`,
-                        width: `${widthPct}%`,
-                        top: `${topPx}px`,
-                        height: `${heightPx}px`,
-                        zIndex: isGroup
-                          ? isSelected || isDragHoverTarget
-                            ? 5
-                            : 1
-                          : isSelected
-                            ? 30
-                            : 10,
-                      }}
-                      className={`absolute p-[3px] ${
-                        isGroup && workbenchMode === 'run'
-                          ? 'pointer-events-none'
-                          : 'pointer-events-auto'
-                      }`}
-                    >
-                      <div
-                        onClick={(e) => {
-                          if (workbenchMode === 'design') {
-                            e.stopPropagation();
-                            setSelectedWidgetId(widget.id);
-                            setSuppressAutoGroupTarget(false);
-                          }
-                        }}
-                        style={{
-                          borderColor:
-                            isDragHoverTarget || isSelected
-                              ? 'var(--status-focus)'
-                              : isGroup
-                                ? 'var(--border-strong)'
-                                : 'var(--border-hairline)',
-                        }}
-                        className={`flex h-full w-full flex-col overflow-hidden rounded-[2px] border ${
-                          isGroup ? 'bg-surface/35' : 'bg-surface'
-                        }`}
-                      >
-                        {/* Crisp Instrument Header Bar */}
-                        <div
-                          onPointerDown={(e) => {
-                            if (workbenchMode !== 'design' || !canMutate) return;
-                            if ((e.target as HTMLElement).closest('button')) {
-                              return;
-                            }
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setSelectedWidgetId(widget.id);
-                            setSuppressAutoGroupTarget(false);
-                            const childOffsets: DragGroupChildOffset[] =
-                              widget.kind === 'group'
-                                ? activePanel.widgets
-                                    .filter((child) =>
-                                      isWidgetInsideGroup(child, widget)
-                                    )
-                                    .map((child) => ({
-                                      id: child.id,
-                                      origCol: child.layout.col,
-                                      origRow: child.layout.row,
-                                      w: child.layout.w,
-                                      h: child.layout.h,
-                                    }))
-                                : [];
-                            dragStateRef.current = {
-                              mode: 'move',
-                              widgetId: widget.id,
-                              widgetKind: widget.kind,
-                              startClientX: e.clientX,
-                              startClientY: e.clientY,
-                              origCol: widget.layout.col,
-                              origRow: widget.layout.row,
-                              origW: widget.layout.w,
-                              origH: widget.layout.h,
-                              childOffsets,
-                            };
-                          }}
-                          className={`pointer-events-auto flex h-6 shrink-0 select-none items-center justify-between gap-1.5 border-b border-hairline bg-elevated px-2 font-mono text-[10px] tabular-nums ${
-                            workbenchMode === 'design' && canMutate
-                              ? 'cursor-move'
-                              : ''
-                          }`}
+              onDuplicateWidget={handleDuplicateWidget}
+              onDeleteWidget={handleDeleteWidget}
+              onDragOver={handleCanvasDragOver}
+              onDragLeave={handleCanvasDragLeave}
+              onDrop={handleCanvasDrop}
+              getHeaderMeta={(widget) => ({
+                badge:
+                  widget.binding?.databaseName ??
+                  widget.config.lonBinding?.databaseName ??
+                  null,
+                tag:
+                  widget.binding?.messageKey ??
+                  widget.config.lonBinding?.messageKey ??
+                  null,
+              })}
+              emptyState={
+                <div className="absolute inset-0 flex items-center justify-center p-6">
+                  <div className="max-w-md rounded-[2px] border border-hairline bg-surface p-5 text-center">
+                    <p className="font-mono text-xs font-semibold uppercase tracking-wider text-ink">
+                      {t('simWb.canvas.gridEmptyTitle')}
+                    </p>
+                    <p className="mt-1.5 text-xs text-muted">
+                      {t('simWb.canvas.gridEmptyDesc')}
+                    </p>
+                    {canMutate &&
+                      loadedSchema &&
+                      loadedSchema.signals.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handlePopulateCurrentEmptyPanelFromDbc}
+                          className="mt-3.5 inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[2px] border border-strong bg-elevated px-3 font-mono text-[10px] font-semibold uppercase text-focus hover:bg-hover"
                         >
-                          <div className="flex min-w-0 items-center gap-1.5">
-                            <span
-                              className="h-2 w-1 shrink-0 rounded-[1px]"
-                              style={{ backgroundColor: accentHex }}
-                              aria-hidden="true"
-                            />
-                            {workbenchMode === 'design' && canMutate && (
-                              <GripHorizontal
-                                className="h-3 w-3 shrink-0 text-subtle"
-                                aria-hidden="true"
-                              />
-                            )}
-                            <span className="truncate font-semibold uppercase tracking-wider text-ink">
-                              {widget.title}
-                            </span>
-                            {isGroup && widget.config.subtitle && (
-                              <span className="hidden truncate text-[9px] text-muted sm:inline">
-                                // {widget.config.subtitle}
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="flex shrink-0 items-center gap-1">
-                            {workbenchMode === 'design' ? (
-                              <>
-                                {isDragHoverTarget && (
-                                  <span
-                                    className="rounded-[2px] border bg-canvas px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-focus"
-                                    style={{
-                                      borderColor: 'var(--status-focus)',
-                                    }}
-                                  >
-                                    {t('simWb.widget.dropToGroup')}
-                                  </span>
-                                )}
-                                {isGroup && (
-                                  <span className="rounded-[2px] border border-hairline bg-canvas px-1 py-0.5 font-mono text-[9px] font-semibold tabular-nums text-muted">
-                                    {t('simWb.widget.itemCount', { count: groupChildCount })}
-                                  </span>
-                                )}
-                                {headerDbName && (
-                                  <span className="hidden max-w-[74px] truncate rounded-[1px] border border-hairline bg-canvas px-1 text-[8px] text-muted xl:inline">
-                                    {headerDbName}
-                                  </span>
-                                )}
-                                <span className="text-[9px] text-subtle">
-                                  {widget.layout.col},{widget.layout.row}{' '}
-                                  {widget.layout.w}×{widget.layout.h}
-                                </span>
-                                {isSelected && canMutate && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleDuplicateWidget(widget.id);
-                                      }}
-                                      title={t('simWb.widget.copy')}
-                                      aria-label={t('simWb.widget.copy')}
-                                      className="cursor-pointer rounded-[2px] p-0.5 text-muted hover:bg-surface hover:text-ink"
-                                    >
-                                      <Copy className="h-2.5 w-2.5" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleDeleteWidget(widget.id);
-                                      }}
-                                      title={t('simWb.widget.delete')}
-                                      aria-label={t('simWb.widget.delete')}
-                                      className="cursor-pointer rounded-[2px] p-0.5 text-muted hover:bg-surface hover:text-critical"
-                                    >
-                                      <Trash2 className="h-2.5 w-2.5" />
-                                    </button>
-                                  </>
-                                )}
-                              </>
-                            ) : (
-                              headerMsgKey && (
-                                <span className="max-w-[130px] truncate text-[9px] text-subtle">
-                                  {headerDbName ? `[${headerDbName}] ` : ''}
-                                  {headerMsgKey}
-                                </span>
-                              )
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Widget Instrument Body */}
-                        <div className="relative min-h-0 flex-1">
-                          <SimulationWidgetBody
-                            widget={widget}
-                            runtimeBus={runtimeBus}
-                            isRunMode={workbenchMode === 'run'}
-                            telemetrySource={telemetrySource}
-                            activeSchema={loadedSchema}
-                            allBindings={allActiveBindings}
-                            isLiveBusArmed={isLiveBusArmed}
-                            onLiveTransmitSignal={handleLiveTransmitSignal}
-                            canMutate={canMutate}
-                            groupChildCount={groupChildCount}
-                            onQuickAddToGroup={(grpId, kind) =>
-                              handleAddWidgetToGroup(grpId, kind, {
-                                selectCreated: true,
-                              })
-                            }
+                          <Database
+                            className="h-3.5 w-3.5 text-nominal"
+                            aria-hidden="true"
                           />
-                        </div>
-
-                        {/* Bottom-Right Machined Resize Handle (DESIGN Mode) */}
-                        {workbenchMode === 'design' && canMutate && (
-                          <div
-                            onPointerDown={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              setSelectedWidgetId(widget.id);
-                              setSuppressAutoGroupTarget(false);
-                              dragStateRef.current = {
-                                mode: 'resize',
-                                widgetId: widget.id,
-                                widgetKind: widget.kind,
-                                startClientX: e.clientX,
-                                startClientY: e.clientY,
-                                origCol: widget.layout.col,
-                                origRow: widget.layout.row,
-                                origW: widget.layout.w,
-                                origH: widget.layout.h,
-                                childOffsets: [],
-                              };
-                            }}
-                            title={t('simWb.widget.resizeTitle')}
-                            className="pointer-events-auto absolute right-[3px] bottom-[3px] z-20 flex h-3.5 w-3.5 cursor-se-resize items-end justify-end border-t border-l border-strong bg-elevated p-0.5 hover:border-focus"
-                          >
-                            <span
-                              className="h-1.5 w-1.5 border-r border-b border-ink"
-                              aria-hidden="true"
-                            />
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+                          {t('simWb.canvas.populateDbc', { count: loadedDbEntries.length })}
+                        </button>
+                      )}
+                  </div>
+                </div>
+              }
+              renderBody={(widget, { groupChildCount }) => (
+                <SimulationWidgetBody
+                  widget={widget}
+                  runtimeBus={runtimeBus}
+                  isRunMode={workbenchMode === 'run'}
+                  telemetrySource={telemetrySource}
+                  activeSchema={loadedSchema}
+                  allBindings={allActiveBindings}
+                  isLiveBusArmed={isLiveBusArmed}
+                  onLiveTransmitSignal={handleLiveTransmitSignal}
+                  canMutate={canMutate}
+                  groupChildCount={groupChildCount}
+                  onQuickAddToGroup={(grpId, kind) =>
+                    handleAddWidgetToGroup(grpId, kind, {
+                      selectCreated: true,
+                    })
+                  }
+                />
+              )}
+            />
 
             {/* Right Inspector + Waveform Generators Sidebar (DESIGN Mode Only) */}
             {workbenchMode === 'design' && (

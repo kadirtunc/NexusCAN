@@ -15,6 +15,7 @@ export type SimulationWidgetKind =
   | 'checkbox'
   | 'combobox'
   | 'slider'
+  | 'textbox'
   | 'group';
 
 export type SimulationButtonMode =
@@ -25,6 +26,9 @@ export type SimulationButtonMode =
   | 'cycle';
 
 export type SimulationMapTileStyle = 'osm_standard' | 'osm_dark' | 'osm_hot' | 'custom';
+
+export type SimulationTextMode = 'display' | 'input' | 'readwrite';
+export type SimulationTextFormat = 'decimal' | 'hex' | 'ascii' | 'enum';
 
 export type SimulationAccentColor = 'steel' | 'cyan' | 'emerald' | 'amber' | 'red' | 'blue';
 export type SimulationLedOperator = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte';
@@ -136,6 +140,21 @@ export interface SimulationWidgetConfigDto {
 
   // Desktop-only periodic TX interval hint (0 = on-change / manual)
   txCycleMs?: number;
+
+  // Textbox options
+  textMode?: SimulationTextMode; // default 'display'
+  textFormat?: SimulationTextFormat; // default 'decimal'
+  placeholder?: string;
+  maxLength?: number;
+  fixedLength?: number; // e.g. 17 for a VIN
+  padByte?: number; // default 0x00 (pads up to fixedLength)
+  sendOnEnter?: boolean; // default true
+  confirmBeforeSend?: boolean; // default true for UDS writes
+  /** Simulation ascii display only: payload byte range of the bound message. */
+  textByteOffset?: number;
+  textByteLength?: number;
+  /** UDS ascii/hex textbox read length: 0 = rest of the response, 1..255 bytes. */
+  textByteLen?: number;
 
   // Group Frame options
   subtitle?: string;

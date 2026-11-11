@@ -38,6 +38,7 @@ const KIND_SHORT_CODE: Record<SimulationWidgetKind, string> = {
   checkbox: 'CHK',
   combobox: 'CMB',
   slider: 'SLD',
+  textbox: 'TXT',
   group: 'GRP',
 };
 

@@ -23,9 +23,22 @@ import {
 } from './buttonControlUtils';
 import {
   type SimulationRuntimeBus,
+  useRuntimeBytesValue,
+  useRuntimeMessageBytes,
   useRuntimePeakValue,
   useRuntimeSignalValue,
 } from './simulationRuntimeBus';
+import {
+  TextboxWidgetView,
+  type TextboxAdapter,
+  type TextboxSendOutcome,
+} from './TextboxWidgetView';
+import {
+  decodeAscii,
+  formatHexBytes,
+  parseDecimalNumber,
+  parseHexInteger,
+} from './textboxCodec';
 import {
   ACCENT_HEX_MAP,
   enumTableToComboOptions,
@@ -58,6 +71,18 @@ export interface SimulationWidgetBodyProps {
   allBindings: readonly SimulationSignalBindingDto[];
   isLiveBusArmed?: boolean;
   onLiveTransmitSignal?: (binding: SimulationSignalBindingDto, value: number, txCycleMs?: number) => void;
+  /**
+   * Replaces the default stimulus path (runtimeBus.writeStimulus + CAN live transmit) for
+   * non-CAN data sources such as UDS WriteDataByIdentifier. The handler owns gating, clamping
+   * and any echo back to the runtime bus.
+   */
+  onStimulus?: (
+    binding: SimulationSignalBindingDto,
+    value: number,
+    flags?: { holdMomentary?: boolean; releaseMomentary?: boolean }
+  ) => void;
+  /** Replaces the default numeric textbox send path (e.g. UDS ascii / hex-bytes writes). */
+  textboxAdapter?: TextboxAdapter;
   canMutate?: boolean;
   groupChildCount?: number;
   onQuickAddToGroup?: (groupId: string, kind: SimulationWidgetKind) => void;
@@ -1522,6 +1547,164 @@ function SliderWidgetView({
   );
 }
 
+function SimTextboxWidget({
+  widget,
+  runtimeBus,
+  signalKey,
+  value,
+  schemaSig,
+  isRunMode,
+  canStimulate,
+  isLiveBridgeReadOnly,
+  onWrite,
+  adapterOverride,
+}: {
+  widget: SimulationWidgetDto;
+  runtimeBus: SimulationRuntimeBus;
+  signalKey: string | null;
+  value: number;
+  schemaSig: SignalSchemaDto | null;
+  isRunMode: boolean;
+  canStimulate: boolean;
+  isLiveBridgeReadOnly: boolean;
+  onWrite: (nextVal: number) => void;
+  adapterOverride?: TextboxAdapter;
+}): React.JSX.Element {
+  const { t } = useI18n();
+  const cfg = widget.config;
+  const binding = widget.binding;
+  const mode = cfg.textMode ?? 'display';
+  const format = cfg.textFormat ?? 'decimal';
+  const decimals = binding?.decimals ?? 1;
+  const unit = binding?.unit ?? '';
+  const min = cfg.min ?? binding?.min ?? 0;
+  const max = cfg.max ?? binding?.max ?? 100;
+
+  const busBytes = useRuntimeBytesValue(runtimeBus, signalKey);
+  const msgBytes = useRuntimeMessageBytes(
+    runtimeBus,
+    binding?.messageKey ?? null,
+    cfg.textByteOffset ?? 0,
+    cfg.textByteLength ?? 0
+  );
+  const bytes = busBytes ?? msgBytes;
+
+  const mergedEnum = useMemo<Record<string, string>>(
+    () => ({ ...(schemaSig?.enumTable ?? {}), ...(cfg.enumMap ?? {}) }),
+    [cfg.enumMap, schemaSig?.enumTable]
+  );
+  const rawInfo = useMemo(
+    () => physicalToRawIntAndHex(value, binding, schemaSig),
+    [binding, schemaSig, value]
+  );
+
+  let liveDisplay: string | null;
+  let editSeed: string;
+  switch (format) {
+    case 'ascii':
+      liveDisplay = bytes ? decodeAscii(bytes) : null;
+      editSeed = liveDisplay ?? '';
+      break;
+    case 'hex':
+      liveDisplay = bytes ? formatHexBytes(bytes) : rawInfo.hex;
+      editSeed = bytes ? formatHexBytes(bytes) : rawInfo.hex.replace(/^0x/i, '');
+      break;
+    case 'enum': {
+      const key = String(Math.round(value));
+      const label = mergedEnum[key];
+      liveDisplay = label ? `${key} : ${label}` : t('simWdg.enum.raw', { val: Math.round(value) });
+      editSeed = key;
+      break;
+    }
+    default:
+      liveDisplay = value.toFixed(decimals);
+      editSeed = value.toFixed(decimals);
+  }
+
+  const onWriteRef = useRef(onWrite);
+  onWriteRef.current = onWrite;
+
+  const defaultAdapter = useMemo<TextboxAdapter>(() => {
+    const toPhysical = (text: string): { ok: true; value: number } | { ok: false } => {
+      if (format === 'decimal') {
+        const parsed = parseDecimalNumber(text);
+        return parsed.ok ? { ok: true, value: parsed.value } : { ok: false };
+      }
+      if (format === 'hex') {
+        const parsed = parseHexInteger(text);
+        if (!parsed.ok) return { ok: false };
+        const factor = schemaSig?.factor ?? (binding && binding.factor !== 0 ? binding.factor : 1);
+        const offset = schemaSig?.offset ?? binding?.offset ?? 0;
+        return { ok: true, value: parsed.value * factor + offset };
+      }
+      return { ok: false };
+    };
+    return {
+      validate: (text) => {
+        if (format === 'decimal') {
+          const parsed = parseDecimalNumber(text);
+          return parsed.ok ? { ok: true } : { ok: false, errorKey: parsed.errorKey };
+        }
+        if (format === 'hex') {
+          const parsed = parseHexInteger(text);
+          return parsed.ok ? { ok: true } : { ok: false, errorKey: parsed.errorKey };
+        }
+        return { ok: false, errorKey: 'textbox.err.unsupportedFormat' };
+      },
+      send: (text): Promise<TextboxSendOutcome> => {
+        const phys = toPhysical(text);
+        if (!phys.ok) {
+          return Promise.resolve({ tone: 'error', message: t('textbox.err.invalidNumber') });
+        }
+        const clamped = Math.max(min, Math.min(max, phys.value));
+        onWriteRef.current(clamped);
+        const wasClamped = Math.abs(clamped - phys.value) > 1e-9;
+        return Promise.resolve(
+          wasClamped
+            ? {
+                tone: 'warn',
+                message: t('textbox.result.clamped', {
+                  requested: Number(phys.value.toFixed(4)),
+                  sent: Number(clamped.toFixed(4)),
+                }),
+              }
+            : {
+                tone: 'ok',
+                message: t('textbox.result.sent', { value: Number(clamped.toFixed(4)) }),
+              }
+        );
+      },
+      describe: (text) => {
+        const phys = toPhysical(text);
+        const sent = phys.ok ? Math.max(min, Math.min(max, phys.value)) : NaN;
+        return [
+          `${binding?.messageName ?? ''} :: ${binding?.signalName ?? ''}`,
+          `${text} → ${Number.isFinite(sent) ? sent : '?'} ${unit}`.trim(),
+        ];
+      },
+    };
+  }, [binding, format, max, min, schemaSig, t, unit]);
+
+  return (
+    <TextboxWidgetView
+      mode={mode}
+      format={format}
+      liveDisplay={liveDisplay}
+      unit={format === 'decimal' ? unit : ''}
+      editSeed={editSeed}
+      isRunMode={isRunMode}
+      canEdit={canStimulate}
+      lockedLabel={isLiveBridgeReadOnly ? t('simWdg.lock.listenOnlyTag') : null}
+      placeholder={cfg.placeholder}
+      maxLength={cfg.maxLength}
+      sendOnEnter={cfg.sendOnEnter ?? true}
+      confirmBeforeSend={cfg.confirmBeforeSend ?? adapterOverride !== undefined}
+      adapter={adapterOverride ?? defaultAdapter}
+      accentHex={ACCENT_HEX_MAP[widget.accentColor]}
+    />
+  );
+}
+
 export function SimulationWidgetBody({
   widget,
   runtimeBus,
@@ -1531,6 +1714,8 @@ export function SimulationWidgetBody({
   allBindings,
   isLiveBusArmed = false,
   onLiveTransmitSignal,
+  onStimulus,
+  textboxAdapter,
   canMutate = false,
   groupChildCount = 0,
   onQuickAddToGroup,
@@ -1629,6 +1814,10 @@ export function SimulationWidgetBody({
     flags?: { holdMomentary?: boolean; releaseMomentary?: boolean }
   ) => {
     if (!widget.binding || !canStimulate) return;
+    if (onStimulus) {
+      onStimulus(widget.binding, nextVal, flags);
+      return;
+    }
     runtimeBus.writeStimulus(widget.binding, nextVal, {
       ...flags,
       allBindings,
@@ -1712,6 +1901,21 @@ export function SimulationWidgetBody({
           canStimulate={canStimulate}
           isLiveBridgeReadOnly={isLiveBridgeReadOnly}
           onWrite={(v) => handleWriteStimulus(v)}
+        />
+      );
+    case 'textbox':
+      return (
+        <SimTextboxWidget
+          widget={widget}
+          runtimeBus={runtimeBus}
+          signalKey={signalKey}
+          value={liveValue}
+          schemaSig={schemaSig}
+          isRunMode={isRunMode}
+          canStimulate={canStimulate}
+          isLiveBridgeReadOnly={isLiveBridgeReadOnly}
+          onWrite={(v) => handleWriteStimulus(v)}
+          adapterOverride={textboxAdapter}
         />
       );
   }

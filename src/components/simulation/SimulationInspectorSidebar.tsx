@@ -27,6 +27,8 @@ import type {
   SimulationGeneratorSpecDto,
   SimulationLedOperator,
   SimulationMapTileStyle,
+  SimulationTextFormat,
+  SimulationTextMode,
   SimulationSignalBindingDto,
   SimulationWaveformKind,
   SimulationWidgetConfigDto,
@@ -95,6 +97,7 @@ const WIDGET_KIND_OPTIONS: ReadonlyArray<WidgetKindOptionDef> = [
   { value: 'checkbox', labelKey: 'simInsp.kind.checkbox' },
   { value: 'combobox', labelKey: 'simInsp.kind.combobox' },
   { value: 'slider', labelKey: 'simInsp.kind.slider' },
+  { value: 'textbox', labelKey: 'simInsp.kind.textbox' },
   { value: 'group', labelKey: 'simInsp.kind.group' },
 ];
 
@@ -172,10 +175,10 @@ export interface SimulationInspectorSidebarProps {
   gridCols: number;
   selectedWidget: SimulationWidgetDto | null;
   allWidgets: readonly SimulationWidgetDto[];
-  generators: readonly SimulationGeneratorSpecDto[];
-  databases: readonly NetworkDatabaseSummaryDto[];
-  loadedDbEntries: readonly LoadedSimulationDatabaseEntry[];
-  schema: DatabaseSchemaDto | null;
+  generators?: readonly SimulationGeneratorSpecDto[];
+  databases?: readonly NetworkDatabaseSummaryDto[];
+  loadedDbEntries?: readonly LoadedSimulationDatabaseEntry[];
+  schema?: DatabaseSchemaDto | null;
   onSelectWidget: (widgetId: string) => void;
   onAddWidgetToGroup: (groupId: string, kind: SimulationWidgetKind) => void;
   onMoveWidgetIntoGroup: (widgetId: string, groupId: string) => void;
@@ -185,25 +188,44 @@ export interface SimulationInspectorSidebarProps {
   ) => void;
   onDuplicateWidget: (widgetId: string) => void;
   onDeleteWidget: (widgetId: string) => void;
-  onUpdateGenerators: (next: SimulationGeneratorSpecDto[]) => void;
+  onUpdateGenerators?: (next: SimulationGeneratorSpecDto[]) => void;
+  /** Restrict the kind selector (e.g. UDS panels have no GNSS map). Default: all kinds. */
+  widgetKinds?: readonly SimulationWidgetKind[];
+  /** Replaces the DBC signal binding block of non-group widgets (e.g. UDS read/write binding). */
+  renderBindingSection?: (widget: SimulationWidgetDto) => React.ReactNode;
+  /** Show the waveform GENERATORS tab (DBC virtual bus only). Default true. */
+  showGeneratorsTab?: boolean;
+  /** Show the periodic TX cycle hint field (CAN signal TX only). Default true. */
+  showTxCycle?: boolean;
+  /** 'signal' = numeric CAN signal (ascii display only); 'bytes' = byte payload source (UDS). */
+  textboxSource?: 'signal' | 'bytes';
 }
+
+const NO_GENERATORS: readonly SimulationGeneratorSpecDto[] = [];
+const NO_DATABASES: readonly NetworkDatabaseSummaryDto[] = [];
+const NO_DB_ENTRIES: readonly LoadedSimulationDatabaseEntry[] = [];
 
 export function SimulationInspectorSidebar({
   canMutate,
   gridCols,
   selectedWidget,
   allWidgets,
-  generators,
-  databases,
-  loadedDbEntries,
-  schema,
+  generators = NO_GENERATORS,
+  databases = NO_DATABASES,
+  loadedDbEntries = NO_DB_ENTRIES,
+  schema = null,
   onSelectWidget,
   onAddWidgetToGroup,
   onMoveWidgetIntoGroup,
   onUpdateWidget,
   onDuplicateWidget,
   onDeleteWidget,
-  onUpdateGenerators,
+  onUpdateGenerators = () => undefined,
+  widgetKinds,
+  renderBindingSection,
+  showGeneratorsTab = true,
+  showTxCycle = true,
+  textboxSource = 'signal',
 }: SimulationInspectorSidebarProps): React.JSX.Element {
   const { t } = useI18n();
 
@@ -661,7 +683,11 @@ export function SimulationInspectorSidebar({
       className="flex w-full shrink-0 flex-col border-t border-hairline bg-surface lg:w-[340px] xl:w-[380px] lg:border-t-0 lg:border-l"
     >
       {/* Top Sub-Tabs: INSPECTOR vs GENERATORS */}
-      <div className="grid min-h-[40px] shrink-0 grid-cols-2 border-b border-hairline bg-elevated font-mono text-[12px] font-semibold uppercase tracking-wider">
+      <div
+        className={`grid min-h-[40px] shrink-0 border-b border-hairline bg-elevated font-mono text-[12px] font-semibold uppercase tracking-wider ${
+          showGeneratorsTab ? 'grid-cols-2' : 'grid-cols-1'
+        }`}
+      >
         <button
           type="button"
           onClick={() => setActiveTab('inspector')}
@@ -674,6 +700,7 @@ export function SimulationInspectorSidebar({
           <Settings2 className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
           {t('simInsp.tab.inspector')}
         </button>
+        {showGeneratorsTab && (
         <button
           type="button"
           onClick={() => setActiveTab('generators')}
@@ -689,9 +716,10 @@ export function SimulationInspectorSidebar({
             total: generators.length,
           })}
         </button>
+        )}
       </div>
 
-      {activeTab === 'generators' ? (
+      {showGeneratorsTab && activeTab === 'generators' ? (
         <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
           <div className="flex items-center justify-between">
             <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-muted">
@@ -1100,7 +1128,9 @@ export function SimulationInspectorSidebar({
                 }
                 className="h-[30px] w-full rounded-[2px] border border-hairline bg-canvas px-2 text-[12px] text-ink"
               >
-                {WIDGET_KIND_OPTIONS.map((opt) => (
+                {WIDGET_KIND_OPTIONS.filter(
+                  (opt) => !widgetKinds || widgetKinds.includes(opt.value)
+                ).map((opt) => (
                   <option key={opt.value} value={opt.value}>
                     {t(opt.labelKey)}
                   </option>
@@ -1249,8 +1279,11 @@ export function SimulationInspectorSidebar({
             </div>
           </div>
 
+          {/* Custom data-source binding (e.g. UDS) replaces the DBC picker when provided */}
+          {selectedWidget.kind !== 'group' && renderBindingSection?.(selectedWidget)}
+
           {/* Multi-DBC Smart SignalBindingPicker (for all non-group widgets) */}
-          {selectedWidget.kind !== 'group' && (
+          {selectedWidget.kind !== 'group' && !renderBindingSection && (
             <div className="space-y-2 rounded-[2px] border border-hairline bg-canvas p-2.5">
               <div className="flex items-center justify-between">
                 <span className="inline-flex items-center gap-1 font-semibold uppercase text-ink">
@@ -3813,7 +3846,176 @@ export function SimulationInspectorSidebar({
               </div>
             )}
 
-            {(selectedWidget.kind === 'button' ||
+
+            {selectedWidget.kind === 'textbox' &&
+              (() => {
+                const cfg = selectedWidget.config;
+                const mode = cfg.textMode ?? 'display';
+                const format = cfg.textFormat ?? 'decimal';
+                const bytesSource = textboxSource === 'bytes';
+                const isInputMode = mode !== 'display';
+                const formatsFor = (m: SimulationTextMode): SimulationTextFormat[] =>
+                  m === 'display'
+                    ? ['decimal', 'hex', 'ascii', 'enum']
+                    : bytesSource
+                      ? ['decimal', 'hex', 'ascii']
+                      : ['decimal', 'hex'];
+                const patchCfg = (p: Partial<SimulationWidgetConfigDto>) =>
+                  onUpdateWidget(selectedWidget.id, (w) => ({
+                    ...w,
+                    config: { ...w.config, ...p },
+                  }));
+                const numInput = (
+                  label: string,
+                  value: number | undefined,
+                  onChange: (n: number) => void,
+                  min?: number
+                ) => (
+                  <label className="block space-y-0.5">
+                    <span className="text-[9px] text-subtle">{label}</span>
+                    <input
+                      type="number"
+                      disabled={!canMutate}
+                      min={min}
+                      step={1}
+                      value={value ?? 0}
+                      onChange={(e) => {
+                        const n = Math.floor(Number(e.target.value));
+                        if (Number.isFinite(n)) onChange(n);
+                      }}
+                      className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-ink"
+                    />
+                  </label>
+                );
+                return (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <label className="space-y-0.5">
+                        <span className="block text-[9px] text-subtle">{t('simInsp.textbox.mode')}</span>
+                        <select
+                          disabled={!canMutate}
+                          value={mode}
+                          onChange={(e) => {
+                            const nextMode = e.target.value as SimulationTextMode;
+                            const allowed = formatsFor(nextMode);
+                            patchCfg({
+                              textMode: nextMode,
+                              textFormat: allowed.includes(format) ? format : 'decimal',
+                            });
+                          }}
+                          className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1 text-ink"
+                        >
+                          {(['display', 'input', 'readwrite'] as const).map((m) => (
+                            <option key={m} value={m}>
+                              {t(`textbox.mode.${m}`)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-0.5">
+                        <span className="block text-[9px] text-subtle">{t('simInsp.textbox.format')}</span>
+                        <select
+                          disabled={!canMutate}
+                          value={format}
+                          onChange={(e) =>
+                            patchCfg({ textFormat: e.target.value as SimulationTextFormat })
+                          }
+                          className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1 text-ink"
+                        >
+                          {formatsFor(mode).map((f) => (
+                            <option key={f} value={f}>
+                              {t(`textbox.fmt.${f}`)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    <p className="text-[9px] text-subtle">
+                      {bytesSource ? t('simInsp.textbox.udsComboHint') : t('simInsp.textbox.comboHint')}
+                    </p>
+
+                    {!bytesSource && format === 'ascii' && (
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {numInput(t('simInsp.textbox.byteOffset'), cfg.textByteOffset, (n) =>
+                          patchCfg({ textByteOffset: Math.max(0, n) }), 0)}
+                        {numInput(t('simInsp.textbox.byteLength'), cfg.textByteLength, (n) =>
+                          patchCfg({ textByteLength: Math.max(0, n) }), 0)}
+                      </div>
+                    )}
+                    {bytesSource && (format === 'ascii' || format === 'hex') &&
+                      numInput(t('simInsp.textbox.udsByteLen'), cfg.textByteLen, (n) =>
+                        patchCfg({ textByteLen: Math.max(0, Math.min(255, n)) }), 0)}
+
+                    {format === 'enum' && (
+                      <label className="block space-y-0.5">
+                        <span className="text-[9px] text-subtle">{t('simInsp.textbox.enumMap')}</span>
+                        <textarea
+                          disabled={!canMutate}
+                          rows={4}
+                          value={Object.entries(cfg.enumMap ?? {})
+                            .map(([k, v]) => `${k}=${v}`)
+                            .join('\n')}
+                          onChange={(e) => {
+                            const map: Record<string, string> = {};
+                            for (const line of e.target.value.split('\n')) {
+                              const [k, ...rest] = line.split('=');
+                              if (k && k.trim()) map[k.trim()] = rest.join('=').trim();
+                            }
+                            patchCfg({ enumMap: map });
+                          }}
+                          className="w-full resize-none rounded-[2px] border border-hairline bg-surface px-1.5 py-1 text-ink"
+                        />
+                      </label>
+                    )}
+
+                    {isInputMode && (
+                      <>
+                        <label className="block space-y-0.5">
+                          <span className="text-[9px] text-subtle">{t('simInsp.textbox.placeholder')}</span>
+                          <input
+                            type="text"
+                            disabled={!canMutate}
+                            value={cfg.placeholder ?? ''}
+                            onChange={(e) => patchCfg({ placeholder: e.target.value })}
+                            className="h-6 w-full rounded-[2px] border border-hairline bg-surface px-1.5 text-ink"
+                          />
+                        </label>
+                        {bytesSource && (format === 'ascii' || format === 'hex') && (
+                          <div className="grid grid-cols-3 gap-1.5">
+                            {numInput(t('simInsp.textbox.maxLength'), cfg.maxLength, (n) =>
+                              patchCfg({ maxLength: Math.max(0, n) }), 0)}
+                            {numInput(t('simInsp.textbox.fixedLength'), cfg.fixedLength, (n) =>
+                              patchCfg({ fixedLength: Math.max(0, n) }), 0)}
+                            {numInput(t('simInsp.textbox.padByte'), cfg.padByte ?? 0, (n) =>
+                              patchCfg({ padByte: Math.max(-1, Math.min(255, n)) }), -1)}
+                          </div>
+                        )}
+                        <label className="flex cursor-pointer items-center gap-1.5 text-ink">
+                          <input
+                            type="checkbox"
+                            disabled={!canMutate}
+                            checked={cfg.sendOnEnter ?? true}
+                            onChange={(e) => patchCfg({ sendOnEnter: e.target.checked })}
+                          />
+                          {t('simInsp.textbox.sendOnEnter')}
+                        </label>
+                        <label className="flex cursor-pointer items-center gap-1.5 text-ink">
+                          <input
+                            type="checkbox"
+                            disabled={!canMutate}
+                            checked={cfg.confirmBeforeSend ?? bytesSource}
+                            onChange={(e) => patchCfg({ confirmBeforeSend: e.target.checked })}
+                          />
+                          {t('simInsp.textbox.confirm')}
+                        </label>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
+            {showTxCycle &&
+              (selectedWidget.kind === 'button' ||
               selectedWidget.kind === 'checkbox' ||
               selectedWidget.kind === 'combobox' ||
               selectedWidget.kind === 'slider') && (

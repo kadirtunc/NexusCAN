@@ -1,4 +1,4 @@
-import { useCallback, useSyncExternalStore } from 'react';
+import { useCallback, useMemo, useSyncExternalStore } from 'react';
 import type {
   DatabaseSchemaDto,
   SignalSchemaDto,
@@ -31,6 +31,7 @@ export class SimulationRuntimeBus {
   private values = new Map<string, number>();
   private peaks = new Map<string, number>();
   private histories = new Map<string, SimTraceSample[]>();
+  private bytesByKey = new Map<string, Uint8Array>();
   private heldKeys = new Set<string>();
   private prevBytesByMsgKey = new Map<string, number[]>();
   private packedFrames: readonly PackedVirtualCanFrame[] = EMPTY_FRAMES;
@@ -74,6 +75,7 @@ export class SimulationRuntimeBus {
     this.values.clear();
     this.peaks.clear();
     this.histories.clear();
+    this.bytesByKey.clear();
     this.heldKeys.clear();
     this.prevBytesByMsgKey.clear();
     this.elapsedSec = 0;
@@ -146,6 +148,49 @@ export class SimulationRuntimeBus {
       );
       this.notifyFrameListeners();
     }
+  }
+
+  /**
+   * External (non-CAN) data sources, e.g. UDS DID polling, publish samples under their own
+   * synthetic key namespace. Value / peak / history flow exactly like DBC signals.
+   */
+  public publishExternalSample(signalKey: string, value: number, tSec: number): void {
+    if (!Number.isFinite(value)) return;
+    if (tSec > this.elapsedSec) this.elapsedSec = tSec;
+    const prev = this.values.get(signalKey);
+    this.setInternalValue(signalKey, value, tSec);
+    if (prev === undefined || Math.abs(prev - value) > 1e-7) {
+      this.notifyKey(signalKey);
+    }
+  }
+
+  /**
+   * Byte channel for non-numeric external data (ASCII / hex DIDs). Shares the per-key listener
+   * mechanism; listeners fire only when the byte content actually changes (memcmp).
+   */
+  public publishExternalBytes(signalKey: string, bytes: Uint8Array): void {
+    const prev = this.bytesByKey.get(signalKey);
+    if (prev && prev.length === bytes.length) {
+      let same = true;
+      for (let i = 0; i < bytes.length; i += 1) {
+        if (prev[i] !== bytes[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return;
+    }
+    this.bytesByKey.set(signalKey, bytes.slice());
+    this.notifyKey(signalKey);
+  }
+
+  public getBytes(signalKey: string): Uint8Array | null {
+    return this.bytesByKey.get(signalKey) ?? null;
+  }
+
+  /** Advances the shared time base (graph widgets scroll against it) without touching values. */
+  public advanceClock(tSec: number): void {
+    if (tSec > this.elapsedSec) this.elapsedSec = tSec;
   }
 
   public getValue(signalKey: string, fallback = 0): number {
@@ -504,6 +549,57 @@ export function useRuntimePeakValue(
   }, [bus, fallback, signalKey]);
 
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+export function useRuntimeBytesValue(
+  bus: SimulationRuntimeBus,
+  signalKey: string | null
+): Uint8Array | null {
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => {
+      if (!signalKey) return () => undefined;
+      return bus.subscribeKey(signalKey, onStoreChange);
+    },
+    [bus, signalKey]
+  );
+  const getSnapshot = useCallback(
+    () => (signalKey ? bus.getBytes(signalKey) : null),
+    [bus, signalKey]
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/**
+ * Payload byte range of a packed (virtual / mirrored live) message. The snapshot is a hex string
+ * so the widget re-renders only when those bytes change, not on every 60 Hz frame notification.
+ */
+export function useRuntimeMessageBytes(
+  bus: SimulationRuntimeBus,
+  messageKey: string | null,
+  byteOffset: number,
+  byteLength: number
+): Uint8Array | null {
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => bus.subscribeFrames(onStoreChange),
+    [bus]
+  );
+  const getSnapshot = useCallback((): string => {
+    if (!messageKey) return '';
+    const frame = bus.getPackedFrames().find((f) => f.messageKey === messageKey);
+    if (!frame) return '';
+    const end = byteLength > 0 ? byteOffset + byteLength : frame.rawBytes.length;
+    return frame.rawBytes
+      .slice(byteOffset, end)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  }, [bus, messageKey, byteLength, byteOffset]);
+  const hex = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return useMemo(() => {
+    if (hex.length === 0) return null;
+    const out = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    return out;
+  }, [hex]);
 }
 
 export function useRuntimePackedFrames(
