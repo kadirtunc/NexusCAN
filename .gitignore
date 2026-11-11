@@ -30,3 +30,11 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
+
+# Copyrighted standards / third-party reference documents (never redistribute)
+/template-app-images/*.pdf
+*.PDF.pdf
+
+# Claude Code local state (machine-specific)
+.claude/settings.local.json
+.claude/worktrees/
