@@ -176,6 +176,7 @@ NexusCAN exists because these projects showed the way, or carry part of the load
 - **[SavvyCAN](https://github.com/collin80/SavvyCAN)** by Collin Kidder, for proving what an open, cross-platform CAN tool can be.
 - **[driftregion/iso14229](https://github.com/driftregion/iso14229)** by Nick Kirkby: our entire virtual ECU network runs on it.
 - **[`automotive`](https://github.com/I-CAN-hack/automotive)**: the ISO-TP / UDS framing under our UDS client.
+- **[udsoncan](https://github.com/pylessard/python-udsoncan)** and **[can-isotp](https://github.com/pylessard/python-can-isotp)** by Pier-Yves Lessard: our independent reference client. Before NexusCAN trusts a virtual ECU, udsoncan has to agree with it.
 - **[candleLight / gs_usb](https://github.com/candle-usb/candleLight_fw)**, for affordable open USB-CAN hardware.
 - **[cantools](https://github.com/cantools/cantools)**, **[canmatrix](https://github.com/ebroecker/canmatrix)** and **[Kayak](https://github.com/dschanoeh/Kayak)**, for open network-description formats.
 - **[PlotJuggler](https://github.com/facontidavide/PlotJuggler)**, for setting the bar on time-series visualization.

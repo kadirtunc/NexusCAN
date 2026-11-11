@@ -31,6 +31,7 @@ Special respect and gratitude to the maintainers and contributors of:
 ### Test-only (HIL harness, not shipped)
 
 - **[driftregion/iso14229](https://github.com/driftregion/iso14229)** *(Nick James Kirkby, MIT)* — The UDS server behind `ecusim`, our virtual ECU network. Every diagnostics feature is verified against it.
+- **[udsoncan](https://github.com/pylessard/python-udsoncan)** & **[can-isotp](https://github.com/pylessard/python-can-isotp)** *(Pier-Yves Lessard, MIT)* — Independent reference UDS client used by the `ecusim` conformance suite (`tests/hil/`).
 - **[cJSON](https://github.com/DaveGamble/cJSON)** *(Dave Gamble & contributors, MIT)* — Configuration parsing for `ecusim`.
 - **[Tauri](https://github.com/tauri-apps/tauri)** *(MIT / Apache-2.0)* & **[wasm-bindgen](https://github.com/rustwasm/wasm-bindgen)** *(MIT / Apache-2.0)* — Enabling 100% bit-identical signal decoding across native desktop and cloud WebAssembly workers.
 
