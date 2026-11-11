@@ -13,6 +13,7 @@ import { StartPageView } from './components/StartPageView';
 import { SymbolsLayoutView } from './components/SymbolsLayoutView';
 import { ToolpacksModal } from './components/ToolpacksModal';
 import { AcknowledgmentsModal } from './components/AcknowledgmentsModal';
+import { DiagnosticsView } from './components/diagnostics/DiagnosticsView';
 import { type StatusBanner, TopBar } from './components/TopBar';
 import { TraceView } from './components/TraceView';
 import {
@@ -28,7 +29,7 @@ import { connectionStore, useConnectionStore } from './store/connectionStore';
 import { cloudBridgeStore, useCloudBridgeHeader } from './store/cloudBridgeStore';
 import { databaseStore, useDatabaseStore, type ActiveDocumentTab } from './store/databaseStore';
 import { plotStore, usePlotStore } from './store/plotStore';
-import { simulationPanelStore, useSimulationPanelStore } from './store/simulationPanelStore';
+import { useSimulationPanelStore } from './store/simulationPanelStore';
 import {
   type QuickBarConnectionState,
   projectStore,
@@ -37,6 +38,7 @@ import {
 import { isToolpackEnabled } from './types/toolpacks';
 import { telemetryStore, useTelemetryHeader } from './store/telemetryStore';
 import { transmitStore, useTransmitStore } from './store/transmitStore';
+import { performPanicStop } from './store/panicStop';
 import { workbenchStore, useWorkbenchStore } from './store/workbenchStore';
 import { traceSessionsStore, useTraceSessionsStore } from './store/traceSessionsStore';
 import type { DeviceDescriptorDto } from './types/hal';
@@ -171,6 +173,7 @@ export const App: React.FC = () => {
     projectStore.scheduleAutoSave(quickBarState);
   }, [
     projState.hasActiveWorkspace,
+    projState.enabledToolpacks,
     quickBarState,
     dbState.usePresetDb,
     dbState.customDbFiles,
@@ -257,12 +260,9 @@ export const App: React.FC = () => {
   }, [quickBarState, t]);
 
   const handlePanicStop = useCallback(async (): Promise<void> => {
-    telemetryStore.markPanicLatched();
-    transmitStore.markAllPaused();
-    simulationPanelStore.stopAllPeriodicStimulusJobs();
     setPanicCounter((c) => c + 1);
     try {
-      const res = await apiPanicStopTx();
+      const res = await performPanicStop();
       setStatusBanner({
         kind: 'error',
         message: t('shell.app.panicStopSuccess', {
@@ -375,12 +375,19 @@ export const App: React.FC = () => {
   ]);
 
   const isSimEnabled = isToolpackEnabled(projState.enabledToolpacks, 'simulation_replay');
+  const isDiagEnabled = isToolpackEnabled(projState.enabledToolpacks, 'automotive_diagnostics');
 
   useEffect(() => {
     if (!isSimEnabled && dbState.activeDocTab === 'panels') {
       databaseStore.setActiveDocTab('rxtx');
     }
   }, [isSimEnabled, dbState.activeDocTab]);
+
+  useEffect(() => {
+    if (!isDiagEnabled && dbState.activeDocTab === 'diagnostics') {
+      databaseStore.setActiveDocTab('rxtx');
+    }
+  }, [isDiagEnabled, dbState.activeDocTab]);
 
   const cloudTabLabel =
     cloudHeader.cloudCapturing
@@ -451,6 +458,8 @@ export const App: React.FC = () => {
             onStatusMessage={setStatusBanner}
           />
         );
+      case 'diagnostics':
+        return <DiagnosticsView />;
       default:
         return null;
     }
@@ -476,6 +485,8 @@ export const App: React.FC = () => {
         return t('shell.tab.panels');
       case 'cloud':
         return t('shell.tab.cloud');
+      case 'diagnostics':
+        return t('shell.tab.diagnostics');
       case 'start':
         return t('shell.tab.workspace');
     }
@@ -688,7 +699,26 @@ export const App: React.FC = () => {
                 </button>
               )}
 
-              {/* 8. Cloud */}
+              {/* 8. Diagnostics (automotive_diagnostics toolpack guard) */}
+              {isDiagEnabled && (
+                <button
+                  type="button"
+                  onClick={() => databaseStore.setActiveDocTab('diagnostics')}
+                  style={{
+                    backgroundColor: dbState.activeDocTab === 'diagnostics' ? 'var(--bg-panel)' : 'transparent',
+                    borderColor: dbState.activeDocTab === 'diagnostics' ? 'var(--border-strong)' : 'transparent',
+                    color: dbState.activeDocTab === 'diagnostics' ? '#67E8F9' : 'var(--text-secondary)',
+                    borderBottomColor: dbState.activeDocTab === 'diagnostics' ? 'var(--bg-panel)' : 'transparent',
+                  }}
+                  className={`h-full px-3.5 xl:px-4 text-[13px] font-sans border-t border-l border-r cursor-pointer shrink-0 rounded-t-[3px] transition-colors ${
+                    dbState.activeDocTab === 'diagnostics' ? 'font-semibold' : 'hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  {t('shell.tab.diagnostics')}
+                </button>
+              )}
+
+              {/* 9. Cloud */}
               <button
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('cloud')}
@@ -813,6 +843,7 @@ export const App: React.FC = () => {
                         <option value="rxtx">{t('shell.tab.rxtx')}</option>
                         <option value="connections">{t('shell.tab.connections')}</option>
                         {isSimEnabled && <option value="panels">{t('shell.tab.panels')}</option>}
+                        {isDiagEnabled && <option value="diagnostics">{t('shell.tab.diagnostics')}</option>}
                         <option value="cloud">{t('shell.tab.cloud')}</option>
                       </select>
 

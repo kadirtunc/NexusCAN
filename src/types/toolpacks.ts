@@ -20,6 +20,11 @@ export type EngineeringToolpackId =
 export const DEFAULT_ENABLED_TOOLPACKS: readonly EngineeringToolpackId[] = [
   'core',
   'simulation_replay',
+  'reverse_engineering',
+  'automotive_diagnostics',
+  'heavy_duty_j1939',
+  'robotics_canopen',
+  'hil_automation',
 ] as const;
 
 export type EngineeringToolpackReleaseStage = 'active' | 'phase_2' | 'phase_3';

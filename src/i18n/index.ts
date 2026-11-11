@@ -9,6 +9,7 @@ import {
   toggleLocale,
 } from './core';
 import { cloudSimWorkbenchEn, cloudSimWorkbenchTr } from './shards/cloudSimWorkbench';
+import { diagnosticsEn, diagnosticsTr } from './shards/diagnostics';
 import { hardwareNetdbEn, hardwareNetdbTr } from './shards/hardwareNetdb';
 import { plotterModalsEn, plotterModalsTr } from './shards/plotterModals';
 import { rxtxTraceEn, rxtxTraceTr } from './shards/rxtxTrace';
@@ -27,6 +28,7 @@ export const trDictionary = {
   ...cloudSimWorkbenchTr,
   ...simInspectorPaletteTr,
   ...simWidgetsCanvasTr,
+  ...diagnosticsTr,
 } as const;
 
 export type TranslationKey = keyof typeof trDictionary;
@@ -39,6 +41,7 @@ export const enDictionary: Record<TranslationKey, string> = {
   ...cloudSimWorkbenchEn,
   ...simInspectorPaletteEn,
   ...simWidgetsCanvasEn,
+  ...diagnosticsEn,
 };
 
 export function translateForLocale(

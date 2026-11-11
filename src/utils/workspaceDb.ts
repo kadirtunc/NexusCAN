@@ -16,7 +16,8 @@ export type ActiveDocumentTab =
   | 'trace'
   | 'symbols'
   | 'panels'
-  | 'cloud';
+  | 'cloud'
+  | 'diagnostics';
 
 export type UiTheme = 'dark' | 'light';
 
