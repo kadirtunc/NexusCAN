@@ -18,6 +18,8 @@ nexus-core = { path = "crates/nexus-core" }
 nexus-netdb = { path = "crates/nexus-netdb" }
 nexus-hal = { path = "crates/nexus-hal" }
 nexus-cloud = { path = "crates/nexus-cloud" }
+nexus-protocols = { path = "crates/nexus-protocols" }
+nexus-seedkey-native = { path = "crates/nexus-seedkey-native" }
 
 # Serialization & Core Utilities
 serde = { version = "1.0", features = ["derive"] }
@@ -48,6 +50,14 @@ serialport = { version = "4.7", default-features = false }
 winnow = "0.7"
 encoding_rs = "0.8"
 quick-xml = "0.37"
+
+# UDS SecurityAccess seed/key providers (nexus-protocols / nexus-seedkey-native)
+rhai = { version = "1", default-features = false, features = ["std", "sync", "no_module", "no_custom_syntax"] }
+libloading = "0.8"
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+
+# UDS client core (D-003): ISO-TP + UDS framing only; NexusCAN HAL provides CAN access. Pinned.
+automotive = { version = "=0.6.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

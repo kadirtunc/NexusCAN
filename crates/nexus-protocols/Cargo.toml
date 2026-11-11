@@ -1,0 +1,32 @@
+[package]
+name = "nexus-protocols"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Higher-layer CAN protocols for NexusCAN (UDS SecurityAccess seed/key providers, later ISO-TP / J1939 / CANopen)"
+
+[features]
+default = ["script"]
+# Sandboxed Rhai seed/key scripts.
+script = ["dep:rhai"]
+
+[dependencies]
+nexus-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rhai = { workspace = true, optional = true }
+# UDS client (D-003): ISO-TP framing over our own DiagCanPort adapter (own adapters disabled).
+automotive = { workspace = true }
+tokio = { workspace = true }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Test-only DiagCanPort over a raw SocketCAN socket (integration tests against tests/hil/ecusim).
+socketcan = { workspace = true }
+
+[lints]
+workspace = true
