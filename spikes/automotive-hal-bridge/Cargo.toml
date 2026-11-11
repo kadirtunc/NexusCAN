@@ -1,0 +1,18 @@
+# Spike: automotive (I-CAN-hack) ISO-TP + UDS over the NexusCAN HAL.
+# Standalone cargo project — NOT a member of the root NexusCAN workspace.
+[package]
+name = "automotive-hal-bridge"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+# Pinned. default-features = false => no panda/socketcan/peak/vector/j2534 adapters.
+automotive = { version = "=0.6.0", default-features = false }
+nexus-core = { path = "../../crates/nexus-core" }
+nexus-hal = { path = "../../crates/nexus-hal" }
+crossbeam-channel = "0.5"
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "time"] }
