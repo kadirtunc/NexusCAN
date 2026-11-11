@@ -11,10 +11,18 @@ Rust core · Tauri v2 desktop · zero-allocation hot path · 100% MIT.
 ![Tauri v2](https://img.shields.io/badge/desktop-Tauri%20v2-24c8db?logo=tauri&logoColor=white)
 ![Status](https://img.shields.io/badge/status-v0.1%20preview-f59e0b)
 
-<img src="docs/assets/ecu_graph_scan.gif" alt="Functional UDS scan: every ECU that answers appears around the tester, then one click opens it" width="100%"/>
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/rx_tx.png" alt="Receive view with live DBC decoding and changed-byte highlighting"/></td>
+<td width="50%"><img src="docs/assets/ecu_graph_scan.gif" alt="Functional UDS scan: every ECU that answers appears around the tester, then one click opens it"/></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Bus analysis</b>: live DBC/KCD decoding, CAN-FD, multiplexers, changed-byte highlighting.</sub></td>
+<td align="center"><sub><b>UDS diagnostics</b>: one functional request, four ECUs answer, the map grows around you.</sub></td>
+</tr>
+</table>
 
-<sub>One functional request (<code>3E 00</code> → <code>0x7DF</code>), four ECUs answer, the graph grows around you. Click a node and you are talking UDS to it.<br/>
-All screenshots are the real app on a virtual ECU network (<code>vcan0</code> + <a href="tests/hil/ecusim">ecusim</a>), reproducible with the steps below.</sub>
+<sub>All screenshots are the real app on a virtual network (<code>vcan0</code> + <a href="tests/hil/ecusim">ecusim</a> ECUs + the built-in EV/BMS simulator), reproducible with the steps below.</sub>
 
 </div>
 
@@ -22,23 +30,48 @@ All screenshots are the real app on a virtual ECU network (<code>vcan0</code> + 
 
 ## Why NexusCAN
 
-Commercial CAN tools are powerful, expensive and closed. Open-source ones are great at sniffing frames, but stop where diagnostics begins. NexusCAN aims at the space in between:
+Commercial CAN tools are powerful, expensive and closed. Open-source ones are great at sniffing frames, but stop where diagnostics begins. NexusCAN is a CAN analyzer first, with a diagnostics workbench built on the same core:
 
-- **Diagnostics you can see.** UDS is not a log of hex lines. Discover the ECUs on the bus, put them on a map, click one and every request, response, NRC and ISO-TP frame lines up underneath.
-- **Every frame accounted for.** Each ISO-TP frame is tagged by the backend with the exact UDS transaction it belongs to: no timestamp guessing, no "which response was that?".
-- **Safe by default.** Channels open **Listen-Only**. Transmitting needs an explicit, confirmed **Arm**, and **Stop All TX** is one click away on every screen.
-- **Real data or nothing.** Outside the clearly badged Demo mode, no view ever fabricates a value.
 - **Fast where it matters.** An 80-byte `#[repr(C)]` frame, no heap allocation on the RX/TX path, and 60 Hz UI snapshots instead of one IPC message per frame.
+- **Your database, fully understood.** A 3-stage `.dbc` / `.kcd` compiler: Intel and Motorola bit layouts, signed and IEEE-754 signals, cascaded multiplexers, CAN-FD 64-byte payloads, J1939 PGNs.
+- **Safe by default.** Channels open **Listen-Only**. Transmitting needs an explicit, confirmed **Arm**, and **Stop All TX** is one click away on every screen.
+- **Diagnostics you can see.** Discover the ECUs on the bus, put them on a map, click one, and every request, response, NRC and ISO-TP frame lines up underneath, each frame tagged by the backend with the exact transaction it belongs to.
+- **Real data or nothing.** Outside the clearly badged Demo mode, no view ever fabricates a value.
 
 ---
 
 ## Tour
 
+### Bus analysis
+
+<img src="docs/assets/trace.png" alt="Chronological trace with decoded signals, mux pages and E2E fields" width="100%"/>
+
+**Trace** — chronological capture with fully decoded signals (cascaded multiplexers, E2E counters/CRCs), replay with speed control, `.trc` `.asc` `.blf` `.log` `.csv` import and export.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/plotter.png" alt="Multi-axis live signal plotter"/></td>
+<td width="50%"><img src="docs/assets/bit_matrix.png" alt="DBC bit layout matrix for a message"/></td>
+</tr>
+<tr>
+<td><b>Plotter</b> — multi-axis live plots on canvas, cursors, overview strip, plot-from-trace.</td>
+<td><b>DBC Studio</b> — byte-by-bit layout matrix (Intel and Motorola), scale/offset/range and live value per signal.</td>
+</tr>
+</table>
+
+**Receive / Transmit** (top of this page) — per-ID overwrite view with live decoding and cycle times; periodic and one-shot TX of raw or signal-encoded frames, values clamped to their DBC range. **Simulation panels** — drag-and-drop instrument panels (gauges, LEDs, plots, buttons, sliders) bound to DBC signals, or generated as a draft straight from a database.
+
+### Safety model
+
+<img src="docs/assets/tx_control.png" alt="TX mode popover: per-bus Listen-Only, Active and Disarm all" width="62%"/>
+
+TX state is always visible in the top bar. Disarming is instant; arming a bus takes an explicit confirmation. **Stop All TX** cancels periodic jobs, disarms every bus and closes every diagnostic tap.
+
 ### UDS diagnostics workbench
 
 <img src="docs/assets/ecu_graph.png" alt="ECU graph with four ECUs, the BMS selected and its identification read" width="100%"/>
 
-**ECU Graph** — functional discovery (11-bit or 29-bit), automatic identification (VIN, part, serial, SW/HW numbers), per-node DTC count and session. Draggable nodes, the map persists and grows with every scan.
+**ECU Graph** — functional discovery (11-bit or 29-bit), automatic identification (VIN, part, serial, SW/HW numbers), per-node DTC count and session. Draggable nodes; the map persists and grows with every scan.
 
 <img src="docs/assets/traffic_dock.png" alt="Traffic dock with a multi-frame ReadDataByIdentifier expanded into its ISO-TP frames" width="100%"/>
 
@@ -55,34 +88,7 @@ Commercial CAN tools are powerful, expensive and closed. Open-source ones are gr
 </tr>
 </table>
 
-Also in the box: DTC scanner (`19 02`), OBD-II Mode 01 live PIDs, a visual UDS flow editor and a drag-and-drop UDS instrument panel.
-
-### Bus analysis
-
-<img src="docs/assets/rx_tx.png" alt="Receive view with live DBC decoding and changed-byte highlighting" width="100%"/>
-
-**Receive / Transmit** — per-ID overwrite view with live DBC decoding, changed-byte highlighting, cycle times, multiplexed and CAN-FD (64-byte) messages.
-
-<img src="docs/assets/trace.png" alt="Chronological trace with decoded signals, mux pages and E2E fields" width="100%"/>
-
-**Trace** — chronological capture with fully decoded signals (cascaded multiplexers, E2E counters/CRCs), replay with speed control, `.trc` `.asc` `.blf` `.log` `.csv` import and export.
-
-<table>
-<tr>
-<td width="50%"><img src="docs/assets/plotter.png" alt="Multi-axis live signal plotter"/></td>
-<td width="50%"><img src="docs/assets/bit_matrix.png" alt="DBC bit layout matrix for a message"/></td>
-</tr>
-<tr>
-<td><b>Plotter</b> — multi-axis live plots on canvas, cursors, overview strip, plot-from-trace.</td>
-<td><b>DBC Studio</b> — <code>.dbc</code> / <code>.kcd</code> compiler with a byte-by-bit layout matrix (Intel and Motorola), live values per signal.</td>
-</tr>
-</table>
-
-### Safety model
-
-<img src="docs/assets/tx_control.png" alt="TX mode popover: per-bus Listen-Only, Active and Disarm all" width="62%"/>
-
-TX state is always visible in the top bar. Disarming is instant; arming a bus takes an explicit confirmation. **Stop All TX** cancels periodic jobs, disarms every bus and closes every diagnostic tap.
+Also in the box: DTC scanner (`19 02`), OBD-II Mode 01 live PIDs (labelled as OBD, not UDS), a visual UDS flow editor and a drag-and-drop UDS instrument panel.
 
 ---
 
@@ -160,8 +166,9 @@ NexusCAN is a **v0.1 preview**. What is real today and what is next, without mar
 | Recording | Trace capture and replay, BLF/ASC/TRC/CSV/candump | Lossless backend recorder with triggers, ASAM MF4 |
 | Protocols | UDS (ISO 14229), ISO-TP (ISO 15765-2), J1939 PGN decoding via DBC | J1939 transport and DM1/DM2, CANopen, XCP |
 | Platforms | Linux (verified), browser mode | Windows and macOS desktop builds via CI |
+| Experimental | NexusCloud client and headless agent: in the repo, **off by default** (enable under *View → Experimental: NexusCloud (self-hosted)*) | NexusCloud server preview, agent releases |
 
-### Ecosystem roadmap
+### Ecosystem roadmap (experimental)
 
 - **NexusCloud** *(open source, self-hosted)* — team DBC library with semantic diffs, shared recordings, time-series replay.
 - **NexusCAN Agent** — headless, always Listen-Only, reachable only through your own NexusCloud. Remote monitoring of test benches and vehicles, with no remote TX by design.
