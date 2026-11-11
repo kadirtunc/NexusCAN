@@ -24,6 +24,14 @@ Special respect and gratitude to the maintainers and contributors of:
 - **[Winnow](https://github.com/winnow-rs/winnow)** *(MIT)* & **[Quick-XML](https://github.com/tafia/quick-xml)** *(MIT)* — Zero-copy combinator and XML foundations behind our clean-room `.dbc` and `.kcd` parser stages.
 - **[Serde](https://github.com/serde-rs/serde)** *(MIT / Apache-2.0)*, **[parking_lot](https://github.com/Amanieu/parking_lot)** *(MIT / Apache-2.0)*, **[crossbeam](https://github.com/crossbeam-rs/crossbeam)** *(MIT / Apache-2.0)*.
 - **[socketcan-rs](https://github.com/socketcan-rs/socketcan-rs)** *(MIT)* & **[serialport-rs](https://gitlab.com/susurrus/serialport-rs)** *(MPL-2.0)*.
+- **[`automotive`](https://github.com/I-CAN-hack/automotive)** *(MIT)* — The ISO-TP / UDS framing layer under our UDS client (`nexus-protocols`).
+- **[Rhai](https://github.com/rhaiscript/rhai)** *(MIT / Apache-2.0)* — Sandboxed scripting for SecurityAccess seed/key providers.
+- **[nix](https://github.com/nix-rust/nix)** *(MIT)*, **[flate2](https://github.com/rust-lang/flate2-rs)** *(MIT / Apache-2.0)* & **[encoding_rs](https://github.com/hsivonen/encoding_rs)** *(Apache-2.0 / MIT, BSD-3-Clause)* — Linux system interfaces, BLF zlib containers and legacy DBC text encodings.
+
+### Test-only (HIL harness, not shipped)
+
+- **[driftregion/iso14229](https://github.com/driftregion/iso14229)** *(Nick James Kirkby, MIT)* — The UDS server behind `ecusim`, our virtual ECU network. Every diagnostics feature is verified against it.
+- **[cJSON](https://github.com/DaveGamble/cJSON)** *(Dave Gamble & contributors, MIT)* — Configuration parsing for `ecusim`.
 - **[Tauri](https://github.com/tauri-apps/tauri)** *(MIT / Apache-2.0)* & **[wasm-bindgen](https://github.com/rustwasm/wasm-bindgen)** *(MIT / Apache-2.0)* — Enabling 100% bit-identical signal decoding across native desktop and cloud WebAssembly workers.
 
 ---
