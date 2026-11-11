@@ -256,7 +256,7 @@ const NodePanel: React.FC<SidePanelProps> = ({ node, functionalId, isActive, onN
       <section className="space-y-1">
         <div className={DIAG_SECTION_TITLE}>{t('ecuGraph.sec.addressing')}</div>
         <div className="rounded-[2px] border border-hairline bg-canvas px-2">
-          <Row label={t('ecuGraph.row.bus')}>{node.busId}</Row>
+          <Row label={t('ecuGraph.row.bus')}>{t('diagHmi.setup.bus', { n: node.busId + 1 })}</Row>
           <Row label={t('ecuGraph.row.mode')}>{node.isExtendedId ? '29-bit' : '11-bit'}</Row>
           <Row label={t('diagReal.disc.colReq')}>
             {node.requestId === null ? dash : formatCanId(node.requestId, node.isExtendedId)}
@@ -394,7 +394,7 @@ export const EcuGraphView: React.FC<Props> = ({ onNavigate }) => {
   const activeKey = session.connected ? activeNodeKey() : null;
   const strings = useMemo<GraphCanvasStrings>(
     () => ({
-      tester: t('ecuGraph.tester', { n: busId }),
+      tester: t('ecuGraph.tester', { n: busId + 1 }),
       testerSub: t('ecuGraph.testerSub', { id: funcLabel }),
       active: t('ecuGraph.active'),
       notSeen: t('ecuGraph.notSeen'),
@@ -453,7 +453,7 @@ export const EcuGraphView: React.FC<Props> = ({ onNavigate }) => {
             >
               {busOptions.map((id) => (
                 <option key={id} value={id}>
-                  {t('diagHmi.setup.bus', { n: id })}
+                  {t('diagHmi.setup.bus', { n: id + 1 })}
                 </option>
               ))}
             </select>

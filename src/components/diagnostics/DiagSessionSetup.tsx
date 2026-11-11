@@ -220,10 +220,10 @@ export const DiagSessionSetup: React.FC = () => {
                   disabled={locked}
                   className={DIAG_SELECT}
                 >
-                  {busOptions.length === 0 && <option value={busId}>{t('diagHmi.setup.bus', { n: busId })}</option>}
+                  {busOptions.length === 0 && <option value={busId}>{t('diagHmi.setup.bus', { n: busId + 1 })}</option>}
                   {busOptions.map((id) => (
                     <option key={id} value={id}>
-                      {t('diagHmi.setup.bus', { n: id })}
+                      {t('diagHmi.setup.bus', { n: id + 1 })}
                     </option>
                   ))}
                 </select>
