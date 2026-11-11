@@ -40,7 +40,7 @@ pub use pipeline::{
 pub use registry::DriverRegistry;
 pub use traits::{
     AdapterCapabilities, AdapterDriver, BusHealthSnapshot, BusState, CanChannel, CanFilter,
-    ChannelConfig, DeviceDescriptor,
+    ChannelConfig, DeviceDescriptor, ListenOnlyEnforcement,
 };
 
 #[cfg(test)]

@@ -3,6 +3,9 @@
 //! cross-OS driver diagnostics, and all 20 IPC command handlers.
 
 pub mod blf;
+pub mod diag_discovery;
+pub mod diag_session;
+pub mod diag_tap;
 pub mod replay;
 pub mod state_table;
 pub mod tx_scheduler;
@@ -16,7 +19,10 @@ use crate::dto::{
 };
 use crate::error::{AdapterError, HalError};
 use crate::registry::DriverRegistry;
-use crate::traits::{BusState, CanChannel, DeviceDescriptor};
+use crate::traits::{BusState, CanChannel, DeviceDescriptor, ListenOnlyEnforcement};
+use diag_tap::{DiagBusShared, GateRefs, TapCtl, TapRegisterError, TapTable, TxOrigin};
+use nexus_protocols::uds::dto::{DiagError, DiagErrorCode};
+use nexus_protocols::uds::port::{DiagPortEvent, DiagTapFilter, DiagTxReject};
 use base64::engine::general_purpose::{STANDARD as BASE64_STD, STANDARD_NO_PAD as BASE64_NO_PAD};
 use base64::Engine as _;
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
@@ -62,7 +68,14 @@ pub(crate) struct TxDispatchRequest {
     pub(crate) ack: Option<Sender<Result<(), AdapterError>>>,
     pub(crate) suppress_echo: bool,
     pub(crate) hw_tx_counter: Option<Arc<AtomicU64>>,
+    /// D-003: diag-tap TX verdicts (`TxConfirmed` / `TxRejected`) go to the origin tap only.
+    pub(crate) origin: TxOrigin,
 }
+
+/// Test-only instrumentation: runs once at the start of every bus-io thread (used by the
+/// allocation-counting integration test to mark the thread). Not part of the public API.
+#[doc(hidden)]
+pub static BUS_IO_THREAD_START_HOOK: Mutex<Option<fn()>> = Mutex::new(None);
 
 pub(crate) struct ConnectedBusHandle {
     bus_id: BusId,
@@ -76,6 +89,10 @@ pub(crate) struct ConnectedBusHandle {
     stop_flag: Arc<AtomicBool>,
     pub(crate) tx_sender: Sender<TxDispatchRequest>,
     io_join: Option<JoinHandle<()>>,
+    /// D-003 diag tap registry of this bus.
+    diag: Arc<DiagBusShared>,
+    /// D-005: how Listen-Only is enforced (`None` when the bus is active).
+    listen_only_enforcement: Option<ListenOnlyEnforcement>,
 }
 
 impl ConnectedBusHandle {
@@ -96,7 +113,15 @@ impl ConnectedBusHandle {
             bus_state: state.as_str().to_string(),
             tx_error_count: self.tx_errors.load(Ordering::Relaxed),
             rx_error_count: self.rx_errors.load(Ordering::Relaxed),
+            listen_only_enforcement: self
+                .listen_only_enforcement
+                .map(|e| e.as_str().to_string()),
         }
+    }
+
+    #[inline]
+    fn fd_enabled(&self) -> bool {
+        self.config.enable_fd && self.descriptor.capabilities.supports_fd
     }
 
     fn nominal_capacity_bps(&self) -> u64 {
@@ -108,6 +133,7 @@ impl ConnectedBusHandle {
     }
 
     fn shutdown(&mut self) {
+        self.diag.close_all();
         self.stop_flag.store(true, Ordering::Release);
         self.tx_armed.store(false, Ordering::Release);
         if let Some(handle) = self.io_join.take() {
@@ -143,6 +169,8 @@ pub struct PipelineEngine {
     latest_snapshot: Arc<RwLock<Option<TelemetrySnapshotDto>>>,
     aggregator_join: Mutex<Option<JoinHandle<()>>>,
     scheduler_join: Mutex<Option<JoinHandle<()>>>,
+    /// D-003 diag session manager (`cmd_diag_*`), see [`diag_session`].
+    diag_sessions: diag_session::DiagSessionMap,
 }
 
 impl Default for PipelineEngine {
@@ -250,6 +278,7 @@ impl PipelineEngine {
             latest_snapshot,
             aggregator_join: Mutex::new(Some(aggregator_handle)),
             scheduler_join: Mutex::new(Some(scheduler_handle)),
+            diag_sessions: diag_session::DiagSessionMap::default(),
         }
     }
 
@@ -287,6 +316,8 @@ impl PipelineEngine {
     ) -> Result<ConnectedBusHandle, HalError> {
         let initial_health = channel.health();
         let listen_only = config.listen_only;
+        let listen_only_enforcement = listen_only.then(|| channel.listen_only_enforcement());
+        let (diag, diag_ctl_rx) = DiagBusShared::new();
         let effective_armed = initial_tx_armed && !listen_only;
 
         let tx_armed = Arc::new(AtomicBool::new(effective_armed));
@@ -304,6 +335,7 @@ impl PipelineEngine {
         let io_rx_err = Arc::clone(&rx_errors);
         let io_frame_tx = self.frame_tx.clone();
         let io_dropped = Arc::clone(&self.dropped_frames);
+        let io_panic = Arc::clone(&self.tx_panic_latched);
 
         let io_join = thread::Builder::new()
             .name(format!("nexus-bus-io-{bus_id}"))
@@ -318,9 +350,11 @@ impl PipelineEngine {
                     io_stop,
                     io_engine_stop,
                     io_armed,
+                    io_panic,
                     io_state,
                     io_tx_err,
                     io_rx_err,
+                    diag_ctl_rx,
                 );
             })
             .map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
@@ -337,6 +371,8 @@ impl PipelineEngine {
             stop_flag,
             tx_sender,
             io_join: Some(io_join),
+            diag,
+            listen_only_enforcement,
         })
     }
 
@@ -399,6 +435,7 @@ impl PipelineEngine {
             self.tx_panic_latched.store(false, Ordering::Release);
         } else {
             bus.tx_armed.store(false, Ordering::Release);
+            bus.diag.close_all();
             drop(guard);
             self.tx_scheduler.lock().remove_jobs_for_bus(bus_id);
             let guard2 = self.buses.lock();
@@ -434,6 +471,7 @@ impl PipelineEngine {
                     self.tx_panic_latched.store(false, Ordering::Release);
                     return Ok(bus.to_health_dto());
                 }
+                bus.diag.close_all();
                 drop(guard);
                 self.tx_scheduler.lock().remove_jobs_for_bus(bus_id);
                 let guard2 = self.buses.lock();
@@ -495,6 +533,8 @@ impl PipelineEngine {
                 if bus.tx_armed.swap(false, Ordering::AcqRel) {
                     disarmed_buses += 1;
                 }
+                // D-003: every diag tap dies with Panic Stop (pending sends -> Closed).
+                bus.diag.close_all();
             }
         }
 
@@ -866,6 +906,7 @@ impl PipelineEngine {
                 ack: Some(ack_tx),
                 suppress_echo: false,
                 hw_tx_counter: None,
+                origin: TxOrigin::Other,
             })
             .map_err(|_| HalError::BusNotConnected(bus_id))?;
 
@@ -989,6 +1030,7 @@ impl PipelineEngine {
                 ack: Some(ack_tx),
                 suppress_echo: false,
                 hw_tx_counter: None,
+                origin: TxOrigin::Other,
             })
             .map_err(|_| HalError::BusNotConnected(bus_id))?;
 
@@ -1307,12 +1349,12 @@ impl PipelineEngine {
         };
 
         let (entries, fallback_source) =
-            if let Some(ref frames) = args.frames.as_ref().filter(|f| !f.is_empty()) {
+            if let Some(frames) = args.frames.as_ref().filter(|f| !f.is_empty()) {
                 (
                     compile_chronological_frames(frames),
                     "In-Memory Trace".to_string(),
                 )
-            } else if let Some(ref b64) =
+            } else if let Some(b64) =
                 args.content_base64.as_ref().filter(|c| !c.trim().is_empty())
             {
                 let name_hint = resolve_name_hint("inline_trace.blf");
@@ -1321,14 +1363,14 @@ impl PipelineEngine {
                     parse_trace_entries_from_bytes(&name_hint, &raw_bytes)?,
                     name_hint,
                 )
-            } else if let Some(ref content) = args.content.as_ref().filter(|c| !c.trim().is_empty())
+            } else if let Some(content) = args.content.as_ref().filter(|c| !c.trim().is_empty())
             {
                 let name_hint = resolve_name_hint("inline_trace.trc");
                 (
                     parse_trace_entries_from_bytes(&name_hint, content.as_bytes())?,
                     name_hint,
                 )
-            } else if let Some(ref fname) = args.file_name.as_ref().filter(|s| !s.trim().is_empty())
+            } else if let Some(fname) = args.file_name.as_ref().filter(|s| !s.trim().is_empty())
             {
                 let safe_name = sanitize_trace_filename(fname);
                 let target_path = self.traces_dir.join(&safe_name);
@@ -1401,6 +1443,8 @@ impl PipelineEngine {
 
 impl Drop for PipelineEngine {
     fn drop(&mut self) {
+        // Stop UDS sessions (keepalive threads) before their buses go away.
+        self.diag_sessions.clear();
         self.engine_stop.store(true, Ordering::Release);
         self.replay.shutdown();
         {
@@ -1419,6 +1463,35 @@ impl Drop for PipelineEngine {
     }
 }
 
+/// Maps a gate/driver verdict to the legacy `AdapterError` acked to UI TX callers.
+/// Only called when an ack channel exists (UI commands), never for diag / scheduler TX.
+#[cold]
+fn gate_reject_to_adapter_error(bus_id: BusId, reason: DiagTxReject) -> AdapterError {
+    match reason {
+        DiagTxReject::ListenOnly => AdapterError::ListenOnlyMode,
+        DiagTxReject::PanicLatched => AdapterError::Driver(format!(
+            "Bus {bus_id} TX blocked: Panic Stop is latched"
+        )),
+        DiagTxReject::Closed => AdapterError::ChannelClosed,
+        _ => AdapterError::Driver(format!("Bus {bus_id} TX is disarmed")),
+    }
+}
+
+#[inline]
+fn adapter_error_to_reject(err: &AdapterError) -> DiagTxReject {
+    match err {
+        AdapterError::ListenOnlyMode => DiagTxReject::ListenOnly,
+        AdapterError::ChannelClosed => DiagTxReject::Closed,
+        _ => DiagTxReject::DriverError,
+    }
+}
+
+/// Single owner of one `CanChannel`: TX drain (with the authoritative safety gate), RX burst
+/// fan-out to the StateTable ring and to D-003 diag taps, health refresh.
+///
+/// Hot-path allocation policy: nothing on this thread allocates per frame. Tap queues and
+/// their `Sender`s are created by the command thread and moved in via `diag_ctl_rx`; rejected
+/// TX only builds an `AdapterError` string when a UI caller is waiting on an ack.
 #[allow(clippy::too_many_arguments)]
 fn run_bus_io_loop(
     bus_id: BusId,
@@ -1430,46 +1503,108 @@ fn run_bus_io_loop(
     bus_stop: Arc<AtomicBool>,
     engine_stop: Arc<AtomicBool>,
     tx_armed: Arc<AtomicBool>,
+    tx_panic_latched: Arc<AtomicBool>,
     bus_state: Arc<AtomicU8>,
     tx_errors: Arc<AtomicU32>,
     rx_errors: Arc<AtomicU32>,
+    diag_ctl_rx: Receiver<TapCtl>,
 ) {
+    let hook = *BUS_IO_THREAD_START_HOOK.lock();
+    if let Some(hook) = hook {
+        hook();
+    }
+
+    let gate = GateRefs {
+        listen_only,
+        tx_armed,
+        panic_latched: tx_panic_latched,
+    };
     let mut rx_batch = [RawCanFrame::zeroed(); 256];
+    let mut taps = TapTable::new();
     let mut tick_counter = 0u32;
     let driver_has_self_loopback = channel.descriptor().driver_id == "mock";
     let mut pending_suppressed_mock_echoes = 0usize;
 
     while !bus_stop.load(Ordering::Acquire) && !engine_stop.load(Ordering::Acquire) {
+        // 0. Cold path: diag tap add/remove.
+        taps.apply_ctl(&diag_ctl_rx);
+
         // 1. Drain outbound TX requests immediately
         while let Ok(req) = tx_rx.try_recv() {
-            let res = if listen_only {
-                Err(AdapterError::ListenOnlyMode)
-            } else if !tx_armed.load(Ordering::Acquire) {
-                Err(AdapterError::Driver(format!(
-                    "Bus {bus_id} TX is disarmed"
-                )))
-            } else {
-                let send_res = channel.send_frame(&req.frame);
-                if send_res.is_ok() {
-                    if let Some(ref counter) = req.hw_tx_counter {
-                        counter.fetch_add(1, Ordering::Relaxed);
+            // Resolve the diag origin. A tap registered just before this drain may not be
+            // applied yet: re-apply control messages once before declaring it stale.
+            let origin_idx = match req.origin {
+                TxOrigin::Other => None,
+                TxOrigin::Tap { slot, gen } => match taps.lookup(slot, gen) {
+                    Some(i) => Some(i),
+                    None => {
+                        taps.apply_ctl(&diag_ctl_rx);
+                        match taps.lookup(slot, gen) {
+                            Some(i) => Some(i),
+                            None => continue, // tap dropped: nobody to report to
+                        }
                     }
-                    if driver_has_self_loopback && req.suppress_echo {
-                        pending_suppressed_mock_echoes =
-                            pending_suppressed_mock_echoes.saturating_add(1);
-                    } else if !driver_has_self_loopback && !req.suppress_echo {
+                },
+            };
+
+            // Authoritative safety gate, immediately before the driver write.
+            let verdict = match origin_idx {
+                Some(i) if taps.is_slot_closed(i) => Err(DiagTxReject::Closed),
+                _ => gate.verdict(),
+            };
+
+            let result: Result<RawCanFrame, (DiagTxReject, Option<AdapterError>)> = match verdict
+            {
+                Err(reason) => Err((reason, None)),
+                Ok(()) => match channel.send_frame(&req.frame) {
+                    Ok(()) => {
+                        if let Some(ref counter) = req.hw_tx_counter {
+                            counter.fetch_add(1, Ordering::Relaxed);
+                        }
                         let mut tx_echo = req.frame.with_flags(nexus_core::FLAG_TX);
                         tx_echo.bus_id = bus_id;
-                        if tx_echo.timestamp_us == 0 {
+                        if tx_echo.timestamp_us == 0 || origin_idx.is_some() {
                             tx_echo.timestamp_us = now_monotonic_us().max(1);
                         }
-                        let _ = frame_tx.try_send(tx_echo);
+                        if driver_has_self_loopback && req.suppress_echo {
+                            pending_suppressed_mock_echoes =
+                                pending_suppressed_mock_echoes.saturating_add(1);
+                        } else if !driver_has_self_loopback && !req.suppress_echo {
+                            // Synthesized TX echo for Trace / StateTable (diag frames included).
+                            if let Err(TrySendError::Full(_)) = frame_tx.try_send(tx_echo) {
+                                dropped_frames.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        Ok(tx_echo)
+                    }
+                    Err(e) => Err((adapter_error_to_reject(&e), Some(e))),
+                },
+            };
+
+            match result {
+                Ok(echo) => {
+                    if let Some(i) = origin_idx {
+                        taps.notify(i, DiagPortEvent::TxConfirmed(echo));
+                    }
+                    // Other taps see this frame as ordinary bus traffic (as a second tester
+                    // on the wire would). Restbus replay frames are virtual and excluded.
+                    if !req.suppress_echo {
+                        taps.deliver(&echo, origin_idx);
+                    }
+                    if let Some(ack) = req.ack {
+                        let _ = ack.send(Ok(()));
                     }
                 }
-                send_res
-            };
-            if let Some(ack) = req.ack {
-                let _ = ack.send(res);
+                Err((reason, driver_err)) => {
+                    if let Some(i) = origin_idx {
+                        taps.notify(i, DiagPortEvent::TxRejected(req.frame, reason));
+                    }
+                    if let Some(ack) = req.ack {
+                        let err = driver_err
+                            .unwrap_or_else(|| gate_reject_to_adapter_error(bus_id, reason));
+                        let _ = ack.send(Err(err));
+                    }
+                }
             }
         }
 
@@ -1484,6 +1619,10 @@ fn run_bus_io_loop(
                     frame.bus_id = bus_id;
                     if let Err(TrySendError::Full(_)) = frame_tx.try_send(*frame) {
                         dropped_frames.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // mock0 loops our own TX back: taps already got it at send time.
+                    if !taps.is_empty() && !(driver_has_self_loopback && frame.is_tx()) {
+                        taps.deliver(frame, None);
                     }
                 }
             }
@@ -1503,6 +1642,8 @@ fn run_bus_io_loop(
         }
     }
 
+    // Close all diag taps and reject their queued sends with `Closed` before the channel goes.
+    taps.shutdown(&tx_rx, &diag_ctl_rx);
     let _ = channel.close();
     bus_state.store(BusState::Disconnected.to_u8(), Ordering::Release);
 }
@@ -1671,6 +1812,7 @@ fn run_tx_scheduler_loop(
                             ack: None,
                             suppress_echo: false,
                             hw_tx_counter: None,
+                            origin: TxOrigin::Other,
                         });
                     }
                 }

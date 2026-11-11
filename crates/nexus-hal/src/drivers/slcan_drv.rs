@@ -7,7 +7,7 @@ use crate::dto::{AdapterCapabilitiesDto, DeviceDescriptorDto, SerialPortInfoDto}
 use crate::error::AdapterError;
 use crate::traits::{
     AdapterCapabilities, AdapterDriver, BusHealthSnapshot, BusState, CanChannel, CanFilter,
-    ChannelConfig, DeviceDescriptor,
+    ChannelConfig, DeviceDescriptor, ListenOnlyEnforcement,
 };
 use nexus_core::{
     now_monotonic_us, BusId, CanIdKey, RawCanFrame, EXT_CAN_ID_MASK, MAX_CAN_FD_DLC,
@@ -789,6 +789,12 @@ impl CanChannel for SlcanChannel {
         self.filters.clear();
         self.filters.extend_from_slice(filters);
         Ok(())
+    }
+
+    /// Listen-Only channels are opened with the Lawicel `L` command (adapter-side silent mode).
+    /// An adapter that NACKs `L` never opens its CAN channel, so it cannot ACK either.
+    fn listen_only_enforcement(&self) -> ListenOnlyEnforcement {
+        ListenOnlyEnforcement::Hardware
     }
 
     fn health(&self) -> BusHealthSnapshot {

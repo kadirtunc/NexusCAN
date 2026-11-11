@@ -11,6 +11,7 @@ path = "src/bin/nexus_bridge.rs"
 [dependencies]
 nexus-core = { workspace = true }
 nexus-netdb = { workspace = true }
+nexus-protocols = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }

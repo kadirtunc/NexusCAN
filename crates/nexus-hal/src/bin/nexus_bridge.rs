@@ -21,6 +21,10 @@ use nexus_hal::{
     },
     pipeline::PipelineEngine,
 };
+use nexus_protocols::uds::dto::{
+    DiagError, DiagErrorCode, DiagOrigin, DiagSessionConfigDto, EcuDiscoveryRequestDto,
+    UdsRequestOptionsDto,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{net::SocketAddr, sync::Arc};
@@ -175,6 +179,166 @@ struct ExportTraceBlfArgs {
     frames: Vec<ChronologicalFrameDto>,
 }
 
+// ─── D-003 `cmd_diag_*` arguments (mirror of `DiagCommandMap` in src/types/udsClient.ts) ───
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagConfigArgs {
+    config: DiagSessionConfigDto,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagSendUdsArgs {
+    config: DiagSessionConfigDto,
+    sid: u8,
+    #[serde(default, alias = "sub_function")]
+    sub_function: Option<u8>,
+    #[serde(default)]
+    data: Vec<u8>,
+    #[serde(default)]
+    options: Option<UdsRequestOptionsDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagReadDidArgs {
+    config: DiagSessionConfigDto,
+    did: u16,
+    /// Conversation origin tag; default `did`.
+    #[serde(default)]
+    origin: Option<DiagOrigin>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagReadDtcsArgs {
+    config: DiagSessionConfigDto,
+    #[serde(default, alias = "status_mask")]
+    status_mask: Option<u8>,
+    /// Conversation origin tag; default `dtc`.
+    #[serde(default)]
+    origin: Option<DiagOrigin>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagTesterPresentArgs {
+    config: DiagSessionConfigDto,
+    enabled: bool,
+    #[serde(default, alias = "interval_ms")]
+    interval_ms: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagConversationArgs {
+    config: DiagSessionConfigDto,
+    #[serde(default, alias = "since_seq")]
+    since_seq: u64,
+    #[serde(default)]
+    max: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagDiscoverEcusArgs {
+    request: EcuDiscoveryRequestDto,
+}
+
+fn diag_bad_args(cmd: &str, e: serde_json::Error) -> Response {
+    bad_request(
+        DiagError::new(
+            DiagErrorCode::InvalidInput,
+            format!("invalid arguments for {cmd}: {e}"),
+        )
+        .to_ipc_string(),
+    )
+}
+
+/// Runs a blocking UDS call on the tokio blocking pool; errors use the `"[diag:<code>] msg"`
+/// wire format through the regular 400 `bad_request` path.
+async fn run_diag<T, F>(engine: Arc<PipelineEngine>, f: F) -> Response
+where
+    T: serde::Serialize + Send + 'static,
+    F: FnOnce(&PipelineEngine) -> Result<T, DiagError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(move || f(&engine)).await {
+        Ok(Ok(v)) => ok_json(v),
+        Ok(Err(e)) => bad_request(e.to_ipc_string()),
+        Err(join_err) => bad_request(
+            DiagError::new(DiagErrorCode::Internal, format!("diag worker failed: {join_err}"))
+                .to_ipc_string(),
+        ),
+    }
+}
+
+/// D-003 router. `None` = not a diag command.
+async fn handle_diag_invoke(cmd: &str, payload: Value, engine: &Arc<PipelineEngine>) -> Option<Response> {
+    macro_rules! args {
+        ($ty:ty) => {
+            match serde_json::from_value::<$ty>(payload) {
+                Ok(a) => a,
+                Err(e) => return Some(diag_bad_args(cmd, e)),
+            }
+        };
+    }
+    let engine = Arc::clone(engine);
+    let resp = match cmd {
+        "cmd_diag_open_session" => {
+            let a = args!(DiagConfigArgs);
+            run_diag(engine, move |e| e.cmd_diag_open_session(a.config)).await
+        }
+        "cmd_diag_close_session" => {
+            let a = args!(DiagConfigArgs);
+            run_diag(engine, move |e| e.cmd_diag_close_session(a.config).map(|()| Value::Null)).await
+        }
+        "cmd_diag_session_info" => {
+            let a = args!(DiagConfigArgs);
+            run_diag(engine, move |e| e.cmd_diag_session_info(a.config)).await
+        }
+        "cmd_diag_send_uds" => {
+            let a = args!(DiagSendUdsArgs);
+            run_diag(engine, move |e| {
+                e.cmd_diag_send_uds(a.config, a.sid, a.sub_function, a.data, a.options)
+            })
+            .await
+        }
+        "cmd_diag_read_did" => {
+            let a = args!(DiagReadDidArgs);
+            run_diag(engine, move |e| e.cmd_diag_read_did(a.config, a.did, a.origin)).await
+        }
+        "cmd_diag_read_stored_dtcs" => {
+            let a = args!(DiagReadDtcsArgs);
+            run_diag(engine, move |e| {
+                e.cmd_diag_read_stored_dtcs(a.config, a.status_mask, a.origin)
+            })
+            .await
+        }
+        "cmd_diag_set_tester_present" => {
+            let a = args!(DiagTesterPresentArgs);
+            run_diag(engine, move |e| {
+                e.cmd_diag_set_tester_present(a.config, a.enabled, a.interval_ms)
+            })
+            .await
+        }
+        "cmd_diag_get_conversation" => {
+            let a = args!(DiagConversationArgs);
+            run_diag(engine, move |e| e.cmd_diag_get_conversation(a.config, a.since_seq, a.max)).await
+        }
+        "cmd_diag_get_isotp_frames" => {
+            let a = args!(DiagConversationArgs);
+            run_diag(engine, move |e| e.cmd_diag_get_isotp_frames(a.config, a.since_seq, a.max)).await
+        }
+        "cmd_diag_discover_ecus" => {
+            let a = args!(DiagDiscoverEcusArgs);
+            run_diag(engine, move |e| e.cmd_diag_discover_ecus(a.request)).await
+        }
+        _ => return None,
+    };
+    Some(resp)
+}
+
 fn build_router(engine: Arc<PipelineEngine>) -> Router {
     Router::new()
         .route("/api/health", get(handle_health))
@@ -288,6 +452,12 @@ async fn handle_invoke(
             Err(e) => return bad_request(format!("Invalid JSON request body: {e}")),
         }
     };
+
+    if cmd.starts_with("cmd_diag_") {
+        if let Some(resp) = handle_diag_invoke(&cmd, payload.clone(), &engine).await {
+            return resp;
+        }
+    }
 
     match cmd.as_str() {
         "cmd_list_devices" => ok_json(engine.cmd_list_devices()),
@@ -624,6 +794,91 @@ mod tests {
             .expect("read response body");
         let val: Value = serde_json::from_slice(&bytes).expect("parse response json");
         (status, val)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_diag_routes_use_diag_error_wire_format() {
+        let engine = Arc::new(PipelineEngine::new());
+        let cfg = r#"{"busId":0,"requestId":2020,"responseId":2028,"isExtendedId":false}"#;
+
+        let (st, v) = call_invoke(&engine, "cmd_diag_open_session", &format!(r#"{{"config":{cfg}}}"#)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().starts_with("[diag:bus_not_connected] "));
+
+        let (st, v) = call_invoke(&engine, "cmd_diag_read_did", r#"{"config":{"busId":0}}"#).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().starts_with("[diag:invalid_input] "));
+
+        let (st, _) = call_invoke(
+            &engine,
+            "cmd_connect_bus",
+            r#"{"deviceId":"mock:mock0","config":{"busId":0,"bitrate":500000,"dataBitrate":2000000,"enableFd":true,"listenOnly":false,"mockFpsPreset":1000}}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_send_uds",
+            &format!(r#"{{"config":{cfg},"sid":62,"subFunction":0,"data":[]}}"#),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().starts_with("[diag:disarmed] "));
+
+        // ISO-TP Monitor: unknown session → empty page (never opens one); bad config → invalid_input.
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_get_isotp_frames",
+            &format!(r#"{{"config":{cfg},"sinceSeq":0,"max":100}}"#),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["frames"].as_array().map(Vec::len), Some(0));
+        assert_eq!(v["lastSeq"], 0);
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["dropped"], 0);
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_get_isotp_frames",
+            r#"{"config":{"busId":0,"requestId":2020,"responseId":2020,"isExtendedId":false},"sinceSeq":0}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().starts_with("[diag:invalid_input] "));
+
+        // ECU discovery: `{ request: {...} }`, same gate and wire format.
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_discover_ecus",
+            r#"{"request":{"busId":0,"isExtendedId":false,"functionalId":2014,"windowMs":100}}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().starts_with("[diag:disarmed] "));
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_discover_ecus",
+            r#"{"request":{"busId":0,"isExtendedId":false,"functionalId":2014,"requestPdu":[62,128]}}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().starts_with("[diag:invalid_input] "));
+
+        // Read-only commands answer without a session.
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_get_conversation",
+            &format!(r#"{{"config":{cfg},"sinceSeq":0,"max":null}}"#),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(v["lastSeq"], 0);
+        let (st, v) = call_invoke(&engine, "cmd_diag_session_info", &format!(r#"{{"config":{cfg}}}"#)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(v["open"], false);
+        let (st, v) = call_invoke(&engine, "cmd_diag_close_session", &format!(r#"{{"config":{cfg}}}"#)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(v.is_null());
     }
 
     #[tokio::test]

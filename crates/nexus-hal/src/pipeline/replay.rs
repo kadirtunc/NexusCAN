@@ -551,6 +551,7 @@ fn parse_byte_token_radix(tok: &str, radix: u32) -> Option<u8> {
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn build_frame_from_parts(
     bus_id: BusId,
     can_id: CanIdKey,
@@ -915,7 +916,7 @@ fn parse_vector_asc_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
                     continue;
                 }
                 let dlc_len = usize::from(
-                    u8::from_str_radix(tokens[5], 10)
+                    tokens[5].parse::<u8>()
                         .or_else(|_| u8::from_str_radix(tokens[5], radix))
                         .unwrap_or(0),
                 )
@@ -969,7 +970,7 @@ fn decode_compact_hex_pairs(hex_str: &str, out_buf: &mut [u8; MAX_CAN_FD_DLC]) -
         return Some(0);
     }
     let bytes = clean.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     let pair_count = (bytes.len() / 2).min(MAX_CAN_FD_DLC);
@@ -1846,21 +1847,18 @@ fn run_replay_worker_loop(
         }
 
         if !st.playing || st.entries.is_empty() {
-            match ctrl_rx.recv_timeout(max_idle_wait) {
-                Ok(cmd) => {
-                    if handle_worker_command(
-                        cmd,
-                        &mut st,
-                        &shared,
-                        &frame_tx,
-                        &dropped_frames,
-                        &buses,
-                        &tx_panic_latched,
-                    ) {
-                        return;
-                    }
+            if let Ok(cmd) = ctrl_rx.recv_timeout(max_idle_wait) {
+                if handle_worker_command(
+                    cmd,
+                    &mut st,
+                    &shared,
+                    &frame_tx,
+                    &dropped_frames,
+                    &buses,
+                    &tx_panic_latched,
+                ) {
+                    return;
                 }
-                Err(_) => {}
             }
             continue;
         }
@@ -2193,6 +2191,7 @@ fn dispatch_due_frames(
                         ack: None,
                         suppress_echo: true,
                         hw_tx_counter: Some(Arc::clone(&shared.hw_tx_frames)),
+                        origin: super::diag_tap::TxOrigin::Other,
                     });
                 }
             }

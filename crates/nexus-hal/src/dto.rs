@@ -84,6 +84,12 @@ pub struct BusHealthDto {
     pub bus_state: String,
     pub tx_error_count: u32,
     pub rx_error_count: u32,
+    /// D-005: how Listen-Only is enforced, present only while `listen_only == true`.
+    /// `"hardware"` (controller silent mode), `"software_only"` (TX blocked in software, the
+    /// physical controller may still ACK frames: HMI must warn), `"virtual"` (vcan/mock).
+    /// Optional & omitted when `None` so older HMI builds keep working.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_only_enforcement: Option<String>,
 }
 
 /// Decoded live signal sample keyed by dense `signal_id` (Plane 2 telemetry).

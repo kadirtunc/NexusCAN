@@ -74,6 +74,34 @@ impl BusState {
     }
 }
 
+/// How a requested `Listen-Only` mode is actually enforced on an open channel (D-005).
+///
+/// CLAUDE.md §3.4: a passive channel must not influence the bus. A software TX lock alone
+/// is NOT sufficient on a physical controller, because the controller still drives the
+/// ACK slot (and error frames) for every frame it receives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenOnlyEnforcement {
+    /// The controller itself is in listen-only / silent mode (no ACK, no error frames).
+    Hardware,
+    /// Only NexusCAN's software TX lock is active; the physical controller may still ACK.
+    SoftwareOnly,
+    /// Virtual / synthetic channel (`vcan*`, `vxcan*`, `mock*`): no physical ACK exists.
+    Virtual,
+}
+
+impl ListenOnlyEnforcement {
+    /// Wire string used in [`crate::dto::BusHealthDto::listen_only_enforcement`].
+    #[inline]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hardware => "hardware",
+            Self::SoftwareOnly => "software_only",
+            Self::Virtual => "virtual",
+        }
+    }
+}
+
 /// Low-overhead snapshot of CAN controller health counters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BusHealthSnapshot {
@@ -142,4 +170,12 @@ pub trait CanChannel: Send {
 
     /// Queries the current controller error state and TEC/REC counters.
     fn health(&self) -> BusHealthSnapshot;
+
+    /// How `Listen-Only` is enforced for this channel. Only meaningful when the channel was
+    /// opened with `listen_only = true`. The conservative default is
+    /// [`ListenOnlyEnforcement::SoftwareOnly`]; drivers that put the controller into a real
+    /// silent mode (or are virtual) override it.
+    fn listen_only_enforcement(&self) -> ListenOnlyEnforcement {
+        ListenOnlyEnforcement::SoftwareOnly
+    }
 }

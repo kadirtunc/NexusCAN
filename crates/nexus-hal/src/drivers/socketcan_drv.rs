@@ -7,15 +7,16 @@ use crate::dto::{AdapterCapabilitiesDto, DeviceDescriptorDto};
 use crate::error::AdapterError;
 use crate::traits::{
     AdapterCapabilities, AdapterDriver, BusHealthSnapshot, BusState, CanChannel, CanFilter,
-    ChannelConfig, DeviceDescriptor,
+    ChannelConfig, DeviceDescriptor, ListenOnlyEnforcement,
 };
 use nexus_core::{
     resolve_frame_timestamp_us, BusId, CanIdKey, RawCanFrame, EXT_CAN_ID_MASK, FLAG_BRS,
     FLAG_ERROR, FLAG_ESI, FLAG_EXTENDED, FLAG_FD, FLAG_RTR, STD_CAN_ID_MASK,
 };
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+use socketcan::nl::CanCtrlModes;
 use socketcan::{
-    CanAnyFrame, CanDataFrame, CanFdFrame, CanFdSocket, CanFilter as ScFilter, CanRemoteFrame,
+    CanAnyFrame, CanCtrlMode, CanInterface, CanDataFrame, CanFdFrame, CanFdSocket, CanFilter as ScFilter, CanRemoteFrame,
     CanSocket, EmbeddedFrame, ExtendedId, Frame as ScFrameTrait, Id, Socket, SocketOptions,
     StandardId,
 };
@@ -26,6 +27,116 @@ use std::path::Path;
 
 const SYS_CLASS_NET: &str = "/sys/class/net";
 const ARPHRD_CAN: &str = "280";
+
+/// Set to `1` to never touch the controller mode via netlink (Listen-Only then stays a
+/// software-only TX lock and is reported as such). For sites where taking `canX` down for a
+/// few milliseconds is not acceptable.
+pub const ENV_DISABLE_HW_LISTEN_ONLY: &str = "NEXUS_SOCKETCAN_NO_HW_LISTEN_ONLY";
+
+/// `vcan*` / `vxcan*` have no physical controller (no ACK slot to suppress).
+fn is_virtual_iface(iface: &str) -> bool {
+    iface.starts_with("vcan") || iface.starts_with("vxcan")
+}
+
+/// Outcome of trying to put a physical controller into listen-only ctrlmode (D-005).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HwListenOnlyOutcome {
+    enforcement: ListenOnlyEnforcement,
+    /// `true` when WE switched the controller into listen-only and must switch it back on close.
+    restore_on_close: bool,
+}
+
+/// D-005: tries to put the CAN controller of `iface` into the kernel `listen-only` ctrlmode
+/// (`ip link set canX type can listen-only on`) before our socket is opened.
+///
+/// * `vcan*` / `vxcan*` → [`ListenOnlyEnforcement::Virtual`], no netlink call at all.
+/// * Controller already in listen-only → `Hardware` (left as is, not restored).
+/// * Needs `CAP_NET_ADMIN`. The kernel refuses ctrlmode changes while the link is up
+///   (`EBUSY`), so the link is taken down, reconfigured and brought up again (this resets the
+///   controller and briefly interrupts other sockets on the interface).
+/// * Any failure (no privilege, driver without listen-only support such as `slcan`, netlink
+///   error) → `SoftwareOnly`; the link is brought back up if we took it down.
+fn try_enable_hw_listen_only(iface: &str) -> HwListenOnlyOutcome {
+    let software = HwListenOnlyOutcome {
+        enforcement: ListenOnlyEnforcement::SoftwareOnly,
+        restore_on_close: false,
+    };
+    if is_virtual_iface(iface) {
+        return HwListenOnlyOutcome {
+            enforcement: ListenOnlyEnforcement::Virtual,
+            restore_on_close: false,
+        };
+    }
+    if std::env::var(ENV_DISABLE_HW_LISTEN_ONLY).is_ok_and(|v| v.trim() == "1") {
+        return software;
+    }
+    let Ok(nl) = CanInterface::open(iface) else {
+        return software;
+    };
+    let Ok(details) = nl.details() else {
+        return software;
+    };
+    let Some(modes) = details.can.ctrl_mode else {
+        // No CAN link info (not a netlink-configurable CAN controller).
+        return software;
+    };
+    if modes.has_mode(CanCtrlMode::ListenOnly) {
+        return HwListenOnlyOutcome {
+            enforcement: ListenOnlyEnforcement::Hardware,
+            restore_on_close: false,
+        };
+    }
+
+    let was_up = details.is_up;
+    let applied = if nl.set_ctrlmode(CanCtrlMode::ListenOnly, true).is_ok() {
+        true
+    } else if was_up && nl.bring_down().is_ok() {
+        let ok = nl.set_ctrlmode(CanCtrlMode::ListenOnly, true).is_ok();
+        // Always try to bring the link back, whether or not the mode change worked.
+        let up_ok = nl.bring_up().is_ok();
+        if ok && !up_ok {
+            // Leave the interface usable rather than silently half-configured.
+            let _ = nl.set_ctrlmode(CanCtrlMode::ListenOnly, false);
+            let _ = nl.bring_up();
+            false
+        } else {
+            ok
+        }
+    } else {
+        false
+    };
+    if !applied {
+        return software;
+    }
+    let verified = nl
+        .details()
+        .ok()
+        .and_then(|d| d.can.ctrl_mode)
+        .is_some_and(|m: CanCtrlModes| m.has_mode(CanCtrlMode::ListenOnly));
+    HwListenOnlyOutcome {
+        enforcement: if verified {
+            ListenOnlyEnforcement::Hardware
+        } else {
+            ListenOnlyEnforcement::SoftwareOnly
+        },
+        restore_on_close: true,
+    }
+}
+
+/// Reverts [`try_enable_hw_listen_only`] (best effort, cold path on channel close).
+fn restore_hw_listen_only(iface: &str) {
+    let Ok(nl) = CanInterface::open(iface) else {
+        return;
+    };
+    if nl.set_ctrlmode(CanCtrlMode::ListenOnly, false).is_ok() {
+        return;
+    }
+    let was_up = nl.details().map(|d| d.is_up).unwrap_or(true);
+    if was_up && nl.bring_down().is_ok() {
+        let _ = nl.set_ctrlmode(CanCtrlMode::ListenOnly, false);
+        let _ = nl.bring_up();
+    }
+}
 
 /// Linux SocketCAN auto-discovering hardware/virtual driver (`can*`, `vcan*`, `slcan*`).
 #[derive(Clone, Copy, Debug, Default)]
@@ -77,7 +188,7 @@ impl AdapterDriver for SocketCanDriver {
                 .unwrap_or_else(|| "unknown".to_string());
 
             let supports_fd = mtu >= 72;
-            let is_virtual = iface.starts_with("vcan") || iface.starts_with("vxcan");
+            let is_virtual = is_virtual_iface(&iface);
             let mode_tag = if supports_fd { "CAN-FD" } else { "Classical CAN" };
 
             devices.push(DeviceDescriptorDto {
@@ -107,6 +218,13 @@ impl AdapterDriver for SocketCanDriver {
         let iface = &device.channel_name;
         let want_fd = device.capabilities.supports_fd && config.enable_fd;
 
+        // D-005: real controller silent mode BEFORE our socket exists (link may bounce).
+        let hw_listen_only = if config.listen_only {
+            Some(try_enable_hw_listen_only(iface))
+        } else {
+            None
+        };
+
         let inner = if want_fd {
             match CanFdSocket::open(iface) {
                 Ok(sock) => {
@@ -132,6 +250,9 @@ impl AdapterDriver for SocketCanDriver {
             descriptor: device.clone(),
             bus_id: config.bus_id,
             listen_only: config.listen_only,
+            listen_only_enforcement: hw_listen_only
+                .map_or(ListenOnlyEnforcement::SoftwareOnly, |o| o.enforcement),
+            restore_hw_listen_only: hw_listen_only.is_some_and(|o| o.restore_on_close),
             closed: false,
             rx_error_count: 0,
             tx_error_count: 0,
@@ -159,13 +280,29 @@ pub struct SocketCanChannel {
     descriptor: DeviceDescriptor,
     bus_id: BusId,
     listen_only: bool,
+    listen_only_enforcement: ListenOnlyEnforcement,
+    /// We switched the controller into listen-only ctrlmode and must revert it on close.
+    restore_hw_listen_only: bool,
     closed: bool,
     rx_error_count: u32,
     tx_error_count: u32,
     socket: Option<SocketHandle>,
 }
 
+impl Drop for SocketCanChannel {
+    fn drop(&mut self) {
+        self.socket = None;
+        self.revert_hw_listen_only();
+    }
+}
+
 impl SocketCanChannel {
+    fn revert_hw_listen_only(&mut self) {
+        if std::mem::take(&mut self.restore_hw_listen_only) {
+            restore_hw_listen_only(&self.descriptor.channel_name);
+        }
+    }
+
     fn read_one_nonblocking(&mut self) -> Result<Option<RawCanFrame>, AdapterError> {
         let sock = self.socket.as_ref().ok_or(AdapterError::ChannelClosed)?;
         let (timestamp_us, _) = resolve_frame_timestamp_us(None);
@@ -211,7 +348,12 @@ impl CanChannel for SocketCanChannel {
     fn close(&mut self) -> Result<(), AdapterError> {
         self.closed = true;
         self.socket = None;
+        self.revert_hw_listen_only();
         Ok(())
+    }
+
+    fn listen_only_enforcement(&self) -> ListenOnlyEnforcement {
+        self.listen_only_enforcement
     }
 
     fn recv_batch(
@@ -477,5 +619,26 @@ fn convert_any_frame(any: CanAnyFrame, bus_id: BusId, timestamp_us: u64) -> RawC
             out.data[..len].copy_from_slice(&bytes[..len]);
             out
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtual_interfaces_never_touch_netlink() {
+        for name in ["vcan0", "vcan12", "vxcan1"] {
+            let out = try_enable_hw_listen_only(name);
+            assert_eq!(out.enforcement, ListenOnlyEnforcement::Virtual);
+            assert!(!out.restore_on_close);
+        }
+    }
+
+    #[test]
+    fn missing_interface_degrades_to_software_only() {
+        let out = try_enable_hw_listen_only("can_nexus_missing_d005");
+        assert_eq!(out.enforcement, ListenOnlyEnforcement::SoftwareOnly);
+        assert!(!out.restore_on_close);
     }
 }

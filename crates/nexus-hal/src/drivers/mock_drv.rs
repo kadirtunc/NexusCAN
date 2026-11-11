@@ -10,7 +10,7 @@ use crate::dto::{AdapterCapabilitiesDto, DeviceDescriptorDto};
 use crate::error::AdapterError;
 use crate::traits::{
     AdapterCapabilities, AdapterDriver, BusHealthSnapshot, BusState, CanChannel, CanFilter,
-    ChannelConfig, DeviceDescriptor,
+    ChannelConfig, DeviceDescriptor, ListenOnlyEnforcement,
 };
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use nexus_core::{
@@ -909,6 +909,11 @@ impl CanChannel for MockCanChannel {
         self.filters.clear();
         self.filters.extend_from_slice(filters);
         Ok(())
+    }
+
+    /// Synthetic generator: there is no physical controller that could ACK frames.
+    fn listen_only_enforcement(&self) -> ListenOnlyEnforcement {
+        ListenOnlyEnforcement::Virtual
     }
 
     fn health(&self) -> BusHealthSnapshot {

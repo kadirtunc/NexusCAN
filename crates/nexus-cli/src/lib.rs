@@ -467,6 +467,7 @@ listen_only = false
                 bus_state: "active".to_string(),
                 tx_error_count: 0,
                 rx_error_count: 0,
+                listen_only_enforcement: Some("virtual".to_string()),
             }],
             frames: vec![
                 // Newer branch listed first in input to verify timestamp sorting!
