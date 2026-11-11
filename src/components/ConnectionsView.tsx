@@ -20,7 +20,6 @@ import {
   apiDisconnectAllBuses,
   apiDisconnectBus,
   apiProbeDrivers,
-  apiSetBusMode,
 } from '../services/ipcClient';
 import {
   DATA_BITRATES_FD,
@@ -38,6 +37,7 @@ import {
   useConnectionStore,
 } from '../store/connectionStore';
 import { ensureMockPresetDatabasesLoaded, syncAllBusDatabasesWithBackend } from '../utils/busDatabaseSync';
+import { setBusTxArmed } from '../store/busTxControl';
 import { telemetryStore, useTelemetryHeader } from '../store/telemetryStore';
 import { transmitStore } from '../store/transmitStore';
 import { useI18n, type TranslationKey } from '../i18n';
@@ -389,13 +389,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   const handleToggleArmOnBus = async (busId: number, currentArmed: boolean): Promise<void> => {
     try {
       const willArm = !currentArmed;
-      const updated = await apiSetBusMode(busId, !willArm, willArm);
-      telemetryStore.upsertBusHealth(updated);
-
-      const matching = connState.profiles.find((p) => p.busId === busId);
-      if (matching) {
-        connectionStore.upsertProfile({ ...matching, listenOnly: !willArm });
-      }
+      const updated = await setBusTxArmed(busId, willArm);
 
       onStatusMessage({
         kind: willArm ? 'success' : 'info',

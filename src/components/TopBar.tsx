@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useI18n } from '../i18n';
+import { TxModeControl } from './TxModeControl';
 import {
   Award,
   Boxes,
@@ -1710,6 +1711,7 @@ export const TopBar: React.FC<TopBarProps> = ({
 
         {/* Right Corner: Fixed Panic / Emergency Stop Safety Switch */}
         <div className="flex items-center gap-1.5 shrink-0">
+          <TxModeControl />
           <button
             type="button"
             onClick={() => void onPanicStop()}
