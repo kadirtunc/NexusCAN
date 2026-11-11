@@ -13,7 +13,14 @@ use nexus_hal::{
     },
     error::HalError,
 };
+use nexus_hal::pipeline::PipelineEngine;
 use nexus_netdb::DatabaseSchemaDto;
+use nexus_protocols::uds::dto::{
+    ConversationPageDto, DiagError, DiagErrorCode, DiagOrigin, DiagSessionConfigDto, DiagSessionInfoDto,
+    DidReadResultDto, DtcEntryDto, EcuDiscoveryRequestDto, EcuDiscoveryResultDto, IsoTpFramePageDto,
+    UdsRequestOptionsDto, UdsResponseDto,
+};
+use std::sync::Arc;
 use serde::Serialize;
 use tauri::{ipc::Channel, State};
 use thiserror::Error;
@@ -360,4 +367,131 @@ pub async fn cmd_control_trace_replay(
     args: TraceReplayControlArgsDto,
 ) -> Result<TraceReplayStatusDto, AppError> {
     Ok(state.engine.cmd_control_trace_replay(args)?)
+}
+
+// ─── D-003 UDS client (`cmd_diag_*`) ────────────────────────────────────────
+// Same names/arguments as `nexus_bridge` and `DiagCommandMap` (src/types/udsClient.ts).
+// UDS calls block (ISO-TP round trips, P2/P2*), so every command runs on the blocking pool.
+// Errors are `"[diag:<code>] <message>"` strings (`DiagError::to_ipc_string`), parsed by
+// `parseDiagError` in the HMI.
+
+async fn run_diag<T, F>(state: State<'_, AppState>, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&PipelineEngine) -> Result<T, DiagError> + Send + 'static,
+{
+    let engine = Arc::clone(&state.engine);
+    match tauri::async_runtime::spawn_blocking(move || f(&engine)).await {
+        Ok(res) => res.map_err(|e| e.to_ipc_string()),
+        Err(join_err) => Err(DiagError::new(
+            DiagErrorCode::Internal,
+            format!("diag worker failed: {join_err}"),
+        )
+        .to_ipc_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_diag_open_session(
+    state: State<'_, AppState>,
+    config: DiagSessionConfigDto,
+) -> Result<DiagSessionInfoDto, String> {
+    run_diag(state, move |e| e.cmd_diag_open_session(config)).await
+}
+
+#[tauri::command]
+pub async fn cmd_diag_close_session(
+    state: State<'_, AppState>,
+    config: DiagSessionConfigDto,
+) -> Result<(), String> {
+    run_diag(state, move |e| e.cmd_diag_close_session(config)).await
+}
+
+#[tauri::command]
+pub async fn cmd_diag_session_info(
+    state: State<'_, AppState>,
+    config: DiagSessionConfigDto,
+) -> Result<DiagSessionInfoDto, String> {
+    run_diag(state, move |e| e.cmd_diag_session_info(config)).await
+}
+
+#[tauri::command]
+pub async fn cmd_diag_send_uds(
+    state: State<'_, AppState>,
+    config: DiagSessionConfigDto,
+    sid: u8,
+    sub_function: Option<u8>,
+    data: Vec<u8>,
+    options: Option<UdsRequestOptionsDto>,
+) -> Result<UdsResponseDto, String> {
+    run_diag(state, move |e| {
+        e.cmd_diag_send_uds(config, sid, sub_function, data, options)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_diag_read_did(
+    state: State<'_, AppState>,
+    config: DiagSessionConfigDto,
+    did: u16,
+    origin: Option<DiagOrigin>,
+) -> Result<DidReadResultDto, String> {
+    run_diag(state, move |e| e.cmd_diag_read_did(config, did, origin)).await
+}
+
+#[tauri::command]
+pub async fn cmd_diag_read_stored_dtcs(
+    state: State<'_, AppState>,
+    config: DiagSessionConfigDto,
+    status_mask: Option<u8>,
+    origin: Option<DiagOrigin>,
+) -> Result<Vec<DtcEntryDto>, String> {
+    run_diag(state, move |e| {
+        e.cmd_diag_read_stored_dtcs(config, status_mask, origin)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_diag_set_tester_present(
+    state: State<'_, AppState>,
+    config: DiagSessionConfigDto,
+    enabled: bool,
+    interval_ms: Option<u32>,
+) -> Result<DiagSessionInfoDto, String> {
+    run_diag(state, move |e| {
+        e.cmd_diag_set_tester_present(config, enabled, interval_ms)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_diag_get_conversation(
+    state: State<'_, AppState>,
+    config: DiagSessionConfigDto,
+    since_seq: u64,
+    max: Option<u32>,
+) -> Result<ConversationPageDto, String> {
+    run_diag(state, move |e| e.cmd_diag_get_conversation(config, since_seq, max)).await
+}
+
+/// Functional-addressing ECU discovery (blocking: fixed window + optional DID identify).
+#[tauri::command]
+pub async fn cmd_diag_discover_ecus(
+    state: State<'_, AppState>,
+    request: EcuDiscoveryRequestDto,
+) -> Result<EcuDiscoveryResultDto, String> {
+    run_diag(state, move |e| e.cmd_diag_discover_ecus(request)).await
+}
+
+/// ISO-TP Monitor page (never opens a session).
+#[tauri::command]
+pub async fn cmd_diag_get_isotp_frames(
+    state: State<'_, AppState>,
+    config: DiagSessionConfigDto,
+    since_seq: u64,
+    max: Option<u32>,
+) -> Result<IsoTpFramePageDto, String> {
+    run_diag(state, move |e| e.cmd_diag_get_isotp_frames(config, since_seq, max)).await
 }
