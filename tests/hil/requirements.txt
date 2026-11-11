@@ -1,0 +1,5 @@
+# Independent UDS client stack used to verify ecusim (pinned).
+udsoncan==1.26.1
+can-isotp==2.0.7
+python-can==4.6.1
+pytest==9.2.0

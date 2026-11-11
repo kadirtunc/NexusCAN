@@ -1,0 +1,23 @@
+ vcan0  7E0  [3]  [SF] ln: 2    data: 10 03                 -  '..'      - [SRQ] DiagnosticSessionControl
+ vcan0  7E8  [8]  [SF] ln: 6    data: 50 03 00 32 00 C8 AA  -  'P..2...' - [PSR] DiagnosticSessionControl
+ vcan0  7E0  [4]  [SF] ln: 3    data: 22 F1 90              -  '"..'     - [SRQ] ReadDataByIdentifier
+ vcan0  7E8  [8]  [FF] ln: 20   data: 62 F1 90 57 4E 58     -  'b..WNX'  - [PSR] ReadDataByIdentifier
+ vcan0  7E0  [3]  [FC] FC: 0 = CTS # BS: 0 = off # STmin: 0x00 = 0 ms
+ vcan0  7E8  [8]  [CF] sn: 1    data: 30 45 43 55 53 49 4D  -  '0ECUSIM'
+ vcan0  7E8  [8]  [CF] sn: 2    data: 30 30 30 30 30 31 37  -  '0000017'
+ vcan0  7E0  [3]  [SF] ln: 2    data: 27 01                 -  ''.'      - [SRQ] SecurityAccess
+ vcan0  7E8  [8]  [SF] ln: 6    data: 67 01 11 22 33 44 AA  -  'g.."3D.' - [PSR] SecurityAccess
+ vcan0  7E0  [7]  [SF] ln: 6    data: 27 02 B4 87 96 E1     -  ''.....'  - [SRQ] SecurityAccess
+ vcan0  7E8  [8]  [SF] ln: 2    data: 67 02 AA AA AA AA AA  -  'g......' - [PSR] SecurityAccess
+ vcan0  7E0  [8]  [FF] ln: 20   data: 2E F1 90 57 4E 58     -  '...WNX'  - [SRQ] WriteDataByIdentifier
+ vcan0  7E8  [8]  [FC] FC: 0 = CTS # BS: 0 = off # STmin: 0x00 = 0 ms
+ vcan0  7E0  [8]  [CF] sn: 1    data: 30 47 4F 4C 44 45 4E  -  '0GOLDEN'
+ vcan0  7E0  [8]  [CF] sn: 2    data: 52 45 43 30 30 30 31  -  'REC0001'
+ vcan0  7E8  [8]  [SF] ln: 3    data: 6E F1 90 AA AA AA AA  -  'n......' - [PSR] WriteDataByIdentifier
+ vcan0  7E0  [4]  [SF] ln: 3    data: 22 F1 90              -  '"..'     - [SRQ] ReadDataByIdentifier
+ vcan0  7E8  [8]  [FF] ln: 20   data: 62 F1 90 57 4E 58     -  'b..WNX'  - [PSR] ReadDataByIdentifier
+ vcan0  7E0  [3]  [FC] FC: 0 = CTS # BS: 0 = off # STmin: 0x00 = 0 ms
+ vcan0  7E8  [8]  [CF] sn: 1    data: 30 47 4F 4C 44 45 4E  -  '0GOLDEN'
+ vcan0  7E8  [8]  [CF] sn: 2    data: 52 45 43 30 30 30 31  -  'REC0001'
+ vcan0  7E0  [3]  [SF] ln: 2    data: 10 01                 -  '..'      - [SRQ] DiagnosticSessionControl
+ vcan0  7E8  [8]  [SF] ln: 6    data: 50 01 00 32 00 C8 AA  -  'P..2...' - [PSR] DiagnosticSessionControl

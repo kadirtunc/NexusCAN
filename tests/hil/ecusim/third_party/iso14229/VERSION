@@ -1,0 +1,16 @@
+name:     iso14229 (driftregion/iso14229)
+version:  0.11.0  (UDS_LIB_VERSION "0.11.0")
+tag:      0.11.0 -> commit 8a7eb23d6ab9d52f66ce36b07ba456613709c78e
+          (upstream HEAD at vendoring time: d018adc7015a88d7a4f164418fcb7e7927e5aa77, not used)
+license:  MIT (see LICENSE)
+source:   GitHub release assets of tag 0.11.0 (published 2026-09-28T09:26:38Z):
+            https://github.com/driftregion/iso14229/releases/download/0.11.0/iso14229.c
+            https://github.com/driftregion/iso14229/releases/download/0.11.0/iso14229.h
+            https://github.com/driftregion/iso14229/releases/download/0.11.0/LICENSE
+          NOTE: the amalgamated iso14229.c/.h committed in the git tree at tag 0.11.0 are stale
+          (older header text); the release assets are the authoritative build of 0.11.0.
+sha256:   a22f1c6afe87247a3513f816f37eacb1976a554d7c3dfd33a65911a705f669c5  iso14229.c
+          30eec21f69f42de2ce02d2f3031c300ca8494b94999bee00c1feedd2adece0ad  iso14229.h
+          bce604d061f572509e6139f574fd857eed2271cee8cbd97f40b024734ae69469  LICENSE
+patches:  none (patches/ is empty). Unsupported SIDs are handled through the upstream
+          UDS_EVT_Custom event; no source modification was necessary.

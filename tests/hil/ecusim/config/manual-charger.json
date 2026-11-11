@@ -1,0 +1,361 @@
+{
+  "name": "NexusCAN ecusim manual graph test ECU-OBC",
+  "_comment": "Elle ECU Graph testi icin ek ECU (manual.json kopyasi; kimlik/DTC farkli).",
+  "timing": {
+    "p2_ms": 50,
+    "p2_star_ms": 2000,
+    "s3_ms": 60000,
+    "security_boot_delay_ms": 0,
+    "reset_power_down_ms": 100,
+    "response_delay_ms": 0
+  },
+  "isotp": {
+    "bs": 0,
+    "stmin": 0,
+    "tx_padding": "0xAA"
+  },
+  "sessions": [
+    {
+      "id": 1
+    },
+    {
+      "id": 2,
+      "from": [
+        2,
+        3
+      ],
+      "_comment": "programming only via extended"
+    },
+    {
+      "id": 3
+    }
+  ],
+  "services": {
+    "0x23": {
+      "sessions": [
+        1,
+        2,
+        3
+      ]
+    },
+    "0x27": {
+      "sessions": [
+        2,
+        3
+      ]
+    },
+    "0x28": {
+      "sessions": [
+        2,
+        3
+      ]
+    },
+    "0x2E": {
+      "sessions": [
+        2,
+        3
+      ]
+    },
+    "0x2F": {
+      "sessions": [
+        3
+      ]
+    },
+    "0x31": {
+      "sessions": [
+        2,
+        3
+      ]
+    },
+    "0x34": {
+      "sessions": [
+        2
+      ],
+      "security": 17
+    },
+    "0x36": {
+      "sessions": [
+        2
+      ],
+      "security": 17
+    },
+    "0x37": {
+      "sessions": [
+        2
+      ],
+      "security": 17
+    },
+    "0x85": {
+      "sessions": [
+        2,
+        3
+      ]
+    },
+    "0x35": {
+      "enabled": false
+    }
+  },
+  "security": [
+    {
+      "level": 1,
+      "seed": "11223344",
+      "seed_mode": "fixed",
+      "algorithm": "xor_const",
+      "constant": "A5A5A5A5",
+      "sessions": [
+        3
+      ],
+      "max_attempts": 3,
+      "lockout_ms": 1500
+    },
+    {
+      "level": 17,
+      "seed": "0A0B0C0D",
+      "seed_mode": "counter",
+      "algorithm": "xor_ff",
+      "sessions": [
+        2
+      ],
+      "max_attempts": 3,
+      "lockout_ms": 1500
+    }
+  ],
+  "dids": [
+    {
+      "id": "0xF186",
+      "source": "active_session"
+    },
+    {
+      "id": "0xF187",
+      "ascii": "NXC-OBC-0110"
+    },
+    {
+      "id": "0xF188",
+      "ascii": "OBC-SW-0105"
+    },
+    {
+      "id": "0xF189",
+      "ascii": "01.05.04"
+    },
+    {
+      "id": "0xF18A",
+      "ascii": "NEXUS-CHARGE"
+    },
+    {
+      "id": "0xF18B",
+      "hex": "260201"
+    },
+    {
+      "id": "0xF18C",
+      "ascii": "SNOBC0000058"
+    },
+    {
+      "id": "0xF190",
+      "ascii": "WNX0ECUSIM0000017",
+      "write": true,
+      "write_sessions": [
+        3
+      ],
+      "write_security": 1
+    },
+    {
+      "id": "0xF191",
+      "ascii": "OBC-HW-01"
+    },
+    {
+      "id": "0xF192",
+      "ascii": "SUP-HW-01"
+    },
+    {
+      "id": "0xF193",
+      "ascii": "A1"
+    },
+    {
+      "id": "0xF194",
+      "ascii": "SUP-SW-01"
+    },
+    {
+      "id": "0xF195",
+      "ascii": "B2"
+    },
+    {
+      "id": "0xF1A0",
+      "hex": "00000000",
+      "write": true,
+      "write_sessions": [
+        3
+      ]
+    },
+    {
+      "id": "0x0100",
+      "hex": "00",
+      "io_control": true,
+      "io_sessions": [
+        3
+      ]
+    },
+    {
+      "id": "0x0101",
+      "hex": "CAFEBABE",
+      "read_security": 1
+    },
+    {
+      "id": "0x0102",
+      "hex": "1234",
+      "read_sessions": [
+        3
+      ]
+    },
+    {
+      "id": "0xF1F0",
+      "ascii": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    },
+    {
+      "id": "0xF1F1",
+      "ascii": "The quick brown fox jumps over the lazy dog. 0123456789. The quick brown fox jumps over the lazy dog. 0123456789. The quick brown fox jumps over the lazy dog. 0123456789. ABCDEFGHIJKLMNOPQRSTUVWXYZ!!!"
+    },
+    {
+      "id": "0xFA01",
+      "hex": "01"
+    },
+    {
+      "id": "0xFA02",
+      "hex": "C0DE"
+    },
+    {
+      "id": "0xFA03",
+      "hex": "03"
+    },
+    {
+      "id": "0xFA04",
+      "hex": "04"
+    },
+    {
+      "id": "0xF197",
+      "ascii": "ONBOARD_CHARGER"
+    }
+  ],
+  "routines": [
+    {
+      "id": "0x0203",
+      "sessions": [
+        3
+      ],
+      "start_result": "00",
+      "stop_result": "01",
+      "results": "AA55"
+    },
+    {
+      "id": "0x0204",
+      "sessions": [
+        3
+      ],
+      "security": 1,
+      "start_result": "00"
+    },
+    {
+      "id": "0xFF00",
+      "action": "erase",
+      "sessions": [
+        2
+      ],
+      "security": 17,
+      "start_result": "00"
+    },
+    {
+      "id": "0x0202",
+      "action": "crc32",
+      "sessions": [
+        2
+      ],
+      "security": 17
+    },
+    {
+      "id": "0xFA05",
+      "sessions": [
+        3
+      ],
+      "start_result": "00"
+    },
+    {
+      "id": "0xFA06",
+      "sessions": [
+        3
+      ],
+      "start_result": "00"
+    }
+  ],
+  "memory": {
+    "max_block_length": 130,
+    "regions": [
+      {
+        "name": "flash",
+        "address": "0x00080000",
+        "size": "0x20000",
+        "fill": "0xFF",
+        "read": true,
+        "download": true
+      },
+      {
+        "name": "calib",
+        "address": "0x00010000",
+        "size": 256,
+        "fill": "0x00",
+        "init_hex": "00112233445566778899AABBCCDDEEFF",
+        "read": true
+      },
+      {
+        "name": "ram",
+        "address": "0x20000000",
+        "size": 1024,
+        "fill": "0x00",
+        "read": true
+      }
+    ]
+  },
+  "dtc": {
+    "availability_mask": "0xFF",
+    "dtcs": []
+  },
+  "obd": {
+    "mode01": {
+      "0x05": "7B",
+      "0x0C": "1AF8",
+      "0x0D": "3C",
+      "0x2F": "80"
+    }
+  },
+  "faults": [
+    {
+      "sid": "0x22",
+      "id": "0xFA01",
+      "nrc": "0x22"
+    },
+    {
+      "sid": "0x22",
+      "id": "0xFA02",
+      "pending": 2
+    },
+    {
+      "sid": "0x22",
+      "id": "0xFA03",
+      "delay_ms": 400
+    },
+    {
+      "sid": "0x22",
+      "id": "0xFA04",
+      "no_response": true
+    },
+    {
+      "sid": "0x31",
+      "id": "0xFA05",
+      "nrc": "0x21",
+      "count": 2
+    },
+    {
+      "sid": "0x31",
+      "id": "0xFA06",
+      "pending": 1
+    }
+  ]
+}
