@@ -273,19 +273,23 @@ impl CompiledDatabase {
         let dlc = self.encode_payload_into(can_id, signal_values, &mut payload)?;
 
         if msg.protocol.is_can_fd() {
-            RawCanFrame::new_fd(bus_id, can_id, &payload[..dlc], true, timestamp_us)
-                .map_err(|_e| EncodeError::BitPlan(crate::error::BitPlanError::SpanExceedsPayload {
+            RawCanFrame::new_fd(bus_id, can_id, &payload[..dlc], true, timestamp_us).map_err(|_e| {
+                EncodeError::BitPlan(crate::error::BitPlanError::SpanExceedsPayload {
                     start_bit: 0,
                     bit_len: dlc as u8,
                     max_bits: 512,
-                }))
+                })
+            })
         } else {
-            RawCanFrame::new_classical(bus_id, can_id, &payload[..dlc], timestamp_us)
-                .map_err(|_e| EncodeError::BitPlan(crate::error::BitPlanError::SpanExceedsPayload {
-                    start_bit: 0,
-                    bit_len: dlc as u8,
-                    max_bits: 64,
-                }))
+            RawCanFrame::new_classical(bus_id, can_id, &payload[..dlc], timestamp_us).map_err(
+                |_e| {
+                    EncodeError::BitPlan(crate::error::BitPlanError::SpanExceedsPayload {
+                        start_bit: 0,
+                        bit_len: dlc as u8,
+                        max_bits: 64,
+                    })
+                },
+            )
         }
     }
 }

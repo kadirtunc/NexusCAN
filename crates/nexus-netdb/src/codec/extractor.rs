@@ -99,7 +99,12 @@ impl CompiledDatabase {
         out_signals: &mut [DecodedSignalSample],
         out_switches: &mut [(SignalId, i64)],
     ) -> Option<DecodeSummary> {
-        self.decode_payload_into(frame.can_id_key(), frame.payload(), out_signals, out_switches)
+        self.decode_payload_into(
+            frame.can_id_key(),
+            frame.payload(),
+            out_signals,
+            out_switches,
+        )
     }
 }
 

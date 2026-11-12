@@ -157,7 +157,11 @@ mod tests {
             _config: &'a BridgeClientConfig,
         ) -> BoxFuture<'a, Result<Box<dyn BridgeTransport>, BridgeClientError>> {
             Box::pin(async move {
-                let rx = self.inbound_rx_slot.lock().take().ok_or(BridgeClientError::ConnectionClosed { code: None })?;
+                let rx = self
+                    .inbound_rx_slot
+                    .lock()
+                    .take()
+                    .ok_or(BridgeClientError::ConnectionClosed { code: None })?;
                 let transport: Box<dyn BridgeTransport> =
                     Box::new(ChannelBridgeTransport::new(self.outbound_tx.clone(), rx));
                 Ok(transport)
@@ -215,12 +219,7 @@ mod tests {
             backoff_max_ms: 200,
         };
 
-        let handle = spawn_bridge_client(
-            cfg,
-            telemetry_rx,
-            connector,
-            Some(uploader.clone()),
-        );
+        let handle = spawn_bridge_client(cfg, telemetry_rx, connector, Some(uploader.clone()));
 
         // 1. Expect Plane-1 BRIDGE_HELLO with exact SHA-256
         let hello_raw = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
@@ -233,7 +232,10 @@ mod tests {
 
         // 2. Cloud responds SCHEMA_ACK(upload_required) + RATE_CONTROL(2Hz) + malicious TX frame
         cloud_to_desktop_tx
-            .send(r#"{"type":"SCHEMA_ACK","status":"upload_required","dbcVersionId":null}"#.to_string())
+            .send(
+                r#"{"type":"SCHEMA_ACK","status":"upload_required","dbcVersionId":null}"#
+                    .to_string(),
+            )
             .await
             .unwrap();
         cloud_to_desktop_tx

@@ -185,7 +185,9 @@ pub fn parse_blf_bytes(bytes: &[u8]) -> Result<Vec<CompiledReplayEntry>, HalErro
             match compression_method {
                 BLF_COMPRESSION_NONE => {
                     if container_data.len() > MAX_CONTAINER_UNCOMPRESSED_BYTES
-                        || uncompressed_stream.len().saturating_add(container_data.len())
+                        || uncompressed_stream
+                            .len()
+                            .saturating_add(container_data.len())
                             > MAX_TOTAL_UNCOMPRESSED_BYTES
                     {
                         return Err(HalError::InvalidInput(
@@ -400,20 +402,9 @@ fn parse_timestamped_lobj(
             let frame_res = if is_rtr && !is_fd {
                 RawCanFrame::new_rtr(bus_id, can_id, dlc.min(8), 0)
             } else if is_fd {
-                RawCanFrame::new_fd(
-                    bus_id,
-                    can_id,
-                    &payload[20..20 + valid_bytes],
-                    is_brs,
-                    0,
-                )
+                RawCanFrame::new_fd(bus_id, can_id, &payload[20..20 + valid_bytes], is_brs, 0)
             } else {
-                RawCanFrame::new_classical(
-                    bus_id,
-                    can_id,
-                    &payload[20..20 + valid_bytes.min(8)],
-                    0,
-                )
+                RawCanFrame::new_classical(bus_id, can_id, &payload[20..20 + valid_bytes.min(8)], 0)
             };
             if let Ok(mut frame) = frame_res {
                 if is_esi {
@@ -506,8 +497,8 @@ pub fn encode_blf_bytes(entries: &[CompiledReplayEntry]) -> Result<Vec<u8>, HalE
             write_inner_v1_header(&mut inner_stream, object_size, BLF_OBJ_CAN_MESSAGE, ts_ns);
 
             let channel = u16::from(frame.bus_id).saturating_add(1);
-            let flags =
-                (if frame.is_tx() { 0x01u8 } else { 0u8 }) | (if frame.is_rtr() { 0x80u8 } else { 0u8 });
+            let flags = (if frame.is_tx() { 0x01u8 } else { 0u8 })
+                | (if frame.is_rtr() { 0x80u8 } else { 0u8 });
             let dlc = frame.dlc.min(8);
             let mut data8 = [0u8; 8];
             if !frame.is_rtr() {
@@ -527,12 +518,17 @@ pub fn encode_blf_bytes(entries: &[CompiledReplayEntry]) -> Result<Vec<u8>, HalE
             // (20-byte header + `mData[64]`): `object_size = 32 + 84 = 116` (4-byte aligned).
             let valid_len = usize::from(frame.dlc).min(MAX_CAN_FD_DLC);
             let object_size = 32u32 + 20 + 64;
-            write_inner_v1_header(&mut inner_stream, object_size, BLF_OBJ_CAN_FD_MESSAGE, ts_ns);
+            write_inner_v1_header(
+                &mut inner_stream,
+                object_size,
+                BLF_OBJ_CAN_FD_MESSAGE,
+                ts_ns,
+            );
 
             let channel = u16::from(frame.bus_id) + 1;
             // `mFlags`: bit0 = TX direction, bit7 = RTR (same as `CAN_MESSAGE`).
-            let flags =
-                (if frame.is_tx() { 0x01u8 } else { 0u8 }) | (if frame.is_rtr() { 0x80u8 } else { 0u8 });
+            let flags = (if frame.is_tx() { 0x01u8 } else { 0u8 })
+                | (if frame.is_rtr() { 0x80u8 } else { 0u8 });
             let dlc_code = len_to_canfd_dlc_code(valid_len as u8);
             // `mCANFDFlags`: bit0 = EDL (FD), bit1 = BRS, bit2 = ESI. Always EDL, mirroring the
             // unconditional `0x1000` of the type-101 writer below.
@@ -616,7 +612,9 @@ pub fn encode_blf_bytes(entries: &[CompiledReplayEntry]) -> Result<Vec<u8>, HalE
             HalError::InvalidInput(format!("Failed to zlib-compress BLF LOG_CONTAINER: {e}"))
         })?;
         let compressed = encoder.finish().map_err(|e| {
-            HalError::InvalidInput(format!("Failed to finalize BLF LOG_CONTAINER zlib stream: {e}"))
+            HalError::InvalidInput(format!(
+                "Failed to finalize BLF LOG_CONTAINER zlib stream: {e}"
+            ))
         })?;
 
         let container_obj_size = (32 + compressed.len()) as u32;
@@ -639,8 +637,7 @@ pub fn encode_blf_bytes(entries: &[CompiledReplayEntry]) -> Result<Vec<u8>, HalE
     }
 
     let total_file_bytes = out.len() as u64;
-    let uncompressed_file_bytes =
-        (BLF_FILE_HEADER_SIZE + total_inner_uncompressed_bytes) as u64;
+    let uncompressed_file_bytes = (BLF_FILE_HEADER_SIZE + total_inner_uncompressed_bytes) as u64;
     let object_count = u32::try_from(entries.len()).unwrap_or(u32::MAX);
 
     write_logg_file_header(
@@ -778,10 +775,7 @@ mod tests {
         assert!(is_blf_bytes(&blf_bytes));
         assert_eq!(&blf_bytes[0..4], b"LOGG");
         assert_eq!(read_u32_le(&blf_bytes, 4).unwrap(), 144);
-        assert_eq!(
-            read_u64_le(&blf_bytes, 16).unwrap(),
-            blf_bytes.len() as u64
-        );
+        assert_eq!(read_u64_le(&blf_bytes, 16).unwrap(), blf_bytes.len() as u64);
         assert_eq!(read_u32_le(&blf_bytes, 32).unwrap(), 5);
 
         let decoded = parse_blf_bytes(&blf_bytes).expect("parse BLF");
@@ -828,7 +822,10 @@ mod tests {
                 exp.frame.payload(),
                 "payload mismatch at index {idx}"
             );
-            assert_eq!(got, exp, "exact CompiledReplayEntry equality at index {idx}");
+            assert_eq!(
+                got, exp,
+                "exact CompiledReplayEntry equality at index {idx}"
+            );
         }
     }
 
@@ -862,7 +859,9 @@ mod tests {
         let empty_blf = encode_blf_bytes(&[]).expect("encode empty BLF");
         assert_eq!(empty_blf.len(), 144);
         assert!(is_blf_bytes(&empty_blf));
-        assert!(parse_blf_bytes(&empty_blf).expect("parse empty BLF").is_empty());
+        assert!(parse_blf_bytes(&empty_blf)
+            .expect("parse empty BLF")
+            .is_empty());
 
         // 3. Verify `CAN_FD_MESSAGE` (type 100) + `header_version = 2` (40B) + `TIME_TEN_MICS` (0x01)
         let mut custom = vec![0u8; BLF_FILE_HEADER_SIZE];
@@ -876,7 +875,7 @@ mod tests {
         custom.extend_from_slice(&[0u8; 4]); // time_status, reserved, obj_version
         custom.extend_from_slice(&2_500u64.to_le_bytes()); // 2500 * 10us = 25_000us
         custom.extend_from_slice(&0u64.to_le_bytes()); // original_timestamp
-        // Payload (20B header + 12B data):
+                                                       // Payload (20B header + 12B data):
         custom.extend_from_slice(&2u16.to_le_bytes()); // channel 2 -> bus_id 1
         custom.push(0x01); // TX flag
         custom.push(9); // DLC 9 (12B)

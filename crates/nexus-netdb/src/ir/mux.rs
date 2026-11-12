@@ -22,7 +22,10 @@ impl MuxRange {
 
     #[inline]
     pub const fn single(val: i64) -> Self {
-        Self { start: val, end: val }
+        Self {
+            start: val,
+            end: val,
+        }
     }
 
     #[inline]

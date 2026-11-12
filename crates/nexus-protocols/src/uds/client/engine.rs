@@ -27,10 +27,14 @@ use tokio::task::JoinHandle;
 use super::bridge::{BridgeShared, PduMark, PortAdapter, PortMsg, ISOTP_MAX_WFT, MAX_RESPONSE_PDU};
 use super::capture::TxnTag;
 use super::conversation::{Conversation, NewEvent};
-use super::format::{negative_code, parse_session_timing, request_sid_of_response, request_suppresses_positive, response_matches};
+use super::format::{
+    negative_code, parse_session_timing, request_sid_of_response, request_suppresses_positive,
+    response_matches,
+};
 use super::nrc::NRC_RESPONSE_PENDING;
 use crate::uds::dto::{
-    ConversationEventKind, DiagError, DiagErrorCode, DiagOrigin, DiagSessionConfigDto, UdsAddressing,
+    ConversationEventKind, DiagError, DiagErrorCode, DiagOrigin, DiagSessionConfigDto,
+    UdsAddressing,
 };
 use crate::uds::port::{DiagCanPort, DiagTxReject};
 
@@ -143,7 +147,10 @@ impl ReqInfo {
 }
 
 pub enum RxItem {
-    Pdu { pdu: Vec<u8>, mark: Option<PduMark> },
+    Pdu {
+        pdu: Vec<u8>,
+        mark: Option<PduMark>,
+    },
     Error(automotive::Error),
     /// The ISO-TP receive stream ended (worker stopped: TX refused, port closed).
     Ended,
@@ -249,8 +256,12 @@ impl Inner {
     pub fn log_closed(&self, detail: &str) {
         if !self.closed_logged.swap(true, Ordering::AcqRel) {
             self.push(
-                NewEvent::new(ConversationEventKind::SessionClosed, UdsAddressing::Physical, now_monotonic_us())
-                    .detail(detail),
+                NewEvent::new(
+                    ConversationEventKind::SessionClosed,
+                    UdsAddressing::Physical,
+                    now_monotonic_us(),
+                )
+                .detail(detail),
             );
         }
     }
@@ -260,7 +271,10 @@ impl Inner {
             err(DiagErrorCode::SessionClosed, "UDS session was closed")
         } else {
             self.log_closed("tap_closed");
-            err(DiagErrorCode::SessionClosed, "diagnostic tap was closed by the bus (disconnect, panic, disarm or mode change)")
+            err(
+                DiagErrorCode::SessionClosed,
+                "diagnostic tap was closed by the bus (disconnect, panic, disarm or mode change)",
+            )
         }
     }
 
@@ -342,7 +356,12 @@ impl Inner {
         let stream = phys.clone().into_recv();
         let rx_task = tokio::spawn(rx_loop(self.clone(), stream));
         *self.adapter_handle.lock() = Some(adapter.clone());
-        eng.stack = Some(Stack { adapter, phys, func, rx_task });
+        eng.stack = Some(Stack {
+            adapter,
+            phys,
+            func,
+            rx_task,
+        });
         Ok(())
     }
 
@@ -358,8 +377,12 @@ impl Inner {
             Some(RxItem::Pdu { pdu, mark }) => self.log_stale(&pdu, mark.as_ref(), None),
             Some(RxItem::Error(e)) => {
                 self.push(
-                    NewEvent::new(ConversationEventKind::TransportError, UdsAddressing::Physical, now_monotonic_us())
-                        .detail(isotp_detail(&e)),
+                    NewEvent::new(
+                        ConversationEventKind::TransportError,
+                        UdsAddressing::Physical,
+                        now_monotonic_us(),
+                    )
+                    .detail(isotp_detail(&e)),
                 );
             }
             Some(RxItem::Ended) | None => {}
@@ -389,7 +412,11 @@ impl Inner {
             .bytes(pdu)
             .request(owner.map(|r| r.seq), elapsed)
             .nrc(negative_code(pdu))
-            .detail(if owner.is_some() { "late" } else { "unsolicited" })
+            .detail(if owner.is_some() {
+                "late"
+            } else {
+                "unsolicited"
+            })
             .origin(owner.map_or(DiagOrigin::Other, |r| r.origin)),
         );
     }
@@ -413,11 +440,15 @@ impl Inner {
     ) -> DiagError {
         let (code, detail) = reject_code(r);
         self.push_failure(
-            NewEvent::new(ConversationEventKind::TxBlocked, addressing, now_monotonic_us())
-                .sid(req.first().copied())
-                .bytes(req)
-                .detail(detail)
-                .origin(origin),
+            NewEvent::new(
+                ConversationEventKind::TxBlocked,
+                addressing,
+                now_monotonic_us(),
+            )
+            .sid(req.first().copied())
+            .bytes(req)
+            .detail(detail)
+            .origin(origin),
             tag,
         );
         if r == DiagTxReject::Closed {
@@ -440,7 +471,10 @@ impl Inner {
         if self.is_closed() {
             return self.closed_error();
         }
-        err(DiagErrorCode::Internal, "ISO-TP worker stopped unexpectedly")
+        err(
+            DiagErrorCode::Internal,
+            "ISO-TP worker stopped unexpectedly",
+        )
     }
 
     fn send_error(
@@ -453,16 +487,22 @@ impl Inner {
     ) -> DiagError {
         use automotive::transports::isotp::Error as TpError;
         match e {
-            automotive::Error::IoError(_) | automotive::Error::Disconnected | automotive::Error::Cancelled => {
+            automotive::Error::IoError(_)
+            | automotive::Error::Disconnected
+            | automotive::Error::Cancelled => {
                 self.stopped_error(req, addressing, origin, Some(tag))
             }
             automotive::Error::Timeout => {
                 self.push_failure(
-                    NewEvent::new(ConversationEventKind::Timeout, addressing, now_monotonic_us())
-                        .sid(req.first().copied())
-                        .bytes(req)
-                        .detail("isotp")
-                        .origin(origin),
+                    NewEvent::new(
+                        ConversationEventKind::Timeout,
+                        addressing,
+                        now_monotonic_us(),
+                    )
+                    .sid(req.first().copied())
+                    .bytes(req)
+                    .detail("isotp")
+                    .origin(origin),
                     Some(tag),
                 );
                 err(
@@ -470,23 +510,32 @@ impl Inner {
                     format!("request not sent: no TX confirmation / flow control within {} ms (N_As/N_Bs)", ISOTP_TIMEOUT.as_millis()),
                 )
             }
-            automotive::Error::NotSupported => {
-                err(DiagErrorCode::InvalidInput, "CAN-FD frame requested on a channel without CAN-FD")
-            }
-            automotive::Error::IsoTPError(TpError::DataTooLarge) => {
-                err(DiagErrorCode::InvalidInput, "request PDU too large for ISO-TP")
-            }
+            automotive::Error::NotSupported => err(
+                DiagErrorCode::InvalidInput,
+                "CAN-FD frame requested on a channel without CAN-FD",
+            ),
+            automotive::Error::IsoTPError(TpError::DataTooLarge) => err(
+                DiagErrorCode::InvalidInput,
+                "request PDU too large for ISO-TP",
+            ),
             other => {
                 let detail = isotp_detail(&other);
                 self.push_failure(
-                    NewEvent::new(ConversationEventKind::TransportError, addressing, now_monotonic_us())
-                        .sid(req.first().copied())
-                        .bytes(req)
-                        .detail(detail.clone())
-                        .origin(origin),
+                    NewEvent::new(
+                        ConversationEventKind::TransportError,
+                        addressing,
+                        now_monotonic_us(),
+                    )
+                    .sid(req.first().copied())
+                    .bytes(req)
+                    .detail(detail.clone())
+                    .origin(origin),
                     Some(tag),
                 );
-                err(DiagErrorCode::IsotpError, format!("ISO-TP send failed: {detail}"))
+                err(
+                    DiagErrorCode::IsotpError,
+                    format!("ISO-TP send failed: {detail}"),
+                )
             }
         }
     }
@@ -504,7 +553,11 @@ impl Inner {
         origin: DiagOrigin,
         keepalive: bool,
     ) -> Result<Exchange, DiagError> {
-        let origin = if keepalive { DiagOrigin::Keepalive } else { origin };
+        let origin = if keepalive {
+            DiagOrigin::Keepalive
+        } else {
+            origin
+        };
         let Some(&sid) = req.first() else {
             return Err(err(DiagErrorCode::InvalidInput, "empty request"));
         };
@@ -514,17 +567,26 @@ impl Inner {
         if req.len() > MAX_REQUEST_PDU {
             return Err(err(
                 DiagErrorCode::InvalidInput,
-                format!("request PDU of {} bytes exceeds the {MAX_REQUEST_PDU}-byte limit", req.len()),
+                format!(
+                    "request PDU of {} bytes exceeds the {MAX_REQUEST_PDU}-byte limit",
+                    req.len()
+                ),
             ));
         }
         if addressing == UdsAddressing::Functional {
             if self.func_cfg.is_none() {
-                return Err(err(DiagErrorCode::InvalidInput, "functional addressing requested but no functionalId configured"));
+                return Err(err(
+                    DiagErrorCode::InvalidInput,
+                    "functional addressing requested but no functionalId configured",
+                ));
             }
             if req.len() > self.max_sf_len() {
                 return Err(err(
                     DiagErrorCode::InvalidInput,
-                    format!("functional requests must fit one single frame ({} bytes max)", self.max_sf_len()),
+                    format!(
+                        "functional requests must fit one single frame ({} bytes max)",
+                        self.max_sf_len()
+                    ),
                 ));
             }
         }
@@ -542,7 +604,12 @@ impl Inner {
             UdsAddressing::Physical => &stack.phys,
             UdsAddressing::Functional => match stack.func.as_ref() {
                 Some(f) => f,
-                None => return Err(err(DiagErrorCode::InvalidInput, "no functionalId configured")),
+                None => {
+                    return Err(err(
+                        DiagErrorCode::InvalidInput,
+                        "no functionalId configured",
+                    ))
+                }
             },
         };
 
@@ -574,11 +641,15 @@ impl Inner {
             Err(detail) => {
                 self.finish_slot(&mut rx, None);
                 self.push_failure(
-                    NewEvent::new(ConversationEventKind::Timeout, addressing, now_monotonic_us())
-                        .sid(Some(sid))
-                        .bytes(req)
-                        .detail(detail)
-                        .origin(origin),
+                    NewEvent::new(
+                        ConversationEventKind::Timeout,
+                        addressing,
+                        now_monotonic_us(),
+                    )
+                    .sid(Some(sid))
+                    .bytes(req)
+                    .detail(detail)
+                    .origin(origin),
                     Some(&tag),
                 );
                 drop(tag);
@@ -586,7 +657,10 @@ impl Inner {
                 let msg = if detail == "isotp_fc_wait" {
                     format!("request not sent: ECU answered with more than {ISOTP_MAX_WFT} Flow Control WAIT frames")
                 } else {
-                    format!("request not sent within {} ms (flow control / TX confirmation stalled)", budget.as_millis())
+                    format!(
+                        "request not sent within {} ms (flow control / TX confirmation stalled)",
+                        budget.as_millis()
+                    )
                 };
                 return Err(err(DiagErrorCode::TimeoutIsotp, msg));
             }
@@ -600,10 +674,27 @@ impl Inner {
             Some(c) => (c.at, c.ts, c.hw),
             None => (Instant::now(), now_monotonic_us(), false),
         };
-        let kind = if keepalive { ConversationEventKind::KeepaliveSent } else { ConversationEventKind::Request };
-        let seq = self.push(NewEvent::new(kind, addressing, req_ts).sid(Some(sid)).bytes(req).origin(origin));
+        let kind = if keepalive {
+            ConversationEventKind::KeepaliveSent
+        } else {
+            ConversationEventKind::Request
+        };
+        let seq = self.push(
+            NewEvent::new(kind, addressing, req_ts)
+                .sid(Some(sid))
+                .bytes(req)
+                .origin(origin),
+        );
         tag.bind(seq);
-        let current = ReqInfo { seq, bytes: req.to_vec(), addressing, origin, ts: req_ts, hw: req_hw, at: sent_at };
+        let current = ReqInfo {
+            seq,
+            bytes: req.to_vec(),
+            addressing,
+            origin,
+            ts: req_ts,
+            hw: req_hw,
+            at: sent_at,
+        };
         let gap = {
             let mut st = self.state.lock();
             let gap = st.last_tx_at.map(|t| sent_at.saturating_duration_since(t));
@@ -611,7 +702,9 @@ impl Inner {
             gap
         };
 
-        let result = self.await_response(&mut rx, &current, arm_seq, total, gap).await;
+        let result = self
+            .await_response(&mut rx, &current, arm_seq, total, gap)
+            .await;
         // Final event (response / timeout / error) is logged: the last RX CF is already tagged.
         drop(tag);
         self.finish_slot(&mut rx, Some(&current));
@@ -677,14 +770,21 @@ impl Inner {
                         (DiagErrorCode::TimeoutP2, "p2", total.unwrap_or(p2c))
                     };
                     self.push(
-                        NewEvent::new(ConversationEventKind::Timeout, req.addressing, req.ts.saturating_add(elapsed))
-                            .sid(sid)
-                            .request(Some(req.seq), Some(elapsed))
-                            .detail(phase)
-                            .origin(req.origin),
+                        NewEvent::new(
+                            ConversationEventKind::Timeout,
+                            req.addressing,
+                            req.ts.saturating_add(elapsed),
+                        )
+                        .sid(sid)
+                        .request(Some(req.seq), Some(elapsed))
+                        .detail(phase)
+                        .origin(req.origin),
                     );
                     let what = if pending > 0 {
-                        format!("no final response within P2* {} ms after {pending} x 0x78", budget.as_millis())
+                        format!(
+                            "no final response within P2* {} ms after {pending} x 0x78",
+                            budget.as_millis()
+                        )
                     } else {
                         format!("no response within {} ms (P2 client)", budget.as_millis())
                     };
@@ -695,40 +795,60 @@ impl Inner {
                 RxItem::Ended => {
                     return Err(self.stopped_error(&req.bytes, req.addressing, req.origin, None));
                 }
-                RxItem::Error(automotive::Error::IsoTPError(automotive::transports::isotp::Error::UnexpectedPdu)) => {
+                RxItem::Error(automotive::Error::IsoTPError(
+                    automotive::transports::isotp::Error::UnexpectedPdu,
+                )) => {
                     // A new SF/FF replaced an unfinished reception; the replacement follows.
                     self.push(
-                        NewEvent::new(ConversationEventKind::TransportError, req.addressing, now_monotonic_us())
-                            .sid(sid)
-                            .request(Some(req.seq), Some(us(req.at.elapsed())))
-                            .detail("isotp_unexpected_pdu")
-                            .origin(req.origin),
+                        NewEvent::new(
+                            ConversationEventKind::TransportError,
+                            req.addressing,
+                            now_monotonic_us(),
+                        )
+                        .sid(sid)
+                        .request(Some(req.seq), Some(us(req.at.elapsed())))
+                        .detail("isotp_unexpected_pdu")
+                        .origin(req.origin),
                     );
                 }
                 RxItem::Error(automotive::Error::Timeout) => {
                     let elapsed = us(req.at.elapsed());
                     self.push(
-                        NewEvent::new(ConversationEventKind::Timeout, req.addressing, req.ts.saturating_add(elapsed))
-                            .sid(sid)
-                            .request(Some(req.seq), Some(elapsed))
-                            .detail("isotp")
-                            .origin(req.origin),
+                        NewEvent::new(
+                            ConversationEventKind::Timeout,
+                            req.addressing,
+                            req.ts.saturating_add(elapsed),
+                        )
+                        .sid(sid)
+                        .request(Some(req.seq), Some(elapsed))
+                        .detail("isotp")
+                        .origin(req.origin),
                     );
                     return Err(err(
                         DiagErrorCode::TimeoutIsotp,
-                        format!("response reassembly stalled: no consecutive frame within {} ms (N_Cr)", ISOTP_TIMEOUT.as_millis()),
+                        format!(
+                            "response reassembly stalled: no consecutive frame within {} ms (N_Cr)",
+                            ISOTP_TIMEOUT.as_millis()
+                        ),
                     ));
                 }
                 RxItem::Error(e) => {
                     let detail = isotp_detail(&e);
                     self.push(
-                        NewEvent::new(ConversationEventKind::TransportError, req.addressing, now_monotonic_us())
-                            .sid(sid)
-                            .request(Some(req.seq), Some(us(req.at.elapsed())))
-                            .detail(detail.clone())
-                            .origin(req.origin),
+                        NewEvent::new(
+                            ConversationEventKind::TransportError,
+                            req.addressing,
+                            now_monotonic_us(),
+                        )
+                        .sid(sid)
+                        .request(Some(req.seq), Some(us(req.at.elapsed())))
+                        .detail(detail.clone())
+                        .origin(req.origin),
                     );
-                    return Err(err(DiagErrorCode::IsotpError, format!("ISO-TP receive failed: {detail}")));
+                    return Err(err(
+                        DiagErrorCode::IsotpError,
+                        format!("ISO-TP receive failed: {detail}"),
+                    ));
                 }
                 RxItem::Pdu { pdu, mark } => {
                     let fresh = mark.as_ref().is_none_or(|m| m.start_seq > arm_seq);
@@ -741,12 +861,16 @@ impl Inner {
                     if nrc == Some(NRC_RESPONSE_PENDING) {
                         pending = pending.saturating_add(1);
                         self.push(
-                            NewEvent::new(ConversationEventKind::ResponsePending, req.addressing, ts)
-                                .sid(sid)
-                                .bytes(&pdu)
-                                .request(Some(req.seq), Some(elapsed))
-                                .nrc(nrc)
-                                .origin(req.origin),
+                            NewEvent::new(
+                                ConversationEventKind::ResponsePending,
+                                req.addressing,
+                                ts,
+                            )
+                            .sid(sid)
+                            .bytes(&pdu)
+                            .request(Some(req.seq), Some(elapsed))
+                            .nrc(nrc)
+                            .origin(req.origin),
                         );
                         deadline = (Instant::now() + p2sc).min(hard);
                         continue;
@@ -760,7 +884,13 @@ impl Inner {
                             .origin(req.origin),
                     );
                     self.apply_state(&req.bytes, &pdu, gap);
-                    return Ok(Exchange { raw: pdu, suppressed: false, pending_count: pending, elapsed_us: elapsed, seq: req.seq });
+                    return Ok(Exchange {
+                        raw: pdu,
+                        suppressed: false,
+                        pending_count: pending,
+                        elapsed_us: elapsed,
+                        seq: req.seq,
+                    });
                 }
             }
         }
@@ -780,7 +910,9 @@ impl Inner {
 
     /// Session / security bookkeeping from a final response (see `DiagSessionInfoDto`).
     fn apply_state(&self, req: &[u8], pdu: &[u8], gap: Option<Duration>) {
-        let (Some(&sid), Some(&rsid)) = (req.first(), pdu.first()) else { return };
+        let (Some(&sid), Some(&rsid)) = (req.first(), pdu.first()) else {
+            return;
+        };
         let mut st = self.state.lock();
         match (sid, rsid) {
             (0x10, 0x50) => {
@@ -838,7 +970,10 @@ pub fn isotp_detail(e: &automotive::Error) -> String {
     }
 }
 
-async fn rx_loop(inner: Arc<Inner>, stream: impl Stream<Item = automotive::Result<Vec<u8>>> + Unpin) {
+async fn rx_loop(
+    inner: Arc<Inner>,
+    stream: impl Stream<Item = automotive::Result<Vec<u8>>> + Unpin,
+) {
     let mut stream = stream;
     while let Some(item) = stream.next().await {
         let item = match item {
@@ -894,7 +1029,14 @@ pub async fn keepalive_loop(inner: Arc<Inner>, mut cfg: watch::Receiver<(bool, u
         };
         last_attempt = Some(Instant::now());
         let _ = inner
-            .exchange(&mut eng, &[0x3E, 0x80], UdsAddressing::Physical, None, DiagOrigin::Keepalive, true)
+            .exchange(
+                &mut eng,
+                &[0x3E, 0x80],
+                UdsAddressing::Physical,
+                None,
+                DiagOrigin::Keepalive,
+                true,
+            )
             .await;
     }
 }

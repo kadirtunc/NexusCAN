@@ -30,7 +30,9 @@ fn handler_commands(lib_rs: &str) -> Vec<String> {
         .find("generate_handler![")
         .expect("src/lib.rs: generate_handler![ not found");
     let rest = &lib_rs[start..];
-    let end = rest.find(']').expect("src/lib.rs: unterminated generate_handler!");
+    let end = rest
+        .find(']')
+        .expect("src/lib.rs: unterminated generate_handler!");
     rest[..end]
         .split("commands::")
         .skip(1)

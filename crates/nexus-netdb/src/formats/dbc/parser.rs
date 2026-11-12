@@ -494,7 +494,9 @@ impl<'a> DbcParser<'a> {
         // start_bit | bit_len @ byte_order value_type
         // Saturating narrowing: an over-range value must fail bit-plan compilation, never wrap into a
         // plausible in-range coordinate (65541 -> 5).
-        let start_bit = self.parse_u64().map_or(0, |v| u16::try_from(v).unwrap_or(u16::MAX));
+        let start_bit = self
+            .parse_u64()
+            .map_or(0, |v| u16::try_from(v).unwrap_or(u16::MAX));
 
         if matches!(self.peek(), Some(Token::Pipe)) {
             self.next();
@@ -646,11 +648,7 @@ impl<'a> DbcParser<'a> {
                 msg.signals.push(signal);
             }
             if let Some(w) = warning_diag {
-                self.add_diag(
-                    DiagnosticSeverity::Warning,
-                    "BIT_SPAN_EXCEEDS_DLC",
-                    w,
-                );
+                self.add_diag(DiagnosticSeverity::Warning, "BIT_SPAN_EXCEEDS_DLC", w);
             }
         }
     }
@@ -1172,11 +1170,7 @@ impl<'a> DbcParser<'a> {
                 }
             }
             if let Some(w) = warning_diag {
-                self.add_diag(
-                    DiagnosticSeverity::Warning,
-                    "VAL_SIGNAL_NOT_FOUND",
-                    w,
-                );
+                self.add_diag(DiagnosticSeverity::Warning, "VAL_SIGNAL_NOT_FOUND", w);
             }
         }
     }
@@ -1331,7 +1325,9 @@ impl<'a> DbcParser<'a> {
             }
         };
 
-        let rep = self.parse_u64().map_or(1, |v| u32::try_from(v).unwrap_or(u32::MAX));
+        let rep = self
+            .parse_u64()
+            .map_or(1, |v| u32::try_from(v).unwrap_or(u32::MAX));
 
         if matches!(self.peek(), Some(Token::Colon)) {
             self.next();

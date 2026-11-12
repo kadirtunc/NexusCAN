@@ -23,11 +23,22 @@ use common::{config, serial, Ids, SocketCanPort, IFACE};
 use nexus_protocols::uds::client::{UdsSession, MAX_RESPONSE_PDU};
 use nexus_protocols::uds::dto::{ConversationEventKind, DiagErrorCode, UdsRequestOptionsDto};
 use socketcan::frame::FdFlags;
-use socketcan::{CanAnyFrame, CanDataFrame, CanFdFrame, CanFdSocket, CanFilter, EmbeddedFrame, Socket, SocketOptions, StandardId};
+use socketcan::{
+    CanAnyFrame, CanDataFrame, CanFdFrame, CanFdSocket, CanFilter, EmbeddedFrame, Socket,
+    SocketOptions, StandardId,
+};
 
 /// Test-only ids of this suite (not used by any other test, tool or ecusim config).
-const CLASSIC: Ids = Ids { req: 0x6C2, resp: 0x6CA, func: 0x6CE };
-const FD: Ids = Ids { req: 0x6C3, resp: 0x6CB, func: 0x6CF };
+const CLASSIC: Ids = Ids {
+    req: 0x6C2,
+    resp: 0x6CA,
+    func: 0x6CE,
+};
+const FD: Ids = Ids {
+    req: 0x6C3,
+    resp: 0x6CB,
+    func: 0x6CF,
+};
 const FORBIDDEN: [u32; 5] = [0x7E0, 0x7E1, 0x7E5, 0x7E7, 0x7DF];
 
 /// Gap between consecutive frames the fake ECU sends in a burst (≈ a full classic frame at
@@ -42,8 +53,10 @@ const CF_GAP: Duration = Duration::from_micros(250);
 fn wait_bus_quiet(ids: Ids, quiet: Duration) {
     let sock = CanFdSocket::open(IFACE).expect("open quiet probe");
     let f = |id| CanFilter::new(id, 0x7FF | 0x8000_0000 | 0x4000_0000);
-    sock.set_filters(&[f(ids.req), f(ids.resp), f(ids.func)]).expect("filter");
-    sock.set_read_timeout(Duration::from_millis(5)).expect("timeout");
+    sock.set_filters(&[f(ids.req), f(ids.resp), f(ids.func)])
+        .expect("filter");
+    sock.set_read_timeout(Duration::from_millis(5))
+        .expect("timeout");
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut last = Instant::now();
     while Instant::now() < deadline && last.elapsed() < quiet {
@@ -60,7 +73,12 @@ fn vcan(need_fd: bool) -> bool {
         eprintln!("SKIP (HIL): {IFACE} not present");
         return false;
     }
-    if need_fd && std::fs::read_to_string(net.join("mtu")).unwrap_or_default().trim() != "72" {
+    if need_fd
+        && std::fs::read_to_string(net.join("mtu"))
+            .unwrap_or_default()
+            .trim()
+            != "72"
+    {
         eprintln!("SKIP (HIL): {IFACE} is not CAN-FD capable (MTU != 72)");
         return false;
     }
@@ -84,13 +102,18 @@ impl Bus {
         loop {
             let r = if self.fd {
                 let mut d = data.to_vec();
-                let len = [8usize, 12, 16, 20, 24, 32, 48, 64].into_iter().find(|&l| l >= d.len()).unwrap_or(64);
+                let len = [8usize, 12, 16, 20, 24, 32, 48, 64]
+                    .into_iter()
+                    .find(|&l| l >= d.len())
+                    .unwrap_or(64);
                 d.resize(len, 0xAA);
-                self.sock.write_frame(&CanFdFrame::with_flags(id, &d, FdFlags::BRS).expect("fd frame"))
+                self.sock
+                    .write_frame(&CanFdFrame::with_flags(id, &d, FdFlags::BRS).expect("fd frame"))
             } else {
                 let mut d = data.to_vec();
                 d.resize(8, 0xAA);
-                self.sock.write_frame(&CanDataFrame::new(id, &d).expect("frame"))
+                self.sock
+                    .write_frame(&CanDataFrame::new(id, &d).expect("frame"))
             };
             match r {
                 Ok(()) => return,
@@ -111,14 +134,23 @@ struct FakeEcu {
 impl FakeEcu {
     fn start(ids: Ids, fd: bool, mut script: Box<Script>) -> FakeEcu {
         for id in [ids.req, ids.resp, ids.func] {
-            assert!(!FORBIDDEN.contains(&id), "ID {id:#x} belongs to the user's manual session");
+            assert!(
+                !FORBIDDEN.contains(&id),
+                "ID {id:#x} belongs to the user's manual session"
+            );
         }
         let rx = CanFdSocket::open(IFACE).expect("open fake ECU rx");
-        rx.set_filters(&[CanFilter::new(ids.req, 0x7FF | 0x8000_0000 | 0x4000_0000)]).expect("filter");
-        rx.set_read_timeout(Duration::from_millis(20)).expect("timeout");
+        rx.set_filters(&[CanFilter::new(ids.req, 0x7FF | 0x8000_0000 | 0x4000_0000)])
+            .expect("filter");
+        rx.set_read_timeout(Duration::from_millis(20))
+            .expect("timeout");
         let tx = CanFdSocket::open(IFACE).expect("open fake ECU tx");
         tx.set_filter_drop_all().expect("drop all");
-        let bus = Bus { sock: Arc::new(tx), resp: ids.resp, fd };
+        let bus = Bus {
+            sock: Arc::new(tx),
+            resp: ids.resp,
+            fd,
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let (stop, bus) = (stop.clone(), bus.clone());
@@ -134,7 +166,11 @@ impl FakeEcu {
                 }
             })
         };
-        FakeEcu { stop, thread: Some(thread), bus }
+        FakeEcu {
+            stop,
+            thread: Some(thread),
+            bus,
+        }
     }
 }
 
@@ -151,16 +187,24 @@ fn vm_rss_kib() -> u64 {
     std::fs::read_to_string("/proc/self/status")
         .unwrap_or_default()
         .lines()
-        .find_map(|l| l.strip_prefix("VmRSS:").and_then(|v| v.split_whitespace().next()?.parse().ok()))
+        .find_map(|l| {
+            l.strip_prefix("VmRSS:")
+                .and_then(|v| v.split_whitespace().next()?.parse().ok())
+        })
         .unwrap_or(0)
 }
 
 fn fc_frames(sent: &[nexus_core::RawCanFrame]) -> usize {
-    sent.iter().filter(|f| f.payload().first().is_some_and(|b| b >> 4 == 3)).count()
+    sent.iter()
+        .filter(|f| f.payload().first().is_some_and(|b| b >> 4 == 3))
+        .count()
 }
 
 /// Runs `f` on a helper thread and waits at most `limit` (a hang must fail the test, not block it).
-fn bounded<T: Send + 'static>(limit: Duration, f: impl FnOnce() -> T + Send + 'static) -> Option<(T, Duration)> {
+fn bounded<T: Send + 'static>(
+    limit: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<(T, Duration)> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let t0 = Instant::now();
@@ -173,7 +217,9 @@ fn bounded<T: Send + 'static>(limit: Duration, f: impl FnOnce() -> T + Send + 's
 /// Answers `3E 00` with `7E 00` (single frame) — the "next request works" probe.
 fn answer_tester_present(data: &[u8], bus: &Bus, fd: bool) -> bool {
     let off = usize::from(fd && data.first() == Some(&0x00));
-    if data.get(off..off + 3) == Some(&[0x02, 0x3E, 0x00][..]) || data.get(..3) == Some(&[0x02, 0x3E, 0x00][..]) {
+    if data.get(off..off + 3) == Some(&[0x02, 0x3E, 0x00][..])
+        || data.get(..3) == Some(&[0x02, 0x3E, 0x00][..])
+    {
         bus.send(&[0x02, 0x7E, 0x00]);
         return true;
     }
@@ -229,7 +275,10 @@ fn huge_escape_ff(ids: Ids, fd: bool) {
     let rss0 = vm_rss_kib();
     let s2 = s.clone();
     let (res, took) = bounded(Duration::from_secs(20), move || {
-        let opts = UdsRequestOptionsDto { timeout_ms: Some(5_000), ..Default::default() };
+        let opts = UdsRequestOptionsDto {
+            timeout_ms: Some(5_000),
+            ..Default::default()
+        };
         s2.request(0x22, &[0xF1, 0x90], &opts)
     })
     .expect("request must not hang");
@@ -244,14 +293,26 @@ fn huge_escape_ff(ids: Ids, fd: bool) {
     let e = res.expect_err("a 4 GiB response must be refused");
     assert_eq!(e.code, DiagErrorCode::IsotpError, "{e}");
     assert!(e.message.contains("too large"), "{e}");
-    assert!(took < Duration::from_secs(2), "refusal must be immediate, took {took:?}");
-    assert_eq!(fc_seen.load(Ordering::Acquire), 0, "tester must not send FC.CTS for an oversized FF");
+    assert!(
+        took < Duration::from_secs(2),
+        "refusal must be immediate, took {took:?}"
+    );
+    assert_eq!(
+        fc_seen.load(Ordering::Acquire),
+        0,
+        "tester must not send FC.CTS for an oversized FF"
+    );
     assert_eq!(fc_frames(&probe.sent()), 0);
     let log = s.conversation_since(0, 100);
-    assert!(log.events.iter().any(|e| e.detail.as_deref() == Some("isotp_pdu_too_large")));
+    assert!(log
+        .events
+        .iter()
+        .any(|e| e.detail.as_deref() == Some("isotp_pdu_too_large")));
 
     // Session still usable.
-    let r = s.request(0x3E, &[0x00], &UdsRequestOptionsDto::default()).expect("next request works");
+    let r = s
+        .request(0x3E, &[0x00], &UdsRequestOptionsDto::default())
+        .expect("next request works");
     assert_eq!(r.raw, vec![0x7E, 0x00]);
     s.close();
 }
@@ -316,8 +377,13 @@ fn legit_long_response(ids: Ids, fd: bool, len: usize) {
     wait_bus_quiet(ids, Duration::from_millis(50));
     let (port, _probe) = SocketCanPort::open(ids, fd);
     let s = UdsSession::open(port, config(ids, fd, false)).expect("open");
-    let opts = UdsRequestOptionsDto { timeout_ms: Some(10_000), ..Default::default() };
-    let r = s.request(0x22, &[0xF1, 0x90], &opts).expect("legit long response");
+    let opts = UdsRequestOptionsDto {
+        timeout_ms: Some(10_000),
+        ..Default::default()
+    };
+    let r = s
+        .request(0x22, &[0xF1, 0x90], &opts)
+        .expect("legit long response");
     assert_eq!(r.raw.len(), len);
     assert_eq!(r.raw, payload);
     s.close();
@@ -379,20 +445,32 @@ fn high07_2_ecu_answering_every_fc_with_wait_forever_times_out_and_releases_sess
     let s2 = s.clone();
     // 2E F1 90 + 17 bytes → multi-frame request (FF + CFs).
     let req: Vec<u8> = [0xF1, 0x90].into_iter().chain(0..17u8).collect();
-    let outcome = bounded(Duration::from_secs(30), move || s2.request(0x2E, &req, &UdsRequestOptionsDto::default()));
+    let outcome = bounded(Duration::from_secs(30), move || {
+        s2.request(0x2E, &req, &UdsRequestOptionsDto::default())
+    });
     // Release the stalled ECU thread so the fake ECU can answer the follow-up probe.
     stalling.store(false, Ordering::Release);
-    let (res, took) = outcome.expect("request blocked > 30 s: FC.WAIT stall is not bounded (HIGH-07.2)");
-    eprintln!("FC.WAIT stall: {:?} after {took:?}, {} WAIT frames", res.as_ref().err(), waits.load(Ordering::Acquire));
+    let (res, took) =
+        outcome.expect("request blocked > 30 s: FC.WAIT stall is not bounded (HIGH-07.2)");
+    eprintln!(
+        "FC.WAIT stall: {:?} after {took:?}, {} WAIT frames",
+        res.as_ref().err(),
+        waits.load(Ordering::Acquire)
+    );
     let e = res.expect_err("must time out");
     assert_eq!(e.code, DiagErrorCode::TimeoutIsotp, "{e}");
     assert!(took < Duration::from_secs(15), "took {took:?}");
     let ev = s.conversation_since(0, 100);
-    assert!(ev.events.iter().any(|e| e.kind == ConversationEventKind::Timeout));
+    assert!(ev
+        .events
+        .iter()
+        .any(|e| e.kind == ConversationEventKind::Timeout));
 
     // Session mutex released, stack rebuilt: the next request works.
     std::thread::sleep(Duration::from_millis(600));
-    let r = s.request(0x3E, &[0x00], &UdsRequestOptionsDto::default()).expect("next request works");
+    let r = s
+        .request(0x3E, &[0x00], &UdsRequestOptionsDto::default())
+        .expect("next request works");
     assert_eq!(r.raw, vec![0x7E, 0x00]);
     s.close();
 }
@@ -416,18 +494,40 @@ fn high07_3_idle_session_does_not_send_flow_control_for_foreign_first_frame() {
     let (port, probe) = SocketCanPort::open(CLASSIC, false);
     let s = UdsSession::open(port, config(CLASSIC, false, false)).expect("open");
     // One exchange so the ISO-TP stack (and its persistent receiver) exists; bus stays armed.
-    assert_eq!(s.request(0x3E, &[0x00], &UdsRequestOptionsDto::default()).expect("3E").raw, vec![0x7E, 0x00]);
+    assert_eq!(
+        s.request(0x3E, &[0x00], &UdsRequestOptionsDto::default())
+            .expect("3E")
+            .raw,
+        vec![0x7E, 0x00]
+    );
     std::thread::sleep(Duration::from_millis(200));
     let before = probe.sent().len();
 
     // Another tester's ECU answer (FF) shows up on our response id while we are idle.
-    ecu.bus.send(&[0x10, 0x14, 0x62, 0xF1, 0x90, b'W', b'N', b'X']);
+    ecu.bus
+        .send(&[0x10, 0x14, 0x62, 0xF1, 0x90, b'W', b'N', b'X']);
     std::thread::sleep(Duration::from_millis(400));
     let after = probe.sent();
-    eprintln!("idle FF: tester frames sent after injection = {:?}", after[before..].iter().map(|f| f.payload().to_vec()).collect::<Vec<_>>());
-    assert_eq!(after.len(), before, "idle session transmitted {} frame(s) (FC.CTS)", after.len() - before);
+    eprintln!(
+        "idle FF: tester frames sent after injection = {:?}",
+        after[before..]
+            .iter()
+            .map(|f| f.payload().to_vec())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        after.len(),
+        before,
+        "idle session transmitted {} frame(s) (FC.CTS)",
+        after.len() - before
+    );
 
     // And the session still works afterwards.
-    assert_eq!(s.request(0x3E, &[0x00], &UdsRequestOptionsDto::default()).expect("3E").raw, vec![0x7E, 0x00]);
+    assert_eq!(
+        s.request(0x3E, &[0x00], &UdsRequestOptionsDto::default())
+            .expect("3E")
+            .raw,
+        vec![0x7E, 0x00]
+    );
     s.close();
 }

@@ -8,8 +8,13 @@ mod common;
 
 fuzz_target!(|data: &[u8]| {
     for fault_tolerant in [true, false] {
-        let opts = ParseOptions { fault_tolerant, ..ParseOptions::default() };
-        let Ok(bundle) = DbcFormat.parse(data, &opts) else { continue };
+        let opts = ParseOptions {
+            fault_tolerant,
+            ..ParseOptions::default()
+        };
+        let Ok(bundle) = DbcFormat.parse(data, &opts) else {
+            continue;
+        };
         // Writer must always produce text our own parser can read back.
         if let Ok(text) = DbcWriter::new(&bundle.database).write_to_string() {
             let _ = DbcFormat.parse(text.as_bytes(), &opts);

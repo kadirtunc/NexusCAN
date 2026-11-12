@@ -2,7 +2,9 @@
 
 pub mod state_table;
 
-pub use nexus_hal::pipeline::{tx_scheduler, PipelineEngine, FRAME_RING_CAPACITY, SNAPSHOT_INTERVAL_US};
+pub use nexus_hal::pipeline::{
+    tx_scheduler, PipelineEngine, FRAME_RING_CAPACITY, SNAPSHOT_INTERVAL_US,
+};
 use nexus_hal::registry::DriverRegistry;
 use nexus_hal::storage::DataRoot;
 use std::sync::Arc;

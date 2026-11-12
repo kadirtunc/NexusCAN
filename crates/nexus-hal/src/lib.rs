@@ -27,8 +27,7 @@ pub use dto::{
     AdapterCapabilitiesDto, BusHealthDto, ChannelConfigDto, ChronologicalFrameDto,
     DeviceDescriptorDto, DriverFamilyStatusDto, DriverProbeReportDto, FrameTelemetryDto,
     LiveSignalDto, PanicStopResultDto, PeriodicTxJobDto, ProjectSummaryDto, ResetSessionResultDto,
-    SerialPortInfoDto,
-    TelemetrySnapshotDto, TxTransmitResultDto,
+    SerialPortInfoDto, TelemetrySnapshotDto, TxTransmitResultDto,
 };
 pub use error::{AdapterError, HalError};
 pub use pipeline::{
@@ -302,7 +301,11 @@ mod tests {
             .iter()
             .filter(|r| r.arb_id == 0x301)
             .collect();
-        assert_eq!(rows_301.len(), 4, "0x301 must have 4 dedicated bank rows (0..=3)");
+        assert_eq!(
+            rows_301.len(),
+            4,
+            "0x301 must have 4 dedicated bank rows (0..=3)"
+        );
         let mut unique_301_sigs = std::collections::BTreeSet::new();
         for (expected_bank, row) in rows_301.iter().enumerate() {
             assert_eq!(
@@ -314,7 +317,10 @@ mod tests {
                 8,
                 "Each 0x301 bank row holds 1 switch + 2 static + 4 cells + 1 NTC == 8 signals"
             );
-            assert!(row.signals.iter().all(|s| s.active_in_last_frame && !s.out_of_range));
+            assert!(row
+                .signals
+                .iter()
+                .all(|s| s.active_in_last_frame && !s.out_of_range));
             for sig in &row.signals {
                 unique_301_sigs.insert(sig.signal_id);
             }
@@ -365,7 +371,10 @@ mod tests {
 
         let mut unique_105_sigs = std::collections::BTreeSet::new();
         for row in &rows_105 {
-            assert!(row.signals.iter().all(|s| s.active_in_last_frame && !s.out_of_range));
+            assert!(row
+                .signals
+                .iter()
+                .all(|s| s.active_in_last_frame && !s.out_of_range));
             for sig in &row.signals {
                 unique_105_sigs.insert(sig.signal_id);
             }
@@ -464,7 +473,8 @@ mod tests {
         assert!(engine.cmd_get_current_schema().is_none());
 
         let scripts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
-        let dbc_b64 = B64.encode(std::fs::read(scripts_dir.join("sample_vehicle.dbc")).expect("dbc"));
+        let dbc_b64 =
+            B64.encode(std::fs::read(scripts_dir.join("sample_vehicle.dbc")).expect("dbc"));
         let kcd_b64 = B64.encode(std::fs::read(scripts_dir.join("sample_bms.kcd")).expect("kcd"));
 
         let s1 = engine
@@ -497,10 +507,19 @@ mod tests {
             .find(|s| s.name == "MotorSpeedRpm")
             .expect("MotorSpeedRpm");
         let tx = engine
-            .cmd_transmit_signal_frame(0, 0x101, false, vec![(rpm_sig.signal_id, 1_500.0)], Some(10), None)
+            .cmd_transmit_signal_frame(
+                0,
+                0x101,
+                false,
+                vec![(rpm_sig.signal_id, 1_500.0)],
+                Some(10),
+                None,
+            )
             .expect("schedule job");
         let job_id = tx.job_id.expect("periodic job id");
-        engine.cmd_stop_periodic_tx(job_id).expect("stop individual job");
+        engine
+            .cmd_stop_periodic_tx(job_id)
+            .expect("stop individual job");
         assert!(engine.cmd_list_periodic_tx().is_empty());
 
         thread::sleep(Duration::from_millis(25));
@@ -535,7 +554,11 @@ mod tests {
             .expect("ChargerOutputVoltageV")
             .signal_id;
 
-        let fd_row = snap.frames.iter().find(|r| r.arb_id == 0x201).expect("0x201");
+        let fd_row = snap
+            .frames
+            .iter()
+            .find(|r| r.arb_id == 0x201)
+            .expect("0x201");
         let tail_val = fd_row
             .signals
             .iter()
@@ -579,7 +602,16 @@ mod tests {
 
         // Raw TX must be blocked until bus is armed
         assert!(engine
-            .cmd_transmit_raw_frame(0, 0x7DF, false, false, false, vec![0x02, 0x01, 0x00], None, None)
+            .cmd_transmit_raw_frame(
+                0,
+                0x7DF,
+                false,
+                false,
+                false,
+                vec![0x02, 0x01, 0x00],
+                None,
+                None
+            )
             .is_err());
 
         engine.cmd_arm_active_bus(0, true).expect("arm bus 0");
@@ -601,14 +633,7 @@ mod tests {
             .expect("MotorSpeedRpm signal")
             .signal_id;
         engine
-            .cmd_transmit_signal_frame(
-                0,
-                0x101,
-                false,
-                vec![(rpm_sig_id, 4_250.0)],
-                None,
-                None,
-            )
+            .cmd_transmit_signal_frame(0, 0x101, false, vec![(rpm_sig_id, 4_250.0)], None, None)
             .expect("single-shot symbolic TX on 0x101");
 
         // Transmit raw Classical CAN on 0x7DF (periodic 25ms) and 10B -> 12B CAN-FD on 0x18DA10F1
@@ -737,7 +762,16 @@ mod tests {
             "expected calm 0x201 period ~250ms, got {}ms",
             row_201_calm.cycle_ms
         );
-        for db_arb_id in [0x201u32, 0x101, 0x105, 0x302, 0x301, 0x303, 0x18FF_50E5, 0x18F0_0900] {
+        for db_arb_id in [
+            0x201u32,
+            0x101,
+            0x105,
+            0x302,
+            0x301,
+            0x303,
+            0x18FF_50E5,
+            0x18F0_0900,
+        ] {
             let row = calm_snap
                 .frames
                 .iter()
@@ -767,7 +801,9 @@ mod tests {
             .expect("connect mock0 nominal 475 schedule");
 
         thread::sleep(Duration::from_millis(420));
-        let nom_snap = engine.flush_snapshot_now().expect("flush nominal 475 snapshot");
+        let nom_snap = engine
+            .flush_snapshot_now()
+            .expect("flush nominal 475 snapshot");
 
         // Multiplexed rows report each branch's true inter-arrival period:
         // - 0x105 transmits every 20ms across 5 cascaded paths -> 100.0ms per mux branch
@@ -815,8 +851,13 @@ mod tests {
         let mut table = StateTable::new();
         for seq in 0..1_500u64 {
             let payload = (seq as u32).to_le_bytes();
-            let frame = RawCanFrame::new_classical(0, CanIdKey::Standard(0x123), &payload, 1_000 + seq * 10)
-                .expect("valid frame");
+            let frame = RawCanFrame::new_classical(
+                0,
+                CanIdKey::Standard(0x123),
+                &payload,
+                1_000 + seq * 10,
+            )
+            .expect("valid frame");
             table.ingest_frame(&frame);
         }
         let snap_1500 = table.build_snapshot(20_000, 0, false, 500_000, Vec::new());
@@ -828,8 +869,13 @@ mod tests {
 
         for seq in 0..2_500u64 {
             let payload = (seq as u32).to_le_bytes();
-            let frame = RawCanFrame::new_classical(0, CanIdKey::Standard(0x123), &payload, 50_000 + seq * 10)
-                .expect("valid frame");
+            let frame = RawCanFrame::new_classical(
+                0,
+                CanIdKey::Standard(0x123),
+                &payload,
+                50_000 + seq * 10,
+            )
+            .expect("valid frame");
             table.ingest_frame(&frame);
         }
         let snap_wrapped = table.build_snapshot(80_000, 0, false, 500_000, Vec::new());
@@ -857,8 +903,10 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&tmp_projects);
 
-        let engine =
-            PipelineEngine::with_projects_dir(DriverRegistry::with_builtin_drivers(), tmp_projects.clone());
+        let engine = PipelineEngine::with_projects_dir(
+            DriverRegistry::with_builtin_drivers(),
+            tmp_projects.clone(),
+        );
         engine
             .cmd_load_preset_databases()
             .expect("load preset databases");
@@ -888,7 +936,9 @@ mod tests {
             .expect("connect mock1 on bus 1");
 
         thread::sleep(Duration::from_millis(240));
-        let dual_snap = engine.flush_snapshot_now().expect("flush dual-bus snapshot");
+        let dual_snap = engine
+            .flush_snapshot_now()
+            .expect("flush dual-bus snapshot");
         assert_eq!(dual_snap.buses.len(), 2);
         assert!(dual_snap.frames.iter().any(|f| f.bus_id == 0));
         assert!(dual_snap.frames.iter().any(|f| f.bus_id == 1));
@@ -954,7 +1004,10 @@ mod tests {
         engine
             .cmd_delete_project("alpha_bench".to_string())
             .expect("delete alpha_bench");
-        assert_eq!(engine.cmd_list_projects().expect("list after delete").len(), 1);
+        assert_eq!(
+            engine.cmd_list_projects().expect("list after delete").len(),
+            1
+        );
 
         let _ = std::fs::remove_dir_all(&tmp_projects);
     }
@@ -1023,14 +1076,9 @@ mod tests {
         assert_eq!(parsed_rtr.dlc, 8);
 
         let fd_payload = [0x5Au8; 12];
-        let fd_frame = RawCanFrame::new_fd(
-            0,
-            CanIdKey::Extended(0x18DA_10F1),
-            &fd_payload,
-            true,
-            500,
-        )
-        .expect("fd frame");
+        let fd_frame =
+            RawCanFrame::new_fd(0, CanIdKey::Extended(0x18DA_10F1), &fd_payload, true, 500)
+                .expect("fd frame");
         let n_fd = encode_slcan_frame(&fd_frame, &mut wire).expect("encode fd");
         assert_eq!(&wire[..11], b"B18DA10F195");
         let parsed_fd = parse_slcan_line(&wire[..n_fd], 0, 500).expect("parse fd");
@@ -1070,7 +1118,8 @@ mod tests {
                 .cmd_connect_bus("pcan:PCAN_USBBUS1".to_string(), ChannelConfigDto::default())
                 .expect_err("uninstalled PCAN must return diagnostic error");
             assert!(
-                err.to_string().contains("PEAK PCAN-Basic driver is not installed"),
+                err.to_string()
+                    .contains("PEAK PCAN-Basic driver is not installed"),
                 "unexpected PCAN error: {err}"
             );
         }
@@ -1085,7 +1134,8 @@ mod tests {
                 .cmd_connect_bus("kvaser:0".to_string(), ChannelConfigDto::default())
                 .expect_err("uninstalled Kvaser must return diagnostic error");
             assert!(
-                err.to_string().contains("Kvaser CANlib driver is not installed"),
+                err.to_string()
+                    .contains("Kvaser CANlib driver is not installed"),
                 "unexpected Kvaser error: {err}"
             );
         }
@@ -1119,7 +1169,10 @@ mod tests {
                 );
             }
         }
-        if let Some(vcan_idx) = devices.iter().position(|d| d.device_id == "socketcan:vcan0") {
+        if let Some(vcan_idx) = devices
+            .iter()
+            .position(|d| d.device_id == "socketcan:vcan0")
+        {
             assert!(vcan_idx < mock0_idx);
         }
 
@@ -1133,7 +1186,11 @@ mod tests {
             matches!(not_conn_err, HalError::BusNotConnected(0)),
             "expected BusNotConnected(0), got: {not_conn_err}"
         );
-        assert!(engine.flush_snapshot_now().expect("snapshot").buses.is_empty());
+        assert!(engine
+            .flush_snapshot_now()
+            .expect("snapshot")
+            .buses
+            .is_empty());
 
         // 2. Connect mock:mock1 (NOT mock0!) in Listen-Only mode on bus 0, capture RX frames,
         //    then atomically switch to Active TX via cmd_set_bus_mode(0, false, true).
@@ -1153,7 +1210,9 @@ mod tests {
         assert!(!ro_dto.tx_armed);
 
         thread::sleep(Duration::from_millis(140));
-        let snap_before = engine.flush_snapshot_now().expect("snapshot before mode switch");
+        let snap_before = engine
+            .flush_snapshot_now()
+            .expect("snapshot before mode switch");
         assert!(
             !snap_before.frames.is_empty(),
             "expected RX frames on mock1 before mode switch"
@@ -1172,7 +1231,9 @@ mod tests {
         assert!(active_dto.connected);
 
         // Verify RX rows in StateTable were NOT wiped during Listen-Only -> Active TX switch
-        let snap_after = engine.flush_snapshot_now().expect("snapshot immediately after switch");
+        let snap_after = engine
+            .flush_snapshot_now()
+            .expect("snapshot immediately after switch");
         assert!(
             !snap_after.frames.is_empty(),
             "StateTable RX rows must be preserved across cmd_set_bus_mode"

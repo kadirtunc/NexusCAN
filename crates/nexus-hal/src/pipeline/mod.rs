@@ -14,32 +14,33 @@ use crate::drivers::probe::probe_all_drivers;
 use crate::dto::{
     BusHealthDto, ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto, DeviceDescriptorDto,
     DriverProbeReportDto, LoadedTraceFileDto, PanicStopResultDto, PeriodicTxJobDto,
-    ProjectSummaryDto, ResetSessionResultDto, StartTraceReplayArgsDto, TelemetrySnapshotDto, TraceFileSummaryDto,
-    TraceReplayControlArgsDto, TraceReplayStatusDto, TraceStorageInfoDto, TxTransmitResultDto,
+    ProjectSummaryDto, ResetSessionResultDto, StartTraceReplayArgsDto, TelemetrySnapshotDto,
+    TraceFileSummaryDto, TraceReplayControlArgsDto, TraceReplayStatusDto, TraceStorageInfoDto,
+    TxTransmitResultDto,
 };
 use crate::error::{AdapterError, HalError};
 use crate::registry::DriverRegistry;
+use crate::storage::{
+    check_frame_count, check_ipc_size, DataRoot, MAX_DB_FILES_PER_CALL, MAX_IPC_CONTENT_BYTES,
+    MAX_IPC_DB_TOTAL_BYTES, MAX_LISTED_ENTRIES, MAX_PROJECT_FILE_BYTES,
+};
 use crate::traits::{BusState, CanChannel, DeviceDescriptor, ListenOnlyEnforcement};
-use diag_tap::{DiagBusShared, GateRefs, TapCtl, TapRegisterError, TapTable, TxOrigin};
-use nexus_protocols::uds::dto::{DiagError, DiagErrorCode};
-use nexus_protocols::uds::port::{DiagPortEvent, DiagTapFilter, DiagTxReject};
 use base64::engine::general_purpose::{STANDARD as BASE64_STD, STANDARD_NO_PAD as BASE64_NO_PAD};
 use base64::Engine as _;
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use diag_tap::{DiagBusShared, GateRefs, TapCtl, TapRegisterError, TapTable, TxOrigin};
 use nexus_core::{now_monotonic_us, BusId, CanIdKey, RawCanFrame};
 use nexus_netdb::{
     merge_databases, CompiledDatabase, DatabaseInfoDto, DatabaseSchemaDto, DbError, FormatRegistry,
     NetworkDatabase, ParseOptions,
 };
+use nexus_protocols::uds::dto::{DiagError, DiagErrorCode};
+use nexus_protocols::uds::port::{DiagPortEvent, DiagTapFilter, DiagTxReject};
 use parking_lot::{Mutex, RwLock};
-use crate::storage::{
-    check_frame_count, check_ipc_size, DataRoot, MAX_DB_FILES_PER_CALL, MAX_IPC_CONTENT_BYTES,
-    MAX_IPC_DB_TOTAL_BYTES, MAX_LISTED_ENTRIES, MAX_PROJECT_FILE_BYTES,
-};
 use replay::{
     compile_chronological_frames, delete_trace_file, list_trace_files, load_trace_file_cached,
-    parse_trace_bytes, parse_trace_entries_from_bytes, read_trace_file_bytes, sanitize_trace_filename,
-    save_trace_file_bytes_cached, ReplayController, TraceStatsCache,
+    parse_trace_bytes, parse_trace_entries_from_bytes, read_trace_file_bytes,
+    sanitize_trace_filename, save_trace_file_bytes_cached, ReplayController, TraceStatsCache,
 };
 use state_table::StateTable;
 use std::collections::BTreeMap;
@@ -143,9 +144,7 @@ impl ConnectedBusHandle {
             bus_state: state.as_str().to_string(),
             tx_error_count: self.tx_errors.load(Ordering::Relaxed),
             rx_error_count: self.rx_errors.load(Ordering::Relaxed),
-            listen_only_enforcement: self
-                .listen_only_enforcement
-                .map(|e| e.as_str().to_string()),
+            listen_only_enforcement: self.listen_only_enforcement.map(|e| e.as_str().to_string()),
         }
     }
 
@@ -156,7 +155,12 @@ impl ConnectedBusHandle {
 
     fn nominal_capacity_bps(&self) -> u64 {
         if self.config.enable_fd && self.descriptor.capabilities.supports_fd {
-            u64::from(self.config.data_bitrate.max(self.config.bitrate).max(500_000))
+            u64::from(
+                self.config
+                    .data_bitrate
+                    .max(self.config.bitrate)
+                    .max(500_000),
+            )
         } else {
             u64::from(self.config.bitrate.max(125_000))
         }
@@ -304,7 +308,13 @@ impl PipelineEngine {
         let scheduler_handle = thread::Builder::new()
             .name("nexus-tx-scheduler".to_string())
             .spawn(move || {
-                run_tx_scheduler_loop(sched_stop, sched_panic, sched_epoch, sched_buses, sched_table);
+                run_tx_scheduler_loop(
+                    sched_stop,
+                    sched_panic,
+                    sched_epoch,
+                    sched_buses,
+                    sched_table,
+                );
             })
             .expect("failed to spawn nexus-tx-scheduler thread");
 
@@ -490,7 +500,9 @@ impl PipelineEngine {
     ) -> Result<u64, HalError> {
         let guard = self.buses.lock();
         let mut sched = self.tx_scheduler.lock();
-        let bus = guard.get(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?;
+        let bus = guard
+            .get(&bus_id)
+            .ok_or(HalError::BusNotConnected(bus_id))?;
         if self.tx_panic_latched.load(Ordering::Acquire)
             || self.tx_epoch.load(Ordering::Acquire) != epoch
         {
@@ -527,8 +539,7 @@ impl PipelineEngine {
         }
 
         let (descriptor, channel) = self.registry.open_by_device_id(&device_id, &config)?;
-        let handle =
-            self.spawn_connected_bus_handle(bus_id, descriptor, config, channel, false)?;
+        let handle = self.spawn_connected_bus_handle(bus_id, descriptor, config, channel, false)?;
 
         let dto = handle.to_health_dto();
         self.buses.lock().insert(bus_id, handle);
@@ -553,7 +564,9 @@ impl PipelineEngine {
     /// 4. `cmd_arm_active_bus` -> Arms or disarms active TX on `bus_id`, enforcing `Listen-Only` lock.
     pub fn cmd_arm_active_bus(&self, bus_id: u8, armed: bool) -> Result<BusHealthDto, HalError> {
         let guard = self.buses.lock();
-        let bus = guard.get(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?;
+        let bus = guard
+            .get(&bus_id)
+            .ok_or(HalError::BusNotConnected(bus_id))?;
 
         if armed {
             if bus.listen_only {
@@ -603,7 +616,9 @@ impl PipelineEngine {
 
         {
             let guard = self.buses.lock();
-            let bus = guard.get(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?;
+            let bus = guard
+                .get(&bus_id)
+                .ok_or(HalError::BusNotConnected(bus_id))?;
             if target_armed && self.tx_panic_latched.load(Ordering::SeqCst) {
                 return Err(panic_latched_error());
             }
@@ -854,11 +869,16 @@ impl PipelineEngine {
         content_base64: String,
         append_to_existing: bool,
     ) -> Result<DatabaseSchemaDto, HalError> {
-        check_ipc_size("Database content", content_base64.len(), MAX_IPC_CONTENT_BYTES)?;
+        check_ipc_size(
+            "Database content",
+            content_base64.len(),
+            MAX_IPC_CONTENT_BYTES,
+        )?;
         let raw_bytes = decode_base64_db_bytes(&content_base64)?;
 
         let registry = FormatRegistry::new();
-        let bundle = registry.parse_bytes(&raw_bytes, Some(&file_name), &ParseOptions::default())?;
+        let bundle =
+            registry.parse_bytes(&raw_bytes, Some(&file_name), &ParseOptions::default())?;
 
         let existing_raw = if append_to_existing {
             self.db_state
@@ -869,27 +889,27 @@ impl PipelineEngine {
             None
         };
 
-        let (target_raw, format_str, source_enc, diagnostics) =
-            if let Some(prev_raw) = existing_raw {
-                let prev_name = prev_raw.name.clone();
-                let mut diags = bundle.diagnostics;
-                let (mut merged, merge_diags) = merge_databases(vec![prev_raw, bundle.database]);
-                merged.name = format!("{prev_name} + {file_name}");
-                diags.extend(merge_diags);
-                (
-                    merged,
-                    format!("Merged ({})", bundle.format_name),
-                    bundle.source_encoding.to_string(),
-                    diags,
-                )
-            } else {
-                (
-                    bundle.database,
-                    bundle.format_name.to_string(),
-                    bundle.source_encoding.to_string(),
-                    bundle.diagnostics,
-                )
-            };
+        let (target_raw, format_str, source_enc, diagnostics) = if let Some(prev_raw) = existing_raw
+        {
+            let prev_name = prev_raw.name.clone();
+            let mut diags = bundle.diagnostics;
+            let (mut merged, merge_diags) = merge_databases(vec![prev_raw, bundle.database]);
+            merged.name = format!("{prev_name} + {file_name}");
+            diags.extend(merge_diags);
+            (
+                merged,
+                format!("Merged ({})", bundle.format_name),
+                bundle.source_encoding.to_string(),
+                diags,
+            )
+        } else {
+            (
+                bundle.database,
+                bundle.format_name.to_string(),
+                bundle.source_encoding.to_string(),
+                bundle.diagnostics,
+            )
+        };
 
         let message_count = target_raw.messages.len();
         let signal_count = target_raw.messages.values().map(|m| m.signals.len()).sum();
@@ -925,13 +945,25 @@ impl PipelineEngine {
         file_name: String,
         content_base64: String,
     ) -> Result<DatabaseSchemaDto, HalError> {
-        check_ipc_size("Database content", content_base64.len(), MAX_IPC_CONTENT_BYTES)?;
+        check_ipc_size(
+            "Database content",
+            content_base64.len(),
+            MAX_IPC_CONTENT_BYTES,
+        )?;
         let raw_bytes = decode_base64_db_bytes(&content_base64)?;
-        let bundle =
-            FormatRegistry::new().parse_bytes(&raw_bytes, Some(&file_name), &ParseOptions::default())?;
+        let bundle = FormatRegistry::new().parse_bytes(
+            &raw_bytes,
+            Some(&file_name),
+            &ParseOptions::default(),
+        )?;
 
         let message_count = bundle.database.messages.len();
-        let signal_count = bundle.database.messages.values().map(|m| m.signals.len()).sum();
+        let signal_count = bundle
+            .database
+            .messages
+            .values()
+            .map(|m| m.signals.len())
+            .sum();
         let info = DatabaseInfoDto {
             name: bundle.database.name.clone(),
             version: bundle.database.version.clone(),
@@ -984,10 +1016,18 @@ impl PipelineEngine {
         }
         let mut total_len = 0usize;
         for f in &files {
-            check_ipc_size("Database content", f.content_base64.len(), MAX_IPC_CONTENT_BYTES)?;
+            check_ipc_size(
+                "Database content",
+                f.content_base64.len(),
+                MAX_IPC_CONTENT_BYTES,
+            )?;
             total_len = total_len.saturating_add(f.content_base64.len());
         }
-        check_ipc_size("Combined database content", total_len, MAX_IPC_DB_TOTAL_BYTES)?;
+        check_ipc_size(
+            "Combined database content",
+            total_len,
+            MAX_IPC_DB_TOTAL_BYTES,
+        )?;
 
         let registry = FormatRegistry::new();
         let opts = ParseOptions::default();
@@ -1111,7 +1151,9 @@ impl PipelineEngine {
 
         let tx_sender = {
             let guard = self.buses.lock();
-            let bus = guard.get(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?;
+            let bus = guard
+                .get(&bus_id)
+                .ok_or(HalError::BusNotConnected(bus_id))?;
             if bus.listen_only {
                 return Err(HalError::Adapter(AdapterError::ListenOnlyMode));
             }
@@ -1165,9 +1207,9 @@ impl PipelineEngine {
                 let label = job_label
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or(default_label);
-                Some(self.register_periodic_job_checked(
-                    bus_id, label, can_id, ms, tx_frame, epoch,
-                )?)
+                Some(
+                    self.register_periodic_job_checked(bus_id, label, can_id, ms, tx_frame, epoch)?,
+                )
             }
             _ => None,
         };
@@ -1214,7 +1256,9 @@ impl PipelineEngine {
 
         let tx_sender = {
             let guard = self.buses.lock();
-            let bus = guard.get(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?;
+            let bus = guard
+                .get(&bus_id)
+                .ok_or(HalError::BusNotConnected(bus_id))?;
             if bus.listen_only {
                 return Err(HalError::Adapter(AdapterError::ListenOnlyMode));
             }
@@ -1304,9 +1348,9 @@ impl PipelineEngine {
                 let label = job_label
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or(default_label);
-                Some(self.register_periodic_job_checked(
-                    bus_id, label, can_id, ms, tx_frame, epoch,
-                )?)
+                Some(
+                    self.register_periodic_job_checked(bus_id, label, can_id, ms, tx_frame, epoch)?,
+                )
             }
             _ => None,
         };
@@ -1564,7 +1608,12 @@ impl PipelineEngine {
         let traces_dir = self.data_root.traces_dir();
         if let Some(b64) = content_base64.as_deref().filter(|s| !s.trim().is_empty()) {
             let raw_bytes = decode_base64_trace_bytes(b64)?;
-            save_trace_file_bytes_cached(traces_dir, &file_name, &raw_bytes, Some(&self.trace_stats))
+            save_trace_file_bytes_cached(
+                traces_dir,
+                &file_name,
+                &raw_bytes,
+                Some(&self.trace_stats),
+            )
         } else if let Some(text) = content {
             save_trace_file_bytes_cached(
                 traces_dir,
@@ -1581,7 +1630,11 @@ impl PipelineEngine {
 
     /// 24. `cmd_load_trace_file` -> Loads and parses `./traces/<safe_name>` into `LoadedTraceFileDto`.
     pub fn cmd_load_trace_file(&self, file_name: String) -> Result<LoadedTraceFileDto, HalError> {
-        load_trace_file_cached(self.data_root.traces_dir(), &file_name, Some(&self.trace_stats))
+        load_trace_file_cached(
+            self.data_root.traces_dir(),
+            &file_name,
+            Some(&self.trace_stats),
+        )
     }
 
     /// 25. `cmd_delete_trace_file` -> Deletes `./traces/<safe_name>`.
@@ -1646,8 +1699,10 @@ impl PipelineEngine {
                     compile_chronological_frames(frames),
                     "In-Memory Trace".to_string(),
                 )
-            } else if let Some(b64) =
-                args.content_base64.as_ref().filter(|c| !c.trim().is_empty())
+            } else if let Some(b64) = args
+                .content_base64
+                .as_ref()
+                .filter(|c| !c.trim().is_empty())
             {
                 let name_hint = resolve_name_hint("inline_trace.blf");
                 let raw_bytes = decode_base64_trace_bytes(b64)?;
@@ -1655,15 +1710,13 @@ impl PipelineEngine {
                     parse_trace_entries_from_bytes(&name_hint, &raw_bytes)?,
                     name_hint,
                 )
-            } else if let Some(content) = args.content.as_ref().filter(|c| !c.trim().is_empty())
-            {
+            } else if let Some(content) = args.content.as_ref().filter(|c| !c.trim().is_empty()) {
                 let name_hint = resolve_name_hint("inline_trace.trc");
                 (
                     parse_trace_entries_from_bytes(&name_hint, content.as_bytes())?,
                     name_hint,
                 )
-            } else if let Some(fname) = args.file_name.as_ref().filter(|s| !s.trim().is_empty())
-            {
+            } else if let Some(fname) = args.file_name.as_ref().filter(|s| !s.trim().is_empty()) {
                 let (safe_name, _path, raw_bytes) =
                     read_trace_file_bytes(self.data_root.traces_dir(), fname)?;
                 (
@@ -1837,9 +1890,9 @@ fn panic_latched_error() -> HalError {
 fn gate_reject_to_adapter_error(bus_id: BusId, reason: DiagTxReject) -> AdapterError {
     match reason {
         DiagTxReject::ListenOnly => AdapterError::ListenOnlyMode,
-        DiagTxReject::PanicLatched => AdapterError::Driver(format!(
-            "Bus {bus_id} TX blocked: Panic Stop is latched"
-        )),
+        DiagTxReject::PanicLatched => {
+            AdapterError::Driver(format!("Bus {bus_id} TX blocked: Panic Stop is latched"))
+        }
         DiagTxReject::Closed => AdapterError::ChannelClosed,
         _ => AdapterError::Driver(format!("Bus {bus_id} TX is disarmed")),
     }
@@ -2249,7 +2302,11 @@ fn check_tx_request_sizes(
         }
     }
     if let Some(label) = job_label {
-        check_ipc_size("TX job label", label.len(), crate::storage::MAX_TX_JOB_LABEL_BYTES)?;
+        check_ipc_size(
+            "TX job label",
+            label.len(),
+            crate::storage::MAX_TX_JOB_LABEL_BYTES,
+        )?;
     }
     Ok(())
 }
@@ -2377,7 +2434,9 @@ mod wp8_storage_tests {
     #[test]
     fn invalid_names_are_errors_and_write_nothing() {
         let (engine, root) = engine("names");
-        for bad in ["../evil", "..", ".", "", "  ", ".dot", "a..b", "a/b", "a\\b", "CON"] {
+        for bad in [
+            "../evil", "..", ".", "", "  ", ".dot", "a..b", "a/b", "a\\b", "CON",
+        ] {
             assert!(
                 engine
                     .cmd_save_trace_file(format!("{bad}.trc"), Some(TRC.into()), None)
@@ -2420,7 +2479,9 @@ mod wp8_storage_tests {
         assert!(engine
             .cmd_load_database_content("big.dbc".into(), big.clone(), false)
             .is_err());
-        assert!(engine.cmd_parse_database_schema("big.dbc".into(), big).is_err());
+        assert!(engine
+            .cmd_parse_database_schema("big.dbc".into(), big)
+            .is_err());
         let many = vec![(0u32, 0.0f64); crate::storage::MAX_TX_SIGNAL_VALUES + 1];
         assert!(engine
             .cmd_transmit_signal_frame(0, 0x100, false, many, None, None)
@@ -2442,7 +2503,11 @@ mod wp8_storage_tests {
         let (engine, root) = engine("list");
         let traces = root.join("traces");
         // Garbage body with a trace extension: listing must not parse it.
-        fs::write(traces.join("garbage.asc"), b"\x00\xffnot a trace at all\x01").unwrap();
+        fs::write(
+            traces.join("garbage.asc"),
+            b"\x00\xffnot a trace at all\x01",
+        )
+        .unwrap();
         // Hidden temp-like file and non-canonical name are not listed.
         fs::write(traces.join(".partial.trc.tmp"), b"x").unwrap();
         fs::write(traces.join("has space.trc"), TRC).unwrap();
@@ -2472,7 +2537,11 @@ mod wp8_storage_tests {
             .cmd_save_trace_file("known.trc".into(), Some(TRC.into()), None)
             .unwrap();
         let listed = engine.cmd_list_traces().unwrap();
-        let known = listed.files.iter().find(|f| f.file_name == "known.trc").unwrap();
+        let known = listed
+            .files
+            .iter()
+            .find(|f| f.file_name == "known.trc")
+            .unwrap();
         assert!(known.stats_known);
         assert_eq!(known.frame_count, 2);
         assert_eq!(known.duration_us, 25_000);
@@ -2480,7 +2549,8 @@ mod wp8_storage_tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(traces.join("locked.trc"), fs::Permissions::from_mode(0o600));
+            let _ =
+                fs::set_permissions(traces.join("locked.trc"), fs::Permissions::from_mode(0o600));
         }
         let _ = fs::remove_dir_all(&root);
     }
@@ -2498,7 +2568,11 @@ mod wp8_storage_tests {
             .cmd_parse_trace_content("imported.trc".into(), Some(TRC.into()), None)
             .unwrap();
         assert_eq!(parsed.frames.len(), 2);
-        assert_eq!(dir_snapshot(&traces), before, "open/parse must not write to disk");
+        assert_eq!(
+            dir_snapshot(&traces),
+            before,
+            "open/parse must not write to disk"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2638,7 +2712,8 @@ mod tx_write_barrier_tests {
 
     fn one_shot(engine: &PipelineEngine) {
         // The 50 ms ack timeout may expire while the test holds the driver; irrelevant here.
-        let _ = engine.cmd_transmit_raw_frame(0, 0x321, false, false, false, vec![0x11], None, None);
+        let _ =
+            engine.cmd_transmit_raw_frame(0, 0x321, false, false, false, vec![0x11], None, None);
     }
 
     /// Enqueues `frame` with an explicit epoch, bypassing the command-side checks (emulates a
@@ -2747,7 +2822,10 @@ mod tx_write_barrier_tests {
             );
             assert_eq!(res.in_flight_timeout_buses, vec![0]);
             assert!(r.engine.is_panic_latched());
-            assert!(r.completed.lock().is_empty(), "the blocking write is still running");
+            assert!(
+                r.completed.lock().is_empty(),
+                "the blocking write is still running"
+            );
             r.release.send(()).expect("release driver");
         });
         r.engine.cmd_disconnect_bus(0).expect("disconnect");
@@ -2758,7 +2836,9 @@ mod tx_write_barrier_tests {
         let r = rig(Duration::from_secs(3));
         thread::scope(|s| {
             s.spawn(|| one_shot(&r.engine));
-            r.entered.recv_timeout(Duration::from_secs(2)).expect("blocked");
+            r.entered
+                .recv_timeout(Duration::from_secs(2))
+                .expect("blocked");
             let (done_tx, done_rx) = bounded(1);
             let engine = &r.engine;
             s.spawn(move || {
@@ -2779,12 +2859,17 @@ mod tx_write_barrier_tests {
         r.engine.cmd_arm_active_bus(0, true).expect("re-arm");
         thread::scope(|s| {
             s.spawn(|| one_shot(&r.engine));
-            r.entered.recv_timeout(Duration::from_secs(2)).expect("blocked");
+            r.entered
+                .recv_timeout(Duration::from_secs(2))
+                .expect("blocked");
             let err = r
                 .engine
                 .cmd_arm_active_bus(0, false)
                 .expect_err("stuck write must be reported");
-            assert!(err.to_string().contains(TX_IN_FLIGHT_TIMEOUT_PREFIX), "{err}");
+            assert!(
+                err.to_string().contains(TX_IN_FLIGHT_TIMEOUT_PREFIX),
+                "{err}"
+            );
             assert!(!r.engine.buses.lock()[&0].tx_armed.load(Ordering::SeqCst));
             r.release.send(()).expect("release");
         });
@@ -2821,7 +2906,9 @@ mod tx_write_barrier_tests {
                 })
                 .expect("enqueue A");
         }
-        r.entered.recv_timeout(Duration::from_secs(2)).expect("A blocked in driver");
+        r.entered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("A blocked in driver");
         // B is queued while armed, behind A (same epoch: disarm does not bump the epoch, so
         // only the queue-drain barrier can stop it).
         enqueue_raw(&r.engine, epoch);
@@ -2845,7 +2932,9 @@ mod tx_write_barrier_tests {
                 early.is_err(),
                 "disarm returned while a request queued before it was still pending"
             );
-            let res = done_rx.recv_timeout(Duration::from_secs(2)).expect("disarm returns");
+            let res = done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("disarm returns");
             assert!(!res.expect("disarm ok"));
             r.engine.cmd_arm_active_bus(0, true).expect("re-arm");
         });

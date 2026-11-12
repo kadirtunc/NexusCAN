@@ -30,7 +30,9 @@ pub enum CloudProtocolError {
     #[error("Missing 'type' discriminator field in cloud wire message")]
     MissingMessageType,
 
-    #[error("READ-ONLY CLOUD SAFETY VIOLATION: Remote actuation command '{0}' is strictly forbidden")]
+    #[error(
+        "READ-ONLY CLOUD SAFETY VIOLATION: Remote actuation command '{0}' is strictly forbidden"
+    )]
     ForbiddenRemoteActuationCommand(String),
 
     #[error("Unrecognized inbound cloud message type '{0}'")]
@@ -206,7 +208,9 @@ pub enum InboundCloudMessage {
 
 /// Parses and validates an inbound JSON frame from `NexusCANCloud`, strictly rejecting
 /// any forbidden CAN `TX` / `Arm Active Bus` or unknown command types.
-pub fn parse_inbound_cloud_message(raw_json: &str) -> Result<InboundCloudMessage, CloudProtocolError> {
+pub fn parse_inbound_cloud_message(
+    raw_json: &str,
+) -> Result<InboundCloudMessage, CloudProtocolError> {
     let val: serde_json::Value = serde_json::from_str(raw_json)?;
     let msg_type = val
         .get("type")
@@ -232,17 +236,11 @@ pub fn parse_inbound_cloud_message(raw_json: &str) -> Result<InboundCloudMessage
             Ok(InboundCloudMessage::CaptureStatus(cs))
         }
         "PING" => {
-            let ts = val
-                .get("timestampMs")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let ts = val.get("timestampMs").and_then(|v| v.as_u64()).unwrap_or(0);
             Ok(InboundCloudMessage::Ping { timestamp_ms: ts })
         }
         "PONG" => {
-            let ts = val
-                .get("timestampMs")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let ts = val.get("timestampMs").and_then(|v| v.as_u64()).unwrap_or(0);
             Ok(InboundCloudMessage::Pong { timestamp_ms: ts })
         }
         "BRIDGE_ERROR" => {

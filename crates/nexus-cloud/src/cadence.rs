@@ -76,7 +76,11 @@ pub struct ExponentialBackoff {
 
 impl ExponentialBackoff {
     pub const fn new(base_delay_ms: u64, max_delay_ms: u64) -> Self {
-        let safe_base = if base_delay_ms == 0 { 100 } else { base_delay_ms };
+        let safe_base = if base_delay_ms == 0 {
+            100
+        } else {
+            base_delay_ms
+        };
         let safe_max = if max_delay_ms < safe_base {
             safe_base
         } else {
@@ -100,7 +104,10 @@ impl ExponentialBackoff {
     pub fn next_delay(&mut self) -> Duration {
         let shift = self.attempt.min(20);
         let factor = 1u64 << shift;
-        let delay_ms = self.base_delay_ms.saturating_mul(factor).min(self.max_delay_ms);
+        let delay_ms = self
+            .base_delay_ms
+            .saturating_mul(factor)
+            .min(self.max_delay_ms);
         self.attempt = self.attempt.saturating_add(1);
         Duration::from_millis(delay_ms)
     }

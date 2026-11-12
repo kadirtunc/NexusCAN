@@ -484,8 +484,9 @@ impl StateTable {
         }; 128];
         let mut switch_buf = [(0u32, 0i64); 16];
 
-        let decode_summary = resolve_effective_db(&self.database, &self.bus_databases, frame.bus_id)
-            .and_then(|db| db.decode_frame_into(frame, &mut decoded_buf, &mut switch_buf));
+        let decode_summary =
+            resolve_effective_db(&self.database, &self.bus_databases, frame.bus_id)
+                .and_then(|db| db.decode_frame_into(frame, &mut decoded_buf, &mut switch_buf));
 
         let mux_path = match decode_summary {
             Some(ref summary) => {
@@ -603,7 +604,8 @@ impl StateTable {
         // Sort message keys deterministically by (bus_id, is_extended, raw_id, mux_path)
         let mut sorted_keys: Vec<(BusId, CanIdKey, MuxPathKey)> =
             self.messages.keys().copied().collect();
-        sorted_keys.sort_by_key(|&(bus, id, mux_path)| (bus, id.is_extended(), id.raw_id(), mux_path));
+        sorted_keys
+            .sort_by_key(|&(bus, id, mux_path)| (bus, id.is_extended(), id.raw_id(), mux_path));
 
         let mut frames = Vec::with_capacity(sorted_keys.len());
         let mut decoded_signals_count = 0usize;
@@ -653,8 +655,7 @@ impl StateTable {
                 }
             }
 
-            let mut signals: Vec<LiveSignalDto> =
-                Vec::with_capacity(state.retained_signals.len());
+            let mut signals: Vec<LiveSignalDto> = Vec::with_capacity(state.retained_signals.len());
             for (&sig_id, slot) in &state.retained_signals {
                 let age_ms = (now_us.saturating_sub(slot.last_updated_us) / 1_000)
                     .min(u64::from(u32::MAX)) as u32;
@@ -803,7 +804,11 @@ mod tests {
         let before = table.overflow_frames();
         let frame = RawCanFrame::new_classical(0, first, &[0xEE; 8], 99_999_999).expect("frame");
         table.ingest_frame(&frame);
-        assert_eq!(table.overflow_frames(), before, "known id must not count as overflow");
+        assert_eq!(
+            table.overflow_frames(),
+            before,
+            "known id must not count as overflow"
+        );
 
         table.reset_all();
         assert_eq!(table.message_row_count(), 0);
@@ -817,7 +822,12 @@ mod tests {
             .parse_bytes(dbc_text.as_bytes(), Some(name), &ParseOptions::default())
             .expect("parse inline dbc");
         let message_count = bundle.database.messages.len();
-        let signal_count = bundle.database.messages.values().map(|m| m.signals.len()).sum();
+        let signal_count = bundle
+            .database
+            .messages
+            .values()
+            .map(|m| m.signals.len())
+            .sum();
         let info = DatabaseInfoDto {
             name: bundle.database.name.clone(),
             version: bundle.database.version.clone(),
@@ -878,17 +888,29 @@ BO_ 256 Thermal_Status: 8 BMS
         let snap = table.build_snapshot(20_000, 0, false, 500_000, Vec::new());
         assert_eq!(snap.frames.len(), 3);
 
-        let row0 = snap.frames.iter().find(|r| r.bus_id == 0).expect("bus 0 row");
+        let row0 = snap
+            .frames
+            .iter()
+            .find(|r| r.bus_id == 0)
+            .expect("bus 0 row");
         assert_eq!(row0.signals.len(), 1);
         assert_eq!(row0.signals[0].signal_id, speed_sig_id);
         assert!((row0.signals[0].physical_value - 150.0).abs() < 1e-6);
 
-        let row1 = snap.frames.iter().find(|r| r.bus_id == 1).expect("bus 1 row");
+        let row1 = snap
+            .frames
+            .iter()
+            .find(|r| r.bus_id == 1)
+            .expect("bus 1 row");
         assert_eq!(row1.signals.len(), 1);
         assert_eq!(row1.signals[0].signal_id, temp_sig_id);
         assert!((row1.signals[0].physical_value - 50.0).abs() < 1e-6);
 
-        let row2 = snap.frames.iter().find(|r| r.bus_id == 2).expect("bus 2 row");
+        let row2 = snap
+            .frames
+            .iter()
+            .find(|r| r.bus_id == 2)
+            .expect("bus 2 row");
         assert!(
             row2.signals.is_empty(),
             "Bus 2 has 0 DBCs bound and must remain pure Raw Hex without cross-bus decoding!"
@@ -981,7 +1003,16 @@ BO_ 256 Thermal_Status: 8 BMS
         // byte 0 high nibble = SubBankSwitch / ContactorState (bits 4..7)
         // byte 1 = PackSocPct raw (156 => 78.0%)
         let make_105 = |dom: u8, sub_or_cont: u8, b2: u8, ts_us: u64| -> RawCanFrame {
-            let payload = [(dom & 0x0F) | ((sub_or_cont & 0x0F) << 4), 156, b2, 0x10, 0x20, 0x30, 0x40, 0x00];
+            let payload = [
+                (dom & 0x0F) | ((sub_or_cont & 0x0F) << 4),
+                156,
+                b2,
+                0x10,
+                0x20,
+                0x30,
+                0x40,
+                0x00,
+            ];
             RawCanFrame::new_classical(0, can_105, &payload, ts_us).expect("0x105 frame")
         };
 

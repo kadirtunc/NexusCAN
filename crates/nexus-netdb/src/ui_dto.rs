@@ -115,7 +115,11 @@ impl CompiledDatabase {
                 if msg.transmitters.contains(node_name) {
                     tx_message_keys.push(m_key.clone());
                 }
-                if msg.all_signals.iter().any(|s| s.receivers.contains(node_name)) {
+                if msg
+                    .all_signals
+                    .iter()
+                    .any(|s| s.receivers.contains(node_name))
+                {
                     rx_message_keys.push(m_key);
                 }
             }
@@ -195,7 +199,11 @@ impl CompiledDatabase {
                 }
             }
         }
-        let message_keys: Vec<String> = self.messages.iter().map(|m| m.can_id.schema_key()).collect();
+        let message_keys: Vec<String> = self
+            .messages
+            .iter()
+            .map(|m| m.can_id.schema_key())
+            .collect();
 
         let mut signals = Vec::with_capacity(self.signals.len());
         for sig in &self.signals {

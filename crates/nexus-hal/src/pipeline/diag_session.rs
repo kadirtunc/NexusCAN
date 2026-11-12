@@ -20,8 +20,7 @@ use super::*;
 use nexus_protocols::uds::client::UdsSession;
 use nexus_protocols::uds::dto::{
     ConversationPageDto, DiagOrigin, DiagSessionConfigDto, DiagSessionInfoDto, DidReadResultDto,
-    DtcEntryDto, IsoTpFramePageDto,
-    UdsRequestOptionsDto, UdsResponseDto,
+    DtcEntryDto, IsoTpFramePageDto, UdsRequestOptionsDto, UdsResponseDto,
 };
 use std::collections::HashMap;
 
@@ -528,8 +527,10 @@ mod tests {
     use super::*;
 
     fn cfg() -> DiagSessionConfigDto {
-        serde_json::from_str(r#"{"busId":0,"requestId":2020,"responseId":2028,"isExtendedId":false}"#)
-            .expect("cfg")
+        serde_json::from_str(
+            r#"{"busId":0,"requestId":2020,"responseId":2028,"isExtendedId":false}"#,
+        )
+        .expect("cfg")
     }
 
     #[test]
@@ -537,10 +538,16 @@ mod tests {
         let mut c = cfg();
         assert!(validate_config(&c).is_ok());
         c.response_id = c.request_id;
-        assert_eq!(validate_config(&c).unwrap_err().code, DiagErrorCode::InvalidInput);
+        assert_eq!(
+            validate_config(&c).unwrap_err().code,
+            DiagErrorCode::InvalidInput
+        );
         let mut c = cfg();
         c.request_id = 0x800;
-        assert_eq!(validate_config(&c).unwrap_err().code, DiagErrorCode::InvalidInput);
+        assert_eq!(
+            validate_config(&c).unwrap_err().code,
+            DiagErrorCode::InvalidInput
+        );
         c.is_extended_id = true;
         assert!(validate_config(&c).is_ok());
         let mut c = cfg();

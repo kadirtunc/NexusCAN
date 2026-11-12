@@ -46,7 +46,9 @@ pub enum RunnerError {
         source: std::io::Error,
     },
 
-    #[error("Device token revoked or forbidden by NexusCANCloud (4003); stopping agent permanently")]
+    #[error(
+        "Device token revoked or forbidden by NexusCANCloud (4003); stopping agent permanently"
+    )]
     TokenRevoked4003,
 }
 
@@ -228,12 +230,8 @@ pub async fn spawn_agent_runtime(
         );
         Some(LoadedEdgeDatabase::new(file_name, schema, &raw_bytes))
     } else if config.auto_sync_dbc {
-        match sync_project_database_from_cloud(
-            &config.cloud_url,
-            &config.project_id,
-            &config.token,
-        )
-        .await
+        match sync_project_database_from_cloud(&config.cloud_url, &config.project_id, &config.token)
+            .await
         {
             Ok(Some(synced)) => {
                 let raw_bytes = BASE64_STD
@@ -275,9 +273,7 @@ pub async fn spawn_agent_runtime(
                 None
             }
             Err(err) => {
-                eprintln!(
-                    "[INFO] Cloud DBC auto-sync skipped ({err}); streaming raw CAN frames."
-                );
+                eprintln!("[INFO] Cloud DBC auto-sync skipped ({err}); streaming raw CAN frames.");
                 None
             }
         }

@@ -18,7 +18,11 @@ use common::{hil_env, serial, EcuSim, Ids, CLASSIC};
 use nexus_hal::{ChannelConfigDto, PipelineEngine};
 use nexus_protocols::uds::dto::{DiagSessionConfigDto, EcuDiscoveryRequestDto};
 
-const ECU_B: Ids = Ids { req: 0x7E6, resp: 0x7EE, func: 0x7DE };
+const ECU_B: Ids = Ids {
+    req: 0x7E6,
+    resp: 0x7EE,
+    func: 0x7DE,
+};
 const FILTER_ID: u32 = 0x7EA;
 const FILTER_MASK: u32 = 0x7FB;
 const VIN: &str = "WNX0ECUSIM0000017";
@@ -66,7 +70,9 @@ fn discovers_two_ecus_on_one_functional_id_and_identifies_them() {
     let b = EcuSim::start("disc_b", ECU_B, false);
     let engine = engine_on_vcan0();
 
-    let res = engine.cmd_diag_discover_ecus(request(true)).expect("discovery");
+    let res = engine
+        .cmd_diag_discover_ecus(request(true))
+        .expect("discovery");
     eprintln!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
 
     assert_eq!(res.request_bytes, vec![0x3E, 0x00]);
@@ -92,7 +98,11 @@ fn discovers_two_ecus_on_one_functional_id_and_identifies_them() {
     assert!(b.count("\"func\"") >= 1, "ECU B log: {}", b.log_text());
 
     std::thread::sleep(Duration::from_millis(30));
-    assert_eq!(engine.diag_tap_count(0), 0, "discovery + temporary identify taps released");
+    assert_eq!(
+        engine.diag_tap_count(0),
+        0,
+        "discovery + temporary identify taps released"
+    );
     let _ = engine.cmd_disconnect_bus(0);
 }
 
@@ -117,23 +127,38 @@ fn identify_reuses_open_user_session_and_keeps_it_open() {
         padding: Some(0xAA),
         p2_margin_ms: 250, // different settings than identify's temporary session
     };
-    engine.cmd_diag_open_session(user.clone()).expect("user session");
+    engine
+        .cmd_diag_open_session(user.clone())
+        .expect("user session");
     assert_eq!(engine.diag_tap_count(0), 1);
 
-    let res = engine.cmd_diag_discover_ecus(request(true)).expect("discovery");
+    let res = engine
+        .cmd_diag_discover_ecus(request(true))
+        .expect("discovery");
     assert_eq!(res.ecus.len(), 2);
-    assert!(res.ecus.iter().all(|e| e.vin.as_deref() == Some(VIN)), "{res:?}");
+    assert!(
+        res.ecus.iter().all(|e| e.vin.as_deref() == Some(VIN)),
+        "{res:?}"
+    );
 
     // The user's session was used (and its conversation shows the identify DIDs), not replaced.
     let info = engine.cmd_diag_session_info(user.clone()).expect("info");
     assert!(info.open, "user session must stay open");
-    let conv = engine.cmd_diag_get_conversation(user.clone(), 0, None).expect("conversation");
+    let conv = engine
+        .cmd_diag_get_conversation(user.clone(), 0, None)
+        .expect("conversation");
     assert!(
-        conv.events.iter().any(|e| e.bytes.starts_with(&[0x22, 0xF1, 0x90])),
+        conv.events
+            .iter()
+            .any(|e| e.bytes.starts_with(&[0x22, 0xF1, 0x90])),
         "identify of ECU A went through the user session"
     );
     std::thread::sleep(Duration::from_millis(30));
-    assert_eq!(engine.diag_tap_count(0), 1, "only the user session tap remains");
+    assert_eq!(
+        engine.diag_tap_count(0),
+        1,
+        "only the user session tap remains"
+    );
     engine.cmd_diag_close_session(user).expect("close");
     let _ = engine.cmd_disconnect_bus(0);
 }
@@ -170,6 +195,9 @@ fn custom_pdu_negative_and_multi_frame_answers() {
     let mut r = request(false);
     r.request_pdu = Some(vec![0x3E, 0x80]);
     let err = engine.cmd_diag_discover_ecus(r).unwrap_err();
-    assert_eq!(err.code, nexus_protocols::uds::dto::DiagErrorCode::InvalidInput);
+    assert_eq!(
+        err.code,
+        nexus_protocols::uds::dto::DiagErrorCode::InvalidInput
+    );
     let _ = engine.cmd_disconnect_bus(0);
 }

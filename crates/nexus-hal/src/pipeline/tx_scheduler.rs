@@ -159,10 +159,7 @@ impl TxScheduler {
 
 /// Identifies all signal IDs in `signal_values` whose requested physical values exceed `[min, max]`
 /// engineering bounds and will therefore be clamped during TX encoding.
-pub fn find_clamped_signals(
-    db: &CompiledDatabase,
-    signal_values: &[(SignalId, f64)],
-) -> Vec<u32> {
+pub fn find_clamped_signals(db: &CompiledDatabase, signal_values: &[(SignalId, f64)]) -> Vec<u32> {
     let mut clamped = Vec::new();
     for &(sig_id, requested_phys) in signal_values {
         if let Some(sig) = db.get_signal(sig_id) {
@@ -186,12 +183,10 @@ mod tests {
         let mut sched = TxScheduler::new();
         let can_id = CanIdKey::new_standard(0x7DF).expect("valid standard id");
 
-        let f1 = RawCanFrame::new_classical(0, can_id, &[0x02, 0x01, 0x0C], 0)
-            .expect("frame 1");
+        let f1 = RawCanFrame::new_classical(0, can_id, &[0x02, 0x01, 0x0C], 0).expect("frame 1");
         let id1 = sched.register_job("OBD_Req_1".to_string(), 0, can_id, 100, f1);
 
-        let f2 = RawCanFrame::new_classical(0, can_id, &[0x02, 0x01, 0x0D], 0)
-            .expect("frame 2");
+        let f2 = RawCanFrame::new_classical(0, can_id, &[0x02, 0x01, 0x0D], 0).expect("frame 2");
         let id2 = sched.register_job("OBD_Req_Updated".to_string(), 0, can_id, 50, f2);
 
         assert_eq!(id1, id2, "same (bus_id, can_id) must upsert in-place");

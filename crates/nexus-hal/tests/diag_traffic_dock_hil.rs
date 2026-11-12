@@ -95,7 +95,9 @@ fn shape(frames: &[&IsoTpFrameDto]) -> Vec<(IsoTpDirection, IsoTpFrameKind)> {
 #[test]
 fn multi_frame_read_tags_every_frame_with_request_seq() {
     let _g = serial();
-    let Some(rig) = Rig::start("dock_multi") else { return };
+    let Some(rig) = Rig::start("dock_multi") else {
+        return;
+    };
 
     let did = rig
         .engine
@@ -125,7 +127,13 @@ fn multi_frame_read_tags_every_frame_with_request_seq() {
     ));
     assert_eq!(shape(&tagged), expected);
     for f in &frames {
-        assert_eq!(f.request_seq, Some(req.seq), "frame {} ({:?})", f.seq, f.kind);
+        assert_eq!(
+            f.request_seq,
+            Some(req.seq),
+            "frame {} ({:?})",
+            f.seq,
+            f.kind
+        );
     }
 }
 
@@ -134,7 +142,9 @@ fn multi_frame_read_tags_every_frame_with_request_seq() {
 #[test]
 fn back_to_back_requests_never_mix_tags() {
     let _g = serial();
-    let Some(rig) = Rig::start("dock_b2b") else { return };
+    let Some(rig) = Rig::start("dock_b2b") else {
+        return;
+    };
 
     let dids = [0xF1F1u16, 0xF186, 0xF190, 0xF1F1];
     let mut seq_to_did: HashMap<u64, u16> = HashMap::new();
@@ -150,8 +160,14 @@ fn back_to_back_requests_never_mix_tags() {
     let frames = rig.frames();
     let mut per_seq: HashMap<u64, Vec<&IsoTpFrameDto>> = HashMap::new();
     for f in &frames {
-        let s = f.request_seq.unwrap_or_else(|| panic!("frame {} untagged", f.seq));
-        assert!(seq_to_did.contains_key(&s), "frame {} tagged with unknown seq {s}", f.seq);
+        let s = f
+            .request_seq
+            .unwrap_or_else(|| panic!("frame {} untagged", f.seq));
+        assert!(
+            seq_to_did.contains_key(&s),
+            "frame {} tagged with unknown seq {s}",
+            f.seq
+        );
         per_seq.entry(s).or_default().push(f);
     }
     assert_eq!(per_seq.len(), dids.len());
@@ -164,13 +180,24 @@ fn back_to_back_requests_never_mix_tags() {
     for (seq, fs) in &per_seq {
         let did = seq_to_did[seq].to_be_bytes();
         let sf = fs[0];
-        assert_eq!((sf.direction, sf.kind), (IsoTpDirection::Tx, IsoTpFrameKind::Single));
-        assert_eq!(&sf.data[1..4], &[0x22, did[0], did[1]], "request SF of seq {seq}");
+        assert_eq!(
+            (sf.direction, sf.kind),
+            (IsoTpDirection::Tx, IsoTpFrameKind::Single)
+        );
+        assert_eq!(
+            &sf.data[1..4],
+            &[0x22, did[0], did[1]],
+            "request SF of seq {seq}"
+        );
         let first_rx = fs
             .iter()
             .find(|f| f.direction == IsoTpDirection::Rx)
             .expect("response frame");
-        let off = if first_rx.kind == IsoTpFrameKind::First { 2 } else { 1 };
+        let off = if first_rx.kind == IsoTpFrameKind::First {
+            2
+        } else {
+            1
+        };
         assert_eq!(
             &first_rx.data[off..off + 3],
             &[0x62, did[0], did[1]],
@@ -184,7 +211,9 @@ fn back_to_back_requests_never_mix_tags() {
 #[test]
 fn tester_present_frames_tagged_with_keepalive_seq() {
     let _g = serial();
-    let Some(rig) = Rig::start("dock_tp") else { return };
+    let Some(rig) = Rig::start("dock_tp") else {
+        return;
+    };
 
     rig.engine
         .cmd_diag_set_tester_present(rig.cfg.clone(), true, Some(100))
@@ -202,25 +231,49 @@ fn tester_present_frames_tagged_with_keepalive_seq() {
         .filter(|e| e.kind == ConversationEventKind::KeepaliveSent)
         .map(|e| (e.seq, e))
         .collect();
-    assert!(ka.len() >= 3, "expected several keepalives, got {}", ka.len());
+    assert!(
+        ka.len() >= 3,
+        "expected several keepalives, got {}",
+        ka.len()
+    );
     for e in ka.values() {
         assert_eq!(e.origin, DiagOrigin::Keepalive);
         assert_eq!(e.bytes, vec![0x3E, 0x80]);
     }
-    for e in events.iter().filter(|e| e.request_seq.is_some_and(|s| ka.contains_key(&s))) {
-        assert_eq!(e.origin, DiagOrigin::Keepalive, "event {} of a keepalive", e.seq);
+    for e in events
+        .iter()
+        .filter(|e| e.request_seq.is_some_and(|s| ka.contains_key(&s)))
+    {
+        assert_eq!(
+            e.origin,
+            DiagOrigin::Keepalive,
+            "event {} of a keepalive",
+            e.seq
+        );
     }
 
     let frames = rig.frames();
     let tp: Vec<&IsoTpFrameDto> = frames
         .iter()
-        .filter(|f| f.direction == IsoTpDirection::Tx && f.data.get(..3) == Some(&[0x02, 0x3E, 0x80]))
+        .filter(|f| {
+            f.direction == IsoTpDirection::Tx && f.data.get(..3) == Some(&[0x02, 0x3E, 0x80])
+        })
         .collect();
-    assert_eq!(tp.len(), ka.len(), "one 3E 80 frame per keepaliveSent event");
+    assert_eq!(
+        tp.len(),
+        ka.len(),
+        "one 3E 80 frame per keepaliveSent event"
+    );
     let mut seen = std::collections::HashSet::new();
     for f in tp {
-        let s = f.request_seq.unwrap_or_else(|| panic!("3E 80 frame {} untagged", f.seq));
-        assert!(ka.contains_key(&s), "3E 80 frame {} tagged with non-keepalive seq {s}", f.seq);
+        let s = f
+            .request_seq
+            .unwrap_or_else(|| panic!("3E 80 frame {} untagged", f.seq));
+        assert!(
+            ka.contains_key(&s),
+            "3E 80 frame {} tagged with non-keepalive seq {s}",
+            f.seq
+        );
         assert!(seen.insert(s), "two frames tagged with keepalive {s}");
     }
 }
@@ -230,7 +283,9 @@ fn tester_present_frames_tagged_with_keepalive_seq() {
 #[test]
 fn explicit_origin_on_request_and_response() {
     let _g = serial();
-    let Some(rig) = Rig::start("dock_origin") else { return };
+    let Some(rig) = Rig::start("dock_origin") else {
+        return;
+    };
 
     let opts = UdsRequestOptionsDto {
         origin: Some(DiagOrigin::Pids),
@@ -260,7 +315,11 @@ fn explicit_origin_on_request_and_response() {
         let req = request_event(&events, seq);
         assert_eq!(req.kind, ConversationEventKind::Request);
         assert_eq!(req.origin, want, "request {seq}");
-        assert_eq!(final_event_of(&events, seq).origin, want, "response of {seq}");
+        assert_eq!(
+            final_event_of(&events, seq).origin,
+            want,
+            "response of {seq}"
+        );
     };
     check(pids.transaction_seq, DiagOrigin::Pids);
     check(plain.transaction_seq, DiagOrigin::Other);
@@ -275,8 +334,14 @@ fn explicit_origin_on_request_and_response() {
 
     // Each request's frames carry its own seq.
     let frames = rig.frames();
-    for e in events.iter().filter(|e| e.kind == ConversationEventKind::Request) {
-        let n = frames.iter().filter(|f| f.request_seq == Some(e.seq)).count();
+    for e in events
+        .iter()
+        .filter(|e| e.kind == ConversationEventKind::Request)
+    {
+        let n = frames
+            .iter()
+            .filter(|f| f.request_seq == Some(e.seq))
+            .count();
         assert!(n >= 2, "request {} has {n} tagged frames", e.seq);
     }
     assert!(frames.iter().all(|f| f.request_seq.is_some()));

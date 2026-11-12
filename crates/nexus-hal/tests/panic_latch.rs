@@ -45,16 +45,28 @@ fn arming_while_latched_errors_and_explicit_clear_then_arm_works() {
     assert!(engine.is_panic_latched());
 
     // Both arming entry points refuse while latched, with the HMI-parsable prefix.
-    let err = engine.cmd_arm_active_bus(0, true).expect_err("arm while latched");
+    let err = engine
+        .cmd_arm_active_bus(0, true)
+        .expect_err("arm while latched");
     assert!(err.to_string().starts_with("PANIC_LATCHED:"), "{err}");
-    let err = engine.cmd_set_bus_mode(0, false, true).expect_err("set_bus_mode arm while latched");
+    let err = engine
+        .cmd_set_bus_mode(0, false, true)
+        .expect_err("set_bus_mode arm while latched");
     assert!(err.to_string().starts_with("PANIC_LATCHED:"), "{err}");
     // Mode change (listen-only toggle) with arm is refused too, and nothing is reopened armed.
     let err = engine.cmd_set_bus_mode(0, true, true);
-    assert!(err.is_ok(), "listen-only request never arms, must succeed: {err:?}");
-    let err = engine.cmd_set_bus_mode(0, false, true).expect_err("mode change + arm while latched");
+    assert!(
+        err.is_ok(),
+        "listen-only request never arms, must succeed: {err:?}"
+    );
+    let err = engine
+        .cmd_set_bus_mode(0, false, true)
+        .expect_err("mode change + arm while latched");
     assert!(err.to_string().starts_with("PANIC_LATCHED:"), "{err}");
-    assert!(engine.is_panic_latched(), "a failed arm must not clear the latch");
+    assert!(
+        engine.is_panic_latched(),
+        "a failed arm must not clear the latch"
+    );
 
     // TX paths report the same prefix.
     let err = engine
@@ -63,15 +75,22 @@ fn arming_while_latched_errors_and_explicit_clear_then_arm_works() {
     assert!(err.to_string().starts_with("PANIC_LATCHED:"), "{err}");
 
     // Disarming is always allowed while latched.
-    engine.cmd_set_bus_mode(0, false, false).expect("back to active, disarmed");
-    engine.cmd_arm_active_bus(0, false).expect("disarm while latched");
+    engine
+        .cmd_set_bus_mode(0, false, false)
+        .expect("back to active, disarmed");
+    engine
+        .cmd_arm_active_bus(0, false)
+        .expect("disarm while latched");
 
     // Clearing the latch does not arm anything.
     engine.cmd_clear_panic_latch();
     assert!(!engine.is_panic_latched());
     let snap = engine.flush_snapshot_now().expect("flush");
     assert!(!snap.tx_panic_latched);
-    assert!(snap.buses.iter().all(|b| !b.tx_armed), "clear latch must not arm buses");
+    assert!(
+        snap.buses.iter().all(|b| !b.tx_armed),
+        "clear latch must not arm buses"
+    );
 
     let h = engine.cmd_arm_active_bus(0, true).expect("arm after clear");
     assert!(h.tx_armed);
@@ -106,7 +125,11 @@ fn reset_session_leaves_nothing_able_to_transmit_and_does_not_latch() {
     assert!(!engine.is_panic_latched());
     let snap = engine.flush_snapshot_now().expect("flush");
     assert!(!snap.tx_panic_latched);
-    assert!(snap.buses.is_empty(), "no bus may stay connected: {:?}", snap.buses);
+    assert!(
+        snap.buses.is_empty(),
+        "no bus may stay connected: {:?}",
+        snap.buses
+    );
 
     // Reset after a Panic Stop clears the latch; reset on an idle engine is a no-op.
     connect(&engine, MOCK0_DEVICE_ID, 0);
@@ -118,7 +141,14 @@ fn reset_session_leaves_nothing_able_to_transmit_and_does_not_latch() {
     assert_eq!(res.disconnected_buses, 1);
     assert!(!engine.is_panic_latched());
     let res = engine.cmd_reset_session();
-    assert_eq!((res.stopped_periodic_jobs, res.disarmed_buses, res.disconnected_buses), (0, 0, 0));
+    assert_eq!(
+        (
+            res.stopped_periodic_jobs,
+            res.disarmed_buses,
+            res.disconnected_buses
+        ),
+        (0, 0, 0)
+    );
 }
 
 #[test]
@@ -170,12 +200,20 @@ fn periodic_job_racing_panic_never_survives_and_never_transmits_after_rearm() {
     thread::sleep(Duration::from_millis(20));
     let after_panic = tx_count(&engine, RACE_ID);
     thread::sleep(Duration::from_millis(60));
-    assert_eq!(tx_count(&engine, RACE_ID), after_panic, "TX after Panic Stop");
+    assert_eq!(
+        tx_count(&engine, RACE_ID),
+        after_panic,
+        "TX after Panic Stop"
+    );
 
     // After clear + re-arm: still nothing (no zombie job, no stale queued frame).
     engine.cmd_clear_panic_latch();
     engine.cmd_arm_active_bus(0, true).expect("re-arm");
     thread::sleep(Duration::from_millis(80));
     assert!(engine.cmd_list_periodic_tx().is_empty());
-    assert_eq!(tx_count(&engine, RACE_ID), after_panic, "TX after clear + re-arm");
+    assert_eq!(
+        tx_count(&engine, RACE_ID),
+        after_panic,
+        "TX after clear + re-arm"
+    );
 }

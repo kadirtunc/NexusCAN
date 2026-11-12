@@ -25,7 +25,8 @@ impl<'a> DbcWriter<'a> {
     pub fn write_to_string(mut self) -> Result<String, DbError> {
         // 1. VERSION
         let ver = self.db.version.as_deref().unwrap_or("");
-        writeln!(self.out, "VERSION \"{}\"", esc(ver)).map_err(|e| DbError::Generic(e.to_string()))?;
+        writeln!(self.out, "VERSION \"{}\"", esc(ver))
+            .map_err(|e| DbError::Generic(e.to_string()))?;
         self.out.push('\n');
 
         // 2. NS_ (New Symbols)
@@ -66,7 +67,8 @@ impl<'a> DbcWriter<'a> {
         // 4. BU_
         self.out.push_str("BU_:");
         for node_name in self.db.nodes.keys() {
-            write!(self.out, " {}", ident(node_name)).map_err(|e| DbError::Generic(e.to_string()))?;
+            write!(self.out, " {}", ident(node_name))
+                .map_err(|e| DbError::Generic(e.to_string()))?;
         }
         self.out.push_str("\n\n");
 
@@ -218,7 +220,8 @@ impl<'a> DbcWriter<'a> {
                 write!(self.out, "BO_TX_BU_ {} :", raw_id)
                     .map_err(|e| DbError::Generic(e.to_string()))?;
                 for tx in &msg.transmitters {
-                    write!(self.out, " {}", ident(tx)).map_err(|e| DbError::Generic(e.to_string()))?;
+                    write!(self.out, " {}", ident(tx))
+                        .map_err(|e| DbError::Generic(e.to_string()))?;
                 }
                 self.out.push_str(" ;\n");
             }
@@ -285,7 +288,9 @@ impl<'a> DbcWriter<'a> {
             writeln!(
                 self.out,
                 "BA_DEF_ {}\"{}\" {} ;",
-                target_str, esc(&def.name), type_str
+                target_str,
+                esc(&def.name),
+                type_str
             )
             .map_err(|e| DbError::Generic(e.to_string()))?;
         }
@@ -372,12 +377,22 @@ impl<'a> DbcWriter<'a> {
             for sig in &msg.signals {
                 match sig.value_type {
                     SignalValueType::Float32 => {
-                        writeln!(self.out, "SIG_VALTYPE_ {} {} : 1 ;", raw_id, ident(&sig.name))
-                            .map_err(|e| DbError::Generic(e.to_string()))?;
+                        writeln!(
+                            self.out,
+                            "SIG_VALTYPE_ {} {} : 1 ;",
+                            raw_id,
+                            ident(&sig.name)
+                        )
+                        .map_err(|e| DbError::Generic(e.to_string()))?;
                     }
                     SignalValueType::Float64 => {
-                        writeln!(self.out, "SIG_VALTYPE_ {} {} : 2 ;", raw_id, ident(&sig.name))
-                            .map_err(|e| DbError::Generic(e.to_string()))?;
+                        writeln!(
+                            self.out,
+                            "SIG_VALTYPE_ {} {} : 2 ;",
+                            raw_id,
+                            ident(&sig.name)
+                        )
+                        .map_err(|e| DbError::Generic(e.to_string()))?;
                     }
                     _ => {}
                 }
@@ -429,7 +444,8 @@ impl<'a> DbcWriter<'a> {
                 )
                 .map_err(|e| DbError::Generic(e.to_string()))?;
                 for s in &grp.signals {
-                    write!(self.out, " {}", ident(s)).map_err(|e| DbError::Generic(e.to_string()))?;
+                    write!(self.out, " {}", ident(s))
+                        .map_err(|e| DbError::Generic(e.to_string()))?;
                 }
                 self.out.push_str(" ;\n");
             }
@@ -471,7 +487,13 @@ fn ident(s: &str) -> Cow<'_, str> {
     }
     let mut out: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if !out.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
         out.insert(0, '_');

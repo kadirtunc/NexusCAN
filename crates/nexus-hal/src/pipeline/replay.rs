@@ -226,7 +226,13 @@ struct CachedTraceStats {
 
 impl TraceStatsCache {
     /// Records stats for `file_name` against the file's current size + mtime.
-    pub fn record(&self, file_name: &str, meta: &fs::Metadata, frame_count: usize, duration_us: u64) {
+    pub fn record(
+        &self,
+        file_name: &str,
+        meta: &fs::Metadata,
+        frame_count: usize,
+        duration_us: u64,
+    ) {
         let mut inner = self.inner.lock();
         if inner.len() >= crate::storage::MAX_LISTED_ENTRIES && !inner.contains_key(file_name) {
             inner.clear();
@@ -273,7 +279,10 @@ pub fn list_trace_files(
         fs::read_dir(traces_dir).map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
 
     let mut files = Vec::new();
-    for entry in dir_entries.flatten().take(crate::storage::MAX_LISTED_ENTRIES) {
+    for entry in dir_entries
+        .flatten()
+        .take(crate::storage::MAX_LISTED_ENTRIES)
+    {
         // `DirEntry::file_type` does not follow symlinks.
         match entry.file_type() {
             Ok(ft) if ft.is_file() => {}
@@ -476,10 +485,7 @@ pub fn parse_trace_bytes(
 }
 
 /// Statelessly parses raw text trace content (`.trc`, `.asc`, `.log`, `.csv`) without writing to disk.
-pub fn parse_trace_content(
-    file_name: &str,
-    content: &str,
-) -> Result<LoadedTraceFileDto, HalError> {
+pub fn parse_trace_content(file_name: &str, content: &str) -> Result<LoadedTraceFileDto, HalError> {
     parse_trace_bytes(file_name, content.as_bytes())
 }
 
@@ -641,11 +647,7 @@ fn parse_id_token_radix(id_tok: &str, radix: u32) -> Option<CanIdKey> {
         return None;
     }
     let has_ext_suffix = t.ends_with('x') || t.ends_with('X');
-    let no_suffix = if has_ext_suffix {
-        &t[..t.len() - 1]
-    } else {
-        t
-    };
+    let no_suffix = if has_ext_suffix { &t[..t.len() - 1] } else { t };
     let clean = no_suffix
         .strip_prefix("0x")
         .or_else(|| no_suffix.strip_prefix("0X"))
@@ -837,16 +839,15 @@ fn parse_pcan_trc_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
             let Some(type_tok) = iter.next() else {
                 continue;
             };
-            let (is_fd, is_brs, is_esi, mut is_rtr) =
-                match type_tok.to_ascii_uppercase().as_str() {
-                    "DT" => (false, false, false, false),
-                    "RR" => (false, false, false, true),
-                    "FD" => (true, false, false, false),
-                    "FB" => (true, true, false, false),
-                    "FE" => (true, false, true, false),
-                    "BI" => (true, true, true, false),
-                    _ => continue,
-                };
+            let (is_fd, is_brs, is_esi, mut is_rtr) = match type_tok.to_ascii_uppercase().as_str() {
+                "DT" => (false, false, false, false),
+                "RR" => (false, false, false, true),
+                "FD" => (true, false, false, false),
+                "FB" => (true, true, false, false),
+                "FE" => (true, false, true, false),
+                "BI" => (true, true, true, false),
+                _ => continue,
+            };
 
             let Some(bus_tok) = iter.next() else {
                 continue;
@@ -1034,9 +1035,17 @@ fn parse_vector_asc_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
                     .get(5)
                     .and_then(|t| u8::from_str_radix(t, radix).ok().or_else(|| t.parse().ok()))
                     .unwrap_or(0);
-                if let Some(frame) =
-                    build_frame_from_parts(bus_id, can_id, false, false, false, is_tx, true, rtr_dlc, &[])
-                {
+                if let Some(frame) = build_frame_from_parts(
+                    bus_id,
+                    can_id,
+                    false,
+                    false,
+                    false,
+                    is_tx,
+                    true,
+                    rtr_dlc,
+                    &[],
+                ) {
                     out.push((ts_us, frame));
                 }
             } else if kind.eq_ignore_ascii_case("d") {
@@ -1044,7 +1053,8 @@ fn parse_vector_asc_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
                     continue;
                 }
                 let dlc_len = usize::from(
-                    tokens[5].parse::<u8>()
+                    tokens[5]
+                        .parse::<u8>()
                         .or_else(|_| u8::from_str_radix(tokens[5], radix))
                         .unwrap_or(0),
                 )
@@ -1200,9 +1210,17 @@ fn parse_candump_log_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
             let rhs = cc_rhs.trim();
             if let Some(rtr_rest) = rhs.strip_prefix('R').or_else(|| rhs.strip_prefix('r')) {
                 let rtr_dlc = rtr_rest.parse::<u8>().unwrap_or(0);
-                if let Some(frame) =
-                    build_frame_from_parts(bus_id, can_id, false, false, false, false, true, rtr_dlc, &[])
-                {
+                if let Some(frame) = build_frame_from_parts(
+                    bus_id,
+                    can_id,
+                    false,
+                    false,
+                    false,
+                    false,
+                    true,
+                    rtr_dlc,
+                    &[],
+                ) {
                     out.push((ts_us, frame));
                 }
             } else {
@@ -1233,13 +1251,12 @@ fn parse_candump_log_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
             }
         } else {
             // Bracketed candump: `[ts] <iface> [RX|TX] <id> <[len]> <XX XX ...>`
-            let (id_idx, is_tx) = if frame_tok.eq_ignore_ascii_case("RX")
-                || frame_tok.eq_ignore_ascii_case("TX")
-            {
-                (idx_iface + 2, frame_tok.eq_ignore_ascii_case("TX"))
-            } else {
-                (idx_iface + 1, false)
-            };
+            let (id_idx, is_tx) =
+                if frame_tok.eq_ignore_ascii_case("RX") || frame_tok.eq_ignore_ascii_case("TX") {
+                    (idx_iface + 2, frame_tok.eq_ignore_ascii_case("TX"))
+                } else {
+                    (idx_iface + 1, false)
+                };
 
             if tokens.len() <= id_idx + 1 {
                 continue;
@@ -1257,9 +1274,10 @@ fn parse_candump_log_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
             let max_len = declared_len.min(MAX_CAN_FD_DLC);
 
             let data_start = id_idx + 2;
-            if tokens.get(data_start).is_some_and(|t| {
-                t.eq_ignore_ascii_case("remote") || t.eq_ignore_ascii_case("RTR")
-            }) {
+            if tokens
+                .get(data_start)
+                .is_some_and(|t| t.eq_ignore_ascii_case("remote") || t.eq_ignore_ascii_case("RTR"))
+            {
                 if let Some(frame) = build_frame_from_parts(
                     bus_id,
                     can_id,
@@ -1288,8 +1306,9 @@ fn parse_candump_log_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
                 count += 1;
             }
 
-            let is_fd =
-                is_fd_double_bracket || declared_len > MAX_CLASSICAL_CAN_DLC || count > MAX_CLASSICAL_CAN_DLC;
+            let is_fd = is_fd_double_bracket
+                || declared_len > MAX_CLASSICAL_CAN_DLC
+                || count > MAX_CLASSICAL_CAN_DLC;
             if let Some(frame) = build_frame_from_parts(
                 bus_id,
                 can_id,
@@ -1530,10 +1549,7 @@ fn parse_single_filter_key(raw: &str) -> Result<Option<CanIdKey>, HalError> {
             .strip_prefix("0x")
             .or_else(|| rest.strip_prefix("0X"))
             .unwrap_or(rest);
-        let hex_digits = after_0x
-            .strip_suffix(['x', 'X'])
-            .unwrap_or(after_0x)
-            .trim();
+        let hex_digits = after_0x.strip_suffix(['x', 'X']).unwrap_or(after_0x).trim();
         if hex_digits.is_empty() {
             return Err(HalError::InvalidInput(format!(
                 "Invalid CAN ID filter key '{trimmed}'"
@@ -1725,8 +1741,7 @@ impl ReplaySharedStatus {
         self.set_bus_override(bus_override);
         self.transmit_to_hardware
             .store(transmit_to_hardware, Ordering::Release);
-        self.filter_mode
-            .store(filter_mode as u8, Ordering::Release);
+        self.filter_mode.store(filter_mode as u8, Ordering::Release);
         *self.filter_keys.write() = normalized_filter_keys;
         self.direction_filter
             .store(direction_filter as u8, Ordering::Release);
@@ -1868,9 +1883,11 @@ impl ReplayController {
             .send(ReplayCommand::Start(session, reply_tx))
             .map_err(|_| HalError::InvalidInput("Trace replay thread stopped".to_string()))?;
 
-        reply_rx.recv_timeout(Duration::from_millis(250)).map_err(|_| {
-            HalError::InvalidInput("Timed out waiting for trace replay start".to_string())
-        })
+        reply_rx
+            .recv_timeout(Duration::from_millis(250))
+            .map_err(|_| {
+                HalError::InvalidInput("Timed out waiting for trace replay start".to_string())
+            })
     }
 
     pub(crate) fn control(
@@ -1936,7 +1953,9 @@ impl WorkerState {
     #[inline]
     fn current_elapsed_us(&self, now: Instant) -> u64 {
         if self.playing {
-            let wall_secs = now.saturating_duration_since(self.anchor_instant).as_secs_f64();
+            let wall_secs = now
+                .saturating_duration_since(self.anchor_instant)
+                .as_secs_f64();
             let scaled_us = (wall_secs * self.speed_factor * 1_000_000.0) as u64;
             self.base_elapsed_us.saturating_add(scaled_us)
         } else if self.completed {
@@ -2092,7 +2111,14 @@ fn handle_worker_command(
             );
 
             // Dispatch initial `rel_us == 0` frames immediately so callers see instant playback start
-            dispatch_due_frames(st, shared, frame_tx, dropped_frames, buses, tx_panic_latched);
+            dispatch_due_frames(
+                st,
+                shared,
+                frame_tx,
+                dropped_frames,
+                buses,
+                tx_panic_latched,
+            );
             let _ = reply_tx.send(shared.snapshot());
         }
         ReplayCommand::Control(ctrl, reply_tx) => {
@@ -2224,7 +2250,9 @@ fn apply_control_action(
             }
             if let Some(hw_tx) = ctrl.transmit_to_hardware {
                 let allowed = hw_tx && !tx_panic_latched.load(Ordering::Acquire);
-                shared.transmit_to_hardware.store(allowed, Ordering::Release);
+                shared
+                    .transmit_to_hardware
+                    .store(allowed, Ordering::Release);
             }
             if let Some(fm) = parsed_filter_mode {
                 st.filter_mode = fm;
@@ -2414,7 +2442,10 @@ mod tests {
         }
 
         // Strict variant used for load / delete: no normalization at all.
-        assert_eq!(validate_existing_trace_filename("evil.trc").unwrap(), "evil.trc");
+        assert_eq!(
+            validate_existing_trace_filename("evil.trc").unwrap(),
+            "evil.trc"
+        );
         assert!(validate_existing_trace_filename("dyno run.asc").is_err());
         assert!(validate_existing_trace_filename("upper.TRC").is_err());
         assert!(validate_existing_trace_filename("noext").is_err());
@@ -2988,15 +3019,24 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
             snap_mid.replay.hw_tx_frames
         );
         assert!(
-            snap_mid.frames.iter().any(|r| r.bus_id == 0 && r.arb_id == 0x101),
+            snap_mid
+                .frames
+                .iter()
+                .any(|r| r.bus_id == 0 && r.arb_id == 0x101),
             "0x101 must be present in StateTable"
         );
         assert!(
-            snap_mid.frames.iter().any(|r| r.bus_id == 0 && r.arb_id == 0x103),
+            snap_mid
+                .frames
+                .iter()
+                .any(|r| r.bus_id == 0 && r.arb_id == 0x103),
             "0x103 must be present in StateTable"
         );
         assert!(
-            !snap_mid.frames.iter().any(|r| r.bus_id == 0 && r.arb_id == 0x102),
+            !snap_mid
+                .frames
+                .iter()
+                .any(|r| r.bus_id == 0 && r.arb_id == 0x102),
             "excluded ECU under test ID 0x102 must NOT enter StateTable"
         );
 
@@ -3019,11 +3059,13 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
 
         // Trigger Panic Stop -> must immediately disarm `transmit_to_hardware` while virtual playback finishes!
         let _ = engine.cmd_panic_stop_tx();
-        assert!(!engine
-            .flush_snapshot_now()
-            .expect("flush panic")
-            .replay
-            .transmit_to_hardware);
+        assert!(
+            !engine
+                .flush_snapshot_now()
+                .expect("flush panic")
+                .replay
+                .transmit_to_hardware
+        );
 
         thread::sleep(Duration::from_millis(35));
         let snap_end = engine.flush_snapshot_now().expect("flush end replay");

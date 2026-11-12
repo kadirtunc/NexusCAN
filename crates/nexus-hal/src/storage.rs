@@ -153,7 +153,10 @@ pub(crate) fn create_private_dir_all(dir: &Path) -> io::Result<()> {
     if dir.is_dir() {
         return Ok(());
     }
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
 }
 
 #[cfg(not(unix))]
@@ -169,8 +172,8 @@ fn io_err(e: io::Error) -> HalError {
 /// Windows reserved device names (`CON.trc` opens the console on Windows).
 pub(crate) fn is_windows_reserved_stem(stem: &str) -> bool {
     const RESERVED: [&str; 22] = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
-        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
     RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem))
 }
@@ -442,8 +445,15 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(root.traces_dir()).unwrap().permissions().mode();
-            assert_eq!(mode & 0o077, 0, "traces dir must not be group/world accessible");
+            let mode = fs::metadata(root.traces_dir())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "traces dir must not be group/world accessible"
+            );
         }
         let _ = fs::remove_dir_all(&base);
     }
@@ -452,7 +462,10 @@ mod tests {
     fn resolve_in_dir_rejects_traversal_names() {
         let base = tmp_dir("resolve");
         for bad in ["", ".", "..", "../x", "a/b", "a\\b", "x\0y"] {
-            assert!(resolve_in_dir(&base, bad).is_err(), "{bad:?} must be rejected");
+            assert!(
+                resolve_in_dir(&base, bad).is_err(),
+                "{bad:?} must be rejected"
+            );
         }
         let ok = resolve_in_dir(&base, "a.trc").unwrap();
         assert_eq!(ok.parent().unwrap(), fs::canonicalize(&base).unwrap());
@@ -478,7 +491,10 @@ mod tests {
         assert!(!is_regular_file(&link));
         // Target untouched, link still there.
         assert_eq!(fs::read(&outside).unwrap(), b"secret");
-        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         let _ = fs::remove_dir_all(&base);
     }
 

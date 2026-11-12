@@ -60,7 +60,10 @@ fn collect_until(
 }
 
 fn is_verdict(ev: &DiagPortEvent) -> bool {
-    matches!(ev, DiagPortEvent::TxConfirmed(_) | DiagPortEvent::TxRejected(..))
+    matches!(
+        ev,
+        DiagPortEvent::TxConfirmed(_) | DiagPortEvent::TxRejected(..)
+    )
 }
 
 #[test]
@@ -69,7 +72,14 @@ fn tx_verdict_goes_only_to_origin_and_echo_reaches_others_and_state_table() {
     connect(&engine, false, true);
 
     let a = engine
-        .open_diag_tap(0, &[DiagTapFilter::exact_std(REQ), DiagTapFilter::exact_std(RESP)], 256)
+        .open_diag_tap(
+            0,
+            &[
+                DiagTapFilter::exact_std(REQ),
+                DiagTapFilter::exact_std(RESP),
+            ],
+            256,
+        )
         .expect("tap a");
     let b = engine
         .open_diag_tap(0, &[DiagTapFilter::exact_std(REQ)], 256)
@@ -79,7 +89,9 @@ fn tx_verdict_goes_only_to_origin_and_echo_reaches_others_and_state_table() {
 
     a.send(frame(REQ, 0x00)).expect("queued");
 
-    let ev_a = collect_until(&a, Duration::from_millis(500), |evs| evs.iter().any(is_verdict));
+    let ev_a = collect_until(&a, Duration::from_millis(500), |evs| {
+        evs.iter().any(is_verdict)
+    });
     let confirmed = ev_a
         .iter()
         .find_map(|e| match e {
@@ -89,7 +101,10 @@ fn tx_verdict_goes_only_to_origin_and_echo_reaches_others_and_state_table() {
         .expect("origin must get TxConfirmed");
     assert_eq!(confirmed.arb_id, REQ);
     assert!(confirmed.flags & FLAG_TX != 0);
-    assert!(confirmed.timestamp_us > 0, "HAL monotonic timestamp of the send");
+    assert!(
+        confirmed.timestamp_us > 0,
+        "HAL monotonic timestamp of the send"
+    );
     // The origin never sees its own frame as RX.
     std::thread::sleep(Duration::from_millis(30));
     while let Some(ev) = a.try_recv() {
@@ -104,7 +119,10 @@ fn tx_verdict_goes_only_to_origin_and_echo_reaches_others_and_state_table() {
         Some(DiagPortEvent::Rx(f)) => assert_eq!(f.arb_id, REQ),
         other => panic!("tap b expected Rx echo, got {other:?}"),
     }
-    assert!(b.try_recv().is_none_or(|e| !is_verdict(&e)), "verdicts are origin-only");
+    assert!(
+        b.try_recv().is_none_or(|e| !is_verdict(&e)),
+        "verdicts are origin-only"
+    );
 
     // StateTable / Trace still sees the diag TX.
     std::thread::sleep(Duration::from_millis(40));
@@ -117,7 +135,11 @@ fn tx_verdict_goes_only_to_origin_and_echo_reaches_others_and_state_table() {
     drop(a);
     drop(b);
     std::thread::sleep(Duration::from_millis(20));
-    assert_eq!(engine.diag_tap_count(0), 0, "dropping a port frees its slot");
+    assert_eq!(
+        engine.diag_tap_count(0),
+        0,
+        "dropping a port frees its slot"
+    );
 }
 
 #[test]
@@ -125,16 +147,25 @@ fn gate_refuses_to_open_taps() {
     let engine = engine();
     let filters = [DiagTapFilter::exact_std(RESP)];
 
-    let err = engine.open_diag_tap(0, &filters, 64).err().expect("not connected");
+    let err = engine
+        .open_diag_tap(0, &filters, 64)
+        .err()
+        .expect("not connected");
     assert_eq!(err.code, DiagErrorCode::BusNotConnected);
 
     connect(&engine, true, false);
-    let err = engine.open_diag_tap(0, &filters, 64).err().expect("listen-only");
+    let err = engine
+        .open_diag_tap(0, &filters, 64)
+        .err()
+        .expect("listen-only");
     assert_eq!(err.code, DiagErrorCode::ListenOnly);
     engine.cmd_disconnect_bus(0).expect("disc");
 
     connect(&engine, false, false);
-    let err = engine.open_diag_tap(0, &filters, 64).err().expect("disarmed");
+    let err = engine
+        .open_diag_tap(0, &filters, 64)
+        .err()
+        .expect("disarmed");
     assert_eq!(err.code, DiagErrorCode::Disarmed);
 
     engine.cmd_arm_active_bus(0, true).expect("arm");
@@ -143,10 +174,14 @@ fn gate_refuses_to_open_taps() {
     assert_eq!(err.code, DiagErrorCode::PanicLatched);
 
     // WP-4: arming no longer clears the latch; it must be cleared explicitly.
-    let err = engine.cmd_arm_active_bus(0, true).expect_err("arm while latched");
+    let err = engine
+        .cmd_arm_active_bus(0, true)
+        .expect_err("arm while latched");
     assert!(err.to_string().starts_with("PANIC_LATCHED:"), "{err}");
     engine.cmd_clear_panic_latch();
-    engine.cmd_arm_active_bus(0, true).expect("re-arm after clearing the latch");
+    engine
+        .cmd_arm_active_bus(0, true)
+        .expect("re-arm after clearing the latch");
     assert!(engine.open_diag_tap(0, &filters, 64).is_ok());
 
     let err = engine.open_diag_tap(0, &[], 64).err().expect("no filters");
@@ -207,7 +242,10 @@ fn panic_stop_closes_taps_and_every_send_gets_exactly_one_verdict() {
             nones += 1;
         }
     }
-    assert!(nones <= 10, "closed tap returned {nones} times in 100 ms (spinning)");
+    assert!(
+        nones <= 10,
+        "closed tap returned {nones} times in 100 ms (spinning)"
+    );
 }
 
 #[test]
@@ -223,21 +261,35 @@ fn disarm_mode_change_and_disconnect_close_taps() {
 
     engine.cmd_arm_active_bus(0, true).expect("arm");
     let p2 = engine.open_diag_tap(0, &f, 64).expect("tap after re-arm");
-    engine.cmd_set_bus_mode(0, false, false).expect("same-mode disarm");
+    engine
+        .cmd_set_bus_mode(0, false, false)
+        .expect("same-mode disarm");
     assert!(p2.is_closed(), "set_bus_mode disarm closes taps");
 
-    engine.cmd_set_bus_mode(0, false, true).expect("arm via set_bus_mode");
+    engine
+        .cmd_set_bus_mode(0, false, true)
+        .expect("arm via set_bus_mode");
     let p3 = engine.open_diag_tap(0, &f, 64).expect("tap");
-    engine.cmd_set_bus_mode(0, true, false).expect("switch to Listen-Only");
+    engine
+        .cmd_set_bus_mode(0, true, false)
+        .expect("switch to Listen-Only");
     assert!(p3.is_closed(), "mode change closes taps");
-    let err = engine.open_diag_tap(0, &f, 64).err().expect("listen-only now");
+    let err = engine
+        .open_diag_tap(0, &f, 64)
+        .err()
+        .expect("listen-only now");
     assert_eq!(err.code, DiagErrorCode::ListenOnly);
 
-    engine.cmd_set_bus_mode(0, false, true).expect("back to active+armed");
+    engine
+        .cmd_set_bus_mode(0, false, true)
+        .expect("back to active+armed");
     let p4 = engine.open_diag_tap(0, &f, 64).expect("tap");
     let t0 = Instant::now();
     engine.cmd_disconnect_bus(0).expect("disconnect");
-    assert!(t0.elapsed() < Duration::from_millis(25), "bus shutdown < 25 ms with a tap open");
+    assert!(
+        t0.elapsed() < Duration::from_millis(25),
+        "bus shutdown < 25 ms with a tap open"
+    );
     assert!(p4.is_closed(), "disconnect closes taps");
     assert_eq!(p4.recv_timeout(Duration::from_millis(5)).map(|_| ()), None);
 }
@@ -256,25 +308,35 @@ fn diag_commands_respect_gate_and_manage_sessions() {
 
     connect(&engine, true, false);
     assert_eq!(
-        engine.cmd_diag_send_uds(cfg.clone(), 0x3E, Some(0x00), vec![], None).unwrap_err().code,
+        engine
+            .cmd_diag_send_uds(cfg.clone(), 0x3E, Some(0x00), vec![], None)
+            .unwrap_err()
+            .code,
         DiagErrorCode::ListenOnly
     );
     engine.cmd_disconnect_bus(0).expect("disc");
 
     connect(&engine, false, false);
     assert_eq!(
-        engine.cmd_diag_read_did(cfg.clone(), 0xF190, None).unwrap_err().code,
+        engine
+            .cmd_diag_read_did(cfg.clone(), 0xF190, None)
+            .unwrap_err()
+            .code,
         DiagErrorCode::Disarmed
     );
     // Read-only commands never open a session and never fail on the gate.
     let info = engine.cmd_diag_session_info(cfg.clone()).expect("info");
     assert!(!info.open);
-    let page = engine.cmd_diag_get_conversation(cfg.clone(), 0, None).expect("page");
+    let page = engine
+        .cmd_diag_get_conversation(cfg.clone(), 0, None)
+        .expect("page");
     assert!(page.events.is_empty());
     assert_eq!(engine.diag_tap_count(0), 0);
 
     engine.cmd_arm_active_bus(0, true).expect("arm");
-    engine.cmd_diag_open_session(cfg.clone()).expect("open session");
+    engine
+        .cmd_diag_open_session(cfg.clone())
+        .expect("open session");
     assert_eq!(engine.diag_tap_count(0), 1);
     // Idempotent open.
     engine.cmd_diag_open_session(cfg.clone()).expect("reopen");
@@ -283,9 +345,15 @@ fn diag_commands_respect_gate_and_manage_sessions() {
     // Same addressing, different settings: the old session is replaced (no double FC).
     let mut cfg2 = cfg.clone();
     cfg2.padding = None;
-    engine.cmd_diag_open_session(cfg2.clone()).expect("open with other padding");
+    engine
+        .cmd_diag_open_session(cfg2.clone())
+        .expect("open with other padding");
     std::thread::sleep(Duration::from_millis(20));
-    assert_eq!(engine.diag_tap_count(0), 1, "old session on the same ids must be closed");
+    assert_eq!(
+        engine.diag_tap_count(0),
+        1,
+        "old session on the same ids must be closed"
+    );
 
     // Produce some conversation (no ECU on mock0 -> request + timeout events).
     let opts = nexus_protocols::uds::dto::UdsRequestOptionsDto {
@@ -294,26 +362,47 @@ fn diag_commands_respect_gate_and_manage_sessions() {
         origin: None,
     };
     let _ = engine.cmd_diag_send_uds(cfg2.clone(), 0x3E, Some(0x00), vec![], Some(opts));
-    let before = engine.cmd_diag_get_conversation(cfg2.clone(), 0, None).expect("page").events.len();
+    let before = engine
+        .cmd_diag_get_conversation(cfg2.clone(), 0, None)
+        .expect("page")
+        .events
+        .len();
     assert!(before > 0, "request must be logged");
 
     // Panic invalidates; next call reports the gate; re-arm reopens.
     let _ = engine.cmd_panic_stop_tx();
-    assert!(!engine.cmd_diag_session_info(cfg2.clone()).expect("info").open);
+    assert!(
+        !engine
+            .cmd_diag_session_info(cfg2.clone())
+            .expect("info")
+            .open
+    );
     assert_eq!(
         engine.cmd_diag_open_session(cfg2.clone()).unwrap_err().code,
         DiagErrorCode::PanicLatched
     );
     assert_eq!(
-        engine.cmd_diag_read_did(cfg2.clone(), 0xF190, None).unwrap_err().code,
+        engine
+            .cmd_diag_read_did(cfg2.clone(), 0xF190, None)
+            .unwrap_err()
+            .code,
         DiagErrorCode::PanicLatched
     );
     // A refused reopen must not discard the closed session and its log.
-    let after = engine.cmd_diag_get_conversation(cfg2.clone(), 0, None).expect("page").events.len();
-    assert!(after >= before, "conversation lost after gate refusal ({before} -> {after})");
+    let after = engine
+        .cmd_diag_get_conversation(cfg2.clone(), 0, None)
+        .expect("page")
+        .events
+        .len();
+    assert!(
+        after >= before,
+        "conversation lost after gate refusal ({before} -> {after})"
+    );
     engine.cmd_clear_panic_latch();
     engine.cmd_arm_active_bus(0, true).expect("re-arm");
-    engine.cmd_diag_open_session(cfg2.clone()).expect("reopen after re-arm");
+    engine
+        .cmd_diag_open_session(cfg2.clone())
+        .expect("reopen after re-arm");
 
     // useFd on an FD-capable mock bus is accepted; out-of-range ids are invalid_input.
     let mut bad = cfg.clone();
@@ -324,7 +413,9 @@ fn diag_commands_respect_gate_and_manage_sessions() {
     );
 
     engine.cmd_diag_close_session(cfg2.clone()).expect("close");
-    engine.cmd_diag_close_session(cfg2).expect("close is idempotent");
+    engine
+        .cmd_diag_close_session(cfg2)
+        .expect("close is idempotent");
     std::thread::sleep(Duration::from_millis(20));
     assert_eq!(engine.diag_tap_count(0), 0);
 }
@@ -345,10 +436,17 @@ fn tx_verdicts_are_not_lost_when_rx_queue_is_full() {
     engine.cmd_arm_active_bus(0, true).expect("arm");
 
     // Accept-all filter + minimum depth: the mock traffic floods the queue immediately.
-    let accept_all = DiagTapFilter { id: 0, mask: 0, extended: None };
+    let accept_all = DiagTapFilter {
+        id: 0,
+        mask: 0,
+        extended: None,
+    };
     let tap = engine.open_diag_tap(0, &[accept_all], 16).expect("tap");
     std::thread::sleep(Duration::from_millis(40));
-    assert!(tap.status().rx_dropped() > 0, "RX queue must be saturated for this test");
+    assert!(
+        tap.status().rx_dropped() > 0,
+        "RX queue must be saturated for this test"
+    );
 
     const SENDS: usize = 8;
     for i in 0..SENDS {
@@ -365,5 +463,8 @@ fn tx_verdicts_are_not_lost_when_rx_queue_is_full() {
             _ => {}
         }
     }
-    assert_eq!(confirmed, SENDS, "every TxConfirmed must reach the origin tap under RX flood");
+    assert_eq!(
+        confirmed, SENDS,
+        "every TxConfirmed must reach the origin tap under RX flood"
+    );
 }

@@ -100,7 +100,10 @@ impl AdapterDriver for MockCanDriver {
         if !is_valid_mock {
             return Err(AdapterError::DeviceNotFound(device.device_id.clone()));
         }
-        Ok(Box::new(MockCanChannel::new(device.clone(), config.clone())))
+        Ok(Box::new(MockCanChannel::new(
+            device.clone(),
+            config.clone(),
+        )))
     }
 }
 
@@ -114,28 +117,14 @@ impl AdapterDriver for MockCanDriver {
 /// - `6`: `0x18FF50E5` (`DCFC_ChargerStatus`, 8B J1939) -> `1_000_000 us` (`1000 ms`, `1 Hz`)
 /// - `7`: `0x18F00900` (`BMS_AccumulatedEnergyExt`, 8B) -> `2_000_000 us` (`2000 ms`, `0.5 Hz`)
 const CALM_ECU_PERIODS_US: [u64; 8] = [
-    250_000,
-    250_000,
-    500_000,
-    400_000,
-    500_000,
-    1_000_000,
-    1_000_000,
-    2_000_000,
+    250_000, 250_000, 500_000, 400_000, 500_000, 1_000_000, 1_000_000, 2_000_000,
 ];
 
 /// Nominal real-time `.dbc` / `.kcd` ECU cycle periods in microseconds (`~475 msg/s`, `Some(475)`):
 /// - `0`: `0x201` (`5 ms`), `1`: `0x101` (`10 ms`), `2`: `0x105` (`20 ms`), `3`: `0x302` (`20 ms`),
 /// - `4`: `0x301` (`25 ms`), `5`: `0x303` (`50 ms`), `6`: `0x18FF50E5` (`100 ms`), `7`: `0x18F00900` (`200 ms`)
 const NOMINAL_ECU_PERIODS_US: [u64; 8] = [
-    5_000,
-    10_000,
-    20_000,
-    20_000,
-    25_000,
-    50_000,
-    100_000,
-    200_000,
+    5_000, 10_000, 20_000, 20_000, 25_000, 50_000, 100_000, 200_000,
 ];
 
 /// Staggered initial ECU phase offsets (`0..3.5 ms`) preventing artificial t=0 bus collisions.
@@ -776,7 +765,10 @@ impl CanChannel for MockCanChannel {
                     .min()
                     .unwrap_or(u64::MAX);
 
-                if earliest_due > now_us && written == 0 && timeout_ms > 0 && earliest_due < u64::MAX
+                if earliest_due > now_us
+                    && written == 0
+                    && timeout_ms > 0
+                    && earliest_due < u64::MAX
                 {
                     let wait_us = (earliest_due - now_us).min(u64::from(timeout_ms) * 1_000);
                     if wait_us > 0 {
@@ -833,9 +825,8 @@ impl CanChannel for MockCanChannel {
                 let mut target_emitted = ((elapsed_us * u128::from(fps)) / 1_000_000) as u64;
 
                 if target_emitted <= self.emitted_frames && written == 0 && timeout_ms > 0 {
-                    let next_due_us =
-                        ((u128::from(self.emitted_frames + 1) * 1_000_000) / u128::from(fps))
-                            as u64;
+                    let next_due_us = ((u128::from(self.emitted_frames + 1) * 1_000_000)
+                        / u128::from(fps)) as u64;
                     let now_us = elapsed_us.min(u128::from(u64::MAX)) as u64;
                     let wait_us = next_due_us
                         .saturating_sub(now_us)

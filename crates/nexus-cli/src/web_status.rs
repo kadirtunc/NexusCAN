@@ -293,7 +293,11 @@ fn bind_host_name(addr: &SocketAddr) -> Option<String> {
     })
 }
 
-async fn host_guard(State(bind_host): State<Option<Arc<str>>>, req: Request, next: Next) -> Response {
+async fn host_guard(
+    State(bind_host): State<Option<Arc<str>>>,
+    req: Request,
+    next: Next,
+) -> Response {
     let host = req
         .headers()
         .get(header::HOST)
@@ -318,11 +322,17 @@ pub fn build_status_router(state: Arc<SharedAgentState>) -> Router {
 }
 
 /// Same as [`build_status_router`], additionally accepting the bind address as `Host`.
-pub fn build_status_router_for_bind(state: Arc<SharedAgentState>, bind_addr: &SocketAddr) -> Router {
+pub fn build_status_router_for_bind(
+    state: Arc<SharedAgentState>,
+    bind_addr: &SocketAddr,
+) -> Router {
     build_status_router_with_host(state, bind_host_name(bind_addr))
 }
 
-fn build_status_router_with_host(state: Arc<SharedAgentState>, bind_host: Option<String>) -> Router {
+fn build_status_router_with_host(
+    state: Arc<SharedAgentState>,
+    bind_host: Option<String>,
+) -> Router {
     let bind_host: Option<Arc<str>> = bind_host.map(Arc::from);
     Router::new()
         .route("/", get(handle_get_index))
@@ -1144,10 +1154,23 @@ mod host_guard_tests {
 
     #[test]
     fn host_allowlist_blocks_dns_rebinding() {
-        for ok in ["localhost", "localhost:8080", "127.0.0.1:9", "[::1]", "[::1]:80"] {
+        for ok in [
+            "localhost",
+            "localhost:8080",
+            "127.0.0.1:9",
+            "[::1]",
+            "[::1]:80",
+        ] {
             assert!(web_host_allowed(ok, None), "{ok}");
         }
-        for bad in ["evil.example", "evil.example:8080", "localhost.evil.example", "", "127.0.0.1:x", "::1"] {
+        for bad in [
+            "evil.example",
+            "evil.example:8080",
+            "localhost.evil.example",
+            "",
+            "127.0.0.1:x",
+            "::1",
+        ] {
             assert!(!web_host_allowed(bad, None), "{bad}");
         }
         let lan: SocketAddr = "10.0.0.7:8080".parse().unwrap();

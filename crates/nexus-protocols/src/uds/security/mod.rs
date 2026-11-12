@@ -88,7 +88,11 @@ fn default_max_key_len() -> u16 {
 ///
 /// JSON shape: `{"kind":"builtin","algorithm":"xor_ff","constantHex":null}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum KeyProviderSpecDto {
     /// Demo algorithms (see [`BuiltinAlgorithm`]).
     Builtin {
@@ -476,7 +480,10 @@ mod contract_tests {
 
     #[test]
     fn hex_roundtrip() {
-        assert_eq!(parse_hex("0x12 ab-CD:ef").unwrap(), vec![0x12, 0xAB, 0xCD, 0xEF]);
+        assert_eq!(
+            parse_hex("0x12 ab-CD:ef").unwrap(),
+            vec![0x12, 0xAB, 0xCD, 0xEF]
+        );
         assert_eq!(to_hex(&[0x01, 0xAF]), "01AF");
         assert!(parse_hex("123").is_err());
         assert!(parse_hex("zz").is_err());
@@ -489,7 +496,10 @@ mod contract_tests {
             constant_hex: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
-        assert_eq!(json, r#"{"kind":"builtin","algorithm":"xor_ff","constantHex":null}"#);
+        assert_eq!(
+            json,
+            r#"{"kind":"builtin","algorithm":"xor_ff","constantHex":null}"#
+        );
         let manual: KeyProviderSpecDto = serde_json::from_str(r#"{"kind":"manual"}"#).unwrap();
         assert_eq!(manual, KeyProviderSpecDto::Manual);
         let lib: KeyProviderSpecDto =

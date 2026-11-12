@@ -18,8 +18,9 @@ pub mod ui_dto;
 
 pub use codec::{DecodeSummary, DecodedSignalSample};
 pub use compiler::{
-    bit_plan::NormalizedBitSpan, mux_tree::{MuxBranch, MuxDecisionTree, MAX_MUX_DEPTH}, CompiledDatabase,
-    CompiledMessage, CompiledSignal,
+    bit_plan::NormalizedBitSpan,
+    mux_tree::{MuxBranch, MuxDecisionTree, MAX_MUX_DEPTH},
+    CompiledDatabase, CompiledMessage, CompiledSignal,
 };
 pub use error::{
     BitPlanError, DbError, DbParseError, DiagnosticSeverity, EncodeError, ParseDiagnostic,
@@ -120,7 +121,12 @@ pub fn parse_and_compile(
         format: bundle.format_name.to_string(),
         source_encoding: bundle.source_encoding.to_string(),
         message_count: bundle.database.messages.len(),
-        signal_count: bundle.database.messages.values().map(|m| m.signals.len()).sum(),
+        signal_count: bundle
+            .database
+            .messages
+            .values()
+            .map(|m| m.signals.len())
+            .sum(),
         diagnostics: bundle.diagnostics,
     };
 
@@ -156,9 +162,12 @@ SG_MUL_VAL_ 512 LeafCellMv InnerMux 9-9;
 SG_MUL_VAL_ 512 AltLeafTemp InnerMux 10-10;
 "#;
 
-        let (compiled_dbc, schema_dbc) =
-            parse_and_compile(dbc_3lvl.as_bytes(), Some("deep3.dbc"), &ParseOptions::default())
-                .expect("compile 3-level cascaded dbc");
+        let (compiled_dbc, schema_dbc) = parse_and_compile(
+            dbc_3lvl.as_bytes(),
+            Some("deep3.dbc"),
+            &ParseOptions::default(),
+        )
+        .expect("compile 3-level cascaded dbc");
 
         let find_id = |schema: &DatabaseSchemaDto, name: &str| -> SignalId {
             schema
@@ -240,9 +249,12 @@ SG_MUL_VAL_ 512 AltLeafTemp InnerMux 10-10;
   </Bus>
 </NetworkDefinition>"#;
 
-        let (compiled_kcd, schema_kcd) =
-            parse_and_compile(kcd_2lvl.as_bytes(), Some("nested2.kcd"), &ParseOptions::default())
-                .expect("compile 2-level nested kcd");
+        let (compiled_kcd, schema_kcd) = parse_and_compile(
+            kcd_2lvl.as_bytes(),
+            Some("nested2.kcd"),
+            &ParseOptions::default(),
+        )
+        .expect("compile 2-level nested kcd");
 
         let dom_id = find_id(&schema_kcd, "DomainMux");
         let bank_id = find_id(&schema_kcd, "BankSubMux");

@@ -41,10 +41,7 @@ pub enum ConfigError {
     InvalidToken(#[from] PairingError),
 
     #[error("Invalid URL for '{field}': {detail}")]
-    InvalidUrl {
-        field: &'static str,
-        detail: String,
-    },
+    InvalidUrl { field: &'static str, detail: String },
 
     #[error("Invalid CAN bitrate configuration: {0}")]
     InvalidBitrate(String),
@@ -186,9 +183,7 @@ impl EffectiveAgentConfig {
             .dbc_path
             .clone()
             .filter(|p| !p.as_os_str().is_empty())
-            .or_else(|| {
-                non_empty_opt(t.agent.dbc_path.as_deref()).map(PathBuf::from)
-            });
+            .or_else(|| non_empty_opt(t.agent.dbc_path.as_deref()).map(PathBuf::from));
 
         // 4. Cloud URL, Token, Project ID, and derived WS Bridge URL
         let raw_cloud_url = non_empty_opt(cli.cloud_url.as_deref())
@@ -420,10 +415,7 @@ pub fn resolve_hal_device_id(iface: &str) -> String {
         "mock0" | "mock:mock0" => "mock:mock0".to_string(),
         "mock1" | "mock:mock1" => "mock:mock1".to_string(),
         other if other.contains(':') => other.to_string(),
-        other
-            if other.starts_with("/dev/")
-                || other.to_ascii_uppercase().starts_with("COM") =>
-        {
+        other if other.starts_with("/dev/") || other.to_ascii_uppercase().starts_with("COM") => {
             format!("slcan:{other}")
         }
         other => format!("socketcan:{other}"),

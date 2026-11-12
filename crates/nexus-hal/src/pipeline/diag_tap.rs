@@ -463,7 +463,10 @@ struct TapSlot {
 impl TapSlot {
     #[inline]
     fn matches(&self, f: &RawCanFrame) -> bool {
-        self.filters.iter().flatten().any(|flt| filter_matches(flt, f))
+        self.filters
+            .iter()
+            .flatten()
+            .any(|flt| filter_matches(flt, f))
     }
 }
 
@@ -543,7 +546,9 @@ impl TapTable {
 
     #[inline]
     pub(crate) fn is_slot_closed(&self, idx: usize) -> bool {
-        self.slots[idx].as_ref().is_none_or(|s| s.shared.is_closed())
+        self.slots[idx]
+            .as_ref()
+            .is_none_or(|s| s.shared.is_closed())
     }
 
     /// Sends a TX verdict to the origin tap only.
@@ -601,7 +606,11 @@ impl TapTable {
     }
 
     /// Bus-io thread exit: reject every queued tap TX with `Closed`, close all taps.
-    pub(crate) fn shutdown(&mut self, tx_rx: &Receiver<TxDispatchRequest>, ctl_rx: &Receiver<TapCtl>) {
+    pub(crate) fn shutdown(
+        &mut self,
+        tx_rx: &Receiver<TxDispatchRequest>,
+        ctl_rx: &Receiver<TapCtl>,
+    ) {
         self.apply_ctl(ctl_rx);
         for s in self.slots.iter().flatten() {
             s.shared.close();
@@ -610,7 +619,10 @@ impl TapTable {
             match req.origin {
                 TxOrigin::Tap { slot, gen } => {
                     if let Some(idx) = self.lookup(slot, gen) {
-                        self.notify(idx, DiagPortEvent::TxRejected(req.frame, DiagTxReject::Closed));
+                        self.notify(
+                            idx,
+                            DiagPortEvent::TxRejected(req.frame, DiagTxReject::Closed),
+                        );
                     }
                 }
                 TxOrigin::Other => {

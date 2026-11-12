@@ -74,7 +74,10 @@ fn counter_self_check() {
         let v: Vec<u8> = std::hint::black_box(Vec::with_capacity(64));
         COUNTING.store(false, Ordering::SeqCst);
         drop(v);
-        assert!(BUS_IO_ALLOCS.load(Ordering::SeqCst) >= 1, "counting allocator is not counting");
+        assert!(
+            BUS_IO_ALLOCS.load(Ordering::SeqCst) >= 1,
+            "counting allocator is not counting"
+        );
         BUS_IO_ALLOCS.store(0, Ordering::SeqCst);
     })
     .join()
@@ -102,15 +105,27 @@ fn bus_io_hot_path_with_diag_taps_does_not_allocate() {
     while !HOOK_RAN.load(Ordering::SeqCst) && t0.elapsed() < Duration::from_secs(2) {
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert!(HOOK_RAN.load(Ordering::SeqCst), "bus-io thread start hook did not run");
+    assert!(
+        HOOK_RAN.load(Ordering::SeqCst),
+        "bus-io thread start hook did not run"
+    );
 
     // Tap 1: catch-all (every mock0 frame is copied into it). Tap 2: diag ids, sends.
-    let all = DiagTapFilter { id: 0, mask: 0, extended: None };
-    let sniffer = engine.open_diag_tap(0, &[all], 65_536).expect("sniffer tap");
+    let all = DiagTapFilter {
+        id: 0,
+        mask: 0,
+        extended: None,
+    };
+    let sniffer = engine
+        .open_diag_tap(0, &[all], 65_536)
+        .expect("sniffer tap");
     let client = engine
         .open_diag_tap(
             0,
-            &[DiagTapFilter::exact_std(0x7EC), DiagTapFilter::exact_std(0x7E4)],
+            &[
+                DiagTapFilter::exact_std(0x7EC),
+                DiagTapFilter::exact_std(0x7E4),
+            ],
             4_096,
         )
         .expect("client tap");
@@ -131,8 +146,9 @@ fn bus_io_hot_path_with_diag_taps_does_not_allocate() {
     };
 
     let key = CanIdKey::new_standard(0x7E4).expect("id");
-    let tx_frame = RawCanFrame::new_classical(0, key, &[0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA], 0)
-        .expect("frame");
+    let tx_frame =
+        RawCanFrame::new_classical(0, key, &[0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA], 0)
+            .expect("frame");
     let mut confirmed = 0u64;
     let pump = |dur: Duration, confirmed: &mut u64| {
         let end = Instant::now() + dur;
@@ -140,7 +156,9 @@ fn bus_io_hot_path_with_diag_taps_does_not_allocate() {
             let _ = client.send(tx_frame);
             // ~500 diag frames/s: drain verdicts
             let until = Instant::now() + Duration::from_millis(2);
-            while let Some(ev) = client.recv_timeout(until.saturating_duration_since(Instant::now())) {
+            while let Some(ev) =
+                client.recv_timeout(until.saturating_duration_since(Instant::now()))
+            {
                 if matches!(ev, DiagPortEvent::TxConfirmed(_)) {
                     *confirmed += 1;
                 }
@@ -172,7 +190,13 @@ fn bus_io_hot_path_with_diag_taps_does_not_allocate() {
     println!(
         "bus-io allocations during measurement: {allocs}; tap RX frames: {sniffed_n}; diag TX confirmed: {confirmed_n}"
     );
-    assert!(sniffed_n > 10_000, "catch-all tap must see mock0 traffic ({sniffed_n})");
-    assert!(confirmed_n > 100, "diag TX must be confirmed ({confirmed_n})");
+    assert!(
+        sniffed_n > 10_000,
+        "catch-all tap must see mock0 traffic ({sniffed_n})"
+    );
+    assert!(
+        confirmed_n > 100,
+        "diag TX must be confirmed ({confirmed_n})"
+    );
     assert_eq!(allocs, 0, "bus-io hot path allocated {allocs} times");
 }

@@ -81,9 +81,7 @@ pub struct BridgeClientConfig {
 
 impl BridgeClientConfig {
     pub fn computed_schema_sha256(&self) -> Option<String> {
-        self.raw_database_bytes
-            .as_deref()
-            .map(sha256_hex)
+        self.raw_database_bytes.as_deref().map(sha256_hex)
     }
 }
 
@@ -126,7 +124,10 @@ impl Default for BridgeClientMetrics {
 
 /// Abstract duplex WebSocket frame transport (`NexusCAN` <-> `NexusCANCloud`).
 pub trait BridgeTransport: Send {
-    fn send_text<'a>(&'a mut self, payload: &'a str) -> BoxFuture<'a, Result<(), BridgeClientError>>;
+    fn send_text<'a>(
+        &'a mut self,
+        payload: &'a str,
+    ) -> BoxFuture<'a, Result<(), BridgeClientError>>;
     fn recv_text<'a>(&'a mut self) -> BoxFuture<'a, Result<Option<String>, BridgeClientError>>;
     fn close<'a>(&'a mut self) -> BoxFuture<'a, Result<(), BridgeClientError>>;
 }
@@ -457,7 +458,10 @@ impl ChannelBridgeTransport {
 }
 
 impl BridgeTransport for ChannelBridgeTransport {
-    fn send_text<'a>(&'a mut self, payload: &'a str) -> BoxFuture<'a, Result<(), BridgeClientError>> {
+    fn send_text<'a>(
+        &'a mut self,
+        payload: &'a str,
+    ) -> BoxFuture<'a, Result<(), BridgeClientError>> {
         Box::pin(async move {
             self.outbound_tx
                 .send(payload.to_string())
@@ -556,7 +560,9 @@ struct ParsedWsUrl {
 fn parse_ws_url(url: &str) -> Result<ParsedWsUrl, BridgeClientError> {
     let invalid = || BridgeClientError::InvalidEndpointUrl(crate::url_safety::redact_url(url));
     if url.starts_with("wss://") {
-        return Err(BridgeClientError::InsecureTransport(crate::url_safety::redact_url(url)));
+        return Err(BridgeClientError::InsecureTransport(
+            crate::url_safety::redact_url(url),
+        ));
     }
     let rest = url.strip_prefix("ws://").ok_or_else(invalid)?;
     let (authority, path_part) = match rest.find('/') {
@@ -565,9 +571,7 @@ fn parse_ws_url(url: &str) -> Result<ParsedWsUrl, BridgeClientError> {
     };
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) => {
-            let parsed_port = p
-                .parse::<u16>()
-                .map_err(|_| invalid())?;
+            let parsed_port = p.parse::<u16>().map_err(|_| invalid())?;
             (h.to_string(), parsed_port)
         }
         None => (authority.to_string(), 80),
@@ -577,7 +581,9 @@ fn parse_ws_url(url: &str) -> Result<ParsedWsUrl, BridgeClientError> {
     }
     // WP-10: no TLS yet -> plaintext only towards a loopback test server.
     if !crate::url_safety::is_loopback_host(&host) {
-        return Err(BridgeClientError::InsecureTransport(crate::url_safety::redact_url(url)));
+        return Err(BridgeClientError::InsecureTransport(
+            crate::url_safety::redact_url(url),
+        ));
     }
     Ok(ParsedWsUrl {
         host,
@@ -600,7 +606,11 @@ impl TcpWsTransport {
         self.mask_counter.to_le_bytes()
     }
 
-    async fn write_masked_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), BridgeClientError> {
+    async fn write_masked_frame(
+        &mut self,
+        opcode: u8,
+        payload: &[u8],
+    ) -> Result<(), BridgeClientError> {
         let mask = self.next_mask();
         let len = payload.len();
         let mut header = Vec::with_capacity(14);
@@ -629,7 +639,10 @@ impl TcpWsTransport {
 }
 
 impl BridgeTransport for TcpWsTransport {
-    fn send_text<'a>(&'a mut self, payload: &'a str) -> BoxFuture<'a, Result<(), BridgeClientError>> {
+    fn send_text<'a>(
+        &'a mut self,
+        payload: &'a str,
+    ) -> BoxFuture<'a, Result<(), BridgeClientError>> {
         Box::pin(async move { self.write_masked_frame(0x01, payload.as_bytes()).await })
     }
 
@@ -662,7 +675,9 @@ impl BridgeTransport for TcpWsTransport {
                 if payload_len_u64 > MAX_WS_FRAME_PAYLOAD {
                     let _ = self.write_masked_frame(0x08, &1009u16.to_be_bytes()).await;
                     let _ = self.stream.shutdown().await;
-                    return Err(BridgeClientError::FrameTooLarge { len: payload_len_u64 });
+                    return Err(BridgeClientError::FrameTooLarge {
+                        len: payload_len_u64,
+                    });
                 }
                 let payload_len = payload_len_u64 as usize;
 
@@ -734,20 +749,29 @@ mod wp10_tests {
         ] {
             let err = parse_ws_url(bad).err().expect("must be refused");
             let msg = err.to_string();
-            assert!(matches!(err, BridgeClientError::InsecureTransport(_)), "{msg}");
+            assert!(
+                matches!(err, BridgeClientError::InsecureTransport(_)),
+                "{msg}"
+            );
             assert!(msg.contains("TLS not yet supported"), "{msg}");
             assert!(!msg.contains("nxc_tok_secret"), "token leaked: {msg}");
         }
-        let err = parse_ws_url("http://x?token=nxc_tok_secret").err().expect("bad scheme");
+        let err = parse_ws_url("http://x?token=nxc_tok_secret")
+            .err()
+            .expect("bad scheme");
         assert!(!err.to_string().contains("nxc_tok_secret"));
-        let err = parse_ws_url("ws://user:pw@127.0.0.1:1/").err().expect("credentials");
+        let err = parse_ws_url("ws://user:pw@127.0.0.1:1/")
+            .err()
+            .expect("credentials");
         assert!(!err.to_string().contains("pw@"), "{err}");
     }
 
     #[tokio::test]
     async fn oversized_inbound_frame_is_rejected_before_allocation() {
         use tokio::io::AsyncWriteExt as _;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("addr");
         let server = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.expect("accept");
@@ -765,7 +789,10 @@ mod wp10_tests {
             mask_counter: 1,
         };
         let err = transport.recv_text().await.expect_err("must fail");
-        assert!(matches!(err, BridgeClientError::FrameTooLarge { len } if len == 1 << 40), "{err}");
+        assert!(
+            matches!(err, BridgeClientError::FrameTooLarge { len } if len == 1 << 40),
+            "{err}"
+        );
         let close = server.await.expect("server");
         assert_eq!(close[0], 0x88, "client must send a Close frame");
     }

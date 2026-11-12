@@ -88,8 +88,7 @@ impl NormalizedBitSpan {
             let b_idx = byte_idx as usize;
             if b_idx < 64 {
                 let bit_val = ((raw >> k) & 1) as u8;
-                payload[b_idx] =
-                    (payload[b_idx] & !(1 << bit_in_byte)) | (bit_val << bit_in_byte);
+                payload[b_idx] = (payload[b_idx] & !(1 << bit_in_byte)) | (bit_val << bit_in_byte);
             }
         }
     }

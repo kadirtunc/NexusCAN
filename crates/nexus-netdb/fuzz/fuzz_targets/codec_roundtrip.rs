@@ -34,16 +34,22 @@ SG_MUL_VAL_ 256 Deep Sub 3-3, 10-15;
 fn db() -> &'static CompiledDatabase {
     static DB: OnceLock<CompiledDatabase> = OnceLock::new();
     DB.get_or_init(|| {
-        parse_and_compile(REF_DBC.as_bytes(), Some("ref.dbc"), &ParseOptions::default())
-            .expect("reference DB compiles")
-            .0
+        parse_and_compile(
+            REF_DBC.as_bytes(),
+            Some("ref.dbc"),
+            &ParseOptions::default(),
+        )
+        .expect("reference DB compiles")
+        .0
     })
 }
 
 fn decode_values(db: &CompiledDatabase, id: CanIdKey, p: &[u8]) -> Vec<(u32, f64)> {
     let mut out = [common::sample(); 64];
     let mut sw = [(0u32, 0i64); 16];
-    let Some(s) = db.decode_payload_into(id, p, &mut out, &mut sw) else { return Vec::new() };
+    let Some(s) = db.decode_payload_into(id, p, &mut out, &mut sw) else {
+        return Vec::new();
+    };
     out[..s.decoded_count]
         .iter()
         .map(|x| (x.signal_id, x.physical_value))
@@ -69,5 +75,8 @@ fuzz_target!(|data: &[u8]| {
     let mut p3 = [0u8; 64];
     db.encode_payload_into(id, &v2, &mut p3)
         .expect("re-encoding a decoded, previously encodable frame must succeed");
-    assert_eq!(p2, p3, "codec must reach a fixed point after one decode/encode pass");
+    assert_eq!(
+        p2, p3,
+        "codec must reach a fixed point after one decode/encode pass"
+    );
 });

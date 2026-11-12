@@ -12,9 +12,13 @@ use std::time::{Duration, Instant};
 
 use common::{config, hil_env, serial, EcuSim, SocketCanPort, CLASSIC, FD};
 use nexus_protocols::uds::client::UdsSession;
-use nexus_protocols::uds::dto::{ConversationEventKind, DiagErrorCode, UdsAddressing, UdsRequestOptionsDto};
+use nexus_protocols::uds::dto::{
+    ConversationEventKind, DiagErrorCode, UdsAddressing, UdsRequestOptionsDto,
+};
 use nexus_protocols::uds::port::DiagTxReject;
-use nexus_protocols::uds::security::{build_portable_provider, BuiltinAlgorithm, KeyProviderSpecDto, SeedKeyRequest};
+use nexus_protocols::uds::security::{
+    build_portable_provider, BuiltinAlgorithm, KeyProviderSpecDto, SeedKeyRequest,
+};
 
 fn opts() -> UdsRequestOptionsDto {
     UdsRequestOptionsDto::default()
@@ -27,12 +31,22 @@ fn open_classic(functional: bool) -> (UdsSession, common::Probe) {
 }
 
 fn kinds(s: &UdsSession) -> Vec<ConversationEventKind> {
-    s.conversation_since(0, 10_000).events.iter().map(|e| e.kind).collect()
+    s.conversation_since(0, 10_000)
+        .events
+        .iter()
+        .map(|e| e.kind)
+        .collect()
 }
 
 fn xor_const_key(seed: &[u8]) -> Vec<u8> {
-    let spec = KeyProviderSpecDto::Builtin { algorithm: BuiltinAlgorithm::XorConst, constant_hex: Some("A5A5A5A5".into()) };
-    build_portable_provider(&spec).expect("provider").compute_key(&SeedKeyRequest { seed, level: 1 }).expect("key")
+    let spec = KeyProviderSpecDto::Builtin {
+        algorithm: BuiltinAlgorithm::XorConst,
+        constant_hex: Some("A5A5A5A5".into()),
+    };
+    build_portable_provider(&spec)
+        .expect("provider")
+        .compute_key(&SeedKeyRequest { seed, level: 1 })
+        .expect("key")
 }
 
 #[test]
@@ -60,7 +74,9 @@ fn session_transitions_and_reported_timing() {
     assert_eq!(s.info().active_session, 1);
 
     // Programming only from extended: negative response is Ok(positive=false).
-    let r = s.request(0x10, &[0x02], &opts()).expect("10 02 from default");
+    let r = s
+        .request(0x10, &[0x02], &opts())
+        .expect("10 02 from default");
     assert!(!r.positive);
     assert_eq!(r.nrc, Some(0x22));
     assert_eq!(r.nrc_name.as_deref(), Some("conditionsNotMet"));
@@ -74,11 +90,18 @@ fn session_transitions_and_reported_timing() {
     assert!(s.request(0x10, &[0x03], &opts()).expect("10 03").positive);
     assert!(s.request(0x11, &[0x01], &opts()).expect("11 01").positive);
     let info = s.info();
-    assert_eq!((info.active_session, info.unlocked_level, info.p2_server_ms), (1, None, None));
+    assert_eq!(
+        (info.active_session, info.unlocked_level, info.p2_server_ms),
+        (1, None, None)
+    );
 
     let page = s.conversation_since(0, 1000);
     assert!(page.events.iter().all(|e| e.timestamp_us > 0));
-    let resp = page.events.iter().find(|e| e.kind == ConversationEventKind::Response).expect("response event");
+    let resp = page
+        .events
+        .iter()
+        .find(|e| e.kind == ConversationEventKind::Response)
+        .expect("response event");
     assert!(resp.request_seq.is_some() && resp.elapsed_us.is_some());
     s.close();
 }
@@ -112,16 +135,23 @@ fn security_access_unlock_and_lockout() {
     let mut nrcs = Vec::new();
     for _ in 0..3 {
         assert!(s.request(0x27, &[0x01], &opts()).expect("seed").positive);
-        let r = s.request(0x27, &[0x02, 0, 0, 0, 0], &opts()).expect("bad key");
+        let r = s
+            .request(0x27, &[0x02, 0, 0, 0, 0], &opts())
+            .expect("bad key");
         nrcs.push(r.nrc);
     }
     assert_eq!(nrcs, vec![Some(0x35), Some(0x35), Some(0x36)]);
     let r = s.request(0x27, &[0x01], &opts()).expect("seed in lockout");
-    assert_eq!((r.nrc, r.nrc_name.as_deref()), (Some(0x37), Some("keyDelayActive")));
+    assert_eq!(
+        (r.nrc, r.nrc_name.as_deref()),
+        (Some(0x37), Some("keyDelayActive"))
+    );
     assert_eq!(s.info().unlocked_level, None);
 
     std::thread::sleep(Duration::from_millis(1700));
-    let seed = s.request(0x27, &[0x01], &opts()).expect("seed after lockout");
+    let seed = s
+        .request(0x27, &[0x01], &opts())
+        .expect("seed after lockout");
     assert!(seed.positive);
     let mut send_key = vec![0x02];
     send_key.extend(xor_const_key(&seed.raw[2..]));
@@ -177,7 +207,11 @@ fn dtc_read_and_clear() {
     // Mask filters on the ECU side.
     assert_eq!(s.read_dtcs_by_status(0x04).expect("pending only").len(), 1);
 
-    assert!(s.request(0x14, &[0xFF, 0xFF, 0xFF], &opts()).expect("14").positive);
+    assert!(
+        s.request(0x14, &[0xFF, 0xFF, 0xFF], &opts())
+            .expect("14")
+            .positive
+    );
     assert!(s.read_dtcs_by_status(0xFF).expect("after clear").is_empty());
 }
 
@@ -191,30 +225,59 @@ fn response_pending_and_p2_timeout() {
     let (s, _) = open_classic(false);
 
     let t0 = Instant::now();
-    let r = s.request(0x22, &[0xFA, 0x02], &opts()).expect("FA02 with 2 x 0x78");
+    let r = s
+        .request(0x22, &[0xFA, 0x02], &opts())
+        .expect("FA02 with 2 x 0x78");
     assert!(r.positive);
     assert_eq!(r.response_pending_count, 2);
     assert_eq!(r.raw, vec![0x62, 0xFA, 0x02, 0xC0, 0xDE]);
     // ecusim: first 0x78 at once, next after 0.3 * P2* (600 ms), then the final response.
     assert!(r.elapsed_us > 500_000, "two 0x78: {} us", r.elapsed_us);
     let ev = s.conversation_since(0, 100).events;
-    let pend: Vec<_> = ev.iter().filter(|e| e.kind == ConversationEventKind::ResponsePending).collect();
+    let pend: Vec<_> = ev
+        .iter()
+        .filter(|e| e.kind == ConversationEventKind::ResponsePending)
+        .collect();
     assert_eq!(pend.len(), 2);
-    assert!(pend.iter().all(|e| e.request_seq == Some(r.transaction_seq) && e.nrc == Some(0x78)));
-    println!("FA02: {} ms total, elapsed_us {}", t0.elapsed().as_millis(), r.elapsed_us);
+    assert!(pend
+        .iter()
+        .all(|e| e.request_seq == Some(r.transaction_seq) && e.nrc == Some(0x78)));
+    println!(
+        "FA02: {} ms total, elapsed_us {}",
+        t0.elapsed().as_millis(),
+        r.elapsed_us
+    );
 
     let t0 = Instant::now();
-    let e = s.request(0x22, &[0xFA, 0x04], &opts()).expect_err("no response");
+    let e = s
+        .request(0x22, &[0xFA, 0x04], &opts())
+        .expect_err("no response");
     let took = t0.elapsed();
     assert_eq!(e.code, DiagErrorCode::TimeoutP2, "{e:?}");
-    assert!(took >= Duration::from_millis(150) && took < Duration::from_millis(600), "{took:?}");
-    let last = s.conversation_since(0, 100).events.into_iter().rev().find(|e| e.kind == ConversationEventKind::Timeout);
+    assert!(
+        took >= Duration::from_millis(150) && took < Duration::from_millis(600),
+        "{took:?}"
+    );
+    let last = s
+        .conversation_since(0, 100)
+        .events
+        .into_iter()
+        .rev()
+        .find(|e| e.kind == ConversationEventKind::Timeout);
     assert_eq!(last.and_then(|e| e.detail).as_deref(), Some("p2"));
 
     // timeout_ms override replaces P2.
     let t0 = Instant::now();
-    let o = UdsRequestOptionsDto { timeout_ms: Some(400), ..Default::default() };
-    assert_eq!(s.request(0x22, &[0xFA, 0x04], &o).expect_err("override").code, DiagErrorCode::TimeoutP2);
+    let o = UdsRequestOptionsDto {
+        timeout_ms: Some(400),
+        ..Default::default()
+    };
+    assert_eq!(
+        s.request(0x22, &[0xFA, 0x04], &o)
+            .expect_err("override")
+            .code,
+        DiagErrorCode::TimeoutP2
+    );
     assert!(t0.elapsed() >= Duration::from_millis(400));
 }
 
@@ -230,7 +293,12 @@ fn late_response_is_dropped_and_next_request_is_clean() {
     // FA03 answers after 400 ms; P2client = 50 + 100 ms.
     let e = s.request(0x22, &[0xFA, 0x03], &opts()).expect_err("late");
     assert_eq!(e.code, DiagErrorCode::TimeoutP2);
-    let late_seq = s.conversation_since(0, 100).events.iter().find(|e| e.kind == ConversationEventKind::Request).map(|e| e.seq);
+    let late_seq = s
+        .conversation_since(0, 100)
+        .events
+        .iter()
+        .find(|e| e.kind == ConversationEventKind::Request)
+        .map(|e| e.seq);
     std::thread::sleep(Duration::from_millis(500));
     let vin = s.read_did(0xF190).expect("next request");
     assert_eq!(vin.decoded, "WNX0ECUSIM0000017");
@@ -246,13 +314,21 @@ fn late_response_is_dropped_and_next_request_is_clean() {
     assert!(stale.elapsed_us.unwrap_or(0) >= 350_000, "{stale:?}");
 
     // Immediate follow-up while the late answer is still coming: never returns FA03's data.
-    let _ = s.request(0x22, &[0xFA, 0x03], &opts()).expect_err("late again");
-    let o = UdsRequestOptionsDto { timeout_ms: Some(2000), ..Default::default() };
+    let _ = s
+        .request(0x22, &[0xFA, 0x03], &opts())
+        .expect_err("late again");
+    let o = UdsRequestOptionsDto {
+        timeout_ms: Some(2000),
+        ..Default::default()
+    };
     match s.request(0x22, &[0xF1, 0x90], &o) {
         Ok(r) => assert_eq!(&r.raw[..3], &[0x62, 0xF1, 0x90]),
         Err(e) => assert!(matches!(e.code, DiagErrorCode::TimeoutP2), "{e:?}"),
     }
-    assert_eq!(s.read_did(0xF190).expect("still in sync").decoded, "WNX0ECUSIM0000017");
+    assert_eq!(
+        s.read_did(0xF190).expect("still in sync").decoded,
+        "WNX0ECUSIM0000017"
+    );
 }
 
 #[test]
@@ -268,7 +344,11 @@ fn tester_present_keeps_s3_alive() {
     assert!(s.info().tester_present_enabled);
     assert_eq!(s.info().tester_present_interval_ms, 2000);
     std::thread::sleep(Duration::from_millis(3500));
-    assert_eq!(s.read_did(0xF186).expect("F186").raw, vec![0x03], "session kept by 3E 80");
+    assert_eq!(
+        s.read_did(0xF186).expect("F186").raw,
+        vec![0x03],
+        "session kept by 3E 80"
+    );
     assert_eq!(ecu.count("\"ev\":\"s3_timeout\""), 0);
     assert!(kinds(&s).contains(&ConversationEventKind::KeepaliveSent));
 
@@ -278,7 +358,12 @@ fn tester_present_keeps_s3_alive() {
     assert_eq!(s.read_did(0xF186).expect("F186").raw, vec![0x01]);
     assert_eq!(ecu.count("\"ev\":\"s3_timeout\""), 1);
 
-    assert_eq!(s.set_tester_present(true, Some(10)).expect_err("range").code, DiagErrorCode::InvalidInput);
+    assert_eq!(
+        s.set_tester_present(true, Some(10))
+            .expect_err("range")
+            .code,
+        DiagErrorCode::InvalidInput
+    );
 }
 
 #[test]
@@ -289,21 +374,35 @@ fn functional_request_with_physical_flow_control() {
     }
     let ecu = EcuSim::start("functional", CLASSIC, false);
     let (s, probe) = open_classic(true);
-    let o = UdsRequestOptionsDto { addressing: Some(UdsAddressing::Functional), ..Default::default() };
+    let o = UdsRequestOptionsDto {
+        addressing: Some(UdsAddressing::Functional),
+        ..Default::default()
+    };
     let r = s.request(0x22, &[0xF1, 0x90], &o).expect("functional VIN");
     assert_eq!(&r.raw[3..], b"WNX0ECUSIM0000017");
     let sent = probe.sent();
-    let sf = sent.iter().find(|f| f.payload().get(1) == Some(&0x22)).expect("request SF");
+    let sf = sent
+        .iter()
+        .find(|f| f.payload().get(1) == Some(&0x22))
+        .expect("request SF");
     assert_eq!(sf.arb_id, CLASSIC.func);
-    let fc = sent.iter().find(|f| f.payload().first().map(|b| b >> 4) == Some(3)).expect("FC");
-    assert_eq!(fc.arb_id, CLASSIC.req, "flow control must use the physical request id");
+    let fc = sent
+        .iter()
+        .find(|f| f.payload().first().map(|b| b >> 4) == Some(3))
+        .expect("FC");
+    assert_eq!(
+        fc.arb_id, CLASSIC.req,
+        "flow control must use the physical request id"
+    );
     assert!(ecu.count("\"ta\":\"func\"") >= 1);
     let ev = s.conversation_since(0, 10).events;
     assert_eq!(ev[0].addressing, UdsAddressing::Functional);
 
     let r = s.request(0x3E, &[0x80], &o).expect("functional 3E 80");
     assert!(r.suppressed);
-    let e = s.request(0x2E, &[0xF1, 0x90, 1, 2, 3, 4, 5, 6, 7], &o).expect_err("too long for SF");
+    let e = s
+        .request(0x2E, &[0xF1, 0x90, 1, 2, 3, 4, 5, 6, 7], &o)
+        .expect_err("too long for SF");
     assert_eq!(e.code, DiagErrorCode::InvalidInput);
 }
 
@@ -317,12 +416,22 @@ fn canfd_session() {
     let (port, probe) = SocketCanPort::open(FD, true);
     let s = UdsSession::open(port, config(FD, true, true)).expect("open fd");
     assert!(s.request(0x10, &[0x03], &opts()).expect("10 03").positive);
-    assert_eq!(s.read_did(0xF190).expect("VIN").decoded, "WNX0ECUSIM0000017");
+    assert_eq!(
+        s.read_did(0xF190).expect("VIN").decoded,
+        "WNX0ECUSIM0000017"
+    );
     let long = s.read_did(0xF1F1).expect("long DID over FD");
     assert!(long.raw.len() > 150);
-    let o = UdsRequestOptionsDto { addressing: Some(UdsAddressing::Functional), ..Default::default() };
+    let o = UdsRequestOptionsDto {
+        addressing: Some(UdsAddressing::Functional),
+        ..Default::default()
+    };
     assert_eq!(s.read_did(0xF18A).expect("F18A").decoded, "NEXUSCAN-TEST");
-    assert!(s.request(0x22, &[0xF1, 0x90], &o).expect("functional FD").positive);
+    assert!(
+        s.request(0x22, &[0xF1, 0x90], &o)
+            .expect("functional FD")
+            .positive
+    );
     assert!(probe.sent().iter().all(|f| f.is_fd()));
 }
 
@@ -338,9 +447,17 @@ fn gate_rejection_and_closed_tap() {
     let e = s.request(0x3E, &[0x00], &opts()).expect_err("disarmed");
     assert_eq!(e.code, DiagErrorCode::Disarmed);
     probe.set_gate(Some(DiagTxReject::ListenOnly));
-    assert_eq!(s.read_did(0xF190).expect_err("listen only").code, DiagErrorCode::ListenOnly);
+    assert_eq!(
+        s.read_did(0xF190).expect_err("listen only").code,
+        DiagErrorCode::ListenOnly
+    );
     assert!(probe.sent().is_empty());
-    let blocked: Vec<_> = s.conversation_since(0, 10).events.into_iter().filter(|e| e.kind == ConversationEventKind::TxBlocked).collect();
+    let blocked: Vec<_> = s
+        .conversation_since(0, 10)
+        .events
+        .into_iter()
+        .filter(|e| e.kind == ConversationEventKind::TxBlocked)
+        .collect();
     assert_eq!(blocked.len(), 2);
     assert_eq!(blocked[0].detail.as_deref(), Some("disarmed"));
 
@@ -350,13 +467,24 @@ fn gate_rejection_and_closed_tap() {
     probe.close();
     std::thread::sleep(Duration::from_millis(150));
     assert!(!s.info().open);
-    assert_eq!(s.request(0x3E, &[0x00], &opts()).expect_err("closed").code, DiagErrorCode::SessionClosed);
+    assert_eq!(
+        s.request(0x3E, &[0x00], &opts()).expect_err("closed").code,
+        DiagErrorCode::SessionClosed
+    );
     assert!(kinds(&s).contains(&ConversationEventKind::SessionClosed));
 
     s.close();
     s.close(); // idempotent
-    assert_eq!(s.read_did(0xF190).expect_err("after close").code, DiagErrorCode::SessionClosed);
-    assert_eq!(s.set_tester_present(true, None).expect_err("after close").code, DiagErrorCode::SessionClosed);
+    assert_eq!(
+        s.read_did(0xF190).expect_err("after close").code,
+        DiagErrorCode::SessionClosed
+    );
+    assert_eq!(
+        s.set_tester_present(true, None)
+            .expect_err("after close")
+            .code,
+        DiagErrorCode::SessionClosed
+    );
 }
 
 #[test]
@@ -385,10 +513,19 @@ fn concurrent_callers_are_serialized() {
     for h in handles {
         for r in h.join().expect("thread") {
             let (did, text) = r.expect("read");
-            assert_eq!(text, if did == 0xF190 { "WNX0ECUSIM0000017" } else { "NEXUSCAN-TEST" });
+            assert_eq!(
+                text,
+                if did == 0xF190 {
+                    "WNX0ECUSIM0000017"
+                } else {
+                    "NEXUSCAN-TEST"
+                }
+            );
         }
     }
-    assert!(kinds(&s).iter().all(|k| !matches!(k, ConversationEventKind::StaleResponseDropped)));
+    assert!(kinds(&s)
+        .iter()
+        .all(|k| !matches!(k, ConversationEventKind::StaleResponseDropped)));
 }
 
 #[test]
@@ -408,26 +545,39 @@ fn idle_cpu_and_thread_cleanup() {
         let th0 = common::thread_sched();
         std::thread::sleep(Duration::from_secs(5));
         for (name, ns, slices) in common::thread_sched() {
-            let (ns0, sl0) = th0.iter().find(|(n, _, _)| *n == name).map_or((0, 0), |(_, a, b)| (*a, *b));
+            let (ns0, sl0) = th0
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .map_or((0, 0), |(_, a, b)| (*a, *b));
             println!(
                 "  thread {name}: {:.3} ms CPU/s, {:.0} wake-ups/s",
                 (ns - ns0) as f64 / 5e6,
                 (slices - sl0) as f64 / 5.0
             );
         }
-        let pct = (common::cpu_ticks() - c0) as f64 / ticks_per_s / t0.elapsed().as_secs_f64() * 100.0;
+        let pct =
+            (common::cpu_ticks() - c0) as f64 / ticks_per_s / t0.elapsed().as_secs_f64() * 100.0;
         println!("idle CPU ({label}): {pct:.2} % of one core");
         pct
     };
     let idle = measure("session open, TesterPresent off");
     s.set_tester_present(true, None).expect("tp");
     let idle_tp = measure("TesterPresent every 2 s");
-    assert!(idle < 5.0 && idle_tp < 5.0, "idle {idle:.2} %, with TP {idle_tp:.2} %");
-    println!("threads: before open {threads_before}, open {}", common::thread_count());
+    assert!(
+        idle < 5.0 && idle_tp < 5.0,
+        "idle {idle:.2} %, with TP {idle_tp:.2} %"
+    );
+    println!(
+        "threads: before open {threads_before}, open {}",
+        common::thread_count()
+    );
     s.close();
     drop(s);
     std::thread::sleep(Duration::from_millis(300));
     let after = common::thread_count();
     println!("threads after close: {after}");
-    assert!(after <= threads_before, "threads left behind: before {threads_before}, after {after}");
+    assert!(
+        after <= threads_before,
+        "threads left behind: before {threads_before}, after {after}"
+    );
 }

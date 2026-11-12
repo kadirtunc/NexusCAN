@@ -14,9 +14,7 @@ use nexus_cloud::{
     ChronologicalFrameWireDto, CloudProtocolError, CycleHealthKind, ExponentialBackoff,
     FrameTelemetryWireDto, InboundCloudMessage, LiveSignalWireDto, SchemaAckStatus,
 };
-use nexus_hal::{
-    BusHealthDto, ChronologicalFrameDto, FrameTelemetryDto, TelemetrySnapshotDto,
-};
+use nexus_hal::{BusHealthDto, ChronologicalFrameDto, FrameTelemetryDto, TelemetrySnapshotDto};
 use nexus_netdb::DatabaseSchemaDto;
 use serde::Serialize;
 use thiserror::Error;
@@ -141,7 +139,9 @@ struct ParsedWsEndpoint {
 
 fn parse_ws_endpoint(url: &str) -> Result<ParsedWsEndpoint, WsBridgeError> {
     if url.trim().starts_with("wss://") {
-        return Err(WsBridgeError::InsecureTransport(nexus_cloud::redact_url(url)));
+        return Err(WsBridgeError::InsecureTransport(nexus_cloud::redact_url(
+            url,
+        )));
     }
     let rest = url
         .trim()
@@ -190,7 +190,9 @@ fn parse_ws_endpoint(url: &str) -> Result<ParsedWsEndpoint, WsBridgeError> {
     }
     // WP-10: no TLS yet -> plaintext only towards a loopback test server.
     if !nexus_cloud::is_loopback_host(&connect_host) {
-        return Err(WsBridgeError::InsecureTransport(nexus_cloud::redact_url(url)));
+        return Err(WsBridgeError::InsecureTransport(nexus_cloud::redact_url(
+            url,
+        )));
     }
 
     Ok(ParsedWsEndpoint {
@@ -224,11 +226,7 @@ impl BufferedWsClient {
                  Sec-WebSocket-Version: 13\r\n\
                  User-Agent: nexuscan-cli/{}\r\n\
                  Authorization: {}\r\n\r\n",
-                parsed.path_and_query,
-                parsed.host_header,
-                ws_key,
-                CLI_VERSION,
-                bearer_header,
+                parsed.path_and_query, parsed.host_header, ws_key, CLI_VERSION, bearer_header,
             );
             stream.write_all(upgrade_req.as_bytes()).await?;
 
@@ -279,7 +277,11 @@ impl BufferedWsClient {
                 read_pos,
                 fragment_buf: Vec::new(),
                 in_text_fragment: false,
-                mask_state: if mask_seed == 0 { 0x5A3C_9E17 } else { mask_seed },
+                mask_state: if mask_seed == 0 {
+                    0x5A3C_9E17
+                } else {
+                    mask_seed
+                },
             })
         })
         .await
@@ -437,8 +439,7 @@ impl BufferedWsClient {
                         self.fragment_buf.extend_from_slice(&payload);
                         if fin {
                             self.in_text_fragment = false;
-                            let text =
-                                String::from_utf8_lossy(&self.fragment_buf).into_owned();
+                            let text = String::from_utf8_lossy(&self.fragment_buf).into_owned();
                             self.fragment_buf.clear();
                             return Ok(WsRecvEvent::Text(text));
                         }
@@ -520,7 +521,8 @@ pub fn coalesce_and_convert_snapshot(
             let mut combined_changed_hi = 0u32;
 
             for (idx, branch) in entries.iter().enumerate() {
-                let is_newest_branch = idx + 1 == entries.len() && branch.last_timestamp_us == newest_ts;
+                let is_newest_branch =
+                    idx + 1 == entries.len() && branch.last_timestamp_us == newest_ts;
                 total_rx_count = total_rx_count.saturating_add(branch.rx_count);
                 combined_changed_lo |= branch.changed_bytes_lo;
                 combined_changed_hi |= branch.changed_bytes_hi;
@@ -1051,8 +1053,7 @@ async fn handle_inbound_text_frame(
         }
         Err(CloudProtocolError::ForbiddenRemoteActuationCommand(cmd)) => {
             shared_state.write_metrics(|m| {
-                m.security_violations_rejected =
-                    m.security_violations_rejected.saturating_add(1);
+                m.security_violations_rejected = m.security_violations_rejected.saturating_add(1);
             });
             eprintln!(
                 "[SECURITY] Blocked forbidden remote actuation command '{cmd}' — Read-Only Listen-Only invariant enforced!"
@@ -1071,7 +1072,9 @@ mod wp10_url_tests {
 
     #[test]
     fn ws_endpoint_is_loopback_only_and_errors_never_contain_the_token() {
-        assert!(parse_ws_endpoint("ws://127.0.0.1:3000/api/bridge/ws?token=nxc_tok_secret").is_ok());
+        assert!(
+            parse_ws_endpoint("ws://127.0.0.1:3000/api/bridge/ws?token=nxc_tok_secret").is_ok()
+        );
         assert!(parse_ws_endpoint("ws://[::1]:3000/api/bridge/ws").is_ok());
         assert!(parse_ws_endpoint("ws://localhost/api/bridge/ws").is_ok());
         for bad in [

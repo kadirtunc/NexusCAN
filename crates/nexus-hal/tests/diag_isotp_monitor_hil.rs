@@ -37,37 +37,62 @@ fn multi_frame_did_read_is_captured_in_bus_order() {
     let cfg = config(CLASSIC, false, false);
 
     // Unknown session: empty page, nothing opened.
-    let p = engine.cmd_diag_get_isotp_frames(cfg.clone(), 0, None).expect("page");
+    let p = engine
+        .cmd_diag_get_isotp_frames(cfg.clone(), 0, None)
+        .expect("page");
     assert!(p.frames.is_empty() && p.last_seq == 0 && !p.truncated);
-    assert_eq!(engine.diag_tap_count(0), 0, "reading the monitor never opens a session");
+    assert_eq!(
+        engine.diag_tap_count(0),
+        0,
+        "reading the monitor never opens a session"
+    );
 
-    let did = engine.cmd_diag_read_did(cfg.clone(), 0xF1F1, None).expect("read F1F1");
+    let did = engine
+        .cmd_diag_read_did(cfg.clone(), 0xF1F1, None)
+        .expect("read F1F1");
     let total = 3 + did.raw.len(); // 62 F1 F1 + record
     assert!(total > 7, "multi-frame response expected");
     let expected_cf = (total - 6).div_ceil(7);
 
-    let page = engine.cmd_diag_get_isotp_frames(cfg.clone(), 0, Some(2_000)).expect("page");
+    let page = engine
+        .cmd_diag_get_isotp_frames(cfg.clone(), 0, Some(2_000))
+        .expect("page");
     assert!(!page.truncated);
     assert_eq!(page.dropped, 0);
     let seqs: Vec<u64> = page.frames.iter().map(|f| f.seq).collect();
-    assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "contiguous seq: {seqs:?}");
+    assert!(
+        seqs.windows(2).all(|w| w[1] == w[0] + 1),
+        "contiguous seq: {seqs:?}"
+    );
     assert_eq!(seqs.first(), Some(&1));
     assert_eq!(page.last_seq, *seqs.last().expect("frames"));
     assert!(
-        page.frames.windows(2).all(|w| w[1].timestamp_us >= w[0].timestamp_us),
+        page.frames
+            .windows(2)
+            .all(|w| w[1].timestamp_us >= w[0].timestamp_us),
         "monotonic timestamps: {:?}",
-        page.frames.iter().map(|f| f.timestamp_us).collect::<Vec<_>>()
+        page.frames
+            .iter()
+            .map(|f| f.timestamp_us)
+            .collect::<Vec<_>>()
     );
 
-    let pattern: Vec<(IsoTpDirection, u32, IsoTpFrameKind)> =
-        page.frames.iter().map(|f| (f.direction, f.can_id, f.kind)).collect();
+    let pattern: Vec<(IsoTpDirection, u32, IsoTpFrameKind)> = page
+        .frames
+        .iter()
+        .map(|f| (f.direction, f.can_id, f.kind))
+        .collect();
     let mut expected = vec![
         (IsoTpDirection::Tx, CLASSIC.req, IsoTpFrameKind::Single),
         (IsoTpDirection::Rx, CLASSIC.resp, IsoTpFrameKind::First),
         (IsoTpDirection::Tx, CLASSIC.req, IsoTpFrameKind::FlowControl),
     ];
     expected.extend(std::iter::repeat_n(
-        (IsoTpDirection::Rx, CLASSIC.resp, IsoTpFrameKind::Consecutive),
+        (
+            IsoTpDirection::Rx,
+            CLASSIC.resp,
+            IsoTpFrameKind::Consecutive,
+        ),
         expected_cf,
     ));
     assert_eq!(pattern, expected);
@@ -78,17 +103,28 @@ fn multi_frame_did_read_is_captured_in_bus_order() {
     assert!(!sf.fd && !sf.is_extended);
     let ff = &page.frames[1];
     assert_eq!(&ff.data[2..5], &[0x62, 0xF1, 0xF1]);
-    assert_eq!(usize::from(ff.data[0] & 0x0F) << 8 | usize::from(ff.data[1]), total);
+    assert_eq!(
+        usize::from(ff.data[0] & 0x0F) << 8 | usize::from(ff.data[1]),
+        total
+    );
     assert_eq!(page.frames[2].data[0], 0x30, "FC CTS");
     for (i, cf) in page.frames[3..].iter().enumerate() {
-        assert_eq!(cf.data[0], 0x20 | (((i + 1) & 0x0F) as u8), "CF sequence number");
+        assert_eq!(
+            cf.data[0],
+            0x20 | (((i + 1) & 0x0F) as u8),
+            "CF sequence number"
+        );
     }
 
     // Incremental paging from the last cursor: nothing new.
-    let p = engine.cmd_diag_get_isotp_frames(cfg.clone(), page.last_seq, None).expect("page");
+    let p = engine
+        .cmd_diag_get_isotp_frames(cfg.clone(), page.last_seq, None)
+        .expect("page");
     assert!(p.frames.is_empty() && p.last_seq == page.last_seq && !p.truncated);
     // Small pages walk the same frames.
-    let p = engine.cmd_diag_get_isotp_frames(cfg.clone(), 0, Some(2)).expect("page");
+    let p = engine
+        .cmd_diag_get_isotp_frames(cfg.clone(), 0, Some(2))
+        .expect("page");
     assert_eq!(p.frames.len(), 2);
     assert_eq!(p.last_seq, 2);
 

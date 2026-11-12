@@ -375,7 +375,10 @@ pub struct DiagError {
 
 impl DiagError {
     pub fn new(code: DiagErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 
     /// Wire format for IPC errors (Tauri `Err(String)` and bridge 400 body):
@@ -403,10 +406,9 @@ mod tests {
 
     #[test]
     fn discovery_request_defaults_and_casing() {
-        let r: EcuDiscoveryRequestDto = serde_json::from_str(
-            r#"{"busId":0,"isExtendedId":false,"functionalId":2015}"#,
-        )
-        .unwrap();
+        let r: EcuDiscoveryRequestDto =
+            serde_json::from_str(r#"{"busId":0,"isExtendedId":false,"functionalId":2015}"#)
+                .unwrap();
         assert_eq!(r.padding, Some(0xAA));
         assert_eq!(r.request_pdu, None);
         assert_eq!(r.window_ms, None);
@@ -429,7 +431,15 @@ mod tests {
             ignored_frames: 0,
         })
         .unwrap();
-        for k in ["requestBytes", "functionalId", "isExtendedId", "windowMs", "txTimestampUs", "ecus", "ignoredFrames"] {
+        for k in [
+            "requestBytes",
+            "functionalId",
+            "isExtendedId",
+            "windowMs",
+            "txTimestampUs",
+            "ecus",
+            "ignoredFrames",
+        ] {
             assert!(v.get(k).is_some(), "{k}");
         }
     }

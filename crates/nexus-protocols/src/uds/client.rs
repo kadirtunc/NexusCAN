@@ -28,8 +28,8 @@ mod engine;
 mod format;
 mod nrc;
 
-pub use capture::{classify_kind, IsoTpCapture, TxnTag, ISOTP_CAPTURE_CAPACITY};
 pub use bridge::{ISOTP_MAX_WFT, MAX_RESPONSE_PDU};
+pub use capture::{classify_kind, IsoTpCapture, TxnTag, ISOTP_CAPTURE_CAPACITY};
 pub use conversation::{CONVERSATION_BYTE_BUDGET, CONVERSATION_CAPACITY};
 pub use engine::MAX_REQUEST_PDU;
 pub use format::{decode_did_record, format_dtc_code, response_matches};
@@ -48,8 +48,9 @@ use self::bridge::{Addressing, BridgeShared, PortMsg, CRATE_BUS, PORT_QUEUE_DEPT
 use self::engine::{err, keepalive_loop, Inner, ISOTP_TIMEOUT, TP_INTERVAL_RANGE_MS};
 use self::format::{negative_code, parse_dtcs_by_status};
 use super::dto::{
-    ConversationPageDto, DiagError, DiagErrorCode, DiagOrigin, DiagSessionConfigDto, DiagSessionInfoDto,
-    DidReadResultDto, DtcEntryDto, IsoTpFramePageDto, UdsAddressing, UdsRequestOptionsDto, UdsResponseDto,
+    ConversationPageDto, DiagError, DiagErrorCode, DiagOrigin, DiagSessionConfigDto,
+    DiagSessionInfoDto, DidReadResultDto, DtcEntryDto, IsoTpFramePageDto, UdsAddressing,
+    UdsRequestOptionsDto, UdsResponseDto,
 };
 use super::port::DiagCanPort;
 
@@ -73,37 +74,64 @@ const _: () = {
 };
 
 fn identifier(id: u32, extended: bool, what: &str) -> Result<Identifier, DiagError> {
-    let r = if extended { Identifier::extended(id) } else { Identifier::standard(id) };
+    let r = if extended {
+        Identifier::extended(id)
+    } else {
+        Identifier::standard(id)
+    };
     r.map_err(|_| {
         err(
             DiagErrorCode::InvalidInput,
-            format!("{what} {id:#X} is not a valid {} CAN id", if extended { "29-bit" } else { "11-bit" }),
+            format!(
+                "{what} {id:#X} is not a valid {} CAN id",
+                if extended { "29-bit" } else { "11-bit" }
+            ),
         )
     })
 }
 
-fn isotp_config(builder: IsoTPConfigBuilder, cfg: &DiagSessionConfigDto) -> Result<IsoTPConfig, DiagError> {
+fn isotp_config(
+    builder: IsoTPConfigBuilder,
+    cfg: &DiagSessionConfigDto,
+) -> Result<IsoTPConfig, DiagError> {
     let b = builder.bus(CRATE_BUS).fd(cfg.use_fd).timeout(ISOTP_TIMEOUT);
     let b = match cfg.padding {
         Some(p) => b.padding(p),
         None => b.without_padding(),
     };
-    b.build().map_err(|e| err(DiagErrorCode::InvalidInput, format!("invalid ISO-TP configuration: {e}")))
+    b.build().map_err(|e| {
+        err(
+            DiagErrorCode::InvalidInput,
+            format!("invalid ISO-TP configuration: {e}"),
+        )
+    })
 }
 
 fn nrc_error(nrc: u8) -> DiagError {
-    err(DiagErrorCode::NegativeResponse, format!("nrc=0x{nrc:02X} {}", nrc_name(nrc)))
+    err(
+        DiagErrorCode::NegativeResponse,
+        format!("nrc=0x{nrc:02X} {}", nrc_name(nrc)),
+    )
 }
 
 impl UdsSession {
     /// Opens the session over `port` (tap already filtered to request/response/functional ids).
-    pub fn open(port: Box<dyn DiagCanPort>, config: DiagSessionConfigDto) -> Result<Self, DiagError> {
+    pub fn open(
+        port: Box<dyn DiagCanPort>,
+        config: DiagSessionConfigDto,
+    ) -> Result<Self, DiagError> {
         let port: Arc<dyn DiagCanPort> = Arc::from(port);
         if port.is_closed() {
-            return Err(err(DiagErrorCode::SessionClosed, "diagnostic tap is already closed"));
+            return Err(err(
+                DiagErrorCode::SessionClosed,
+                "diagnostic tap is already closed",
+            ));
         }
         if config.use_fd && !port.fd_enabled() {
-            return Err(err(DiagErrorCode::InvalidInput, "useFd requires a channel opened with CAN-FD"));
+            return Err(err(
+                DiagErrorCode::InvalidInput,
+                "useFd requires a channel opened with CAN-FD",
+            ));
         }
         let ext = config.is_extended_id;
         let req = identifier(config.request_id, ext, "requestId")?;
@@ -112,7 +140,10 @@ impl UdsSession {
         let func_cfg = match config.functional_id {
             Some(f) => {
                 let fid = identifier(f, ext, "functionalId")?;
-                Some(isotp_config(IsoTPConfig::builder(fid).rx_id(resp), &config)?)
+                Some(isotp_config(
+                    IsoTPConfig::builder(fid).rx_id(resp),
+                    &config,
+                )?)
             }
             None => None,
         };
@@ -132,7 +163,12 @@ impl UdsSession {
             .thread_name("nexus-uds-rt")
             .enable_time()
             .build()
-            .map_err(|e| err(DiagErrorCode::Internal, format!("cannot start UDS runtime: {e}")))?;
+            .map_err(|e| {
+                err(
+                    DiagErrorCode::Internal,
+                    format!("cannot start UDS runtime: {e}"),
+                )
+            })?;
         let handle = runtime.handle().clone();
 
         let inner = Arc::new(Inner::new(
@@ -159,12 +195,25 @@ impl UdsSession {
                         }
                     }
                 })
-                .map_err(|e| err(DiagErrorCode::Internal, format!("cannot start UDS pump thread: {e}")))?
+                .map_err(|e| {
+                    err(
+                        DiagErrorCode::Internal,
+                        format!("cannot start UDS pump thread: {e}"),
+                    )
+                })?
         };
 
         handle.spawn(keepalive_loop(inner.clone(), inner.tp_cfg.subscribe()));
 
-        Ok(Self { inner, handle, resources: Mutex::new(Some(Resources { runtime, pump, pump_stop })) })
+        Ok(Self {
+            inner,
+            handle,
+            resources: Mutex::new(Some(Resources {
+                runtime,
+                pump,
+                pump_stop,
+            })),
+        })
     }
 
     /// Runs `fut` on the session runtime and blocks the calling thread for its result.
@@ -180,7 +229,8 @@ impl UdsSession {
         self.handle.spawn(async move {
             let _ = tx.send(fut.await);
         });
-        rx.recv().unwrap_or_else(|_| Err(err(DiagErrorCode::SessionClosed, "UDS session was closed")))
+        rx.recv()
+            .unwrap_or_else(|_| Err(err(DiagErrorCode::SessionClosed, "UDS session was closed")))
     }
 
     /// Sends `[sid, data...]` and waits for the matching final response (0x78 aware).
@@ -189,7 +239,12 @@ impl UdsSession {
     /// plus `p2MarginMs`); each 0x78 restarts a P2*client wait. `opts.timeout_ms` replaces the
     /// initial wait and caps the whole exchange. Concurrent callers queue; `busy` only when the
     /// queue wait exceeds the request's own budget (`timeout_ms`, else P2*client).
-    pub fn request(&self, sid: u8, data: &[u8], opts: &UdsRequestOptionsDto) -> Result<UdsResponseDto, DiagError> {
+    pub fn request(
+        &self,
+        sid: u8,
+        data: &[u8],
+        opts: &UdsRequestOptionsDto,
+    ) -> Result<UdsResponseDto, DiagError> {
         if opts.timeout_ms == Some(0) {
             return Err(err(DiagErrorCode::InvalidInput, "timeoutMs must be > 0"));
         }
@@ -198,14 +253,26 @@ impl UdsSession {
         pdu.extend_from_slice(data);
         let addressing = opts.addressing.unwrap_or(UdsAddressing::Physical);
         let origin = opts.origin.unwrap_or_default();
-        let total = opts.timeout_ms.map(|ms| Duration::from_millis(u64::from(ms)));
+        let total = opts
+            .timeout_ms
+            .map(|ms| Duration::from_millis(u64::from(ms)));
         let inner = self.inner.clone();
         self.run(async move {
             let queue_wait = total.unwrap_or_else(|| inner.timings().1);
-            let mut eng = tokio::time::timeout(queue_wait, inner.engine.lock()).await.map_err(|_| {
-                err(DiagErrorCode::Busy, format!("another request is still in progress after {} ms", queue_wait.as_millis()))
-            })?;
-            let ex = inner.exchange(&mut eng, &pdu, addressing, total, origin, false).await?;
+            let mut eng = tokio::time::timeout(queue_wait, inner.engine.lock())
+                .await
+                .map_err(|_| {
+                    err(
+                        DiagErrorCode::Busy,
+                        format!(
+                            "another request is still in progress after {} ms",
+                            queue_wait.as_millis()
+                        ),
+                    )
+                })?;
+            let ex = inner
+                .exchange(&mut eng, &pdu, addressing, total, origin, false)
+                .await?;
             let nrc = negative_code(&ex.raw);
             Ok(UdsResponseDto {
                 positive: nrc.is_none(),
@@ -228,17 +295,32 @@ impl UdsSession {
     }
 
     /// [`Self::read_did`] with an explicit origin tag for the conversation log.
-    pub fn read_did_with(&self, did: u16, origin: DiagOrigin) -> Result<DidReadResultDto, DiagError> {
-        let opts = UdsRequestOptionsDto { origin: Some(origin), ..Default::default() };
+    pub fn read_did_with(
+        &self,
+        did: u16,
+        origin: DiagOrigin,
+    ) -> Result<DidReadResultDto, DiagError> {
+        let opts = UdsRequestOptionsDto {
+            origin: Some(origin),
+            ..Default::default()
+        };
         let r = self.request(0x22, &did.to_be_bytes(), &opts)?;
         if let Some(nrc) = r.nrc {
             return Err(nrc_error(nrc));
         }
         if r.raw.len() < 3 || r.raw[1..3] != did.to_be_bytes() {
-            return Err(err(DiagErrorCode::UnexpectedResponse, format!("malformed 0x62 response for DID {did:04X}")));
+            return Err(err(
+                DiagErrorCode::UnexpectedResponse,
+                format!("malformed 0x62 response for DID {did:04X}"),
+            ));
         }
         let raw = r.raw[3..].to_vec();
-        Ok(DidReadResultDto { did, decoded: decode_did_record(&raw), raw, transaction_seq: r.transaction_seq })
+        Ok(DidReadResultDto {
+            did,
+            decoded: decode_did_record(&raw),
+            raw,
+            transaction_seq: r.transaction_seq,
+        })
     }
 
     /// 0x19 0x02 with `status_mask` (origin [`DiagOrigin::Dtc`]).
@@ -247,18 +329,33 @@ impl UdsSession {
     }
 
     /// [`Self::read_dtcs_by_status`] with an explicit origin tag for the conversation log.
-    pub fn read_dtcs_by_status_with(&self, status_mask: u8, origin: DiagOrigin) -> Result<Vec<DtcEntryDto>, DiagError> {
-        let opts = UdsRequestOptionsDto { origin: Some(origin), ..Default::default() };
+    pub fn read_dtcs_by_status_with(
+        &self,
+        status_mask: u8,
+        origin: DiagOrigin,
+    ) -> Result<Vec<DtcEntryDto>, DiagError> {
+        let opts = UdsRequestOptionsDto {
+            origin: Some(origin),
+            ..Default::default()
+        };
         let r = self.request(0x19, &[0x02, status_mask], &opts)?;
         if let Some(nrc) = r.nrc {
             return Err(nrc_error(nrc));
         }
-        parse_dtcs_by_status(&r.raw)
-            .ok_or_else(|| err(DiagErrorCode::UnexpectedResponse, "malformed 0x59 0x02 response"))
+        parse_dtcs_by_status(&r.raw).ok_or_else(|| {
+            err(
+                DiagErrorCode::UnexpectedResponse,
+                "malformed 0x59 0x02 response",
+            )
+        })
     }
 
     /// Background TesterPresent (`3E 80`), serialized with requests. `interval_ms` default 2000.
-    pub fn set_tester_present(&self, enabled: bool, interval_ms: Option<u32>) -> Result<(), DiagError> {
+    pub fn set_tester_present(
+        &self,
+        enabled: bool,
+        interval_ms: Option<u32>,
+    ) -> Result<(), DiagError> {
         if self.inner.is_closed() {
             return Err(err(DiagErrorCode::SessionClosed, "UDS session is closed"));
         }
@@ -266,7 +363,11 @@ impl UdsSession {
             Some(ms) if !TP_INTERVAL_RANGE_MS.contains(&ms) => {
                 return Err(err(
                     DiagErrorCode::InvalidInput,
-                    format!("intervalMs must be {}..={}", TP_INTERVAL_RANGE_MS.start(), TP_INTERVAL_RANGE_MS.end()),
+                    format!(
+                        "intervalMs must be {}..={}",
+                        TP_INTERVAL_RANGE_MS.start(),
+                        TP_INTERVAL_RANGE_MS.end()
+                    ),
                 ));
             }
             Some(ms) => ms,
@@ -312,10 +413,14 @@ impl UdsSession {
     /// Stops keepalive, closes the tap. Idempotent; later calls on this session return
     /// `SessionClosed` (contract change approved by team-lead: `&self` for `Arc<UdsSession>`).
     pub fn close(&self) {
-        let Some(res) = self.resources.lock().take() else { return };
+        let Some(res) = self.resources.lock().take() else {
+            return;
+        };
         self.inner.client_closed.store(true, Ordering::Release);
         self.inner.state.lock().tester_present_enabled = false;
-        self.inner.tp_cfg.send_replace((false, self.inner.state.lock().tester_present_interval_ms));
+        self.inner
+            .tp_cfg
+            .send_replace((false, self.inner.state.lock().tester_present_interval_ms));
         self.inner.log_closed("client_close");
         // Stop the ISO-TP worker first (it blocks ≤ 50 ms in recv; the kick wakes it now).
         let _ = self.inner.kick.try_send(PortMsg::Kick);

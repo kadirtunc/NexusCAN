@@ -35,14 +35,19 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
 
-      # `cargo fmt --check` is intentionally NOT gated yet: the tree is not rustfmt-clean
-      # (66 files). Add `cargo fmt --all --check` here after a repo-wide `cargo fmt`.
+      - name: rustfmt (root workspace + src-tauri + fuzz crates)
+        if: runner.os == 'Linux'
+        run: |
+          cargo fmt --all --check
+          (cd src-tauri && cargo fmt --check)
+          (cd crates/nexus-hal/fuzz && cargo fmt --check)
+          (cd crates/nexus-netdb/fuzz && cargo fmt --check)
 
       # Real SocketCAN HIL (vcan0): Panic Stop wire race, diag HIL. Best effort — if the
       # runner kernel has no vcan module the HIL tests print SKIP instead of failing.

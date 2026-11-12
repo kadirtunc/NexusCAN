@@ -295,7 +295,10 @@ pub fn is_canonical_serial_port_name(name: &str) -> bool {
             && s.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'+'))
     }
-    if let Some(n) = name.strip_prefix("/dev/ttyUSB").or_else(|| name.strip_prefix("/dev/ttyACM")) {
+    if let Some(n) = name
+        .strip_prefix("/dev/ttyUSB")
+        .or_else(|| name.strip_prefix("/dev/ttyACM"))
+    {
         return digits(n);
     }
     if let Some(rest) = name.strip_prefix("/dev/serial/by-id/") {
@@ -916,7 +919,10 @@ mod tests {
             "CON",
             "../COM3",
         ] {
-            assert!(!is_canonical_serial_port_name(bad), "{bad} must be rejected");
+            assert!(
+                !is_canonical_serial_port_name(bad),
+                "{bad} must be rejected"
+            );
         }
     }
 
@@ -928,7 +934,13 @@ mod tests {
             serial_port: Some("/dev/mem".to_string()),
             ..ChannelConfig::default()
         };
-        let err = drv.open_channel(&desc, &cfg).err().expect("must refuse /dev/mem");
-        assert!(err.to_string().contains("Refusing to open '/dev/mem'"), "{err}");
+        let err = drv
+            .open_channel(&desc, &cfg)
+            .err()
+            .expect("must refuse /dev/mem");
+        assert!(
+            err.to_string().contains("Refusing to open '/dev/mem'"),
+            "{err}"
+        );
     }
 }

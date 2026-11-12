@@ -810,7 +810,10 @@ mod tests {
         assert_eq!(map.get(&std_id), Some(&"BMS_Std_100"));
         assert_eq!(map.get(&ext_id), Some(&"J1939_Ext_100"));
 
-        assert_eq!(CanIdKey::new_standard(0x7FF), Some(CanIdKey::Standard(0x7FF)));
+        assert_eq!(
+            CanIdKey::new_standard(0x7FF),
+            Some(CanIdKey::Standard(0x7FF))
+        );
         assert_eq!(CanIdKey::new_standard(0x800), None);
         assert_eq!(
             CanIdKey::new_extended(0x1FFF_FFFF),
@@ -927,9 +930,14 @@ mod tests {
         assert!(!classical.is_extended());
 
         // CAN-FD padding quantization (10 bytes -> quantized 12-byte DLC)
-        let fd_padded =
-            RawCanFrame::new_fd(1, CanIdKey::Extended(0x18FF_50E5), &[0x11; 10], true, 99_999)
-                .expect("valid 10->12B CAN-FD frame");
+        let fd_padded = RawCanFrame::new_fd(
+            1,
+            CanIdKey::Extended(0x18FF_50E5),
+            &[0x11; 10],
+            true,
+            99_999,
+        )
+        .expect("valid 10->12B CAN-FD frame");
         assert_eq!(fd_padded.dlc, 12);
         assert!(fd_padded.is_fd());
         assert!(fd_padded.is_brs());
@@ -974,7 +982,8 @@ mod tests {
         assert_eq!(decoded.payload()[63], 0xFE);
 
         // CanIdKey tagged serde check
-        let key_json = serde_json::to_string(&CanIdKey::Standard(0x100)).expect("serialize CanIdKey");
+        let key_json =
+            serde_json::to_string(&CanIdKey::Standard(0x100)).expect("serialize CanIdKey");
         assert_eq!(key_json, r#"{"kind":"Standard","id":256}"#);
         let key_back: CanIdKey = serde_json::from_str(&key_json).expect("deserialize CanIdKey");
         assert_eq!(key_back, CanIdKey::Standard(0x100));

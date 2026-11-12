@@ -34,7 +34,11 @@ fn sid_supports_suppression(sid: u8) -> bool {
 /// single-frame only (classic 1..=7 bytes, CAN-FD 1..=62 bytes). A request with the
 /// suppressPosRspMsgIndicationBit set is rejected (healthy ECUs would stay silent).
 pub fn validate_request_pdu(pdu: &[u8], use_fd: bool) -> Result<(), String> {
-    let max = if use_fd { MAX_FD_SF_PDU } else { MAX_CLASSIC_SF_PDU };
+    let max = if use_fd {
+        MAX_FD_SF_PDU
+    } else {
+        MAX_CLASSIC_SF_PDU
+    };
     if pdu.is_empty() || pdu.len() > max {
         return Err(format!(
             "requestPdu must be 1..={max} bytes: functional requests are ISO-TP single frames only ({} CAN, got {} bytes)",
@@ -66,7 +70,11 @@ pub fn build_single_frame(pdu: &[u8], padding: Option<u8>) -> Vec<u8> {
     }
     out.extend_from_slice(pdu);
     if let Some(p) = padding {
-        let target = if out.len() <= 8 { 8 } else { fd_len_at_least(out.len()) };
+        let target = if out.len() <= 8 {
+            8
+        } else {
+            fd_len_at_least(out.len())
+        };
         out.resize(target, p);
     }
     out
@@ -232,7 +240,13 @@ impl DiscoveryCollector {
 
     /// Feeds one received frame (`data` = CAN payload, `rtr` frames must be passed as ignored
     /// by the caller or with empty data).
-    pub fn on_frame(&mut self, arb_id: u32, extended: bool, timestamp_us: u64, data: &[u8]) -> FrameVerdict {
+    pub fn on_frame(
+        &mut self,
+        arb_id: u32,
+        extended: bool,
+        timestamp_us: u64,
+        data: &[u8],
+    ) -> FrameVerdict {
         if extended == self.extended && arb_id == self.functional_id {
             return FrameVerdict::FunctionalEcho;
         }
@@ -342,8 +356,14 @@ mod tests {
 
     #[test]
     fn single_frame_building() {
-        assert_eq!(build_single_frame(&[0x3E, 0x00], Some(0xAA)), vec![0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]);
-        assert_eq!(build_single_frame(&[0x3E, 0x00], None), vec![0x02, 0x3E, 0x00]);
+        assert_eq!(
+            build_single_frame(&[0x3E, 0x00], Some(0xAA)),
+            vec![0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]
+        );
+        assert_eq!(
+            build_single_frame(&[0x3E, 0x00], None),
+            vec![0x02, 0x3E, 0x00]
+        );
         let f = build_single_frame(&[0x22; 10], Some(0xCC));
         assert_eq!(&f[..2], &[0x00, 0x0A]);
         assert_eq!(f.len(), 12);
@@ -352,7 +372,10 @@ mod tests {
         assert_eq!(f.len(), 16);
         assert_eq!(f[15], 0xCC);
         assert_eq!(build_single_frame(&[0x22; 10], None).len(), 12);
-        assert_eq!(classify_pci(build_single_frame(&[0x22; 62], Some(0)).as_slice()), PciClass::Single(&[0x22; 62]));
+        assert_eq!(
+            classify_pci(build_single_frame(&[0x22; 62], Some(0)).as_slice()),
+            PciClass::Single(&[0x22; 62])
+        );
     }
 
     #[test]
@@ -366,9 +389,18 @@ mod tests {
 
     #[test]
     fn derive_ext_normal_fixed() {
-        assert_eq!(derive_physical_request_id(0x18DA_F110, true), Some(0x18DA_10F1));
-        assert_eq!(derive_physical_request_id(0x18DA_F1FF, true), Some(0x18DA_FFF1));
-        assert_eq!(derive_physical_request_id(0x18DA_0000, true), Some(0x18DA_0000));
+        assert_eq!(
+            derive_physical_request_id(0x18DA_F110, true),
+            Some(0x18DA_10F1)
+        );
+        assert_eq!(
+            derive_physical_request_id(0x18DA_F1FF, true),
+            Some(0x18DA_FFF1)
+        );
+        assert_eq!(
+            derive_physical_request_id(0x18DA_0000, true),
+            Some(0x18DA_0000)
+        );
         // functional (0x18DB) and other PGNs are not physical responses
         assert_eq!(derive_physical_request_id(0x18DB_33F1, true), None);
         assert_eq!(derive_physical_request_id(0x1CDA_F110, true), None);
@@ -391,14 +423,26 @@ mod tests {
 
     #[test]
     fn classify_single_frames() {
-        assert_eq!(classify_pci(&[0x02, 0x7E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]), PciClass::Single(&[0x7E, 0x00]));
-        assert_eq!(classify_pci(&[0x07, 1, 2, 3, 4, 5, 6, 7]), PciClass::Single(&[1, 2, 3, 4, 5, 6, 7]));
+        assert_eq!(
+            classify_pci(&[0x02, 0x7E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]),
+            PciClass::Single(&[0x7E, 0x00])
+        );
+        assert_eq!(
+            classify_pci(&[0x07, 1, 2, 3, 4, 5, 6, 7]),
+            PciClass::Single(&[1, 2, 3, 4, 5, 6, 7])
+        );
         // unpadded, exact length
-        assert_eq!(classify_pci(&[0x03, 0x7F, 0x3E, 0x12]), PciClass::Single(&[0x7F, 0x3E, 0x12]));
+        assert_eq!(
+            classify_pci(&[0x03, 0x7F, 0x3E, 0x12]),
+            PciClass::Single(&[0x7F, 0x3E, 0x12])
+        );
         // length larger than the frame
         assert_eq!(classify_pci(&[0x05, 0x7E, 0x00]), PciClass::Ignore);
         // classic SF length > 7 is invalid
-        assert_eq!(classify_pci(&[0x08, 1, 2, 3, 4, 5, 6, 7, 8]), PciClass::Ignore);
+        assert_eq!(
+            classify_pci(&[0x08, 1, 2, 3, 4, 5, 6, 7, 8]),
+            PciClass::Ignore
+        );
     }
 
     #[test]
@@ -417,18 +461,30 @@ mod tests {
     fn classify_first_frames_and_others() {
         assert_eq!(
             classify_pci(&[0x10, 0x14, 0x62, 0xF1, 0x90, 0x57, 0x4E, 0x58]),
-            PciClass::FirstFrame { total_len: 0x14, first: &[0x62, 0xF1, 0x90, 0x57, 0x4E, 0x58] }
+            PciClass::FirstFrame {
+                total_len: 0x14,
+                first: &[0x62, 0xF1, 0x90, 0x57, 0x4E, 0x58]
+            }
         );
         assert_eq!(
             classify_pci(&[0x1F, 0xFF, 1, 2]),
-            PciClass::FirstFrame { total_len: 0xFFF, first: &[1, 2] }
+            PciClass::FirstFrame {
+                total_len: 0xFFF,
+                first: &[1, 2]
+            }
         );
         assert_eq!(
             classify_pci(&[0x10, 0x00, 0x00, 0x01, 0x00, 0x00, 0x62, 0x01]),
-            PciClass::FirstFrame { total_len: 0x1_0000, first: &[0x62, 0x01] }
+            PciClass::FirstFrame {
+                total_len: 0x1_0000,
+                first: &[0x62, 0x01]
+            }
         );
         assert_eq!(classify_pci(&[0x10, 0x00, 0x00, 0x00]), PciClass::Ignore);
-        assert_eq!(classify_pci(&[0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x62]), PciClass::Ignore);
+        assert_eq!(
+            classify_pci(&[0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x62]),
+            PciClass::Ignore
+        );
         assert_eq!(classify_pci(&[0x10]), PciClass::Ignore);
         assert_eq!(classify_pci(&[0x21, 1, 2, 3]), PciClass::Ignore); // CF
         assert_eq!(classify_pci(&[0x30, 0x00, 0x00]), PciClass::Ignore); // FC
@@ -445,13 +501,34 @@ mod tests {
     #[test]
     fn collector_aggregates_multiple_ecus_sorted() {
         let mut c = DiscoveryCollector::new(0x3E, 0x7DE, false, 1_000);
-        assert_eq!(c.on_frame(0x7DE, false, 1_001, &sf(&[0x3E, 0x00])), FrameVerdict::FunctionalEcho);
-        assert_eq!(c.on_frame(0x7EE, false, 1_900, &sf(&[0x7E, 0x00])), FrameVerdict::Response);
-        assert_eq!(c.on_frame(0x7EA, false, 1_500, &sf(&[0x7E, 0x00])), FrameVerdict::Response);
-        assert_eq!(c.on_frame(0x7EA, false, 1_700, &sf(&[0x7E, 0x00])), FrameVerdict::Response);
-        assert_eq!(c.on_frame(0x7EC, false, 1_600, &sf(&[0x62, 0xF1])), FrameVerdict::Ignored);
-        assert_eq!(c.on_frame(0x7EC, false, 1_600, &[0x21, 1, 2]), FrameVerdict::Ignored);
-        assert_eq!(c.on_frame(0x7EC, true, 1_600, &sf(&[0x7E, 0x00])), FrameVerdict::Ignored);
+        assert_eq!(
+            c.on_frame(0x7DE, false, 1_001, &sf(&[0x3E, 0x00])),
+            FrameVerdict::FunctionalEcho
+        );
+        assert_eq!(
+            c.on_frame(0x7EE, false, 1_900, &sf(&[0x7E, 0x00])),
+            FrameVerdict::Response
+        );
+        assert_eq!(
+            c.on_frame(0x7EA, false, 1_500, &sf(&[0x7E, 0x00])),
+            FrameVerdict::Response
+        );
+        assert_eq!(
+            c.on_frame(0x7EA, false, 1_700, &sf(&[0x7E, 0x00])),
+            FrameVerdict::Response
+        );
+        assert_eq!(
+            c.on_frame(0x7EC, false, 1_600, &sf(&[0x62, 0xF1])),
+            FrameVerdict::Ignored
+        );
+        assert_eq!(
+            c.on_frame(0x7EC, false, 1_600, &[0x21, 1, 2]),
+            FrameVerdict::Ignored
+        );
+        assert_eq!(
+            c.on_frame(0x7EC, true, 1_600, &sf(&[0x7E, 0x00])),
+            FrameVerdict::Ignored
+        );
         let r = c.finish(vec![0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA], 300);
         assert_eq!(r.ignored_frames, 3);
         assert_eq!(r.ecus.len(), 2);
@@ -469,12 +546,32 @@ mod tests {
     #[test]
     fn collector_pending_then_final_and_negative() {
         let mut c = DiscoveryCollector::new(0x10, 0x18DB_33F1, true, 10);
-        assert_eq!(c.on_frame(0x18DA_F110, true, 20, &sf(&[0x7F, 0x10, 0x78])), FrameVerdict::Pending);
-        assert_eq!(c.on_frame(0x18DA_F110, true, 90, &sf(&[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4])), FrameVerdict::Response);
-        assert_eq!(c.on_frame(0x18DA_F120, true, 30, &sf(&[0x7F, 0x10, 0x22])), FrameVerdict::Response);
-        assert_eq!(c.on_frame(0x18DA_F130, true, 40, &sf(&[0x7F, 0x10, 0x78])), FrameVerdict::Pending);
+        assert_eq!(
+            c.on_frame(0x18DA_F110, true, 20, &sf(&[0x7F, 0x10, 0x78])),
+            FrameVerdict::Pending
+        );
+        assert_eq!(
+            c.on_frame(
+                0x18DA_F110,
+                true,
+                90,
+                &sf(&[0x50, 0x01, 0x00, 0x32, 0x01, 0xF4])
+            ),
+            FrameVerdict::Response
+        );
+        assert_eq!(
+            c.on_frame(0x18DA_F120, true, 30, &sf(&[0x7F, 0x10, 0x22])),
+            FrameVerdict::Response
+        );
+        assert_eq!(
+            c.on_frame(0x18DA_F130, true, 40, &sf(&[0x7F, 0x10, 0x78])),
+            FrameVerdict::Pending
+        );
         // wrong SID in a negative response
-        assert_eq!(c.on_frame(0x18DA_F140, true, 40, &sf(&[0x7F, 0x22, 0x31])), FrameVerdict::Ignored);
+        assert_eq!(
+            c.on_frame(0x18DA_F140, true, 40, &sf(&[0x7F, 0x22, 0x31])),
+            FrameVerdict::Ignored
+        );
         let r = c.finish(vec![], 300);
         assert_eq!(r.ecus.len(), 3);
         let a = &r.ecus[0];
@@ -496,14 +593,25 @@ mod tests {
     #[test]
     fn collector_records_first_frame_and_fd_escape() {
         let mut c = DiscoveryCollector::new(0x01, 0x7DF, false, 0);
-        assert_eq!(c.on_frame(0x7E8, false, 5, &[0x10, 0x0A, 0x41, 0x00, 0xBE, 0x3E, 0xB8, 0x11]), FrameVerdict::Response);
+        assert_eq!(
+            c.on_frame(
+                0x7E8,
+                false,
+                5,
+                &[0x10, 0x0A, 0x41, 0x00, 0xBE, 0x3E, 0xB8, 0x11]
+            ),
+            FrameVerdict::Response
+        );
         let mut fd = [0xAAu8; 12];
         fd[..8].copy_from_slice(&[0x00, 0x06, 0x41, 0x00, 0x98, 0x18, 0x80, 0x13]);
         assert_eq!(c.on_frame(0x7E9, false, 7, &fd), FrameVerdict::Response);
         // empty / short frames
         assert_eq!(c.on_frame(0x7EA, false, 7, &[]), FrameVerdict::Ignored);
         assert_eq!(c.on_frame(0x7EA, false, 7, &[0x01]), FrameVerdict::Ignored);
-        assert_eq!(c.on_frame(0x7EA, false, 7, &[0x01, 0x7F]), FrameVerdict::Ignored);
+        assert_eq!(
+            c.on_frame(0x7EA, false, 7, &[0x01, 0x7F]),
+            FrameVerdict::Ignored
+        );
         let r = c.finish(vec![], 50);
         assert_eq!(r.ecus.len(), 2);
         assert!(r.ecus[0].multi_frame && r.ecus[0].positive);

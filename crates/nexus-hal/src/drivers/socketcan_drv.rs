@@ -16,9 +16,9 @@ use nexus_core::{
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use socketcan::nl::CanCtrlModes;
 use socketcan::{
-    CanAnyFrame, CanCtrlMode, CanInterface, CanDataFrame, CanFdFrame, CanFdSocket, CanFilter as ScFilter, CanRemoteFrame,
-    CanSocket, EmbeddedFrame, ExtendedId, Frame as ScFrameTrait, Id, Socket, SocketOptions,
-    StandardId,
+    CanAnyFrame, CanCtrlMode, CanDataFrame, CanFdFrame, CanFdSocket, CanFilter as ScFilter,
+    CanInterface, CanRemoteFrame, CanSocket, EmbeddedFrame, ExtendedId, Frame as ScFrameTrait, Id,
+    Socket, SocketOptions, StandardId,
 };
 use std::fs;
 use std::io;
@@ -212,7 +212,11 @@ impl AdapterDriver for SocketCanDriver {
 
             let supports_fd = mtu >= 72;
             let is_virtual = is_virtual_iface(&iface);
-            let mode_tag = if supports_fd { "CAN-FD" } else { "Classical CAN" };
+            let mode_tag = if supports_fd {
+                "CAN-FD"
+            } else {
+                "Classical CAN"
+            };
 
             devices.push(DeviceDescriptorDto {
                 device_id: format!("socketcan:{iface}"),
@@ -401,8 +405,7 @@ impl CanChannel for SocketCanChannel {
             let poll_ready = {
                 let sock = self.socket.as_ref().ok_or(AdapterError::ChannelClosed)?;
                 let mut fds = [PollFd::new(sock.as_borrowed_fd(), PollFlags::POLLIN)];
-                let poll_timeout =
-                    PollTimeout::try_from(timeout_ms).unwrap_or(PollTimeout::MAX);
+                let poll_timeout = PollTimeout::try_from(timeout_ms).unwrap_or(PollTimeout::MAX);
                 match poll(&mut fds, poll_timeout) {
                     Ok(n) => n > 0,
                     Err(nix::errno::Errno::EINTR) => false,
@@ -662,24 +665,51 @@ mod tests {
         let std_frame_0x123 = 0x123u32;
         let ext_frame_0x123 = 0x123u32 | LINUX_CAN_EFF_FLAG;
 
-        let ext_only = kernel_filter(&CanFilter { id: 0x123, mask: 0x1FFF_FFFF, extended: Some(true) });
+        let ext_only = kernel_filter(&CanFilter {
+            id: 0x123,
+            mask: 0x1FFF_FFFF,
+            extended: Some(true),
+        });
         assert_eq!(ext_only, (0x8000_0123, 0x9FFF_FFFF));
         assert!(kernel_accepts(ext_only, ext_frame_0x123));
         assert!(!kernel_accepts(ext_only, std_frame_0x123));
 
-        let std_only = kernel_filter(&CanFilter { id: 0x123, mask: 0x7FF, extended: Some(false) });
+        let std_only = kernel_filter(&CanFilter {
+            id: 0x123,
+            mask: 0x7FF,
+            extended: Some(false),
+        });
         assert_eq!(std_only, (0x123, 0x8000_07FF));
         assert!(kernel_accepts(std_only, std_frame_0x123));
         assert!(!kernel_accepts(std_only, ext_frame_0x123));
         // Standard filter ids are masked to 11 bits.
-        assert_eq!(kernel_filter(&CanFilter { id: 0xFFFF, mask: 0xFFFF, extended: Some(false) }).0, 0x7FF);
+        assert_eq!(
+            kernel_filter(&CanFilter {
+                id: 0xFFFF,
+                mask: 0xFFFF,
+                extended: Some(false)
+            })
+            .0,
+            0x7FF
+        );
 
-        let both = kernel_filter(&CanFilter { id: 0x123, mask: 0x7FF, extended: None });
+        let both = kernel_filter(&CanFilter {
+            id: 0x123,
+            mask: 0x7FF,
+            extended: None,
+        });
         assert_eq!(both, (0x123, 0x7FF));
         assert!(kernel_accepts(both, std_frame_0x123));
         assert!(kernel_accepts(both, ext_frame_0x123));
         // Caller-supplied flag bits never leak into the kernel filter.
-        assert_eq!(kernel_filter(&CanFilter { id: 0xE000_0123, mask: 0xFFFF_FFFF, extended: None }), (0x123, 0x1FFF_FFFF));
+        assert_eq!(
+            kernel_filter(&CanFilter {
+                id: 0xE000_0123,
+                mask: 0xFFFF_FFFF,
+                extended: None
+            }),
+            (0x123, 0x1FFF_FFFF)
+        );
     }
 
     #[test]

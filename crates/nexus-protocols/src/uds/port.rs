@@ -56,10 +56,18 @@ pub struct DiagTapFilter {
 
 impl DiagTapFilter {
     pub const fn exact_std(id: u32) -> Self {
-        Self { id, mask: 0x7FF, extended: Some(false) }
+        Self {
+            id,
+            mask: 0x7FF,
+            extended: Some(false),
+        }
     }
     pub const fn exact_ext(id: u32) -> Self {
-        Self { id, mask: 0x1FFF_FFFF, extended: Some(true) }
+        Self {
+            id,
+            mask: 0x1FFF_FFFF,
+            extended: Some(true),
+        }
     }
 }
 

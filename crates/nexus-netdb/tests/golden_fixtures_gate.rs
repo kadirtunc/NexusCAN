@@ -51,8 +51,7 @@ fn load_merged_golden_databases() -> (CompiledDatabase, DatabaseSchemaDto) {
     assert_eq!(dbc_bundle.database.messages.len(), 4);
     assert_eq!(kcd_bundle.database.messages.len(), 4);
 
-    let (merged_ir, merge_diags) =
-        merge_databases(vec![dbc_bundle.database, kcd_bundle.database]);
+    let (merged_ir, merge_diags) = merge_databases(vec![dbc_bundle.database, kcd_bundle.database]);
     assert!(
         merge_diags.is_empty(),
         "Non-colliding golden DBC + KCD merge should emit zero warnings, got: {:?}",
@@ -113,12 +112,7 @@ fn decoded_map<'a>(
         .collect()
 }
 
-fn assert_phys(
-    decoded: &[(&str, DecodedSignalSample)],
-    sig_name: &str,
-    expected: f64,
-    tol: f64,
-) {
+fn assert_phys(decoded: &[(&str, DecodedSignalSample)], sig_name: &str, expected: f64, tol: f64) {
     let sample = decoded
         .iter()
         .find(|(n, _)| *n == sig_name)
@@ -173,7 +167,10 @@ fn gate2_schema_dense_ids_protocols_and_orphan_isolation() {
         .unwrap();
     assert_eq!(m101.protocol, "CAN");
     assert_eq!(m101.expected_cycle_ms, Some(10));
-    assert_eq!(m101.transmitters, vec!["INV".to_string(), "VCU".to_string()]);
+    assert_eq!(
+        m101.transmitters,
+        vec!["INV".to_string(), "VCU".to_string()]
+    );
 
     let m201 = schema
         .messages
@@ -232,7 +229,9 @@ fn gate2_vector1_dbc_0x101_motorola_sawtooth_and_signed_cross_byte() {
         let f = db
             .encode_raw_frame(0, id_101, &[(torque_id, target)], 100)
             .unwrap();
-        let sum = db.decode_frame_into(&f, &mut out_sigs, &mut out_sw).unwrap();
+        let sum = db
+            .decode_frame_into(&f, &mut out_sigs, &mut out_sw)
+            .unwrap();
         let dm = decoded_map(&db, &out_sigs[..sum.decoded_count]);
         assert_phys(&dm, "MotorTorqueNm", target, 1e-6);
     }
@@ -565,7 +564,11 @@ fn gate2_tx_encode_roundtrip_clamping_and_cascaded_mux_conflict() {
         .encode_raw_frame(
             0,
             id_101,
-            &[(torque_id, 950.0), (speed_id, -25_000.0), (phase_id, -999.0)],
+            &[
+                (torque_id, 950.0),
+                (speed_id, -25_000.0),
+                (phase_id, -999.0),
+            ],
             100,
         )
         .expect("encode 0x101 clamped");
@@ -707,7 +710,10 @@ fn gate3_zero_alloc_100k_mixed_frames_throughput_benchmark() {
     }
     let elapsed = start.elapsed();
 
-    assert_eq!(total_decoded_signals, (7 + 6 + 11 + 6 + 8) * (TOTAL_FRAMES / 5));
+    assert_eq!(
+        total_decoded_signals,
+        (7 + 6 + 11 + 6 + 8) * (TOTAL_FRAMES / 5)
+    );
 
     let secs = elapsed.as_secs_f64().max(1e-9);
     let fps = (TOTAL_FRAMES as f64) / secs;

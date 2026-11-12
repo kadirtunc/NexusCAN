@@ -139,7 +139,12 @@ pub fn classify_kind(data: &[u8]) -> IsoTpFrameKind {
 impl IsoTpCapture {
     pub fn with_capacity(capacity: usize) -> Self {
         let cap = capacity.max(1);
-        let empty = Record { seq: 0, tag: TAG_NONE, tx: false, frame: RawCanFrame::zeroed() };
+        let empty = Record {
+            seq: 0,
+            tag: TAG_NONE,
+            tx: false,
+            frame: RawCanFrame::zeroed(),
+        };
         Self {
             ring: Mutex::new(Ring {
                 buf: vec![empty; cap].into_boxed_slice(),
@@ -168,7 +173,12 @@ impl IsoTpCapture {
         let cap = r.buf.len();
         r.last_seq += 1;
         let seq = r.last_seq;
-        let rec = Record { seq, tag: r.cur_tag, tx, frame: *frame };
+        let rec = Record {
+            seq,
+            tag: r.cur_tag,
+            tx,
+            frame: *frame,
+        };
         if r.len < cap {
             let idx = (r.head + r.len) % cap;
             r.buf[idx] = rec;
@@ -197,12 +207,22 @@ impl IsoTpCapture {
         let (picked, newest, truncated, dropped) = {
             let mut r = self.ring.lock();
             let newest = r.last_seq;
-            let (since, stale_cursor) = if since_seq > newest { (0, true) } else { (since_seq, false) };
+            let (since, stale_cursor) = if since_seq > newest {
+                (0, true)
+            } else {
+                (since_seq, false)
+            };
             let cap = r.buf.len();
-            let oldest = if r.len == 0 { newest + 1 } else { r.buf[r.head].seq };
+            let oldest = if r.len == 0 {
+                newest + 1
+            } else {
+                r.buf[r.head].seq
+            };
             let truncated = stale_cursor || (oldest > since + 1 && since < newest);
             // Records are contiguous in seq: offset of the first one with seq > since.
-            let skip = usize::try_from((since + 1).saturating_sub(oldest)).unwrap_or(usize::MAX).min(r.len);
+            let skip = usize::try_from((since + 1).saturating_sub(oldest))
+                .unwrap_or(usize::MAX)
+                .min(r.len);
             let n = (r.len - skip).min(max);
             let mut picked: Vec<Record> = Vec::with_capacity(n);
             for i in 0..n {
@@ -231,7 +251,11 @@ impl IsoTpCapture {
                     timestamp_us: p.frame.timestamp_us,
                     can_id: p.frame.arb_id,
                     is_extended: p.frame.is_extended(),
-                    direction: if p.tx { IsoTpDirection::Tx } else { IsoTpDirection::Rx },
+                    direction: if p.tx {
+                        IsoTpDirection::Tx
+                    } else {
+                        IsoTpDirection::Rx
+                    },
                     fd: p.frame.is_fd(),
                     kind: classify_kind(&data),
                     data,
@@ -239,7 +263,12 @@ impl IsoTpCapture {
                 }
             })
             .collect();
-        IsoTpFramePageDto { frames, last_seq, truncated, dropped }
+        IsoTpFramePageDto {
+            frames,
+            last_seq,
+            truncated,
+            dropped,
+        }
     }
 }
 
@@ -250,20 +279,45 @@ mod tests {
 
     fn frame(i: u8) -> RawCanFrame {
         let key = CanIdKey::new_standard(0x7EA).expect("id");
-        RawCanFrame::new_classical(0, key, &[0x21, i, 0, 0, 0, 0, 0, 0], u64::from(i) + 1).expect("frame")
+        RawCanFrame::new_classical(0, key, &[0x21, i, 0, 0, 0, 0, 0, 0], u64::from(i) + 1)
+            .expect("frame")
     }
 
     #[test]
     fn kinds_including_fd_escapes() {
-        assert_eq!(classify_kind(&[0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]), IsoTpFrameKind::Single);
-        assert_eq!(classify_kind(&[0x00, 0x0A, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), IsoTpFrameKind::Single);
-        assert_eq!(classify_kind(&[0x10, 0x14, 0x62, 0xF1, 0x90, 1, 2, 3]), IsoTpFrameKind::First);
-        assert_eq!(classify_kind(&[0x10, 0x00, 0x00, 0x01, 0x00, 0x00, 0x62, 0x01]), IsoTpFrameKind::First);
-        assert_eq!(classify_kind(&[0x21, 1, 2, 3, 4, 5, 6, 7]), IsoTpFrameKind::Consecutive);
+        assert_eq!(
+            classify_kind(&[0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]),
+            IsoTpFrameKind::Single
+        );
+        assert_eq!(
+            classify_kind(&[0x00, 0x0A, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+            IsoTpFrameKind::Single
+        );
+        assert_eq!(
+            classify_kind(&[0x10, 0x14, 0x62, 0xF1, 0x90, 1, 2, 3]),
+            IsoTpFrameKind::First
+        );
+        assert_eq!(
+            classify_kind(&[0x10, 0x00, 0x00, 0x01, 0x00, 0x00, 0x62, 0x01]),
+            IsoTpFrameKind::First
+        );
+        assert_eq!(
+            classify_kind(&[0x21, 1, 2, 3, 4, 5, 6, 7]),
+            IsoTpFrameKind::Consecutive
+        );
         assert_eq!(classify_kind(&[0x2F]), IsoTpFrameKind::Consecutive);
-        assert_eq!(classify_kind(&[0x30, 0x00, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]), IsoTpFrameKind::FlowControl);
-        assert_eq!(classify_kind(&[0x31, 0x00, 0x00]), IsoTpFrameKind::FlowControl);
-        assert_eq!(classify_kind(&[0x32, 0x00, 0x00]), IsoTpFrameKind::FlowControl);
+        assert_eq!(
+            classify_kind(&[0x30, 0x00, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]),
+            IsoTpFrameKind::FlowControl
+        );
+        assert_eq!(
+            classify_kind(&[0x31, 0x00, 0x00]),
+            IsoTpFrameKind::FlowControl
+        );
+        assert_eq!(
+            classify_kind(&[0x32, 0x00, 0x00]),
+            IsoTpFrameKind::FlowControl
+        );
         assert_eq!(classify_kind(&[0x33, 0x00, 0x00]), IsoTpFrameKind::Unknown);
         assert_eq!(classify_kind(&[0x30, 0x00]), IsoTpFrameKind::Unknown);
         assert_eq!(classify_kind(&[0x05, 0x01]), IsoTpFrameKind::Unknown); // SF longer than frame
@@ -281,7 +335,10 @@ mod tests {
             assert_eq!(c.record(&frame(i), i % 2 == 0), u64::from(i) + 1);
         }
         let p = c.since(0, 4);
-        assert_eq!(p.frames.iter().map(|f| f.seq).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        assert_eq!(
+            p.frames.iter().map(|f| f.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
         assert_eq!(p.last_seq, 4);
         assert_eq!(p.frames[0].direction, IsoTpDirection::Tx);
         assert_eq!(p.frames[1].direction, IsoTpDirection::Rx);
@@ -315,7 +372,7 @@ mod tests {
             c.record(&frame(i), true);
         }
         assert_eq!(c.since(12, 2).last_seq, 14); // reader now at 14
-        // 8 more: overwrites 9..=16; 15 and 16 were unread → dropped 2.
+                                                 // 8 more: overwrites 9..=16; 15 and 16 were unread → dropped 2.
         for i in 0..8 {
             c.record(&frame(i), true);
         }
@@ -340,7 +397,7 @@ mod tests {
             let t = c.begin_txn();
             c.record(&frame(1), true); // request SF (TX confirmed before the event is logged)
             c.record(&frame(2), false); // fast response
-            // Not bound yet: held back, the untagged frame is returned.
+                                        // Not bound yet: held back, the untagged frame is returned.
             let p = c.since(0, 100);
             assert_eq!(tags(&p), vec![(1, None)]);
             assert_eq!(p.last_seq, 1);
@@ -350,7 +407,10 @@ mod tests {
         }
         c.record(&frame(4), false); // late frame after the final event
         let p = c.since(1, 100);
-        assert_eq!(tags(&p), vec![(2, Some(42)), (3, Some(42)), (4, Some(42)), (5, None)]);
+        assert_eq!(
+            tags(&p),
+            vec![(2, Some(42)), (3, Some(42)), (4, Some(42)), (5, None)]
+        );
         // Never bound (e.g. request rejected without an event): untagged, not held back.
         {
             let _t = c.begin_txn();
@@ -374,7 +434,10 @@ mod tests {
         // 15 records, ring keeps the last 4: seq 12..=15.
         let p = c.since(0, 100);
         assert!(p.truncated);
-        assert_eq!(tags(&p), vec![(12, None), (13, Some(14)), (14, Some(14)), (15, None)]);
+        assert_eq!(
+            tags(&p),
+            vec![(12, None), (13, Some(14)), (14, Some(14)), (15, None)]
+        );
         // A PENDING run longer than the ring is still retagged entirely.
         let t = c.begin_txn();
         for i in 0..6 {
@@ -383,7 +446,15 @@ mod tests {
         t.bind(99);
         drop(t);
         let p = c.since(15, 100);
-        assert_eq!(tags(&p), vec![(18, Some(99)), (19, Some(99)), (20, Some(99)), (21, Some(99))]);
+        assert_eq!(
+            tags(&p),
+            vec![
+                (18, Some(99)),
+                (19, Some(99)),
+                (20, Some(99)),
+                (21, Some(99))
+            ]
+        );
     }
 
     #[test]

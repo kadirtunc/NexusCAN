@@ -6,7 +6,9 @@
 
 use std::collections::VecDeque;
 
-use crate::uds::dto::{ConversationEventDto, ConversationEventKind, ConversationPageDto, DiagOrigin, UdsAddressing};
+use crate::uds::dto::{
+    ConversationEventDto, ConversationEventKind, ConversationPageDto, DiagOrigin, UdsAddressing,
+};
 
 /// Ring capacity (contract: ≥ 10 000 events).
 pub const CONVERSATION_CAPACITY: usize = 16_384;
@@ -97,7 +99,13 @@ impl Conversation {
 
     pub fn with_limits(capacity: usize, byte_budget: usize) -> Self {
         let capacity = capacity.max(1);
-        Self { events: VecDeque::with_capacity(capacity.min(1024)), capacity, byte_budget, bytes: 0, next_seq: 1 }
+        Self {
+            events: VecDeque::with_capacity(capacity.min(1024)),
+            capacity,
+            byte_budget,
+            bytes: 0,
+            next_seq: 1,
+        }
     }
 
     fn event_bytes(e: &ConversationEventDto) -> usize {
@@ -153,7 +161,11 @@ impl Conversation {
     ///   `seq` not after the cursor, so polling continues seamlessly.
     pub fn since(&self, since_seq: u64, max: usize) -> ConversationPageDto {
         let newest = self.last_seq();
-        let (since, stale_cursor) = if since_seq > newest { (0, true) } else { (since_seq, false) };
+        let (since, stale_cursor) = if since_seq > newest {
+            (0, true)
+        } else {
+            (since_seq, false)
+        };
         let oldest = self.events.front().map_or(newest + 1, |e| e.seq);
         let truncated = stale_cursor || (oldest > since + 1 && since < newest);
         let max = max.min(MAX_PAGE);
@@ -161,7 +173,11 @@ impl Conversation {
         let events: Vec<ConversationEventDto> =
             self.events.iter().skip(start).take(max).cloned().collect();
         let last_seq = events.last().map_or(since, |e| e.seq);
-        ConversationPageDto { events, last_seq, truncated }
+        ConversationPageDto {
+            events,
+            last_seq,
+            truncated,
+        }
     }
 }
 
@@ -170,7 +186,8 @@ mod tests {
     use super::*;
 
     fn ev(i: u64) -> NewEvent {
-        NewEvent::new(ConversationEventKind::Request, UdsAddressing::Physical, i).bytes(&[0x3E, 0x00])
+        NewEvent::new(ConversationEventKind::Request, UdsAddressing::Physical, i)
+            .bytes(&[0x3E, 0x00])
     }
 
     #[test]
@@ -242,7 +259,10 @@ mod tests {
         let mut c = Conversation::with_limits(1000, 10_000);
         let big = vec![0u8; 4_000];
         for i in 0..10 {
-            c.push(NewEvent::new(ConversationEventKind::Response, UdsAddressing::Physical, i).bytes(&big));
+            c.push(
+                NewEvent::new(ConversationEventKind::Response, UdsAddressing::Physical, i)
+                    .bytes(&big),
+            );
         }
         assert!(c.retained_bytes() <= 10_000, "{}", c.retained_bytes());
         let p = c.since(0, 100);
@@ -250,7 +270,10 @@ mod tests {
         assert!(p.truncated);
         assert_eq!(p.last_seq, 10);
         // A single event larger than the budget is still kept (alone).
-        c.push(NewEvent::new(ConversationEventKind::Response, UdsAddressing::Physical, 11).bytes(&vec![1u8; 20_000]));
+        c.push(
+            NewEvent::new(ConversationEventKind::Response, UdsAddressing::Physical, 11)
+                .bytes(&vec![1u8; 20_000]),
+        );
         assert_eq!(c.since(0, 100).events.len(), 1);
         c.push(ev(12));
         assert_eq!(c.since(0, 100).events.len(), 1);

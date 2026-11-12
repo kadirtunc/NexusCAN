@@ -86,8 +86,7 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STD;
     use base64::Engine as _;
     use nexus_hal::{
-        BusHealthDto, ChronologicalFrameDto, FrameTelemetryDto, LiveSignalDto,
-        TelemetrySnapshotDto,
+        BusHealthDto, ChronologicalFrameDto, FrameTelemetryDto, LiveSignalDto, TelemetrySnapshotDto,
     };
     use parking_lot::Mutex;
     use serde_json::{json, Value};
@@ -257,8 +256,14 @@ token = "nxc_tok_minimal_valid_token_99"
 
         // Case B: `--fd true`, `--fd false`, `--fd=true`, `--fd=false`, `--no-fd`
         for (args, expected_fd) in [
-            (vec!["agent", "run", "--fd", "true", "--iface", "can0"], Some(true)),
-            (vec!["agent", "run", "--fd", "false", "--iface", "can0"], Some(false)),
+            (
+                vec!["agent", "run", "--fd", "true", "--iface", "can0"],
+                Some(true),
+            ),
+            (
+                vec!["agent", "run", "--fd", "false", "--iface", "can0"],
+                Some(false),
+            ),
             (vec!["agent", "run", "--fd", "1"], Some(true)),
             (vec!["agent", "run", "--fd", "0"], Some(false)),
             (vec!["agent", "run", "--fd=true"], Some(true)),
@@ -325,7 +330,12 @@ enable_fd = true
         let exit_code = dispatch_sync_command(&cmd, &mut stdout, &mut stderr).unwrap();
         let out_str = String::from_utf8(stdout).unwrap();
 
-        assert_eq!(exit_code, 0, "valid sample_vehicle.dbc must exit 0; stderr={}", String::from_utf8_lossy(&stderr));
+        assert_eq!(
+            exit_code,
+            0,
+            "valid sample_vehicle.dbc must exit 0; stderr={}",
+            String::from_utf8_lossy(&stderr)
+        );
         assert!(out_str.contains("Format:"));
         assert!(out_str.contains("Messages:"));
         assert!(out_str.contains("Total Signals:"));
@@ -351,10 +361,8 @@ BO_ NOT_AN_ID BrokenMsg: 8 ECU1
         assert!(garbage_report.error_diagnostics >= 1);
 
         // Also verify execute_dbc_lint on a malformed .dbc file on disk exits 1 and prints [ERROR]
-        let tmp_bad_dbc = std::env::temp_dir().join(format!(
-            "nexuscan_lint_bad_{}.dbc",
-            std::process::id()
-        ));
+        let tmp_bad_dbc =
+            std::env::temp_dir().join(format!("nexuscan_lint_bad_{}.dbc", std::process::id()));
         std::fs::write(&tmp_bad_dbc, malformed_dbc).expect("write temp bad dbc");
         let mut bad_out = Vec::new();
         let mut bad_err = Vec::new();
@@ -395,7 +403,8 @@ listen_only = false
         .expect("parse TOML with listen_only = false");
 
         let CliCommand::AgentRun(unsafe_cli) =
-            parse_cli_args(["agent", "run", "--listen-only=false"]).expect("parse --listen-only=false")
+            parse_cli_args(["agent", "run", "--listen-only=false"])
+                .expect("parse --listen-only=false")
         else {
             panic!("expected AgentRun");
         };
@@ -436,7 +445,10 @@ listen_only = false
         assert_eq!(resolve_hal_device_id("COM3"), "slcan:COM3");
         assert_eq!(resolve_hal_device_id("com12"), "slcan:com12");
         assert_eq!(resolve_hal_device_id("gs_usb:0"), "gs_usb:0");
-        assert_eq!(resolve_hal_device_id("pcan:PCAN_USBBUS1"), "pcan:PCAN_USBBUS1");
+        assert_eq!(
+            resolve_hal_device_id("pcan:PCAN_USBBUS1"),
+            "pcan:PCAN_USBBUS1"
+        );
         assert_eq!(resolve_hal_device_id("kvaser:0"), "kvaser:0");
     }
 
@@ -553,7 +565,11 @@ listen_only = false
         };
 
         let wire = coalesce_and_convert_snapshot(&snap, Vec::new());
-        assert_eq!(wire.frames.len(), 1, "must coalesce into 1 authoritative frame");
+        assert_eq!(
+            wire.frames.len(),
+            1,
+            "must coalesce into 1 authoritative frame"
+        );
         let f = &wire.frames[0];
         assert_eq!(f.rx_count, 95);
         assert_eq!(f.last_timestamp_us, 240_000);
@@ -836,8 +852,14 @@ listen_only = false
             .and_then(Value::as_array)
             .expect("buses array");
         assert_eq!(buses.len(), 1);
-        assert_eq!(buses[0].get("listenOnly").and_then(Value::as_bool), Some(true));
-        assert_eq!(buses[0].get("txArmed").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            buses[0].get("listenOnly").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            buses[0].get("txArmed").and_then(Value::as_bool),
+            Some(false)
+        );
 
         if let Some(frames_arr) = first_snap.get("frames").and_then(Value::as_array) {
             let mut seen_keys = HashSet::new();
@@ -946,7 +968,10 @@ listen_only = false
             let mut resp = Vec::new();
             stream.read_to_end(&mut resp).await.expect("read");
             let text = String::from_utf8_lossy(&resp);
-            assert!(text.starts_with("HTTP/1.1 403"), "rebinding Host must be 403: {text}");
+            assert!(
+                text.starts_with("HTTP/1.1 403"),
+                "rebinding Host must be 403: {text}"
+            );
         }
 
         // 5. Trigger clean shutdown and verify rapid termination
@@ -1027,12 +1052,9 @@ listen_only = false
 
         // `run_agent_until_signal` MUST exit cleanly with `Err(RunnerError::TokenRevoked4003)`
         // instead of leaving CAN & web tasks running as a zombie process!
-        let run_res = tokio::time::timeout(
-            Duration::from_secs(3),
-            run_agent_until_signal(eff_cfg),
-        )
-        .await
-        .expect("run_agent_until_signal must not hang after 4003 WS close");
+        let run_res = tokio::time::timeout(Duration::from_secs(3), run_agent_until_signal(eff_cfg))
+            .await
+            .expect("run_agent_until_signal must not hang after 4003 WS close");
         assert!(
             matches!(run_res, Err(RunnerError::TokenRevoked4003)),
             "Expected Err(RunnerError::TokenRevoked4003), got: {run_res:?}"
@@ -1107,12 +1129,12 @@ listen_only = false
             };
 
             let eff_cfg = EffectiveAgentConfig::from_cli_and_optional_file(&cli_args).unwrap();
-            let run_res = tokio::time::timeout(
-                Duration::from_secs(3),
-                run_agent_until_signal(eff_cfg),
-            )
-            .await
-            .expect("run_agent_until_signal must not hang on HTTP 401/403 upgrade rejection");
+            let run_res =
+                tokio::time::timeout(Duration::from_secs(3), run_agent_until_signal(eff_cfg))
+                    .await
+                    .expect(
+                        "run_agent_until_signal must not hang on HTTP 401/403 upgrade rejection",
+                    );
 
             assert!(
                 matches!(run_res, Err(RunnerError::TokenRevoked4003)),

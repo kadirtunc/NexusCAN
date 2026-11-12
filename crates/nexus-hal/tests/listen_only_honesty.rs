@@ -35,11 +35,16 @@ fn mock_listen_only_is_virtual_and_active_is_null() {
 
     let v = connect_json(&engine, MOCK0_DEVICE_ID, false);
     let obj = v.as_object().expect("object");
-    assert!(obj.contains_key("listenOnlyEnforcement"), "key must be present: {v}");
+    assert!(
+        obj.contains_key("listenOnlyEnforcement"),
+        "key must be present: {v}"
+    );
     assert!(v["listenOnlyEnforcement"].is_null(), "{v}");
 
     // Mode switch to listen-only re-populates it.
-    let dto = engine.cmd_set_bus_mode(0, true, false).expect("to listen-only");
+    let dto = engine
+        .cmd_set_bus_mode(0, true, false)
+        .expect("to listen-only");
     assert_eq!(dto.listen_only_enforcement.as_deref(), Some("virtual"));
 }
 

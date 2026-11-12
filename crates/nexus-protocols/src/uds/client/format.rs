@@ -101,7 +101,11 @@ pub fn format_dtc_code(dtc: u32) -> String {
         2 => 'B',
         _ => 'U',
     };
-    format!("{letter}{:01X}{:01X}{mid:02X}-{ftb:02X}", (hi >> 4) & 0x03, hi & 0x0F)
+    format!(
+        "{letter}{:01X}{:01X}{mid:02X}-{ftb:02X}",
+        (hi >> 4) & 0x03,
+        hi & 0x0F
+    )
 }
 
 /// One DTC record (3 DTC bytes + status) → DTO.
@@ -184,13 +188,18 @@ mod tests {
 
     #[test]
     fn dtc_response_parsing() {
-        let pdu = [0x59, 0x02, 0xFF, 0x01, 0x23, 0x45, 0x2F, 0x9A, 0x0B, 0x00, 0x08];
+        let pdu = [
+            0x59, 0x02, 0xFF, 0x01, 0x23, 0x45, 0x2F, 0x9A, 0x0B, 0x00, 0x08,
+        ];
         let list = parse_dtcs_by_status(&pdu).unwrap_or_default();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].code, "P0123-45");
         assert_eq!(list[1].code, "B1A0B-00");
         assert_eq!(list[1].status_byte, 0x08);
-        assert_eq!(parse_dtcs_by_status(&[0x59, 0x02, 0xFF]).map(|v| v.len()), Some(0));
+        assert_eq!(
+            parse_dtcs_by_status(&[0x59, 0x02, 0xFF]).map(|v| v.len()),
+            Some(0)
+        );
         assert!(parse_dtcs_by_status(&[0x59, 0x02, 0xFF, 1, 2, 3]).is_none());
         assert!(parse_dtcs_by_status(&[0x59, 0x01, 0xFF]).is_none());
         assert!(parse_dtcs_by_status(&[0x59]).is_none());
@@ -225,16 +234,31 @@ mod tests {
         assert!(!response_matches(&[], &[0x62]));
 
         // Sub-function echo without the suppression bit.
-        assert!(response_matches(&[0x10, 0x03], &[0x50, 0x03, 0x00, 0x32, 0x00, 0xC8]));
-        assert!(!response_matches(&[0x10, 0x03], &[0x50, 0x01, 0x00, 0x32, 0x00, 0xC8]));
+        assert!(response_matches(
+            &[0x10, 0x03],
+            &[0x50, 0x03, 0x00, 0x32, 0x00, 0xC8]
+        ));
+        assert!(!response_matches(
+            &[0x10, 0x03],
+            &[0x50, 0x01, 0x00, 0x32, 0x00, 0xC8]
+        ));
         assert!(response_matches(&[0x3E, 0x80], &[0x7E, 0x00]));
-        assert!(response_matches(&[0x27, 0x01], &[0x67, 0x01, 0x11, 0x22, 0x33, 0x44]));
+        assert!(response_matches(
+            &[0x27, 0x01],
+            &[0x67, 0x01, 0x11, 0x22, 0x33, 0x44]
+        ));
         assert!(!response_matches(&[0x27, 0x02, 0xB4], &[0x67, 0x01, 0x11]));
         assert!(response_matches(&[0x19, 0x02, 0xFF], &[0x59, 0x02, 0xFF]));
 
         // Routine control echoes type + RID.
-        assert!(response_matches(&[0x31, 0x01, 0x02, 0x03], &[0x71, 0x01, 0x02, 0x03, 0x00]));
-        assert!(!response_matches(&[0x31, 0x01, 0x02, 0x03], &[0x71, 0x01, 0xFA, 0x05, 0x00]));
+        assert!(response_matches(
+            &[0x31, 0x01, 0x02, 0x03],
+            &[0x71, 0x01, 0x02, 0x03, 0x00]
+        ));
+        assert!(!response_matches(
+            &[0x31, 0x01, 0x02, 0x03],
+            &[0x71, 0x01, 0xFA, 0x05, 0x00]
+        ));
 
         // TransferData echoes the block sequence counter.
         assert!(response_matches(&[0x36, 0x05, 0xAA], &[0x76, 0x05]));
@@ -256,7 +280,10 @@ mod tests {
 
     #[test]
     fn session_timing_parse() {
-        assert_eq!(parse_session_timing(&[0x50, 0x03, 0x00, 0x32, 0x00, 0xC8]), Some((50, 2000)));
+        assert_eq!(
+            parse_session_timing(&[0x50, 0x03, 0x00, 0x32, 0x00, 0xC8]),
+            Some((50, 2000))
+        );
         assert_eq!(parse_session_timing(&[0x50, 0x03]), None);
         assert_eq!(parse_session_timing(&[0x51, 0x03, 0, 0, 0, 0]), None);
     }

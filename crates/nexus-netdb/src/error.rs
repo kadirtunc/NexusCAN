@@ -48,7 +48,14 @@ impl ParseDiagnostic {
         column: Option<usize>,
         context: Option<String>,
     ) -> Self {
-        Self::new(DiagnosticSeverity::Warning, code, message, line, column, context)
+        Self::new(
+            DiagnosticSeverity::Warning,
+            code,
+            message,
+            line,
+            column,
+            context,
+        )
     }
 
     pub fn error(
@@ -58,7 +65,14 @@ impl ParseDiagnostic {
         column: Option<usize>,
         context: Option<String>,
     ) -> Self {
-        Self::new(DiagnosticSeverity::Error, code, message, line, column, context)
+        Self::new(
+            DiagnosticSeverity::Error,
+            code,
+            message,
+            line,
+            column,
+            context,
+        )
     }
 
     pub fn info(
@@ -68,7 +82,14 @@ impl ParseDiagnostic {
         column: Option<usize>,
         context: Option<String>,
     ) -> Self {
-        Self::new(DiagnosticSeverity::Info, code, message, line, column, context)
+        Self::new(
+            DiagnosticSeverity::Info,
+            code,
+            message,
+            line,
+            column,
+            context,
+        )
     }
 }
 
@@ -85,10 +106,18 @@ pub enum BitPlanError {
     BitLengthTooLarge { bit_len: u8, max_allowed: u8 },
 
     #[error("Signal bit span (start_bit {start_bit}, bit_len {bit_len}) exceeds payload limit {max_bits} bits")]
-    SpanExceedsPayload { start_bit: u16, bit_len: u8, max_bits: u16 },
+    SpanExceedsPayload {
+        start_bit: u16,
+        bit_len: u8,
+        max_bits: u16,
+    },
 
     #[error("Motorola sawtooth bit span stepped into invalid byte index {byte_index} (start_bit {start_bit}, bit_len {bit_len})")]
-    MotorolaByteOverflow { start_bit: u16, bit_len: u8, byte_index: usize },
+    MotorolaByteOverflow {
+        start_bit: u16,
+        bit_len: u8,
+        byte_index: usize,
+    },
 }
 
 /// Errors occurring during signal TX packing.
@@ -127,7 +156,9 @@ pub enum EncodeError {
     #[error("Multiplexer ancestor chain of signal ID {signal_id} exceeds the maximum depth of {max} (cycle or over-deep cascade)")]
     MuxTooDeep { signal_id: u32, max: usize },
 
-    #[error("Physical value {value} for signal '{signal_name}' is out of valid bounds [{min}, {max}]")]
+    #[error(
+        "Physical value {value} for signal '{signal_name}' is out of valid bounds [{min}, {max}]"
+    )]
     ValueOutOfRange {
         signal_name: String,
         value: f64,

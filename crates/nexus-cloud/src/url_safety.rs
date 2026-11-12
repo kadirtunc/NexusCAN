@@ -65,7 +65,14 @@ mod tests {
         for ok in ["localhost", "LocalHost", "127.0.0.1", "::1", "[::1]"] {
             assert!(is_loopback_host(ok), "{ok}");
         }
-        for bad in ["cloud.nexuscan.io", "127.0.0.2", "10.0.0.1", "localhost.evil", "", "0.0.0.0"] {
+        for bad in [
+            "cloud.nexuscan.io",
+            "127.0.0.2",
+            "10.0.0.1",
+            "localhost.evil",
+            "",
+            "0.0.0.0",
+        ] {
             assert!(!is_loopback_host(bad), "{bad}");
         }
     }

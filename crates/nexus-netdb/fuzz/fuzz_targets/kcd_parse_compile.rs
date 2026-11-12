@@ -8,8 +8,13 @@ mod common;
 
 fuzz_target!(|data: &[u8]| {
     for fault_tolerant in [true, false] {
-        let opts = ParseOptions { fault_tolerant, ..ParseOptions::default() };
-        let Ok(bundle) = KcdFormat.parse(data, &opts) else { continue };
+        let opts = ParseOptions {
+            fault_tolerant,
+            ..ParseOptions::default()
+        };
+        let Ok(bundle) = KcdFormat.parse(data, &opts) else {
+            continue;
+        };
         let _ = DbcWriter::new(&bundle.database).write_to_string();
         if let Ok(db) = CompiledDatabase::compile(bundle.database) {
             common::exercise(&db, data);

@@ -33,7 +33,8 @@ impl DatabaseFormatParser for KcdFormat {
         } else {
             header_bytes
         });
-        sample.text.contains("<NetworkDefinition") || sample.text.contains("<NetworkDefinition xmlns")
+        sample.text.contains("<NetworkDefinition")
+            || sample.text.contains("<NetworkDefinition xmlns")
     }
 
     fn parse(

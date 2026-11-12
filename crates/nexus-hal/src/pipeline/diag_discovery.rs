@@ -22,7 +22,8 @@ use nexus_protocols::uds::discovery::{
     DEFAULT_DISCOVERY_PDU,
 };
 use nexus_protocols::uds::dto::{
-    DiagOrigin, DiagSessionConfigDto, DiscoveredEcuDto, EcuDiscoveryRequestDto, EcuDiscoveryResultDto,
+    DiagOrigin, DiagSessionConfigDto, DiscoveredEcuDto, EcuDiscoveryRequestDto,
+    EcuDiscoveryResultDto,
 };
 use nexus_protocols::uds::port::DiagCanPort;
 
@@ -99,7 +100,12 @@ fn request_frame(req: &EcuDiscoveryRequestDto, pdu: &[u8]) -> Result<RawCanFrame
             .ok()
             .and_then(CanIdKey::new_standard)
     }
-    .ok_or_else(|| invalid(format!("functionalId 0x{:X} is not a valid CAN id", req.functional_id)))?;
+    .ok_or_else(|| {
+        invalid(format!(
+            "functionalId 0x{:X} is not a valid CAN id",
+            req.functional_id
+        ))
+    })?;
     let payload = build_single_frame(pdu, req.padding);
     let built = if req.use_fd {
         RawCanFrame::new_fd(req.bus_id, key, &payload, false, 0)
@@ -145,7 +151,11 @@ impl PipelineEngine {
                 },
                 DiagTapFilter {
                     id: req.functional_id,
-                    mask: if req.is_extended_id { 0x1FFF_FFFF } else { 0x7FF },
+                    mask: if req.is_extended_id {
+                        0x1FFF_FFFF
+                    } else {
+                        0x7FF
+                    },
                     extended: ext,
                 },
             ];
@@ -320,7 +330,8 @@ mod tests {
     use super::*;
 
     fn req() -> EcuDiscoveryRequestDto {
-        serde_json::from_str(r#"{"busId":0,"isExtendedId":false,"functionalId":2014}"#).expect("req")
+        serde_json::from_str(r#"{"busId":0,"isExtendedId":false,"functionalId":2014}"#)
+            .expect("req")
     }
 
     #[test]
@@ -381,7 +392,10 @@ mod tests {
     fn request_frame_padding_and_fd() {
         let mut r = req();
         let f = request_frame(&r, &[0x3E, 0x00]).expect("frame");
-        assert_eq!(f.payload(), &[0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]);
+        assert_eq!(
+            f.payload(),
+            &[0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]
+        );
         assert_eq!(f.arb_id, 0x7DE);
         assert!(!f.is_extended() && f.flags & nexus_core::FLAG_FD == 0);
         r.padding = None;
@@ -419,7 +433,11 @@ mod tests {
             engine.cmd_diag_discover_ecus(req()).unwrap_err().code,
             DiagErrorCode::ListenOnly
         );
-        assert_eq!(engine.diag_tap_count(0), 0, "no tap leaked by a refused discovery");
+        assert_eq!(
+            engine.diag_tap_count(0),
+            0,
+            "no tap leaked by a refused discovery"
+        );
 
         // Active but disarmed.
         let cfg = ChannelConfigDto {
@@ -442,13 +460,19 @@ mod tests {
         let mut r = req();
         r.window_ms = Some(60);
         let t0 = Instant::now();
-        let res = engine.cmd_diag_discover_ecus(r).expect("discovery on mock0");
+        let res = engine
+            .cmd_diag_discover_ecus(r)
+            .expect("discovery on mock0");
         assert!(t0.elapsed() >= Duration::from_millis(60), "window is fixed");
         assert_eq!(res.request_bytes, vec![0x3E, 0x00]);
         assert_eq!(res.window_ms, 60);
         assert!(res.tx_timestamp_us > 0);
         std::thread::sleep(Duration::from_millis(20));
-        assert_eq!(engine.diag_tap_count(0), 0, "discovery tap closed after the window");
+        assert_eq!(
+            engine.diag_tap_count(0),
+            0,
+            "discovery tap closed after the window"
+        );
 
         // Panic Stop latches → refused.
         let _ = engine.cmd_panic_stop_tx();

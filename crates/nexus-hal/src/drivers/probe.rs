@@ -94,10 +94,7 @@ pub fn probe_socketcan_family() -> DriverFamilyStatusDto {
 
         let installed = found_module.is_some() || !detected_channels.is_empty();
         let status_label = if !detected_channels.is_empty() {
-            format!(
-                "Kernel Active ({} iface)",
-                detected_channels.len()
-            )
+            format!("Kernel Active ({} iface)", detected_channels.len())
         } else if installed {
             "Kernel Module Loaded (No Interface Up)".to_string()
         } else {
@@ -149,8 +146,7 @@ pub fn probe_slcan_family(serial_ports: &[SerialPortInfoDto]) -> DriverFamilySta
         ]
     };
 
-    let detected_channels: Vec<String> =
-        serial_ports.iter().map(|p| p.port_name.clone()).collect();
+    let detected_channels: Vec<String> = serial_ports.iter().map(|p| p.port_name.clone()).collect();
     let status_label = if detected_channels.is_empty() {
         "Driver Ready (Enter / Attach Serial Port)".to_string()
     } else {
@@ -178,10 +174,13 @@ pub fn probe_pcan_family() -> DriverFamilyStatusDto {
     let mut detected_channels = Vec::new();
 
     if cfg!(target_os = "windows") {
-        let candidates = collect_windows_dll_candidates(&[
-            r"C:\Windows\System32\PCANBasic.dll",
-            r"C:\Windows\SysWOW64\PCANBasic.dll",
-        ], "PCANBasic.dll");
+        let candidates = collect_windows_dll_candidates(
+            &[
+                r"C:\Windows\System32\PCANBasic.dll",
+                r"C:\Windows\SysWOW64\PCANBasic.dll",
+            ],
+            "PCANBasic.dll",
+        );
         for p in candidates {
             let s = p.to_string_lossy().to_string();
             if detected_lib.is_none() && p.is_file() {
@@ -853,15 +852,24 @@ mod tests {
     fn vendor_family_never_falls_back_to_another_interface() {
         let family = v(&["can1"]);
         let all = v(&["can0", "can1", "vcan0"]);
-        assert_eq!(resolve_family_socketcan_iface("can1", &family, &all).as_deref(), Some("can1"));
+        assert_eq!(
+            resolve_family_socketcan_iface("can1", &family, &all).as_deref(),
+            Some("can1")
+        );
         // Requested channel missing -> no fallback to the first family / SocketCAN interface.
         assert_eq!(resolve_family_socketcan_iface("can7", &family, &all), None);
-        assert_eq!(resolve_family_socketcan_iface("PCAN_USBBUS1", &family, &all), None);
+        assert_eq!(
+            resolve_family_socketcan_iface("PCAN_USBBUS1", &family, &all),
+            None
+        );
         assert_eq!(resolve_family_socketcan_iface("0", &family, &all), None);
         // A live interface of ANOTHER driver (e.g. vcan0, or a gs_usb can0) is not this family's.
         assert_eq!(resolve_family_socketcan_iface("vcan0", &family, &all), None);
         assert_eq!(resolve_family_socketcan_iface("can0", &family, &all), None);
         // Family channel that is not a live SocketCAN interface (e.g. went down).
-        assert_eq!(resolve_family_socketcan_iface("can1", &family, &v(&["can0"])), None);
+        assert_eq!(
+            resolve_family_socketcan_iface("can1", &family, &v(&["can0"])),
+            None
+        );
     }
 }

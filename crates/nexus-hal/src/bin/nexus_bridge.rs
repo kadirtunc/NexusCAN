@@ -77,9 +77,15 @@ struct BridgeSecurity {
 
 impl BridgeSecurity {
     fn new(token: String, extra_origins: &str, bind_addr: SocketAddr) -> Self {
-        let mut allowed_origins: Vec<String> =
-            DEFAULT_ALLOWED_ORIGINS.iter().map(|s| (*s).to_string()).collect();
-        for o in extra_origins.split(',').map(str::trim).filter(|o| !o.is_empty()) {
+        let mut allowed_origins: Vec<String> = DEFAULT_ALLOWED_ORIGINS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        for o in extra_origins
+            .split(',')
+            .map(str::trim)
+            .filter(|o| !o.is_empty())
+        {
             let o = o.trim_end_matches('/').to_string();
             if HeaderValue::from_str(&o).is_ok() && o != "null" && !allowed_origins.contains(&o) {
                 allowed_origins.push(o);
@@ -227,13 +233,17 @@ fn write_token_file(path: &FsPath, token: &str) -> Result<(), String> {
         .ok_or_else(|| format!("token file '{}' has no parent directory", path.display()))?;
     let tmp = dir.join(format!(
         ".{}.tmp-{}",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("bridge.token"),
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("bridge.token"),
         std::process::id()
     ));
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+        use std::os::unix::fs::{
+            DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
+        };
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -244,8 +254,12 @@ fn write_token_file(path: &FsPath, token: &str) -> Result<(), String> {
         if !meta.is_dir() {
             return Err(format!("'{}' is not a directory (symlink?)", dir.display()));
         }
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| format!("cannot chmod 0700 '{}' (not owned by us?): {e}", dir.display()))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+            format!(
+                "cannot chmod 0700 '{}' (not owned by us?): {e}",
+                dir.display()
+            )
+        })?;
         let _ = std::fs::remove_file(&tmp);
         let mut f = std::fs::OpenOptions::new()
             .write(true)
@@ -267,7 +281,8 @@ fn write_token_file(path: &FsPath, token: &str) -> Result<(), String> {
     }
     #[cfg(not(unix))]
     {
-        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create '{}': {e}", dir.display()))?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create '{}': {e}", dir.display()))?;
         let _ = std::fs::remove_file(&tmp);
         let mut f = std::fs::OpenOptions::new()
             .write(true)
@@ -302,15 +317,15 @@ fn forbidden(reason: &str) -> Response {
 }
 
 fn unauthorized() -> Response {
-    (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response()
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "unauthorized" })),
+    )
+        .into_response()
 }
 
 /// Outermost guard (every request incl. CORS preflight and WS upgrade): Host + Origin.
-async fn host_origin_guard(
-    State(state): State<BridgeState>,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn host_origin_guard(State(state): State<BridgeState>, req: Request, next: Next) -> Response {
     let host = req
         .headers()
         .get(header::HOST)
@@ -595,14 +610,21 @@ where
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => bad_request(e.to_ipc_string()),
         Err(join_err) => bad_request(
-            DiagError::new(DiagErrorCode::Internal, format!("diag worker failed: {join_err}"))
-                .to_ipc_string(),
+            DiagError::new(
+                DiagErrorCode::Internal,
+                format!("diag worker failed: {join_err}"),
+            )
+            .to_ipc_string(),
         ),
     }
 }
 
 /// D-003 router. `None` = not a diag command.
-async fn handle_diag_invoke(cmd: &str, payload: Value, engine: &Arc<PipelineEngine>) -> Option<Response> {
+async fn handle_diag_invoke(
+    cmd: &str,
+    payload: Value,
+    engine: &Arc<PipelineEngine>,
+) -> Option<Response> {
     macro_rules! args {
         ($ty:ty) => {
             match serde_json::from_value::<$ty>(payload) {
@@ -619,7 +641,10 @@ async fn handle_diag_invoke(cmd: &str, payload: Value, engine: &Arc<PipelineEngi
         }
         "cmd_diag_close_session" => {
             let a = args!(DiagConfigArgs);
-            run_diag(engine, move |e| e.cmd_diag_close_session(a.config).map(|()| Value::Null)).await
+            run_diag(engine, move |e| {
+                e.cmd_diag_close_session(a.config).map(|()| Value::Null)
+            })
+            .await
         }
         "cmd_diag_session_info" => {
             let a = args!(DiagConfigArgs);
@@ -634,7 +659,10 @@ async fn handle_diag_invoke(cmd: &str, payload: Value, engine: &Arc<PipelineEngi
         }
         "cmd_diag_read_did" => {
             let a = args!(DiagReadDidArgs);
-            run_diag(engine, move |e| e.cmd_diag_read_did(a.config, a.did, a.origin)).await
+            run_diag(engine, move |e| {
+                e.cmd_diag_read_did(a.config, a.did, a.origin)
+            })
+            .await
         }
         "cmd_diag_read_stored_dtcs" => {
             let a = args!(DiagReadDtcsArgs);
@@ -652,11 +680,17 @@ async fn handle_diag_invoke(cmd: &str, payload: Value, engine: &Arc<PipelineEngi
         }
         "cmd_diag_get_conversation" => {
             let a = args!(DiagConversationArgs);
-            run_diag(engine, move |e| e.cmd_diag_get_conversation(a.config, a.since_seq, a.max)).await
+            run_diag(engine, move |e| {
+                e.cmd_diag_get_conversation(a.config, a.since_seq, a.max)
+            })
+            .await
         }
         "cmd_diag_get_isotp_frames" => {
             let a = args!(DiagConversationArgs);
-            run_diag(engine, move |e| e.cmd_diag_get_isotp_frames(a.config, a.since_seq, a.max)).await
+            run_diag(engine, move |e| {
+                e.cmd_diag_get_isotp_frames(a.config, a.since_seq, a.max)
+            })
+            .await
         }
         "cmd_diag_discover_ecus" => {
             let a = args!(DiagDiscoverEcusArgs);
@@ -677,9 +711,15 @@ fn build_router(engine: Arc<PipelineEngine>, security: Arc<BridgeSecurity>) -> R
         .route("/api/health", get(handle_health))
         .route("/ws/telemetry", get(handle_ws_upgrade))
         .route("/api/invoke/{cmd}", post(handle_invoke))
-        .layer(middleware::from_fn_with_state(state.clone(), api_token_guard))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            api_token_guard,
+        ))
         .layer(security.cors_layer())
-        .layer(middleware::from_fn_with_state(state.clone(), host_origin_guard))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            host_origin_guard,
+        ))
         .with_state(state)
 }
 
@@ -844,7 +884,9 @@ async fn handle_invoke(
         "cmd_connect_bus" => {
             let args: ConnectBusArgs = match serde_json::from_value(payload) {
                 Ok(a) => a,
-                Err(e) => return bad_request(format!("Invalid arguments for cmd_connect_bus: {e}")),
+                Err(e) => {
+                    return bad_request(format!("Invalid arguments for cmd_connect_bus: {e}"))
+                }
             };
             match engine.cmd_connect_bus(args.device_id, args.config) {
                 Ok(res) => ok_json(res),
@@ -952,9 +994,7 @@ async fn handle_invoke(
             let args: SetBusDatabasesArgs = match serde_json::from_value(payload) {
                 Ok(a) => a,
                 Err(e) => {
-                    return bad_request(format!(
-                        "Invalid arguments for cmd_set_bus_databases: {e}"
-                    ))
+                    return bad_request(format!("Invalid arguments for cmd_set_bus_databases: {e}"))
                 }
             };
             match engine.cmd_set_bus_databases(args.bus_id, args.files) {
@@ -1214,12 +1254,30 @@ mod tests {
     #[test]
     fn host_header_parsing_and_rebinding_rules() {
         let sec = test_security();
-        for ok in ["localhost", "localhost:14210", "LOCALHOST:5173", "127.0.0.1", "127.0.0.1:1", "[::1]", "[::1]:14210"] {
+        for ok in [
+            "localhost",
+            "localhost:14210",
+            "LOCALHOST:5173",
+            "127.0.0.1",
+            "127.0.0.1:1",
+            "[::1]",
+            "[::1]:14210",
+        ] {
             assert!(sec.host_allowed(ok), "{ok} must be allowed");
         }
         for bad in [
-            "", "evil.example", "evil.example:14210", "localhost.evil.example", "127.0.0.1.nip.io",
-            "localhost:abc", "localhost:", ":14210", "[::1]x", "::1", "0.0.0.0:14210", "192.168.1.5",
+            "",
+            "evil.example",
+            "evil.example:14210",
+            "localhost.evil.example",
+            "127.0.0.1.nip.io",
+            "localhost:abc",
+            "localhost:",
+            ":14210",
+            "[::1]x",
+            "::1",
+            "0.0.0.0:14210",
+            "192.168.1.5",
             "localhost:14210:1",
         ] {
             assert!(!sec.host_allowed(bad), "{bad} must be rejected");
@@ -1228,7 +1286,10 @@ mod tests {
         assert!(lan.host_allowed("192.168.1.5:14210"));
         assert!(!lan.host_allowed("192.168.1.6:14210"));
         let any = BridgeSecurity::new(TEST_TOKEN.into(), "", "0.0.0.0:14210".parse().unwrap());
-        assert!(!any.host_allowed("0.0.0.0:14210"), "wildcard bind is never a valid Host");
+        assert!(
+            !any.host_allowed("0.0.0.0:14210"),
+            "wildcard bind is never a valid Host"
+        );
         assert!(any.host_allowed("localhost:14210"));
     }
 
@@ -1264,9 +1325,15 @@ mod tests {
         assert!(!constant_time_eq(b"abc", b"abcd"));
 
         let mut h = HeaderMap::new();
-        h.insert(header::AUTHORIZATION, HeaderValue::from_static("bearer   tok123 "));
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("bearer   tok123 "),
+        );
         assert_eq!(bearer_token(&h), Some("tok123"));
-        h.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic tok123"));
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Basic tok123"),
+        );
         assert_eq!(bearer_token(&h), None);
     }
 
@@ -1281,7 +1348,11 @@ mod tests {
         write_token_file(&path, "second-token").expect("write 2");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second-token");
         let fmode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        let dmode = std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777;
+        let dmode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(fmode, 0o600);
         assert_eq!(dmode, 0o700);
         let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
@@ -1302,7 +1373,9 @@ mod tests {
     async fn spawn_server() -> SocketAddr {
         let engine = Arc::new(PipelineEngine::new());
         let app = build_router(engine, test_security());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -1311,8 +1384,17 @@ mod tests {
     }
 
     /// Sends one raw HTTP/1.1 request; returns (status, raw response text).
-    async fn raw_http(addr: SocketAddr, method: &str, path: &str, headers: &[(&str, String)], body: &str) -> (u16, String) {
-        let mut req = format!("{method} {path} HTTP/1.1\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
+    async fn raw_http(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        headers: &[(&str, String)],
+        body: &str,
+    ) -> (u16, String) {
+        let mut req = format!(
+            "{method} {path} HTTP/1.1\r\nConnection: close\r\nContent-Length: {}\r\n",
+            body.len()
+        );
         for (k, v) in headers {
             req.push_str(&format!("{k}: {v}\r\n"));
         }
@@ -1347,48 +1429,115 @@ mod tests {
         assert!(body.contains(r#"{"error":"unauthorized"}"#), "{body}");
 
         let wrong = ("Authorization", format!("Bearer {TEST_TOKEN}x"));
-        let (st, _) = raw_http(addr, "POST", invoke, &[host.clone(), wrong, ct.clone()], "{}").await;
+        let (st, _) = raw_http(
+            addr,
+            "POST",
+            invoke,
+            &[host.clone(), wrong, ct.clone()],
+            "{}",
+        )
+        .await;
         assert_eq!(st, 401);
 
         let (st, _) = raw_http(addr, "GET", "/api/health", std::slice::from_ref(&host), "").await;
         assert_eq!(st, 401, "health is under /api/* and needs the token too");
 
-        let (st, body) = raw_http(addr, "POST", invoke, &[host.clone(), auth.clone(), ct.clone()], "{}").await;
+        let (st, body) = raw_http(
+            addr,
+            "POST",
+            invoke,
+            &[host.clone(), auth.clone(), ct.clone()],
+            "{}",
+        )
+        .await;
         assert_eq!(st, 200, "{body}");
         assert!(body.contains("mock:mock0"));
 
         // DNS rebinding: valid token, attacker-controlled Host.
         let evil_host = ("Host", format!("evil.example:{}", addr.port()));
-        let (st, _) = raw_http(addr, "POST", invoke, &[evil_host, auth.clone(), ct.clone()], "{}").await;
+        let (st, _) = raw_http(
+            addr,
+            "POST",
+            invoke,
+            &[evil_host, auth.clone(), ct.clone()],
+            "{}",
+        )
+        .await;
         assert_eq!(st, 403);
 
         // Foreign Origin (browser "simple request" CSRF): valid token, still refused.
         let evil_origin = ("Origin", "http://evil.example".to_string());
-        let (st, _) = raw_http(addr, "POST", invoke, &[host.clone(), evil_origin.clone(), auth.clone(), ct.clone()], "{}").await;
+        let (st, _) = raw_http(
+            addr,
+            "POST",
+            invoke,
+            &[host.clone(), evil_origin.clone(), auth.clone(), ct.clone()],
+            "{}",
+        )
+        .await;
         assert_eq!(st, 403);
 
         // Allowed origin: 200 with an exact (non-wildcard) CORS header.
         let good_origin = ("Origin", "http://localhost:5173".to_string());
-        let (st, body) = raw_http(addr, "POST", invoke, &[host.clone(), good_origin.clone(), auth.clone(), ct.clone()], "{}").await;
+        let (st, body) = raw_http(
+            addr,
+            "POST",
+            invoke,
+            &[host.clone(), good_origin.clone(), auth.clone(), ct.clone()],
+            "{}",
+        )
+        .await;
         assert_eq!(st, 200);
         let lower = body.to_ascii_lowercase();
-        assert!(lower.contains("access-control-allow-origin: http://localhost:5173"), "{body}");
+        assert!(
+            lower.contains("access-control-allow-origin: http://localhost:5173"),
+            "{body}"
+        );
         // ...and a missing token from an allowed origin is a readable 401 (CORS headers present).
-        let (st, body) = raw_http(addr, "POST", invoke, &[host.clone(), good_origin.clone(), ct.clone()], "{}").await;
+        let (st, body) = raw_http(
+            addr,
+            "POST",
+            invoke,
+            &[host.clone(), good_origin.clone(), ct.clone()],
+            "{}",
+        )
+        .await;
         assert_eq!(st, 401);
-        assert!(body.to_ascii_lowercase().contains("access-control-allow-origin: http://localhost:5173"));
+        assert!(body
+            .to_ascii_lowercase()
+            .contains("access-control-allow-origin: http://localhost:5173"));
 
         // CORS preflight needs no token; foreign origin preflight is refused.
         let pf = [
             ("Access-Control-Request-Method", "POST".to_string()),
-            ("Access-Control-Request-Headers", "authorization,content-type".to_string()),
+            (
+                "Access-Control-Request-Headers",
+                "authorization,content-type".to_string(),
+            ),
         ];
-        let (st, body) = raw_http(addr, "OPTIONS", invoke, &[host.clone(), good_origin, pf[0].clone(), pf[1].clone()], "").await;
+        let (st, body) = raw_http(
+            addr,
+            "OPTIONS",
+            invoke,
+            &[host.clone(), good_origin, pf[0].clone(), pf[1].clone()],
+            "",
+        )
+        .await;
         assert!((200..300).contains(&st), "{body}");
         let lower = body.to_ascii_lowercase();
-        assert!(lower.contains("access-control-allow-origin: http://localhost:5173"), "{body}");
+        assert!(
+            lower.contains("access-control-allow-origin: http://localhost:5173"),
+            "{body}"
+        );
         assert!(lower.contains("authorization"), "{body}");
-        let (st, _) = raw_http(addr, "OPTIONS", invoke, &[host, evil_origin, pf[0].clone(), pf[1].clone()], "").await;
+        let (st, _) = raw_http(
+            addr,
+            "OPTIONS",
+            invoke,
+            &[host, evil_origin, pf[0].clone(), pf[1].clone()],
+            "",
+        )
+        .await;
         assert_eq!(st, 403);
     }
 
@@ -1416,7 +1565,11 @@ mod tests {
             head.push(byte[0]);
         }
         let text = String::from_utf8_lossy(&head);
-        let status = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         (status, stream)
     }
 
@@ -1469,20 +1622,30 @@ mod tests {
         // No auth message -> closed with 4401 after ~3 s; no telemetry before that.
         let (st, mut s) = ws_connect(addr, &[]).await;
         assert_eq!(st, 101);
-        let (op, payload) = ws_read_frame(&mut s, Duration::from_secs(5)).await.expect("close frame");
+        let (op, payload) = ws_read_frame(&mut s, Duration::from_secs(5))
+            .await
+            .expect("close frame");
         assert_eq!(op, 0x8, "first frame must be Close, not telemetry");
         assert_eq!(close_code(&payload), WS_CLOSE_UNAUTHORIZED);
 
         // Wrong token -> 4401 immediately.
         let (_, mut s) = ws_connect(addr, &[("Origin", "http://localhost:5173".to_string())]).await;
         ws_send_text(&mut s, r#"{"type":"auth","token":"nope"}"#).await;
-        let (op, payload) = ws_read_frame(&mut s, Duration::from_secs(2)).await.expect("close frame");
+        let (op, payload) = ws_read_frame(&mut s, Duration::from_secs(2))
+            .await
+            .expect("close frame");
         assert_eq!((op, close_code(&payload)), (0x8, WS_CLOSE_UNAUTHORIZED));
 
         // Correct auth -> telemetry text frames.
         let (_, mut s) = ws_connect(addr, &[("Origin", "http://localhost:5173".to_string())]).await;
-        ws_send_text(&mut s, &format!(r#"{{"type":"auth","token":"{TEST_TOKEN}"}}"#)).await;
-        let (op, payload) = ws_read_frame(&mut s, Duration::from_secs(3)).await.expect("snapshot");
+        ws_send_text(
+            &mut s,
+            &format!(r#"{{"type":"auth","token":"{TEST_TOKEN}"}}"#),
+        )
+        .await;
+        let (op, payload) = ws_read_frame(&mut s, Duration::from_secs(3))
+            .await
+            .expect("snapshot");
         assert_eq!(op, 0x1, "expected a text snapshot");
         let v: Value = serde_json::from_slice(&payload).expect("snapshot json");
         assert!(v.get("seq").is_some());
@@ -1498,17 +1661,23 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        let (st, _) = call_invoke(&engine, "cmd_arm_active_bus", r#"{"busId":0,"armed":true}"#).await;
+        let (st, _) =
+            call_invoke(&engine, "cmd_arm_active_bus", r#"{"busId":0,"armed":true}"#).await;
         assert_eq!(st, StatusCode::OK);
         let (st, _) = call_invoke(&engine, "cmd_panic_stop_tx", "").await;
         assert_eq!(st, StatusCode::OK);
-        let (st, v) = call_invoke(&engine, "cmd_arm_active_bus", r#"{"busId":0,"armed":true}"#).await;
+        let (st, v) =
+            call_invoke(&engine, "cmd_arm_active_bus", r#"{"busId":0,"armed":true}"#).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        assert!(v["error"].as_str().unwrap().starts_with("PANIC_LATCHED:"), "{v}");
+        assert!(
+            v["error"].as_str().unwrap().starts_with("PANIC_LATCHED:"),
+            "{v}"
+        );
         let (st, v) = call_invoke(&engine, "cmd_clear_panic_latch", "").await;
         assert_eq!(st, StatusCode::OK);
         assert!(v.is_null());
-        let (st, v) = call_invoke(&engine, "cmd_arm_active_bus", r#"{"busId":0,"armed":true}"#).await;
+        let (st, v) =
+            call_invoke(&engine, "cmd_arm_active_bus", r#"{"busId":0,"armed":true}"#).await;
         assert_eq!(st, StatusCode::OK, "{v}");
 
         let (st, v) = call_invoke(&engine, "cmd_reset_session", "").await;
@@ -1544,14 +1713,30 @@ mod tests {
         });
         let (st, v) = call_invoke(&engine, "cmd_seedkey_compute_adhoc", &body.to_string()).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        assert!(v["error"].as_str().unwrap().starts_with("[seedkey:unsupported] "), "{v}");
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("[seedkey:unsupported] "),
+            "{v}"
+        );
 
         let (st, v) = call_invoke(&engine, "cmd_seedkey_compute_adhoc", r#"{"level":1}"#).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        assert!(v["error"].as_str().unwrap().starts_with("[seedkey:invalid_input] "), "{v}");
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("[seedkey:invalid_input] "),
+            "{v}"
+        );
     }
 
-    async fn call_invoke(engine: &Arc<PipelineEngine>, cmd: &str, body_str: &str) -> (StatusCode, Value) {
+    async fn call_invoke(
+        engine: &Arc<PipelineEngine>,
+        cmd: &str,
+        body_str: &str,
+    ) -> (StatusCode, Value) {
         let resp = handle_invoke(
             Path(cmd.to_string()),
             State(Arc::clone(engine)),
@@ -1571,13 +1756,24 @@ mod tests {
         let engine = Arc::new(PipelineEngine::new());
         let cfg = r#"{"busId":0,"requestId":2020,"responseId":2028,"isExtendedId":false}"#;
 
-        let (st, v) = call_invoke(&engine, "cmd_diag_open_session", &format!(r#"{{"config":{cfg}}}"#)).await;
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_open_session",
+            &format!(r#"{{"config":{cfg}}}"#),
+        )
+        .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        assert!(v["error"].as_str().unwrap().starts_with("[diag:bus_not_connected] "));
+        assert!(v["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("[diag:bus_not_connected] "));
 
         let (st, v) = call_invoke(&engine, "cmd_diag_read_did", r#"{"config":{"busId":0}}"#).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        assert!(v["error"].as_str().unwrap().starts_with("[diag:invalid_input] "));
+        assert!(v["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("[diag:invalid_input] "));
 
         let (st, _) = call_invoke(
             &engine,
@@ -1614,7 +1810,10 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        assert!(v["error"].as_str().unwrap().starts_with("[diag:invalid_input] "));
+        assert!(v["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("[diag:invalid_input] "));
 
         // ECU discovery: `{ request: {...} }`, same gate and wire format.
         let (st, v) = call_invoke(
@@ -1632,7 +1831,10 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        assert!(v["error"].as_str().unwrap().starts_with("[diag:invalid_input] "));
+        assert!(v["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("[diag:invalid_input] "));
 
         // Read-only commands answer without a session.
         let (st, v) = call_invoke(
@@ -1643,24 +1845,30 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(v["lastSeq"], 0);
-        let (st, v) = call_invoke(&engine, "cmd_diag_session_info", &format!(r#"{{"config":{cfg}}}"#)).await;
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_session_info",
+            &format!(r#"{{"config":{cfg}}}"#),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(v["open"], false);
-        let (st, v) = call_invoke(&engine, "cmd_diag_close_session", &format!(r#"{{"config":{cfg}}}"#)).await;
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_close_session",
+            &format!(r#"{{"config":{cfg}}}"#),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
         assert!(v.is_null());
     }
 
     #[tokio::test]
     async fn bridge_http_endpoints_and_400_error_contract() {
-        let tmp_projects = std::env::temp_dir().join(format!(
-            "nexuscan-bridge-projects-{}",
-            std::process::id()
-        ));
-        let tmp_traces = std::env::temp_dir().join(format!(
-            "nexuscan-bridge-traces-{}",
-            std::process::id()
-        ));
+        let tmp_projects =
+            std::env::temp_dir().join(format!("nexuscan-bridge-projects-{}", std::process::id()));
+        let tmp_traces =
+            std::env::temp_dir().join(format!("nexuscan-bridge-traces-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp_projects);
         let _ = std::fs::remove_dir_all(&tmp_traces);
 
@@ -1680,21 +1888,19 @@ mod tests {
         let (st_dev, devs) = call_invoke(&engine, "cmd_list_devices", "").await;
         assert_eq!(st_dev, StatusCode::OK);
         let dev_arr = devs.as_array().expect("array");
-        assert!(dev_arr
-            .iter()
-            .any(|d| d["deviceId"] == "mock:mock0"
-                && d["displayName"] == "mock0 — Virtual EV Powertrain + BMS Bus"));
-        assert!(dev_arr
-            .iter()
-            .any(|d| d["deviceId"] == "mock:mock1"
-                && d["displayName"] == "mock1 — Virtual Auxiliary / Charger Bus"));
+        assert!(dev_arr.iter().any(|d| d["deviceId"] == "mock:mock0"
+            && d["displayName"] == "mock0 — Virtual EV Powertrain + BMS Bus"));
+        assert!(dev_arr.iter().any(|d| d["deviceId"] == "mock:mock1"
+            && d["displayName"] == "mock1 — Virtual Auxiliary / Charger Bus"));
 
         // 2b. cmd_probe_drivers returns all 6 driver families
         let (st_probe, probe_val) = call_invoke(&engine, "cmd_probe_drivers", "").await;
         assert_eq!(st_probe, StatusCode::OK);
         let fams = probe_val["families"].as_array().expect("families array");
         assert_eq!(fams.len(), 6);
-        assert!(fams.iter().any(|f| f["familyId"] == "slcan" && f["installed"] == true));
+        assert!(fams
+            .iter()
+            .any(|f| f["familyId"] == "slcan" && f["installed"] == true));
         assert!(fams.iter().any(|f| f["familyId"] == "pcan"));
         assert!(fams.iter().any(|f| f["familyId"] == "kvaser"));
 
@@ -1779,8 +1985,7 @@ mod tests {
         assert_eq!(jobs_arr.len(), 1);
         assert_eq!(jobs_arr[0]["arbId"], 1919);
 
-        let (st_disc_all, disc_count) =
-            call_invoke(&engine, "cmd_disconnect_all_buses", "").await;
+        let (st_disc_all, disc_count) = call_invoke(&engine, "cmd_disconnect_all_buses", "").await;
         assert_eq!(st_disc_all, StatusCode::OK);
         assert_eq!(disc_count, 2);
 
@@ -1806,7 +2011,10 @@ mod tests {
         )
         .await;
         assert_eq!(st_load_p, StatusCode::OK);
-        assert!(loaded_p.as_str().expect("project json str").contains("EV Dyno Bench"));
+        assert!(loaded_p
+            .as_str()
+            .expect("project json str")
+            .contains("EV Dyno Bench"));
 
         let (st_del_p, _) = call_invoke(
             &engine,
@@ -1938,12 +2146,8 @@ mod tests {
         assert_eq!(rep_cfg["filterKeys"], json!(["STD:0x101"]));
         assert_eq!(rep_cfg["directionFilter"], "all");
 
-        let (st_rep_stop, rep_stopped) = call_invoke(
-            &engine,
-            "cmd_control_trace_replay",
-            r#"{"action":"stop"}"#,
-        )
-        .await;
+        let (st_rep_stop, rep_stopped) =
+            call_invoke(&engine, "cmd_control_trace_replay", r#"{"action":"stop"}"#).await;
         assert_eq!(st_rep_stop, StatusCode::OK);
         assert_eq!(rep_stopped["state"], "idle");
 
@@ -2002,4 +2206,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp_traces);
     }
 }
-

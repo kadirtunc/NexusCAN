@@ -25,7 +25,10 @@ fn script_available() -> bool {
             source: "fn calculate_key(seed, level) { seed }".to_string(),
             timeout_ms: 1_000,
         };
-        !matches!(build_portable_provider(&probe), Err(SeedKeyError::Unsupported(_)))
+        !matches!(
+            build_portable_provider(&probe),
+            Err(SeedKeyError::Unsupported(_))
+        )
     })
 }
 
@@ -67,10 +70,7 @@ pub fn compute_adhoc(
     }
     let started = Instant::now();
     let key_provider = build_portable_provider(provider)?;
-    let key = key_provider.compute_key(&SeedKeyRequest {
-        seed: &seed,
-        level,
-    })?;
+    let key = key_provider.compute_key(&SeedKeyRequest { seed: &seed, level })?;
     Ok(ComputeKeyResultDto {
         key_hex: to_hex(&key),
         provider_kind: provider.kind().to_string(),
@@ -171,7 +171,10 @@ mod tests {
         };
         let err = compute_adhoc(&spin, 0x01, "11").expect_err("runaway");
         assert!(
-            matches!(err.code(), SeedKeyErrorCode::Timeout | SeedKeyErrorCode::Script),
+            matches!(
+                err.code(),
+                SeedKeyErrorCode::Timeout | SeedKeyErrorCode::Script
+            ),
             "{err:?}"
         );
     }

@@ -128,8 +128,7 @@ impl MuxDecisionTree {
             // Look for sub-switches in this branch
             for sig in &sigs {
                 if sig.mux_role.is_switch() {
-                    let sub_tree =
-                        Self::build_at_depth(sig.id, all_signals, visited, depth + 1)?;
+                    let sub_tree = Self::build_at_depth(sig.id, all_signals, visited, depth + 1)?;
                     sub_switches.push(sub_tree);
                 }
             }

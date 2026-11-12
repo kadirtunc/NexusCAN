@@ -20,7 +20,10 @@ use nexus_core::{now_monotonic_us, CanIdKey, RawCanFrame};
 use nexus_protocols::uds::dto::DiagSessionConfigDto;
 use nexus_protocols::uds::port::{DiagCanPort, DiagPortEvent, DiagTxReject};
 use socketcan::frame::FdFlags;
-use socketcan::{CanAnyFrame, CanDataFrame, CanFdFrame, CanFdSocket, CanFilter, EmbeddedFrame, Frame, Socket, SocketOptions, StandardId};
+use socketcan::{
+    CanAnyFrame, CanDataFrame, CanFdFrame, CanFdSocket, CanFilter, EmbeddedFrame, Frame, Socket,
+    SocketOptions, StandardId,
+};
 
 pub const IFACE: &str = "vcan0";
 
@@ -33,8 +36,16 @@ pub struct Ids {
 
 /// User's manual test ECU (PID 107587) — never used here.
 const FORBIDDEN: [u32; 3] = [0x7E0, 0x7E8, 0x7DF];
-pub const CLASSIC: Ids = Ids { req: 0x7E2, resp: 0x7EA, func: 0x7DE };
-pub const FD: Ids = Ids { req: 0x7E3, resp: 0x7EB, func: 0x7D8 };
+pub const CLASSIC: Ids = Ids {
+    req: 0x7E2,
+    resp: 0x7EA,
+    func: 0x7DE,
+};
+pub const FD: Ids = Ids {
+    req: 0x7E3,
+    resp: 0x7EB,
+    func: 0x7D8,
+};
 
 /// Serializes HIL tests even if `--test-threads=1` is forgotten (same CAN ids).
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -61,7 +72,10 @@ pub fn hil_env(need_fd: bool) -> Option<()> {
     if need_fd {
         let mtu = std::fs::read_to_string(net.join("mtu")).unwrap_or_default();
         if mtu.trim() != "72" {
-            eprintln!("SKIP (HIL): {IFACE} MTU is {} (CAN-FD needs 72)", mtu.trim());
+            eprintln!(
+                "SKIP (HIL): {IFACE} MTU is {} (CAN-FD needs 72)",
+                mtu.trim()
+            );
             return None;
         }
     }
@@ -153,9 +167,14 @@ fn to_raw(f: &CanAnyFrame) -> Option<RawCanFrame> {
 impl SocketCanPort {
     pub fn open(ids: Ids, fd: bool) -> (Box<dyn DiagCanPort>, Probe) {
         let rx = CanFdSocket::open(IFACE).expect("open rx socket");
-        rx.set_filters(&[std_filter(ids.resp), std_filter(ids.req), std_filter(ids.func)])
-            .expect("filters");
-        rx.set_read_timeout(Duration::from_millis(20)).expect("timeout");
+        rx.set_filters(&[
+            std_filter(ids.resp),
+            std_filter(ids.req),
+            std_filter(ids.func),
+        ])
+        .expect("filters");
+        rx.set_read_timeout(Duration::from_millis(20))
+            .expect("timeout");
         let tx = CanFdSocket::open(IFACE).expect("open tx socket");
         tx.set_filter_drop_all().expect("drop all");
         let (ev_tx, events) = crossbeam_channel::unbounded();
@@ -173,7 +192,9 @@ impl SocketCanPort {
                     let Some(raw) = to_raw(&frame) else { continue };
                     let ev = if raw.arb_id == ids.req || raw.arb_id == ids.func {
                         let mut p = pending.lock().unwrap_or_else(|e| e.into_inner());
-                        let mine = p.front().is_some_and(|f| f.arb_id == raw.arb_id && f.payload() == raw.payload());
+                        let mine = p.front().is_some_and(|f| {
+                            f.arb_id == raw.arb_id && f.payload() == raw.payload()
+                        });
                         if mine {
                             p.pop_front();
                             DiagPortEvent::TxConfirmed(raw)
@@ -187,7 +208,15 @@ impl SocketCanPort {
                 }
             })
         };
-        let port = SocketCanPort { tx, events, pending, stop, reader: Some(reader), probe: probe.clone(), fd };
+        let port = SocketCanPort {
+            tx,
+            events,
+            pending,
+            stop,
+            reader: Some(reader),
+            probe: probe.clone(),
+            fd,
+        };
         (Box::new(port), probe)
     }
 }
@@ -220,21 +249,43 @@ impl DiagCanPort for SocketCanPort {
     fn send(&self, frame: RawCanFrame) -> Result<(), DiagTxReject> {
         self.gate_check()?;
         let id = StandardId::new(frame.arb_id as u16).ok_or(DiagTxReject::DriverError)?;
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).push_back(frame);
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(frame);
         let res = if frame.is_fd() {
-            let flags = if frame.is_brs() { FdFlags::BRS } else { FdFlags::empty() };
+            let flags = if frame.is_brs() {
+                FdFlags::BRS
+            } else {
+                FdFlags::empty()
+            };
             CanFdFrame::with_flags(id, frame.payload(), flags)
                 .ok_or(DiagTxReject::DriverError)
-                .and_then(|f| self.tx.write_frame(&f).map_err(|_| DiagTxReject::DriverError))
+                .and_then(|f| {
+                    self.tx
+                        .write_frame(&f)
+                        .map_err(|_| DiagTxReject::DriverError)
+                })
         } else {
             CanDataFrame::new(id, frame.payload())
                 .ok_or(DiagTxReject::DriverError)
-                .and_then(|f| self.tx.write_frame(&f).map_err(|_| DiagTxReject::DriverError))
+                .and_then(|f| {
+                    self.tx
+                        .write_frame(&f)
+                        .map_err(|_| DiagTxReject::DriverError)
+                })
         };
         if res.is_err() {
-            self.pending.lock().unwrap_or_else(|e| e.into_inner()).pop_back();
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop_back();
         } else {
-            self.probe.sent.lock().unwrap_or_else(|e| e.into_inner()).push(frame);
+            self.probe
+                .sent
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(frame);
         }
         res
     }
@@ -272,7 +323,10 @@ fn logs_dir() -> PathBuf {
 impl EcuSim {
     pub fn start(tag: &str, ids: Ids, fd: bool) -> EcuSim {
         for id in [ids.req, ids.resp, ids.func] {
-            assert!(!FORBIDDEN.contains(&id), "ID {id:#x} belongs to the user's manual session");
+            assert!(
+                !FORBIDDEN.contains(&id),
+                "ID {id:#x} belongs to the user's manual session"
+            );
         }
         let log = logs_dir().join(format!("{tag}.ecu.jsonl"));
         let _ = std::fs::remove_file(&log);
@@ -291,8 +345,15 @@ impl EcuSim {
             cmd.arg("--fd");
         }
         let child = cmd.spawn().expect("spawn ecusim");
-        let ecu = EcuSim { child: Some(child), log };
-        assert!(ecu.wait_event("\"ev\":\"ready\"", Duration::from_secs(3)), "ecusim not ready, see {:?}", ecu.log);
+        let ecu = EcuSim {
+            child: Some(child),
+            log,
+        };
+        assert!(
+            ecu.wait_event("\"ev\":\"ready\"", Duration::from_secs(3)),
+            "ecusim not ready, see {:?}",
+            ecu.log
+        );
         ecu
     }
 
@@ -301,7 +362,10 @@ impl EcuSim {
     }
 
     pub fn count(&self, needle: &str) -> usize {
-        self.log_text().lines().filter(|l| l.contains(needle)).count()
+        self.log_text()
+            .lines()
+            .filter(|l| l.contains(needle))
+            .count()
     }
 
     pub fn wait_event(&self, needle: &str, timeout: Duration) -> bool {
@@ -319,7 +383,9 @@ impl EcuSim {
 impl Drop for EcuSim {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
+            let _ = Command::new("kill")
+                .args(["-TERM", &child.id().to_string()])
+                .status();
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
                 if let Ok(Some(_)) = child.try_wait() {
@@ -349,12 +415,16 @@ pub fn cpu_ticks() -> u64 {
 }
 
 pub fn thread_count() -> usize {
-    std::fs::read_dir("/proc/self/task").map(|d| d.count()).unwrap_or(0)
+    std::fs::read_dir("/proc/self/task")
+        .map(|d| d.count())
+        .unwrap_or(0)
 }
 
 /// `(thread name + tid, utime + stime ticks)` for every thread of this process.
 pub fn thread_ticks() -> Vec<(String, u64)> {
-    let Ok(dir) = std::fs::read_dir("/proc/self/task") else { return Vec::new() };
+    let Ok(dir) = std::fs::read_dir("/proc/self/task") else {
+        return Vec::new();
+    };
     dir.filter_map(|e| e.ok())
         .filter_map(|e| {
             let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
@@ -369,13 +439,22 @@ pub fn thread_ticks() -> Vec<(String, u64)> {
 
 /// `(thread, run ns, timeslices)` from `/proc/self/task/*/schedstat` (ns resolution).
 pub fn thread_sched() -> Vec<(String, u64, u64)> {
-    let Ok(dir) = std::fs::read_dir("/proc/self/task") else { return Vec::new() };
+    let Ok(dir) = std::fs::read_dir("/proc/self/task") else {
+        return Vec::new();
+    };
     dir.filter_map(|e| e.ok())
         .filter_map(|e| {
             let comm = std::fs::read_to_string(e.path().join("comm")).ok()?;
             let st = std::fs::read_to_string(e.path().join("schedstat")).ok()?;
-            let f: Vec<u64> = st.split_whitespace().filter_map(|v| v.parse().ok()).collect();
-            Some((format!("{}/{}", comm.trim(), e.file_name().to_string_lossy()), *f.first()?, *f.get(2)?))
+            let f: Vec<u64> = st
+                .split_whitespace()
+                .filter_map(|v| v.parse().ok())
+                .collect();
+            Some((
+                format!("{}/{}", comm.trim(), e.file_name().to_string_lossy()),
+                *f.first()?,
+                *f.get(2)?,
+            ))
         })
         .collect()
 }

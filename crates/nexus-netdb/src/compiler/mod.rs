@@ -155,8 +155,11 @@ impl CompiledDatabase {
                 current_sig_id += 1;
                 name_to_id.insert(sig_def.name.clone(), id);
 
-                let bit_span =
-                    NormalizedBitSpan::compile(sig_def.start_bit, sig_def.bit_len, sig_def.byte_order)?;
+                let bit_span = NormalizedBitSpan::compile(
+                    sig_def.start_bit,
+                    sig_def.bit_len,
+                    sig_def.byte_order,
+                )?;
 
                 let (min, max, has_bounds) = normalize_bounds(sig_def.min, sig_def.max);
                 let has_enum_table = !sig_def.enum_values.is_empty();
@@ -253,7 +256,11 @@ impl CompiledDatabase {
             // Compile MuxDecisionTree if a switch exists
             let mux_tree = if let Some(m_id) = master_switch_id {
                 let mut visited = FxHashSet::default();
-                Some(MuxDecisionTree::build(m_id, &temp_compiled_sigs, &mut visited)?)
+                Some(MuxDecisionTree::build(
+                    m_id,
+                    &temp_compiled_sigs,
+                    &mut visited,
+                )?)
             } else {
                 None
             };

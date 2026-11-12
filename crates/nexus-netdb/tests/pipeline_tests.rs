@@ -109,11 +109,7 @@ SIG_VALTYPE_ 256 SingleFloat : 1 ;
     // SingleFloat = 380.5 V
     let mut payload = [0u8; 64];
     compiled
-        .encode_payload_into(
-            can_id,
-            &[(0, -10.0), (1, -500.0), (2, 380.5)],
-            &mut payload,
-        )
+        .encode_payload_into(can_id, &[(0, -10.0), (1, -500.0), (2, 380.5)], &mut payload)
         .unwrap();
 
     let summary = compiled
@@ -194,10 +190,17 @@ SG_MUL_VAL_ 260 MultiRange MasterMux 5-8, 10-12 ;
 
     // Case 3: Conflicting branches in single TX (Cell0_Volt from mux 0 and Cell1_Volt from mux 1)
     let conflict = compiled.encode_payload_into(can_id, &[(1, 3.65), (2, 4.12)], &mut payload);
-    assert!(matches!(conflict, Err(EncodeError::ConflictingMuxBranches { .. })));
+    assert!(matches!(
+        conflict,
+        Err(EncodeError::ConflictingMuxBranches { .. })
+    ));
 
     // Case 4: Multi-range SG_MUL_VAL_ (matches 5-8, 10-12)
-    let multi_sig = compiled.signals.iter().find(|s| s.name == "MultiRange").unwrap();
+    let multi_sig = compiled
+        .signals
+        .iter()
+        .find(|s| s.name == "MultiRange")
+        .unwrap();
     assert!(multi_sig.mux_role.matches_value(6));
     assert!(multi_sig.mux_role.matches_value(11));
     assert!(!multi_sig.mux_role.matches_value(9));
@@ -266,7 +269,9 @@ BO_ 100 NormalMsg: 8 NodeA
     assert_eq!(bundle.database.messages.len(), 1);
     let compiled = CompiledDatabase::compile(bundle.database).unwrap();
     assert_eq!(compiled.messages.len(), 1);
-    assert!(compiled.get_message(&CanIdKey::Extended(VECTOR_INDEPENDENT_SIG_MSG_ID)).is_none());
+    assert!(compiled
+        .get_message(&CanIdKey::Extended(VECTOR_INDEPENDENT_SIG_MSG_ID))
+        .is_none());
 }
 
 #[test]
@@ -285,7 +290,10 @@ fn test_windows_1252_special_characters() {
     let sig = &bundle.database.messages[&CanIdKey::Standard(100)].signals[0];
     assert_eq!(sig.unit, "°C");
     assert_eq!(bundle.source_encoding, "Windows-1252");
-    assert!(bundle.diagnostics.iter().any(|d| d.code == "ENCODING_TRANSCODED"));
+    assert!(bundle
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "ENCODING_TRANSCODED"));
 }
 
 #[test]
@@ -303,14 +311,29 @@ UNKNOWN_KEYWORD 123 456 ;
 
     let registry = FormatRegistry::new();
     let bundle = registry
-        .parse_bytes(dbc_quirks.as_bytes(), Some("quirks.dbc"), &ParseOptions::default())
+        .parse_bytes(
+            dbc_quirks.as_bytes(),
+            Some("quirks.dbc"),
+            &ParseOptions::default(),
+        )
         .unwrap();
 
     assert_eq!(bundle.database.messages.len(), 1);
-    assert_eq!(bundle.database.messages[&CanIdKey::Standard(200)].signals.len(), 2);
+    assert_eq!(
+        bundle.database.messages[&CanIdKey::Standard(200)]
+            .signals
+            .len(),
+        2
+    );
     // Verified diagnostic emission
-    assert!(bundle.diagnostics.iter().any(|d| d.code == "BIT_SPAN_EXCEEDS_DLC"));
-    assert!(bundle.diagnostics.iter().any(|d| d.code == "UNKNOWN_STATEMENT"));
+    assert!(bundle
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "BIT_SPAN_EXCEEDS_DLC"));
+    assert!(bundle
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "UNKNOWN_STATEMENT"));
 }
 
 #[test]
@@ -339,7 +362,11 @@ fn test_kcd_parsing_and_dbc_roundtrip() {
 
     let registry = FormatRegistry::new();
     let bundle = registry
-        .parse_bytes(kcd_xml.as_bytes(), Some("sample.kcd"), &ParseOptions::default())
+        .parse_bytes(
+            kcd_xml.as_bytes(),
+            Some("sample.kcd"),
+            &ParseOptions::default(),
+        )
         .unwrap();
 
     assert_eq!(bundle.format_name, "kcd");
@@ -375,12 +402,8 @@ BO_ 500 TestMsg: 8 ECU
  SG_ SigB : 12|4@1+ (1,0) [0|15] "" Vector__XXX
 "#;
 
-    let (_compiled, schema_dto) = parse_and_compile(
-        dbc.as_bytes(),
-        Some("test.dbc"),
-        &ParseOptions::default(),
-    )
-    .unwrap();
+    let (_compiled, schema_dto) =
+        parse_and_compile(dbc.as_bytes(), Some("test.dbc"), &ParseOptions::default()).unwrap();
 
     // Invariant: signals[i].signal_id == i as u32
     for (i, sig) in schema_dto.signals.iter().enumerate() {
@@ -389,7 +412,11 @@ BO_ 500 TestMsg: 8 ECU
 
     // Verify BitCellDto for SigA (12 bits from 0 to 11)
     let msg_dto = &schema_dto.messages[0];
-    let sig_a_cells: Vec<&BitCellDto> = msg_dto.bit_layout.iter().filter(|c| c.signal_id == 0).collect();
+    let sig_a_cells: Vec<&BitCellDto> = msg_dto
+        .bit_layout
+        .iter()
+        .filter(|c| c.signal_id == 0)
+        .collect();
     assert_eq!(sig_a_cells.len(), 12);
     assert!(sig_a_cells[0].is_lsb);
     assert!(sig_a_cells[11].is_msb);
@@ -430,7 +457,10 @@ fn test_multi_database_merge() {
     db2.messages.insert(CanIdKey::Standard(100), msg2);
 
     let (merged, diags) = merge_databases(vec![db1, db2]);
-    assert_eq!(merged.messages[&CanIdKey::Standard(100)].name, "MsgA_Overwritten");
+    assert_eq!(
+        merged.messages[&CanIdKey::Standard(100)].name,
+        "MsgA_Overwritten"
+    );
     assert!(diags.iter().any(|d| d.code == "DUPLICATE_CAN_ID"));
 }
 
@@ -445,12 +475,8 @@ BO_ 400 TorqueCmd: 8 Actuator
  SG_ TargetTorque : 0|16@1- (0.1,0) [-200|200] "Nm" Vector__XXX
 "#;
 
-    let (compiled, _) = parse_and_compile(
-        dbc.as_bytes(),
-        Some("torque.dbc"),
-        &ParseOptions::default(),
-    )
-    .unwrap();
+    let (compiled, _) =
+        parse_and_compile(dbc.as_bytes(), Some("torque.dbc"), &ParseOptions::default()).unwrap();
 
     let can_id = CanIdKey::Standard(400);
 
@@ -494,12 +520,8 @@ BO_ 700 HighPrecision: 8 PrecisionNode
 SIG_VALTYPE_ 700 GpsLatitude : 2 ;
 "#;
 
-    let (compiled, _) = parse_and_compile(
-        dbc.as_bytes(),
-        Some("gps.dbc"),
-        &ParseOptions::default(),
-    )
-    .unwrap();
+    let (compiled, _) =
+        parse_and_compile(dbc.as_bytes(), Some("gps.dbc"), &ParseOptions::default()).unwrap();
 
     let can_id = CanIdKey::Standard(700);
     let mut payload = [0u8; 64];
@@ -528,11 +550,11 @@ SIG_VALTYPE_ 700 GpsLatitude : 2 ;
 
 #[test]
 fn test_cyclic_mux_detection() {
-    use rustc_hash::FxHashSet;
-    use smallvec::SmallVec;
     use nexus_netdb::compiler::CompiledSignal;
     use nexus_netdb::ir::mux::{MuxRange, MuxRole};
     use nexus_netdb::MuxDecisionTree;
+    use rustc_hash::FxHashSet;
+    use smallvec::SmallVec;
 
     let span_a = NormalizedBitSpan::compile(0, 8, ByteOrder::LittleEndian).unwrap();
     let span_b = NormalizedBitSpan::compile(8, 8, ByteOrder::LittleEndian).unwrap();
