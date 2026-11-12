@@ -73,8 +73,16 @@ export interface TraceFileSummaryDto {
   filePath: string;
   format: 'trc' | 'asc' | 'log' | 'csv' | 'blf' | string;
   sizeBytes: number;
+  /** 0 when `statsKnown === false` (not parsed yet); never display as a real count. */
   frameCount: number;
+  /** 0 when `statsKnown === false`; never use as a real duration. */
   durationUs: number;
+  /**
+   * `false` when `cmd_list_traces` did not parse the file body (frameCount/durationUs are
+   * placeholders). Save/load/parse results always report `true`. Older backends may omit
+   * the field: treat `undefined` as `true`.
+   */
+  statsKnown?: boolean;
   updatedAt: string;
 }
 
@@ -141,6 +149,8 @@ export interface PanicStopResultDto {
   stoppedPeriodicJobs: number;
   disarmedBuses: number;
   timestampUs: number;
+  /** Buses whose driver write did not finish within 250 ms (latch is set anyway). Absent on older backends. */
+  inFlightTimeoutBuses?: number[];
 }
 
 /** `cmd_reset_session`: cold-start reset. Does NOT latch panic; clears the latch. */
@@ -148,6 +158,8 @@ export interface ResetSessionResultDto {
   stoppedPeriodicJobs: number;
   disarmedBuses: number;
   disconnectedBuses: number;
+  /** Same semantics as `PanicStopResultDto.inFlightTimeoutBuses`. Absent on older backends. */
+  inFlightTimeoutBuses?: number[];
 }
 
 export interface TxTransmitResultDto {

@@ -8,9 +8,11 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "tauri": "tauri",
     "test:decode": "esbuild src/services/udsDecode.test.ts --bundle --platform=node --format=esm | node --input-type=module",
     "test:traffic": "esbuild src/components/diagnostics/traffic/trafficModel.test.ts --bundle --platform=node --format=esm | node --input-type=module",
-    "test:graph": "esbuild src/components/diagnostics/ecu-graph/graphModel.test.ts --bundle --platform=node --format=esm | node --input-type=module"
+    "test:graph": "esbuild src/components/diagnostics/ecu-graph/graphModel.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:inflight": "esbuild src/services/txInFlight.test.ts --bundle --platform=node --format=esm | node --input-type=module"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.2.0",
@@ -20,6 +22,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.9",
+    "@tauri-apps/cli": "^2.12.4",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",

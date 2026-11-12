@@ -15,7 +15,7 @@ export const EnforcementBadge: React.FC<{ kind: ListenOnlyEnforcementKind | null
   return (
     <span
       title={cfg.tip}
-      className={`px-1.5 border text-[10.5px] font-bold font-mono tabular-nums whitespace-nowrap ${cfg.cls}`}
+      className={`px-1.5 border text-[10.5px] font-bold font-mono tabular-nums whitespace-nowrap shrink-0 ${cfg.cls}`}
     >
       {cfg.text}
     </span>

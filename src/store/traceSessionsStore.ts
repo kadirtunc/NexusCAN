@@ -922,13 +922,13 @@ export const traceSessionsStore = {
 
   /**
    * Imports a trace file from user's computer (.trc, .asc, .log, .csv, .blf), parses it via backend,
-   * optionally copies it to `traces/`, and opens it in a new Trace tab.
+   * opens it in a new Trace tab.
    * If `contentBase64` is provided, passes binary base64 payload to preserve binary integrity.
    */
   async importLocalTraceFile(
     fileName: string,
     content: string,
-    alsoSaveToDisk = true,
+    alsoSaveToDisk = false,
     contentBase64?: string,
   ): Promise<TraceSession> {
     const isBinary = Boolean(contentBase64 && contentBase64.length > 0);
@@ -996,9 +996,9 @@ export const traceSessionsStore = {
       targetSession.state = 'stopped';
       targetSession.name = fileName.replace(/\.(trc|asc|log|csv|blf)$/i, '');
       targetSession.fileName = fileName;
-      targetSession.savedFilePath = diskSummary?.filePath ?? loaded.summary.filePath ?? null;
+      targetSession.savedFilePath = diskSummary?.filePath ?? null;
       targetSession.savedAtIso = diskSummary?.updatedAt ?? now.toISOString();
-      targetSession.dirtySinceSave = false;
+      targetSession.dirtySinceSave = diskSummary === null;
       targetSession.version += 1;
       session = targetSession;
       recomputeAndEmit(storeState.sessions, targetSession.id);
@@ -1030,9 +1030,9 @@ export const traceSessionsStore = {
         lastTimestampUs: loaded.frames[loaded.frames.length - 1]?.timestampUs ?? 0,
         lastSeenMaxTs: loaded.frames[loaded.frames.length - 1]?.timestampUs ?? -1,
         busFilter: null,
-        savedFilePath: diskSummary?.filePath ?? loaded.summary.filePath ?? null,
+        savedFilePath: diskSummary?.filePath ?? null,
         savedAtIso: diskSummary?.updatedAt ?? now.toISOString(),
-        dirtySinceSave: false,
+        dirtySinceSave: diskSummary === null,
       };
 
       const nextSessions = [...storeState.sessions, session];
@@ -1047,11 +1047,11 @@ export const traceSessionsStore = {
    * Automatically inspects a File object:
    * - If Vector BLF (.blf or 'LOGG' magic), reads as binary ArrayBuffer -> Base64 without UTF-8 corruption.
    * - Otherwise reads as UTF-8 text (.trc, .asc, .log, .csv).
-   * Opens the trace in a tab and persists to `traces/` if `alsoSaveToDisk` is true.
+   * Opens the trace in a tab and persists to `traces/` ONLY if `alsoSaveToDisk` is explicitly true (default false; saving is an explicit user action).
    */
   async importTraceFileObject(
     file: File,
-    alsoSaveToDisk = true,
+    alsoSaveToDisk = false,
   ): Promise<TraceSession> {
     const slice = await file.slice(0, 4).arrayBuffer();
     const magic = new Uint8Array(slice);

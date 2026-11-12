@@ -13,7 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import { useI18n, type TranslationKey } from '../../../i18n';
-import { performPanicStop } from '../../../store/panicStop';
+import { panicInFlightBuses, performPanicStop } from '../../../store/panicStop';
 import type { SimulationSignalBindingDto, SimulationWidgetKind } from '../../../types/simulation';
 import type { UdsPanelDto, UdsWidgetDto } from '../../../types/uds';
 import { InstrumentCanvasGrid } from '../../simulation/InstrumentCanvasGrid';
@@ -446,11 +446,18 @@ export const UdsInstrumentPanel: React.FC = () => {
   );
 
   const handlePanicStop = useCallback(() => {
-    void performPanicStop().catch((err: unknown) => {
-      udsPanelStore.notify('error', 'udsPanel.notice.panicFailed', {
-        message: err instanceof Error ? err.message : String(err),
+    void performPanicStop()
+      .then((res) => {
+        const stuck = panicInFlightBuses(res);
+        if (stuck !== null) {
+          udsPanelStore.notify('error', 'udsPanel.notice.panicInFlight', { buses: stuck });
+        }
+      })
+      .catch((err: unknown) => {
+        udsPanelStore.notify('error', 'udsPanel.notice.panicFailed', {
+          message: err instanceof Error ? err.message : String(err),
+        });
       });
-    });
   }, []);
 
   const handleAddWidget = useCallback(

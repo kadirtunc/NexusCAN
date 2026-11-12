@@ -1,4 +1,4 @@
-import { apiPanicStopTx } from '../services/ipcClient';
+import { apiPanicStopTx, formatInFlightBuses } from '../services/ipcClient';
 import type { PanicStopResultDto } from '../types/telemetry';
 import { telemetryStore } from './telemetryStore';
 import { stopAllTxSources } from './txSources';
@@ -14,4 +14,10 @@ export async function performPanicStop(): Promise<PanicStopResultDto> {
   telemetryStore.markPanicLatched();
   stopAllTxSources();
   return apiPanicStopTx();
+}
+
+/** Non-empty 1-based bus list when the Panic result reports a driver write that did not finish; else null. */
+export function panicInFlightBuses(res: Pick<PanicStopResultDto, 'inFlightTimeoutBuses'>): string | null {
+  const buses = res.inFlightTimeoutBuses;
+  return buses !== undefined && buses.length > 0 ? formatInFlightBuses(buses) : null;
 }

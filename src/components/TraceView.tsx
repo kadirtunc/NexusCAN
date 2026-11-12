@@ -822,7 +822,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
     if (!file) return;
     e.target.value = '';
     try {
-      const loaded = await traceSessionsStore.importTraceFileObject(file, true);
+      const loaded = await traceSessionsStore.importTraceFileObject(file, false);
       onStatusMessage?.({
         kind: 'success',
         message: t('trace.notify.fileOpened', {

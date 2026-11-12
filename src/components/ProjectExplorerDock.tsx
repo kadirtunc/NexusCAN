@@ -835,8 +835,13 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                                 </div>
 
                                 <div className="flex items-center gap-1 shrink-0 ml-1">
-                                  <span className="text-[11px] font-mono tabular-nums text-[var(--text-muted)]">
-                                    {f.frameCount.toLocaleString('en-US')}k · {(f.durationUs / 1_000_000).toFixed(1)}s
+                                  <span
+                                    className="text-[11px] font-mono tabular-nums text-[var(--text-muted)]"
+                                    title={f.statsKnown === false ? t('shell.dock.traceStatsUnknownHint') : undefined}
+                                  >
+                                    {f.statsKnown === false
+                                      ? t('shell.dock.traceStatsUnknown')
+                                      : `${f.frameCount.toLocaleString('en-US')} ${t('shell.dock.traceFramesUnit')} · ${(f.durationUs / 1_000_000).toFixed(1)}s`}
                                   </span>
 
                                   <button

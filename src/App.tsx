@@ -39,7 +39,7 @@ import { isToolpackEnabled } from './types/toolpacks';
 import { telemetryStore, useTelemetryHeader } from './store/telemetryStore';
 import { transmitStore, useTransmitStore } from './store/transmitStore';
 import { ImportedProjectNotice } from './components/ImportedProjectNotice';
-import { performPanicStop } from './store/panicStop';
+import { panicInFlightBuses, performPanicStop } from './store/panicStop';
 import { workbenchStore, useWorkbenchStore } from './store/workbenchStore';
 import { traceSessionsStore, useTraceSessionsStore } from './store/traceSessionsStore';
 import type { DeviceDescriptorDto } from './types/hal';
@@ -268,12 +268,17 @@ export const App: React.FC = () => {
     setPanicCounter((c) => c + 1);
     try {
       const res = await performPanicStop();
+      const stuck = panicInFlightBuses(res);
+      // Persistent (status bar keeps the message until replaced): the adapter may still be transmitting.
       setStatusBanner({
         kind: 'error',
-        message: t('shell.app.panicStopSuccess', {
-          stopped: res.stoppedPeriodicJobs,
-          disarmed: res.disarmedBuses,
-        }),
+        message:
+          stuck !== null
+            ? t('sec.panic.inFlightTimeout', { buses: stuck })
+            : t('shell.app.panicStopSuccess', {
+                stopped: res.stoppedPeriodicJobs,
+                disarmed: res.disarmedBuses,
+              }),
       });
     } catch (err) {
       setStatusBanner({

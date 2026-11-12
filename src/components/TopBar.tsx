@@ -326,7 +326,7 @@ export const TopBar: React.FC<TopBarProps> = ({
     if (!file) return;
     e.target.value = '';
     try {
-      const loaded = await traceSessionsStore.importTraceFileObject(file, true);
+      const loaded = await traceSessionsStore.importTraceFileObject(file, false);
       onStatusMessage({
         kind: 'success',
         message: t('shell.topbar.traceFileOpened', {

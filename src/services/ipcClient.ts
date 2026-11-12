@@ -444,6 +444,18 @@ export function apiPanicStopTx(): Promise<PanicStopResultDto> {
 
 /** Errors from arming while the panic latch is set start with this prefix. */
 export const PANIC_LATCHED_PREFIX = 'PANIC_LATCHED:';
+/** Disarm succeeded (bus is passive) but a driver write may still be in flight. */
+export const TX_IN_FLIGHT_TIMEOUT_PREFIX = 'TX_IN_FLIGHT_TIMEOUT:';
+
+export function isTxInFlightTimeoutError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  return msg.includes(TX_IN_FLIGHT_TIMEOUT_PREFIX);
+}
+
+/** 1-based, comma-separated bus labels (matches the "Bus N" display used across the UI). */
+export function formatInFlightBuses(buses: readonly number[] | undefined): string {
+  return (buses ?? []).map((b) => String(b + 1)).join(', ');
+}
 
 export function isPanicLatchedError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
@@ -464,13 +476,15 @@ export function apiResetSession(): Promise<ResetSessionResultDto> {
  * Session reset that never latches Panic. Falls back to the legacy panic+disconnect pair ONLY when
  * the backend does not know `cmd_reset_session` (older build).
  */
-export async function resetSessionCompat(): Promise<void> {
+export async function resetSessionCompat(): Promise<number[]> {
   try {
-    await apiResetSession();
+    const res = await apiResetSession();
+    return res.inFlightTimeoutBuses ?? [];
   } catch (err) {
-    if (!isUnknownCommandError(err)) return;
-    await apiPanicStopTx().catch(() => null);
+    if (!isUnknownCommandError(err)) return [];
+    const res = await apiPanicStopTx().catch(() => null);
     await apiDisconnectAllBuses().catch(() => 0);
+    return res?.inFlightTimeoutBuses ?? [];
   }
 }
 

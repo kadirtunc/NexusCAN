@@ -226,17 +226,11 @@ export const TxModeControl: React.FC = () => {
                     className="border border-[var(--border-strong)] rounded-[3px] p-2 flex flex-col gap-1.5"
                   >
                     <div className="flex items-center gap-2">
-                      <span className="font-mono tabular-nums font-bold truncate flex-1">
-                        {busLabel(b)}
-                      </span>
                       <span
-                        className={`px-1.5 border text-[10.5px] font-bold font-mono tabular-nums ${badge.cls}`}
+                        title={busLabel(b)}
+                        className="font-mono tabular-nums font-bold truncate flex-1 min-w-0"
                       >
-                        {badge.text}
-                      </span>
-                      <EnforcementBadge kind={b.listenOnlyEnforcement ?? null} />
-                      <span className="font-mono tabular-nums text-[10.5px] text-[var(--text-secondary)] min-w-[56px] text-right">
-                        {b.busState}
+                        {busLabel(b)}
                       </span>
                       {isPending ? (
                         <Loader2
@@ -265,6 +259,17 @@ export const TxModeControl: React.FC = () => {
                         )
                       )}
                     </div>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span
+                        className={`px-1.5 border text-[10.5px] font-bold font-mono tabular-nums whitespace-nowrap shrink-0 ${badge.cls}`}
+                      >
+                        {badge.text}
+                      </span>
+                      <EnforcementBadge kind={b.listenOnlyEnforcement ?? null} />
+                      <span className="font-mono tabular-nums text-[10.5px] text-[var(--text-secondary)] ml-auto whitespace-nowrap">
+                        {b.busState}
+                      </span>
+                    </div>
                     {confirming && !isPending && (
                       <div className="border border-amber-500/70 bg-amber-900/20 p-2 flex flex-col gap-1.5">
                         <div className="text-amber-200 text-[11.5px]">
@@ -291,8 +296,13 @@ export const TxModeControl: React.FC = () => {
                       </div>
                     )}
                     {errors[b.busId] !== undefined && (
-                      <div role="alert" className="text-red-400 text-[11px] font-mono break-words">
-                        {t('shell.tx.error', { err: errors[b.busId] })}
+                      <div
+                        role="alert"
+                        className={`${errors[b.busId] === t('sec.tx.inFlightDisarmed') ? 'text-amber-300' : 'text-red-400'} text-[11px] font-mono tabular-nums break-words`}
+                      >
+                        {errors[b.busId] === t('sec.tx.inFlightDisarmed')
+                          ? errors[b.busId]
+                          : t('shell.tx.error', { err: errors[b.busId] })}
                       </div>
                     )}
                   </li>
