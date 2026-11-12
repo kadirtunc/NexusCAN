@@ -161,6 +161,44 @@ fn restore_hw_listen_only(iface: &str) {
     }
 }
 
+/// Fail-closed gate (WP-5 `require_hardware_listen_only`), evaluated right after
+/// [`try_enable_hw_listen_only`] and BEFORE any CAN socket is opened.
+///
+/// Returns `Err` when hardware listen-only was required but only `SoftwareOnly` could be
+/// achieved; a ctrlmode change we made (applied but not verified) is reverted first. Note that
+/// the failed attempt itself never leaves the controller in a different mode than we found it
+/// (a link we took down to retry is brought back up).
+///
+/// Honest limit: if `iface` is already UP in normal mode, its controller ACKs frames on its own,
+/// independent of NexusCAN (the kernel driver does that while the link is up, with or without
+/// sockets). We cannot prevent that; fail-closed only guarantees NexusCAN does not run on it and
+/// never presents it as passive.
+fn fail_closed_gate(
+    iface: &str,
+    outcome: HwListenOnlyOutcome,
+    required: bool,
+) -> Result<(), AdapterError> {
+    if !required || outcome.enforcement != ListenOnlyEnforcement::SoftwareOnly {
+        return Ok(());
+    }
+    if outcome.restore_on_close {
+        restore_hw_listen_only(iface);
+    }
+    let env_note = if std::env::var(ENV_DISABLE_HW_LISTEN_ONLY).is_ok_and(|v| v.trim() == "1") {
+        format!(" Note: {ENV_DISABLE_HW_LISTEN_ONLY}=1 is set, which disables the netlink switch.")
+    } else {
+        String::new()
+    };
+    Err(AdapterError::hw_listen_only_unavailable(&format!(
+        "SocketCAN interface '{iface}' could not be put into controller listen-only mode, so \
+         it was not opened. Grant CAP_NET_ADMIN to NexusCAN (e.g. `sudo setcap \
+         cap_net_admin+ep <binary>`), or configure the interface beforehand: `sudo ip link set \
+         {iface} down && sudo ip link set {iface} type can listen-only on && sudo ip link set \
+         {iface} up` (drivers without listen-only ctrlmode, such as slcand netdevs, cannot be \
+         used fail-closed).{env_note}"
+    )))
+}
+
 /// Linux SocketCAN auto-discovering hardware/virtual driver (`can*`, `vcan*`, `slcan*`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SocketCanDriver;
@@ -246,8 +284,12 @@ impl AdapterDriver for SocketCanDriver {
         let want_fd = device.capabilities.supports_fd && config.enable_fd;
 
         // D-005: real controller silent mode BEFORE our socket exists (link may bounce).
+        // WP-5 fail-closed: with `require_hardware_listen_only`, refuse here, before any socket
+        // is opened, if only the software TX lock is possible.
         let hw_listen_only = if config.listen_only {
-            Some(try_enable_hw_listen_only(iface))
+            let outcome = try_enable_hw_listen_only(iface);
+            fail_closed_gate(iface, outcome, config.require_hardware_listen_only)?;
+            Some(outcome)
         } else {
             None
         };
@@ -719,6 +761,68 @@ mod tests {
             assert_eq!(out.enforcement, ListenOnlyEnforcement::Virtual);
             assert!(!out.restore_on_close);
         }
+    }
+
+    #[test]
+    fn fail_closed_gate_only_rejects_required_software_only() {
+        let sw = HwListenOnlyOutcome {
+            enforcement: ListenOnlyEnforcement::SoftwareOnly,
+            restore_on_close: false,
+        };
+        let err = fail_closed_gate("can_nexus_missing_wp5", sw, true).expect_err("must refuse");
+        assert!(err.is_hw_listen_only_unavailable(), "{err}");
+        assert!(err.to_string().contains("CAP_NET_ADMIN"), "{err}");
+        assert!(fail_closed_gate("can_nexus_missing_wp5", sw, false).is_ok());
+        for enforcement in [
+            ListenOnlyEnforcement::Hardware,
+            ListenOnlyEnforcement::Virtual,
+        ] {
+            let ok = HwListenOnlyOutcome {
+                enforcement,
+                restore_on_close: false,
+            };
+            assert!(fail_closed_gate("can_nexus_missing_wp5", ok, true).is_ok());
+        }
+    }
+
+    /// The refusal happens before any socket is opened: on a missing physical interface the
+    /// error is the fail-closed refusal, not the socket-open I/O error.
+    #[test]
+    fn open_refuses_before_socket_when_hw_listen_only_required() {
+        let desc = DeviceDescriptorDto {
+            device_id: "socketcan:can_nexus_missing_wp5".to_string(),
+            driver_id: "socketcan".to_string(),
+            channel_name: "can_nexus_missing_wp5".to_string(),
+            display_name: String::new(),
+            capabilities: AdapterCapabilitiesDto {
+                supports_fd: false,
+                supports_listen_only: true,
+                supports_hw_timestamps: true,
+                max_bitrate: 1_000_000,
+                is_virtual: false,
+            },
+        };
+        let cfg = ChannelConfig {
+            listen_only: true,
+            require_hardware_listen_only: true,
+            ..ChannelConfig::default()
+        };
+        let err = match SocketCanDriver::new().open_channel(&desc, &cfg) {
+            Ok(_) => panic!("must not open"),
+            Err(e) => e,
+        };
+        assert!(err.is_hw_listen_only_unavailable(), "{err}");
+
+        // Without the flag the same open proceeds to the socket (and fails there: no iface).
+        let cfg = ChannelConfig {
+            require_hardware_listen_only: false,
+            ..cfg
+        };
+        let err = match SocketCanDriver::new().open_channel(&desc, &cfg) {
+            Ok(_) => panic!("missing iface cannot open"),
+            Err(e) => e,
+        };
+        assert!(!err.is_hw_listen_only_unavailable(), "{err}");
     }
 
     #[test]

@@ -15,6 +15,7 @@ import {
   resolveDeviceIdForProfile,
   useConnectionStore,
 } from '../store/connectionStore';
+import { describeTxError } from '../store/busTxControl';
 import { apiArmActiveBus, apiConnectBus } from '../services/ipcClient';
 import { telemetryStore } from '../store/telemetryStore';
 import { useI18n, type TranslationKey } from '../i18n';
@@ -198,7 +199,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
         kind: 'error',
         message: t('conn.modal.connectFailed', {
           bus: busId + 1,
-          err: err instanceof Error ? err.message : String(err),
+          err: describeTxError(err),
         }),
       });
     } finally {

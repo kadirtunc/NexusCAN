@@ -47,6 +47,7 @@ import {
   writeActiveSessionMetaSync,
 } from '../utils/workspaceDb';
 import type { CloudProjectBindingV1 } from '../utils/workspaceDiff';
+import { describeTxError } from './busTxControl';
 import { sanitizeProject } from '../utils/projectSanitize';
 
 export interface QuickBarConnectionState {
@@ -529,7 +530,7 @@ export const projectStore = {
         telemetryStore.upsertBusHealth(health);
         connected += 1;
       } catch (err) {
-        warnings.push(`${prof.name}: ${err instanceof Error ? err.message : String(err)}`);
+        warnings.push(`${prof.name}: ${describeTxError(err)}`);
       }
     }
     currentState = {
@@ -727,7 +728,7 @@ export const projectStore = {
           telemetryStore.upsertBusHealth(health);
           reconnectedCount += 1;
         } catch (err) {
-          const errMsg = err instanceof Error ? err.message : String(err);
+          const errMsg = describeTxError(err);
           if (isReload && errMsg.toLowerCase().includes('already connected')) {
             reconnectedCount += 1;
           } else {

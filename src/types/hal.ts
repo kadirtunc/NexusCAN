@@ -28,6 +28,8 @@ export interface ChannelConfigDto {
   dataBitrate: number;
   enableFd: boolean;
   listenOnly: boolean; // MUST default to true in UI!
+  /** Opt-in fail-closed: refuse to connect when hardware Listen-Only cannot be enforced (physical adapters only). */
+  requireHardwareListenOnly?: boolean;
   mockFpsPreset: number | null;
   driverFamily?: string | null; // 'mock' | 'socketcan' | 'slcan' | 'pcan' | 'kvaser' | 'gs_usb'
   serialPort?: string | null; // e.g. 'COM3', '/dev/ttyUSB0', '/dev/ttyACM0'

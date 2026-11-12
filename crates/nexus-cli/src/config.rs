@@ -54,6 +54,8 @@ pub struct AgentSectionToml {
     pub hostname: Option<String>,
     pub device_id: Option<String>,
     pub listen_only: Option<bool>,
+    /// Fail-closed hardware Listen-Only (also accepted under `[can]`, which takes precedence).
+    pub require_hw_listen_only: Option<bool>,
     pub auto_sync_dbc: Option<bool>,
     pub dbc_path: Option<String>,
 }
@@ -76,6 +78,8 @@ pub struct CanSectionToml {
     pub enable_fd: Option<bool>,
     pub data_bitrate: Option<u32>,
     pub listen_only: Option<bool>,
+    /// Fail-closed: refuse to start unless the controller is in hardware listen-only mode.
+    pub require_hw_listen_only: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +127,9 @@ pub struct EffectiveAgentConfig {
     pub device_id: Option<String>,
     pub listen_only: bool,
     pub forced_listen_only_override: bool,
+    /// Fail-closed hardware Listen-Only (`--require-hw-listen-only` / `require_hw_listen_only`):
+    /// the agent refuses to start on a software-only listen-only channel. Default `false`.
+    pub require_hw_listen_only: bool,
     pub auto_sync_dbc: bool,
     pub dbc_path: Option<PathBuf>,
     pub cloud_url: String,
@@ -160,6 +167,13 @@ impl EffectiveAgentConfig {
         let attempted_active_tx = t.agent.listen_only == Some(false)
             || t.can.listen_only == Some(false)
             || cli.listen_only == Some(false);
+
+        // 1b. Fail-closed hardware Listen-Only: CLI -> [can] -> [agent] -> default false.
+        let require_hw_listen_only = cli
+            .require_hw_listen_only
+            .or(t.can.require_hw_listen_only)
+            .or(t.agent.require_hw_listen_only)
+            .unwrap_or(false);
 
         // 2. Hostname & Agent Name
         let hostname = non_empty_opt(cli.hostname.as_deref())
@@ -293,6 +307,7 @@ impl EffectiveAgentConfig {
             device_id,
             listen_only: true, // HARD SAFETY INVARIANT: ALWAYS TRUE
             forced_listen_only_override: attempted_active_tx,
+            require_hw_listen_only,
             auto_sync_dbc,
             dbc_path,
             cloud_url,
@@ -319,6 +334,7 @@ impl EffectiveAgentConfig {
             data_bitrate: self.data_bitrate,
             enable_fd: self.enable_fd,
             listen_only: true, // HARD SAFETY INVARIANT: ALWAYS TRUE
+            require_hardware_listen_only: self.require_hw_listen_only,
             mock_fps_preset: if is_mock {
                 Some(DEFAULT_MOCK_FPS_PRESET)
             } else {

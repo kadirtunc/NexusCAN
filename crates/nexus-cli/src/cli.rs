@@ -81,6 +81,10 @@ impl HelpTopic {
                  \x20     --web <ip:port>          Enable local read-only HTTP /api/status server (e.g. 127.0.0.1:8080)\n\
                  \x20     --no-web                 Disable local HTTP status server\n\
                  \x20     --listen-only [bool]     Passive bus observation flag (enforced true unconditionally)\n\
+                 \x20     --require-hw-listen-only [bool]\n\
+                 \x20                              Fail-closed: refuse to start if the CAN controller cannot be put\n\
+                 \x20                              into hardware listen-only mode (no software-only fallback;\n\
+                 \x20                              exits with EX_CONFIG 78, no retry). Default: false\n\
                  \x20 -h, --help                   Print help information\n"
             }
             Self::Dbc => {
@@ -129,6 +133,8 @@ pub struct AgentRunArgs {
     pub web_bind: Option<String>,
     pub web_disabled: bool,
     pub listen_only: Option<bool>,
+    /// `--require-hw-listen-only [bool]` (fail-closed hardware Listen-Only, WP-5).
+    pub require_hw_listen_only: Option<bool>,
 }
 
 // One-shot parse result, built once per process: the size gap between variants is irrelevant.
@@ -383,6 +389,10 @@ fn parse_agent_run_flags(tokens: &[String]) -> Result<CliCommand, CliError> {
             "--listen-only" => {
                 let b = take_dual_form_bool(flag_name, inline_val, tokens, &mut idx)?;
                 out.listen_only = Some(b);
+            }
+            "--require-hw-listen-only" => {
+                let b = take_dual_form_bool(flag_name, inline_val, tokens, &mut idx)?;
+                out.require_hw_listen_only = Some(b);
             }
             "--auto-sync-dbc" => {
                 let b = take_dual_form_bool(flag_name, inline_val, tokens, &mut idx)?;

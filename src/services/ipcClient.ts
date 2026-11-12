@@ -452,6 +452,24 @@ export function isTxInFlightTimeoutError(err: unknown): boolean {
   return msg.includes(TX_IN_FLIGHT_TIMEOUT_PREFIX);
 }
 
+/** Connect/re-open failed because hardware Listen-Only was required but unavailable. */
+export const HW_LISTEN_ONLY_UNAVAILABLE_PREFIX = 'HW_LISTEN_ONLY_UNAVAILABLE:';
+
+function errorMessageOf(err: unknown): string {
+  return err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+}
+
+export function isHwListenOnlyUnavailableError(err: unknown): boolean {
+  return errorMessageOf(err).includes(HW_LISTEN_ONLY_UNAVAILABLE_PREFIX);
+}
+
+/** Backend hint text following the `HW_LISTEN_ONLY_UNAVAILABLE:` prefix ('' when absent). */
+export function hwListenOnlyHint(err: unknown): string {
+  const msg = errorMessageOf(err);
+  const i = msg.indexOf(HW_LISTEN_ONLY_UNAVAILABLE_PREFIX);
+  return i < 0 ? '' : msg.slice(i + HW_LISTEN_ONLY_UNAVAILABLE_PREFIX.length).trim();
+}
+
 /** 1-based, comma-separated bus labels (matches the "Bus N" display used across the UI). */
 export function formatInFlightBuses(buses: readonly number[] | undefined): string {
   return (buses ?? []).map((b) => String(b + 1)).join(', ');

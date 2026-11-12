@@ -7,7 +7,9 @@ use crate::drivers::slcan_drv::SlcanDriver;
 use crate::drivers::socketcan_drv::SocketCanDriver;
 use crate::dto::{AdapterCapabilitiesDto, DeviceDescriptorDto};
 use crate::error::AdapterError;
-use crate::traits::{AdapterDriver, CanChannel, ChannelConfig, DeviceDescriptor};
+use crate::traits::{
+    AdapterDriver, CanChannel, ChannelConfig, DeviceDescriptor, ListenOnlyEnforcement,
+};
 use std::sync::Arc;
 
 /// Thread-safe registry of available CAN / CAN-FD hardware and virtual drivers.
@@ -71,7 +73,46 @@ impl DriverRegistry {
     /// Opens a channel by `device_id` (`"mock:mock0"`, `"mock:mock1"`, `"socketcan:vcan0"`,
     /// `"slcan:COM3"`, `"slcan:/dev/ttyUSB0"`, `"pcan:PCAN_USBBUS1"`, `"kvaser:0"`, `"gs_usb:0"`),
     /// supporting manually entered serial ports and explicit driver installation diagnostics.
+    ///
+    /// # Fail-closed hardware Listen-Only (WP-5)
+    ///
+    /// When [`ChannelConfig::requires_hardware_listen_only`] is set, a channel whose
+    /// [`CanChannel::listen_only_enforcement`] is
+    /// [`ListenOnlyEnforcement::SoftwareOnly`] is never returned: the error is
+    /// [`AdapterError::hw_listen_only_unavailable`] (message prefix
+    /// [`crate::HW_LISTEN_ONLY_UNAVAILABLE_PREFIX`]). Per driver:
+    ///
+    /// | Driver | Behaviour |
+    /// | :--- | :--- |
+    /// | `socketcan` (`can*`, `slcan*` netdevs; also `pcan`/`kvaser`/`gs_usb` routed to SocketCAN) | **Fails before open**: the netlink listen-only switch is attempted before any socket exists; on failure anything we changed is reverted and no socket is opened. |
+    /// | `socketcan` (`vcan*`, `vxcan*`) | n/a: `Virtual`, always allowed. |
+    /// | `slcan` (serial Lawicel) | **Fails before the CAN channel is opened**: the reply to `L` is read (scan of at most 16 bytes, tolerating echoes / stray bytes). `CR` → `Hardware`. `BEL` / no reply → `C` is sent, the serial port is closed, and the error is returned; `O` is never sent. Without the flag the channel opens with `O` instead (Lawicel has no other receive mode), so the adapter ACKs, and it is reported `SoftwareOnly` with the software TX lock. |
+    /// | `pcan` / `kvaser` / `gs_usb` native SDK paths | n/a today: no native backend opens a channel yet (they error or route to SocketCAN). |
+    /// | `mock` | n/a: `Virtual`, always allowed. |
+    /// | any other / future driver keeping the trait default `SoftwareOnly` | **Closes after open**: this function calls [`CanChannel::close`] and drops the channel before returning, so it never reaches a bus-io thread. |
     pub fn open_by_device_id(
+        &self,
+        device_id: &str,
+        config: &ChannelConfig,
+    ) -> Result<(DeviceDescriptor, Box<dyn CanChannel>), AdapterError> {
+        let (desc, mut channel) = self.open_by_device_id_unchecked(device_id, config)?;
+        if config.requires_hardware_listen_only()
+            && channel.listen_only_enforcement() == ListenOnlyEnforcement::SoftwareOnly
+        {
+            let _ = channel.close();
+            drop(channel);
+            return Err(AdapterError::hw_listen_only_unavailable(&format!(
+                "adapter '{}' (driver '{}') does not support controller silent / listen-only \
+                 mode, so it could still ACK frames; the channel was closed without being used. \
+                 Use an adapter with hardware listen-only support, or clear \
+                 'require hardware listen-only' to accept the software-only TX lock.",
+                desc.device_id, desc.driver_id
+            )));
+        }
+        Ok((desc, channel))
+    }
+
+    fn open_by_device_id_unchecked(
         &self,
         device_id: &str,
         config: &ChannelConfig,

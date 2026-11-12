@@ -3,6 +3,8 @@ import {
   apiClearPanicLatch,
   apiSetBusMode,
   isPanicLatchedError,
+  hwListenOnlyHint,
+  isHwListenOnlyUnavailableError,
   isTxInFlightTimeoutError,
 } from '../services/ipcClient';
 import type { BusHealthDto } from '../types/hal';
@@ -60,5 +62,8 @@ export async function clearPanicLatch(): Promise<void> {
 export function describeTxError(err: unknown): string {
   if (isPanicLatchedError(err)) return t('sec.tx.clearLatchFirst');
   if (isTxInFlightTimeoutError(err)) return t('sec.tx.inFlightDisarmed');
+  if (isHwListenOnlyUnavailableError(err)) {
+    return t('sec.hwlo.unavailable', { hint: hwListenOnlyHint(err) });
+  }
   return err instanceof Error ? err.message : String(err);
 }

@@ -5,6 +5,14 @@ use nexus_netdb::{DbError, DbParseError, EncodeError};
 use serde::Serialize;
 use thiserror::Error;
 
+/// Exact message prefix of the fail-closed hardware Listen-Only refusal (WP-5): a channel was
+/// requested with `listen_only && require_hardware_listen_only`, but the controller could not
+/// be put into hardware silent mode, so it was not opened (or closed again before use).
+///
+/// Produced as [`AdapterError::UnsupportedCapability`] inside the HAL and surfaced by
+/// [`crate::PipelineEngine`] as [`HalError::SafetyLock`], whose message starts with this prefix.
+pub const HW_LISTEN_ONLY_UNAVAILABLE_PREFIX: &str = "HW_LISTEN_ONLY_UNAVAILABLE:";
+
 /// Hardware driver and channel I/O errors.
 #[derive(Debug, Error)]
 pub enum AdapterError {
@@ -37,6 +45,19 @@ pub enum AdapterError {
     Driver(String),
 }
 
+impl AdapterError {
+    /// Fail-closed hardware Listen-Only refusal; the message starts with
+    /// [`HW_LISTEN_ONLY_UNAVAILABLE_PREFIX`] followed by `hint`.
+    pub fn hw_listen_only_unavailable(hint: &str) -> Self {
+        Self::UnsupportedCapability(format!("{HW_LISTEN_ONLY_UNAVAILABLE_PREFIX} {hint}"))
+    }
+
+    /// `true` for errors built by [`Self::hw_listen_only_unavailable`].
+    pub fn is_hw_listen_only_unavailable(&self) -> bool {
+        matches!(self, Self::UnsupportedCapability(m) if m.starts_with(HW_LISTEN_ONLY_UNAVAILABLE_PREFIX))
+    }
+}
+
 /// Top-level pipeline, safety-gate, database, and command execution errors.
 #[derive(Debug, Error)]
 pub enum HalError {
@@ -67,6 +88,33 @@ pub enum HalError {
     /// Invalid input payload (e.g., base64 decode or preset file lookup failure).
     #[error("{0}")]
     InvalidInput(String),
+}
+
+impl HalError {
+    /// Maps a channel-open [`AdapterError`] to a [`HalError`]: the fail-closed hardware
+    /// Listen-Only refusal becomes [`HalError::SafetyLock`] so the IPC message starts with
+    /// [`HW_LISTEN_ONLY_UNAVAILABLE_PREFIX`] (like `TX_IN_FLIGHT_TIMEOUT:`); anything else is
+    /// passed through unchanged.
+    pub fn from_channel_open(err: AdapterError) -> Self {
+        match err {
+            AdapterError::UnsupportedCapability(msg)
+                if msg.starts_with(HW_LISTEN_ONLY_UNAVAILABLE_PREFIX) =>
+            {
+                Self::SafetyLock(msg)
+            }
+            other => Self::Adapter(other),
+        }
+    }
+
+    /// `true` when this is the fail-closed hardware Listen-Only refusal (message prefix
+    /// [`HW_LISTEN_ONLY_UNAVAILABLE_PREFIX`]).
+    pub fn is_hw_listen_only_unavailable(&self) -> bool {
+        match self {
+            Self::SafetyLock(m) => m.starts_with(HW_LISTEN_ONLY_UNAVAILABLE_PREFIX),
+            Self::Adapter(e) => e.is_hw_listen_only_unavailable(),
+            _ => false,
+        }
+    }
 }
 
 impl From<DbParseError> for HalError {

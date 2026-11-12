@@ -97,6 +97,7 @@ pub fn open_bus(
         serial_baud_rate: None,
         serial_dtr_rts: None,
         adapter_channel: None,
+        require_hardware_listen_only: false,
     };
     let (_desc, channel) = registry
         .open_by_device_id(device_id, &cfg)

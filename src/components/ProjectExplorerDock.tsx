@@ -74,6 +74,7 @@ import {
   ensureMockPresetDatabasesLoaded,
   syncAllBusDatabasesWithBackend,
 } from '../utils/busDatabaseSync';
+import { describeTxError } from '../store/busTxControl';
 import {
   apiConnectBus,
   apiDisconnectBus,
@@ -234,7 +235,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
       } catch (err) {
         onStatusMessage({
           kind: 'error',
-          message: t('shell.dock.busConnectError', { slot: prof.busId + 1, error: err instanceof Error ? err.message : String(err) }),
+          message: t('shell.dock.busConnectError', { slot: prof.busId + 1, error: describeTxError(err) }),
         });
       }
     }

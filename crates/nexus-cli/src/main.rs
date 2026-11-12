@@ -65,6 +65,15 @@ fn main() -> ExitCode {
             );
             ExitCode::from(EXIT_CODE_EX_CONFIG)
         }
+        Err(err @ RunnerError::HardwareListenOnlyUnavailable(_)) => {
+            // Same EX_CONFIG (78) as a revoked token: systemd `RestartPreventExitStatus=78`
+            // keeps the unit from restart-looping on a bus it must not run on.
+            eprintln!("[SAFETY] {err}");
+            eprintln!(
+                "Agent terminated with EX_CONFIG ({EXIT_CODE_EX_CONFIG}): hardware listen-only unavailable; not retrying."
+            );
+            ExitCode::from(EXIT_CODE_EX_CONFIG)
+        }
         Err(err) => {
             eprintln!("Agent runtime error: {err}");
             ExitCode::from(1)

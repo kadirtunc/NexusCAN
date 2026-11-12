@@ -525,6 +525,12 @@ impl PipelineEngine {
     }
 
     /// 2. `cmd_connect_bus` -> Opens a CAN / CAN-FD channel and starts its zero-alloc reader thread.
+    ///
+    /// WP-5 fail-closed: with `config.listen_only && config.require_hardware_listen_only`, a
+    /// channel that could only be software-locked is never connected (see
+    /// [`DriverRegistry::open_by_device_id`]); the bus is not inserted and the error is a
+    /// [`HalError::SafetyLock`] whose message starts with
+    /// [`crate::error::HW_LISTEN_ONLY_UNAVAILABLE_PREFIX`].
     pub fn cmd_connect_bus(
         &self,
         device_id: String,
@@ -538,7 +544,10 @@ impl PipelineEngine {
             }
         }
 
-        let (descriptor, channel) = self.registry.open_by_device_id(&device_id, &config)?;
+        let (descriptor, channel) = self
+            .registry
+            .open_by_device_id(&device_id, &config)
+            .map_err(HalError::from_channel_open)?;
         let handle = self.spawn_connected_bus_handle(bus_id, descriptor, config, channel, false)?;
 
         let dto = handle.to_health_dto();
@@ -604,6 +613,10 @@ impl PipelineEngine {
     ///
     /// Never opens a fallback or `mock0` device: returns `Err(HalError::BusNotConnected(bus_id))`
     /// if `bus_id` is not currently connected.
+    ///
+    /// The stored `require_hardware_listen_only` flag is kept across re-opens. If a re-open into
+    /// Listen-Only is refused by it (`HW_LISTEN_ONLY_UNAVAILABLE:`), the old channel is already
+    /// closed and the bus stays disconnected (fail-closed), like any other re-open failure.
     pub fn cmd_set_bus_mode(
         &self,
         bus_id: u8,
@@ -660,7 +673,8 @@ impl PipelineEngine {
 
         let (descriptor, channel) = self
             .registry
-            .open_by_device_id(&exact_device_id, &updated_config)?;
+            .open_by_device_id(&exact_device_id, &updated_config)
+            .map_err(HalError::from_channel_open)?;
 
         // WP-4: a Panic Stop may have landed while the channel was reopened; never come back
         // armed in that case (the bus is reconnected disarmed instead).

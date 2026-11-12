@@ -903,6 +903,7 @@ impl CanChannel for MockCanChannel {
     }
 
     /// Synthetic generator: there is no physical controller that could ACK frames.
+    /// Synthetic bus (no physical ACK): the WP-5 fail-closed gate never refuses it.
     fn listen_only_enforcement(&self) -> ListenOnlyEnforcement {
         ListenOnlyEnforcement::Virtual
     }

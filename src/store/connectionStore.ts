@@ -43,6 +43,8 @@ export interface SavedConnectionProfile {
   enableFd: boolean;
   dataBitrate: number;
   listenOnly: boolean;
+  /** Fail-closed: backend refuses Listen-Only connects that are software-enforced only. */
+  requireHardwareListenOnly?: boolean;
   mockFpsPreset: number | null;
   autoConnectOnProjectLoad: boolean;
   notes: string;
@@ -161,6 +163,8 @@ export function buildChannelConfigForProfile(
     dataBitrate: enableFd ? profile.dataBitrate : profile.bitrate,
     enableFd,
     listenOnly,
+    requireHardwareListenOnly:
+      profile.driverFamily !== 'mock' && profile.requireHardwareListenOnly === true,
     mockFpsPreset: profile.driverFamily === 'mock' ? profile.mockFpsPreset : null,
     driverFamily: profile.driverFamily,
     serialPort:

@@ -12,7 +12,8 @@
     "test:decode": "esbuild src/services/udsDecode.test.ts --bundle --platform=node --format=esm | node --input-type=module",
     "test:traffic": "esbuild src/components/diagnostics/traffic/trafficModel.test.ts --bundle --platform=node --format=esm | node --input-type=module",
     "test:graph": "esbuild src/components/diagnostics/ecu-graph/graphModel.test.ts --bundle --platform=node --format=esm | node --input-type=module",
-    "test:inflight": "esbuild src/services/txInFlight.test.ts --bundle --platform=node --format=esm | node --input-type=module"
+    "test:inflight": "esbuild src/services/txInFlight.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:hwlo": "esbuild src/services/hwListenOnly.test.ts --bundle --platform=node --format=esm | node --input-type=module"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.2.0",

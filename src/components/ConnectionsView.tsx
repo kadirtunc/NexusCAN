@@ -37,7 +37,7 @@ import {
   useConnectionStore,
 } from '../store/connectionStore';
 import { ensureMockPresetDatabasesLoaded, syncAllBusDatabasesWithBackend } from '../utils/busDatabaseSync';
-import { setBusTxArmed } from '../store/busTxControl';
+import { describeTxError, setBusTxArmed } from '../store/busTxControl';
 import { telemetryStore, useTelemetryHeader } from '../store/telemetryStore';
 import { transmitStore } from '../store/transmitStore';
 import { useI18n, type TranslationKey } from '../i18n';
@@ -368,7 +368,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
         kind: 'error',
         message: t('conn.status.connFailed', {
           name: profile.name,
-          err: err instanceof Error ? err.message : String(err),
+          err: describeTxError(err),
         }),
       });
     } finally {
@@ -477,7 +477,8 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           role="alert"
           className="shrink-0 px-3 py-1.5 border-b border-amber-500/70 bg-amber-900/20 text-amber-200 text-[11.5px]"
         >
-          {t('sec.enf.softwareWarn', { bus: b.busId + 1, channel: b.channelName })}
+          {t('sec.enf.softwareWarn', { bus: b.busId + 1, channel: b.channelName })}{' '}
+          {t('sec.hwlo.softwareHint')}
         </div>
       ))}
       {/* ==================================================================== */}
@@ -1568,6 +1569,23 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 />
                 <span>{t('conn.editor.listenOnlySafe')}</span>
               </label>
+
+              {draft.driverFamily !== 'mock' && (
+                <label
+                  className="flex items-center gap-2 cursor-pointer text-[var(--text-secondary)]"
+                  title={t('sec.hwlo.requireTip')}
+                >
+                  <input
+                    type="checkbox"
+                    checked={draft.requireHardwareListenOnly === true}
+                    onChange={(e) =>
+                      setDraft((p) => ({ ...p, requireHardwareListenOnly: e.target.checked }))
+                    }
+                    className="accent-emerald-600 h-4 w-4"
+                  />
+                  <span>{t('sec.hwlo.require')}</span>
+                </label>
+              )}
 
               <label className="flex items-center gap-2 cursor-pointer text-[var(--text-secondary)]">
                 <input

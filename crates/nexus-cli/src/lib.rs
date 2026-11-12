@@ -8,6 +8,9 @@
 //! 2. **Unconditional `listen_only = true`:** Every CAN / CAN-FD channel opened by
 //!    `nexuscan agent run` is locked to passive `Listen-Only` observation (`tx_armed = false`),
 //!    even if `agent.toml` or CLI flags attempt to pass `listen_only = false`.
+//!    Opt-in fail-closed mode (`--require-hw-listen-only` / `require_hw_listen_only = true`)
+//!    refuses to start when the controller cannot be put into hardware listen-only mode
+//!    (exit `EX_CONFIG` 78, no retry) instead of accepting the software-only TX lock.
 //! 3. **Read-Only Cloud Bridge:** Inbound actuation frames (`TX`, `CAN_TX`, `ARM_ACTIVE_BUS`, etc.)
 //!    are rejected and counted as security violations without ever touching `nexus-hal`.
 
@@ -428,6 +431,133 @@ listen_only = false
             "ChannelConfigDto.listen_only MUST always be true"
         );
         assert_eq!(ch_dto.mock_fps_preset, Some(500));
+    }
+
+    const MIN_TOML: &str = r#"
+[cloud]
+url = "http://localhost:3000"
+project_id = "proj-hwlo"
+token = "nxc_tok_hwlo_test_1234567890"
+"#;
+
+    fn run_args(argv: &[&str]) -> AgentRunArgs {
+        match parse_cli_args(argv.iter().copied()).expect("parse") {
+            CliCommand::AgentRun(a) => a,
+            other => panic!("expected AgentRun, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_hw_listen_only_flag_parses_in_all_forms() {
+        for (argv, expected) in [
+            (vec!["agent", "run"], None),
+            (vec!["agent", "run", "--require-hw-listen-only"], Some(true)),
+            (
+                vec![
+                    "agent",
+                    "run",
+                    "--require-hw-listen-only",
+                    "--iface",
+                    "can0",
+                ],
+                Some(true),
+            ),
+            (
+                vec!["agent", "run", "--require-hw-listen-only", "false"],
+                Some(false),
+            ),
+            (
+                vec!["agent", "run", "--require-hw-listen-only=yes"],
+                Some(true),
+            ),
+            (
+                vec!["agent", "run", "--require-hw-listen-only=0"],
+                Some(false),
+            ),
+        ] {
+            assert_eq!(run_args(&argv).require_hw_listen_only, expected, "{argv:?}");
+        }
+        assert!(parse_cli_args(["agent", "run", "--require-hw-listen-only=maybe"]).is_err());
+        assert!(HelpTopic::AgentRun
+            .usage_text()
+            .contains("--require-hw-listen-only"));
+    }
+
+    #[test]
+    fn require_hw_listen_only_merges_cli_over_can_over_agent_and_reaches_dto() {
+        let resolve = |toml_extra: &str, argv: &[&str]| {
+            let t = parse_agent_toml_str(&format!("{MIN_TOML}\n{toml_extra}")).expect("toml");
+            EffectiveAgentConfig::resolve(Some(t), &run_args(argv)).expect("resolve")
+        };
+
+        // Default: off, existing behaviour.
+        let eff = resolve("", &["agent", "run"]);
+        assert!(!eff.require_hw_listen_only);
+        assert!(!eff.to_channel_config_dto().require_hardware_listen_only);
+
+        // Config-file key in [can] and in [agent].
+        let eff = resolve("[can]\nrequire_hw_listen_only = true\n", &["agent", "run"]);
+        assert!(eff.require_hw_listen_only);
+        let dto = eff.to_channel_config_dto();
+        assert!(dto.listen_only && dto.require_hardware_listen_only);
+        assert!(dto.requires_hardware_listen_only());
+        let eff = resolve(
+            "[agent]\nrequire_hw_listen_only = true\n",
+            &["agent", "run"],
+        );
+        assert!(eff.require_hw_listen_only);
+
+        // [can] takes precedence over [agent].
+        let eff = resolve(
+            "[agent]\nrequire_hw_listen_only = true\n[can]\nrequire_hw_listen_only = false\n",
+            &["agent", "run"],
+        );
+        assert!(!eff.require_hw_listen_only);
+
+        // CLI overrides the file in both directions.
+        let eff = resolve("", &["agent", "run", "--require-hw-listen-only"]);
+        assert!(eff.require_hw_listen_only);
+        let eff = resolve(
+            "[can]\nrequire_hw_listen_only = true\n",
+            &["agent", "run", "--require-hw-listen-only=false"],
+        );
+        assert!(!eff.require_hw_listen_only);
+
+        // Listen-Only itself stays forced on regardless.
+        assert!(eff.to_channel_config_dto().listen_only);
+    }
+
+    #[test]
+    fn require_hw_listen_only_on_virtual_mock_still_starts_channel_config() {
+        // mock0 is virtual: the DTO carries the flag and the HAL accepts it (no refusal).
+        let t = parse_agent_toml_str(&format!(
+            "{MIN_TOML}\n[can]\ninterface = \"mock0\"\nrequire_hw_listen_only = true\n"
+        ))
+        .expect("toml");
+        let eff =
+            EffectiveAgentConfig::resolve(Some(t), &AgentRunArgs::default()).expect("resolve");
+        let engine = nexus_hal::PipelineEngine::new();
+        let dto = engine
+            .cmd_connect_bus(eff.resolved_device_id.clone(), eff.to_channel_config_dto())
+            .expect("virtual mock0 is allowed fail-closed");
+        assert_eq!(dto.listen_only_enforcement.as_deref(), Some("virtual"));
+        engine.cmd_disconnect_bus(0).expect("disconnect");
+    }
+
+    #[test]
+    fn runner_error_for_hw_listen_only_is_distinct() {
+        let hal = nexus_hal::HalError::from_channel_open(
+            nexus_hal::AdapterError::hw_listen_only_unavailable("test"),
+        );
+        assert!(hal.is_hw_listen_only_unavailable());
+        assert!(hal
+            .to_string()
+            .starts_with(nexus_hal::HW_LISTEN_ONLY_UNAVAILABLE_PREFIX));
+        let e = RunnerError::HardwareListenOnlyUnavailable(hal.to_string());
+        assert!(
+            e.to_string().contains("HW_LISTEN_ONLY_UNAVAILABLE: test"),
+            "{e}"
+        );
     }
 
     #[test]

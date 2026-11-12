@@ -50,6 +50,20 @@ pub struct ChannelConfigDto {
     pub serial_dtr_rts: Option<bool>,
     #[serde(default)]
     pub adapter_channel: Option<String>,
+    /// Fail-closed: when `listen_only` is requested on a physical channel and the controller
+    /// cannot be put into hardware listen-only mode, refuse to open the channel instead of
+    /// falling back to the software TX lock. Virtual channels are unaffected.
+    #[serde(default)]
+    pub require_hardware_listen_only: bool,
+}
+
+impl ChannelConfigDto {
+    /// `true` when this config asks for Listen-Only AND forbids the software-only fallback
+    /// (see [`Self::require_hardware_listen_only`]).
+    #[inline]
+    pub const fn requires_hardware_listen_only(&self) -> bool {
+        self.listen_only && self.require_hardware_listen_only
+    }
 }
 
 impl Default for ChannelConfigDto {
@@ -66,6 +80,7 @@ impl Default for ChannelConfigDto {
             serial_baud_rate: None,
             serial_dtr_rts: None,
             adapter_channel: None,
+            require_hardware_listen_only: false,
         }
     }
 }

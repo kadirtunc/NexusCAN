@@ -94,6 +94,8 @@ function sanitizeProfile(raw: unknown, mode: 'external' | 'own'): SavedConnectio
     dataBitrate: num(raw['dataBitrate'], 2_000_000, 1000, 20_000_000),
     // Imported files can never switch a channel out of Listen-Only.
     listenOnly: ownMode ? raw['listenOnly'] !== false : true,
+    // Fail-closed opt-in is the safer value, so imported files may keep it; non-boolean -> false.
+    requireHardwareListenOnly: raw['requireHardwareListenOnly'] === true,
     mockFpsPreset: typeof raw['mockFpsPreset'] === 'number' ? num(raw['mockFpsPreset'], 0, 0, 1_000_000) : null,
     autoConnectOnProjectLoad: ownMode ? raw['autoConnectOnProjectLoad'] === true : false,
     notes: str(raw['notes'], '', MAX_NOTES),

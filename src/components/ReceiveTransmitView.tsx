@@ -2788,7 +2788,7 @@ const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
         kind: 'error',
         message: t('rxtx.dock.connectError', {
           name: prof.name,
-          error: err instanceof Error ? err.message : String(err),
+          error: describeTxError(err),
         }),
       });
     } finally {

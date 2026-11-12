@@ -50,6 +50,11 @@ pub enum RunnerError {
         "Device token revoked or forbidden by NexusCANCloud (4003); stopping agent permanently"
     )]
     TokenRevoked4003,
+
+    /// `require_hw_listen_only` is set and the controller cannot be put into hardware
+    /// listen-only mode. Configuration / privilege problem: never retried.
+    #[error("Refusing to start (require_hw_listen_only): {0}")]
+    HardwareListenOnlyUnavailable(String),
 }
 
 /// Handle to a running headless telemetry agent instance (used by `nexuscan agent run` and E2E tests).
@@ -178,6 +183,9 @@ pub async fn spawn_agent_runtime(
         Ok(h) => h,
         Err(e) => {
             let _ = fs::remove_dir_all(&temp_root_dir);
+            if e.is_hw_listen_only_unavailable() {
+                return Err(RunnerError::HardwareListenOnlyUnavailable(e.to_string()));
+            }
             return Err(RunnerError::Hal(e));
         }
     };
