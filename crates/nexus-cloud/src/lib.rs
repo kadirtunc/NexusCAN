@@ -157,9 +157,7 @@ mod tests {
             _config: &'a BridgeClientConfig,
         ) -> BoxFuture<'a, Result<Box<dyn BridgeTransport>, BridgeClientError>> {
             Box::pin(async move {
-                let rx = self.inbound_rx_slot.lock().take().ok_or_else(|| {
-                    BridgeClientError::ConnectionClosed { code: None }
-                })?;
+                let rx = self.inbound_rx_slot.lock().take().ok_or(BridgeClientError::ConnectionClosed { code: None })?;
                 let transport: Box<dyn BridgeTransport> =
                     Box::new(ChannelBridgeTransport::new(self.outbound_tx.clone(), rx));
                 Ok(transport)

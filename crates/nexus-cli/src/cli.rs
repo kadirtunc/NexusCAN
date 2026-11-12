@@ -131,6 +131,8 @@ pub struct AgentRunArgs {
     pub listen_only: Option<bool>,
 }
 
+// One-shot parse result, built once per process: the size gap between variants is irrelevant.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CliCommand {
     Version,
@@ -209,17 +211,14 @@ fn parse_agent_subcommand(tokens: &[String]) -> Result<CliCommand, CliError> {
     match tokens[0].as_str() {
         "-h" | "--help" | "help" => Ok(CliCommand::Help(HelpTopic::Agent)),
         "version" | "-V" | "--version" => {
-            for extra in &tokens[1..] {
-                match extra.as_str() {
-                    "-h" | "--help" => return Ok(CliCommand::Help(HelpTopic::Agent)),
-                    other => {
-                        return Err(CliError::PositionalArgumentError(format!(
-                            "Unexpected argument '{other}' after 'nexuscan agent version'"
-                        )));
-                    }
-                }
+            // Only the first extra token matters: help wins, anything else is an error.
+            match tokens.get(1).map(String::as_str) {
+                None => Ok(CliCommand::Version),
+                Some("-h" | "--help") => Ok(CliCommand::Help(HelpTopic::Agent)),
+                Some(other) => Err(CliError::PositionalArgumentError(format!(
+                    "Unexpected argument '{other}' after 'nexuscan agent version'"
+                ))),
             }
-            Ok(CliCommand::Version)
         }
         "run" => parse_agent_run_flags(&tokens[1..]),
         other if other.starts_with('-') => Err(CliError::UnknownFlag {

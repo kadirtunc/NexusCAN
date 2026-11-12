@@ -756,8 +756,10 @@ listen_only = false
 
         let deadline = Instant::now() + Duration::from_millis(650);
         while Instant::now() < deadline {
-            match tokio::time::timeout(Duration::from_millis(60), inbound_ws_rx.recv()).await {
-                Ok(Some(frame)) => {
+            if let Ok(Some(frame)) =
+                tokio::time::timeout(Duration::from_millis(60), inbound_ws_rx.recv()).await
+            {
+                {
                     match frame.get("type").and_then(Value::as_str) {
                         Some("BRIDGE_HELLO") => {
                             received_bridge_hello = true;
@@ -787,7 +789,6 @@ listen_only = false
                         break;
                     }
                 }
-                _ => {}
             }
         }
 
@@ -1129,12 +1130,11 @@ listen_only = false
 
     #[tokio::test]
     async fn offline_web_hmi_serves_live_mock0_frames_when_cloud_is_unreachable() {
-        // Bind and immediately drop a TCP port so Cloud WS fails to connect (offline WAN simulation)
-        let closed_port = {
-            let tmp = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            tmp.local_addr().unwrap().port()
-        };
-        let offline_cloud_url = format!("http://127.0.0.1:{closed_port}");
+        // Offline WAN simulation: privileged port 1 on loopback has no listener, so the Cloud WS
+        // connect is refused. Do NOT bind-and-drop an ephemeral port here: the OS may hand that
+        // port to a parallel test's server, and this agent's reconnect loop would then connect to
+        // it (seen as a spurious second connection in the 4003 no-reconnect test).
+        let offline_cloud_url = "http://127.0.0.1:1".to_string();
 
         let CliCommand::AgentRun(cli_args) = parse_cli_args([
             "agent",

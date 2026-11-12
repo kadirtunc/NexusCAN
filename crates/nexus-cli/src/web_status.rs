@@ -75,9 +75,11 @@ impl SharedAgentState {
         active_db_name: Option<String>,
         schema_opt: Option<&DatabaseSchemaDto>,
     ) -> Self {
-        let mut init_metrics = MutableRuntimeMetrics::default();
-        init_metrics.active_db_name = active_db_name;
-        init_metrics.target_hz = BridgeTargetHz::Hz20.as_u8();
+        let init_metrics = MutableRuntimeMetrics {
+            active_db_name,
+            target_hz: BridgeTargetHz::Hz20.as_u8(),
+            ..MutableRuntimeMetrics::default()
+        };
 
         let mut message_names = BTreeMap::new();
         let mut signal_catalog = BTreeMap::new();

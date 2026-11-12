@@ -176,8 +176,10 @@ pub fn spawn_bridge_client(
     schema_uploader: Option<Arc<dyn SchemaUploader>>,
 ) -> BridgeClientHandle {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let mut initial_metrics = BridgeClientMetrics::default();
-    initial_metrics.current_target_hz = config.preferred_active_hz;
+    let initial_metrics = BridgeClientMetrics {
+        current_target_hz: config.preferred_active_hz,
+        ..BridgeClientMetrics::default()
+    };
     let metrics = Arc::new(RwLock::new(initial_metrics));
     let metrics_clone = Arc::clone(&metrics);
 

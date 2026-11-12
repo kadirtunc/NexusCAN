@@ -1,0 +1,185 @@
+# NexusCAN CI — security remediation plan v0.1 (WP-4 HIL evidence, WP-8 CI gates).
+#
+# Security regression: no separate job. `cargo test --workspace` already runs the hostile-input
+# (netdb/trace parsers), Panic Stop latch (mock0 + vcan0 HIL), listen-only honesty and IPC
+# hardening tests; the dedicated `diag_tap_alloc` step covers the feature-gated LOW-01 test.
+name: CI
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  rust:
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # `cargo fmt --check` is intentionally NOT gated yet: the tree is not rustfmt-clean
+      # (66 files). Add `cargo fmt --all --check` here after a repo-wide `cargo fmt`.
+
+      # Real SocketCAN HIL (vcan0): Panic Stop wire race, diag HIL. Best effort — if the
+      # runner kernel has no vcan module the HIL tests print SKIP instead of failing.
+      - name: Set up vcan0 (Linux, best effort)
+        if: runner.os == 'Linux'
+        run: |
+          if sudo modprobe vcan 2>/dev/null \
+             || { sudo apt-get update -q \
+                  && sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" \
+                  && sudo modprobe vcan; }; then
+            sudo ip link add dev vcan0 type vcan
+            sudo ip link set vcan0 mtu 72
+            sudo ip link set up vcan0
+            ip -details link show vcan0
+            echo "NEXUS_REQUIRE_VCAN=1" >> "$GITHUB_ENV"
+          else
+            echo "::warning::vcan kernel module unavailable; vcan0 HIL tests will SKIP"
+          fi
+
+      - name: Clippy (workspace, -D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test workspace
+        run: cargo test --workspace
+
+      - name: Test diag tap allocation (test-hooks feature)
+        run: cargo test -p nexus-hal --features test-hooks --test diag_tap_alloc
+
+  tauri:
+    name: tauri (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies (WebKitGTK 4.1)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libssl-dev libxdo-dev \
+            build-essential file patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # src-tauri is a separate cargo workspace with its own Cargo.lock; it depends on the
+      # root crates by path, so both lockfiles feed the cache key.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            src-tauri -> target
+          key: tauri
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Type-check frontend
+        run: npx tsc -p tsconfig.app.json --noEmit
+
+      # `tauri::generate_context!` needs `frontendDist` (../dist) at compile time.
+      - name: Build frontend
+        run: npm run build
+
+      - name: Test src-tauri
+        working-directory: src-tauri
+        run: cargo test
+
+      # 3-OS package build (unsigned), using the @tauri-apps/cli devDependency from package-lock.
+      - name: Package (tauri build)
+        run: npm run tauri -- build --ci
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nexuscan-bundle-${{ matrix.os }}
+          path: src-tauri/target/release/bundle/
+          if-no-files-found: error
+          retention-days: 14
+
+  fuzz-smoke:
+    name: fuzz-smoke (nightly, 60 s/target)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/nexus-netdb/fuzz -> target
+            crates/nexus-hal/fuzz -> target
+          key: fuzz
+          cache-all-crates: true
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz nexus-netdb targets
+        working-directory: crates/nexus-netdb
+        run: |
+          set -euo pipefail
+          for t in $(cargo +nightly fuzz list); do
+            echo "::group::nexus-netdb/$t"
+            cargo +nightly fuzz run "$t" -- -max_total_time=60
+            echo "::endgroup::"
+          done
+
+      - name: Fuzz nexus-hal targets (if present)
+        run: |
+          set -euo pipefail
+          if [ -d crates/nexus-hal/fuzz ]; then
+            cd crates/nexus-hal
+            for t in $(cargo +nightly fuzz list); do
+              echo "::group::nexus-hal/$t"
+              cargo +nightly fuzz run "$t" -- -max_total_time=60
+              echo "::endgroup::"
+            done
+          else
+            echo "crates/nexus-hal/fuzz not present; skipping"
+          fi
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: |
+            crates/nexus-netdb/fuzz/artifacts/
+            crates/nexus-hal/fuzz/artifacts/
+          if-no-files-found: ignore

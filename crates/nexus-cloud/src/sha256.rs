@@ -81,6 +81,8 @@ fn compress_block(state: &mut [u32; 8], block: &[u8; 64]) {
 }
 
 /// Computes the raw 32-byte FIPS 180-4 SHA-256 digest of `input`.
+// `as_chunks` needs Rust 1.88; the workspace MSRV is 1.80.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 pub fn sha256_digest(input: &[u8]) -> [u8; 32] {
     let mut state = INITIAL_STATE;
     let mut chunks = input.chunks_exact(64);
