@@ -179,21 +179,33 @@ pub struct TelemetrySnapshotDto {
 }
 
 /// Result returned when engaging Panic Stop (halt all TX & disarm all buses).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// When this is returned, no driver write that passed the bus-io safety gate before the Panic
+/// is still running on any bus listed as quiesced, and no later write can pass the gate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PanicStopResultDto {
     pub stopped_periodic_jobs: usize,
     pub disarmed_buses: usize,
     pub timestamp_us: u64,
+    /// Buses whose in-flight driver write did not finish within
+    /// [`crate::pipeline::TX_QUIESCE_TIMEOUT`] (blocking driver). The latch is engaged anyway
+    /// and nothing new can pass the gate, but that ONE write may still reach the wire.
+    /// Empty in the normal case.
+    #[serde(default)]
+    pub in_flight_timeout_buses: Vec<u8>,
 }
 
 /// WP-4: result of `cmd_reset_session` (cold-start reset that never latches Panic Stop).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResetSessionResultDto {
     pub stopped_periodic_jobs: usize,
     pub disarmed_buses: usize,
     pub disconnected_buses: usize,
+    /// Same meaning as [`PanicStopResultDto::in_flight_timeout_buses`].
+    #[serde(default)]
+    pub in_flight_timeout_buses: Vec<u8>,
 }
 
 /// Result returned by `cmd_transmit_signal_frame` and `cmd_transmit_raw_frame`.
@@ -287,9 +299,20 @@ pub struct TraceFileSummaryDto {
     /// `"trc"` | `"asc"` | `"log"` | `"csv"` | `"blf"`
     pub format: String,
     pub size_bytes: u64,
+    /// WP-8: `0` with `stats_known == false` in `cmd_list_traces` for files this engine has not
+    /// parsed yet (listing never reads file bodies).
     pub frame_count: usize,
+    /// Same semantics as `frame_count`.
     pub duration_us: u64,
     pub updated_at: String,
+    /// WP-8: `true` when `frame_count` / `duration_us` are exact (always `true` for save /
+    /// load / parse results; `false` in `cmd_list_traces` until the file is opened).
+    #[serde(default = "default_true")]
+    pub stats_known: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Persistent `./traces/` storage directory path and discovered trace file summaries.

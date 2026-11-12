@@ -32,15 +32,19 @@ use nexus_netdb::{
     NetworkDatabase, ParseOptions,
 };
 use parking_lot::{Mutex, RwLock};
+use crate::storage::{
+    check_frame_count, check_ipc_size, DataRoot, MAX_DB_FILES_PER_CALL, MAX_IPC_CONTENT_BYTES,
+    MAX_IPC_DB_TOTAL_BYTES, MAX_LISTED_ENTRIES, MAX_PROJECT_FILE_BYTES,
+};
 use replay::{
-    compile_chronological_frames, delete_trace_file, list_trace_files, load_trace_file,
-    parse_trace_bytes, parse_trace_entries_from_bytes, sanitize_trace_filename, save_trace_file,
-    save_trace_file_bytes, ReplayController,
+    compile_chronological_frames, delete_trace_file, list_trace_files, load_trace_file_cached,
+    parse_trace_bytes, parse_trace_entries_from_bytes, read_trace_file_bytes, sanitize_trace_filename,
+    save_trace_file_bytes_cached, ReplayController, TraceStatsCache,
 };
 use state_table::StateTable;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -77,7 +81,9 @@ pub(crate) struct TxDispatchRequest {
 }
 
 /// Test-only instrumentation: runs once at the start of every bus-io thread (used by the
-/// allocation-counting integration test to mark the thread). Not part of the public API.
+/// allocation-counting integration test to mark the thread). Not part of the public API and
+/// compiled only for unit tests or with the `test-hooks` feature (WP-8 / LOW-01).
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub static BUS_IO_THREAD_START_HOOK: Mutex<Option<fn()>> = Mutex::new(None);
 
@@ -99,9 +105,27 @@ pub(crate) struct ConnectedBusHandle {
     listen_only_enforcement: Option<ListenOnlyEnforcement>,
     /// WP-4: engine-wide TX epoch (shared with every bus, scheduler and replay).
     pub(crate) tx_epoch: Arc<AtomicU64>,
+    /// Write barrier: non-zero while this bus's io thread is between "enter gate" and
+    /// "`send_frame` returned" (see [`TxInFlightGuard`] and [`wait_tx_quiesced`]).
+    tx_in_flight: Arc<AtomicU32>,
+}
+
+/// What [`PipelineEngine::quiesce_bus_after_disarm`] waits on (cloned under the buses lock).
+struct DisarmBarrier {
+    in_flight: Arc<AtomicU32>,
+    tx_sender: Sender<TxDispatchRequest>,
+    bus_state: Arc<AtomicU8>,
 }
 
 impl ConnectedBusHandle {
+    fn disarm_barrier(&self) -> DisarmBarrier {
+        DisarmBarrier {
+            in_flight: Arc::clone(&self.tx_in_flight),
+            tx_sender: self.tx_sender.clone(),
+            bus_state: Arc::clone(&self.bus_state),
+        }
+    }
+
     #[inline]
     pub(crate) fn is_connected(&self) -> bool {
         BusState::from_u8(self.bus_state.load(Ordering::Acquire)) != BusState::Disconnected
@@ -139,9 +163,12 @@ impl ConnectedBusHandle {
     }
 
     fn shutdown(&mut self) {
+        // Disarm BEFORE stopping: the io thread finishes its current TX drain before it sees
+        // `stop_flag`, and the gate must reject everything in that drain. The join below is
+        // the (unbounded) write barrier for this path.
+        self.tx_armed.store(false, Ordering::SeqCst);
         self.diag.close_all();
         self.stop_flag.store(true, Ordering::Release);
-        self.tx_armed.store(false, Ordering::Release);
         if let Some(handle) = self.io_join.take() {
             let _ = handle.join();
         }
@@ -159,8 +186,10 @@ struct LoadedDatabaseState {
 /// Core NexusCAN multi-bus pipeline engine shared by both `src-tauri` and `nexus_bridge`.
 pub struct PipelineEngine {
     registry: DriverRegistry,
-    projects_dir: PathBuf,
-    traces_dir: PathBuf,
+    /// WP-8: persistent `projects/` + `traces/` locations (see [`crate::storage`]).
+    data_root: DataRoot,
+    /// WP-8: frame-count cache so `cmd_list_traces` never parses file bodies.
+    trace_stats: TraceStatsCache,
     buses: Arc<Mutex<BTreeMap<BusId, ConnectedBusHandle>>>,
     db_state: RwLock<Option<LoadedDatabaseState>>,
     bus_db_states: RwLock<BTreeMap<BusId, Option<LoadedDatabaseState>>>,
@@ -193,14 +222,16 @@ impl PipelineEngine {
         Self::with_registry(DriverRegistry::with_builtin_drivers())
     }
 
-    /// Creates a [`PipelineEngine`] with a custom [`DriverRegistry`].
+    /// Creates a [`PipelineEngine`] with a custom [`DriverRegistry`] and the default data root
+    /// ([`DataRoot::resolve_default`]: `NEXUS_DATA_DIR`, else the dev repo-relative layout).
     pub fn with_registry(registry: DriverRegistry) -> Self {
-        Self::with_storage_dirs(registry, locate_projects_dir(), locate_traces_dir())
+        Self::with_data_root(registry, DataRoot::resolve_default())
     }
 
     /// Creates a [`PipelineEngine`] with an explicit persistent `./projects` directory path.
     pub fn with_projects_dir(registry: DriverRegistry, projects_dir: PathBuf) -> Self {
-        Self::with_storage_dirs(registry, projects_dir, locate_traces_dir())
+        let traces_dir = DataRoot::resolve_default().traces_dir().to_path_buf();
+        Self::with_storage_dirs(registry, projects_dir, traces_dir)
     }
 
     /// Creates a [`PipelineEngine`] with explicit persistent `./projects` and `./traces` directories.
@@ -209,7 +240,14 @@ impl PipelineEngine {
         projects_dir: PathBuf,
         traces_dir: PathBuf,
     ) -> Self {
-        let _ = fs::create_dir_all(&traces_dir);
+        Self::with_data_root(registry, DataRoot::from_dirs(projects_dir, traces_dir))
+    }
+
+    /// WP-8: creates a [`PipelineEngine`] storing projects/traces under `data_root`
+    /// (`src-tauri` passes `app_local_data_dir()`). Directories are created lazily on first
+    /// use as well, so a failure here is not fatal.
+    pub fn with_data_root(registry: DriverRegistry, data_root: DataRoot) -> Self {
+        let _ = data_root.ensure_dirs();
 
         let (frame_tx, frame_rx) = bounded::<RawCanFrame>(FRAME_RING_CAPACITY);
         let (ctrl_tx, ctrl_rx) = bounded::<AggregatorControl>(64);
@@ -272,8 +310,8 @@ impl PipelineEngine {
 
         Self {
             registry,
-            projects_dir,
-            traces_dir,
+            data_root,
+            trace_stats: TraceStatsCache::default(),
             buses,
             db_state: RwLock::new(None),
             bus_db_states: RwLock::new(BTreeMap::new()),
@@ -348,6 +386,8 @@ impl PipelineEngine {
         let io_dropped = Arc::clone(&self.dropped_frames);
         let io_panic = Arc::clone(&self.tx_panic_latched);
         let io_epoch = Arc::clone(&self.tx_epoch);
+        let tx_in_flight = Arc::new(AtomicU32::new(0));
+        let io_in_flight = Arc::clone(&tx_in_flight);
 
         let io_join = thread::Builder::new()
             .name(format!("nexus-bus-io-{bus_id}"))
@@ -364,6 +404,7 @@ impl PipelineEngine {
                     io_armed,
                     io_panic,
                     io_epoch,
+                    io_in_flight,
                     io_state,
                     io_tx_err,
                     io_rx_err,
@@ -387,7 +428,48 @@ impl PipelineEngine {
             diag,
             listen_only_enforcement,
             tx_epoch: Arc::clone(&self.tx_epoch),
+            tx_in_flight,
         })
+    }
+
+    /// Write barrier for one bus after `tx_armed` was cleared (SeqCst). Unlike Panic Stop /
+    /// reset, disarm does not bump the engine-wide epoch (that would spuriously reject TX on
+    /// every other bus), so requests still QUEUED for this bus are not epoch-invalidated.
+    /// Instead we wait until the io thread has drained the queue (every request drained after
+    /// the disarm store is rejected by the gate) and no write is in flight; a fast re-arm can
+    /// then not release a pre-disarm frame.
+    ///
+    /// Returns `Err` if that does not happen within [`TX_QUIESCE_TIMEOUT`]; the bus stays
+    /// disarmed either way.
+    fn quiesce_bus_after_disarm(&self, bus_id: BusId, b: DisarmBarrier) -> Result<(), HalError> {
+        let deadline = Instant::now() + TX_QUIESCE_TIMEOUT;
+        // A dead io thread (channel closed) never drains, but it cannot write either.
+        let io_alive =
+            || BusState::from_u8(b.bus_state.load(Ordering::Acquire)) != BusState::Disconnected;
+        while !b.tx_sender.is_empty() && io_alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_micros(100));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let stuck = wait_tx_quiesced(&[(bus_id, b.in_flight)], remaining);
+        if stuck.is_empty() && (b.tx_sender.is_empty() || !io_alive()) {
+            Ok(())
+        } else {
+            report_quiesce_timeout("disarm", &[bus_id]);
+            Err(HalError::SafetyLock(format!(
+                "{TX_IN_FLIGHT_TIMEOUT_PREFIX} bus {bus_id} is disarmed, but a driver write or \
+                 queued TX request from before the disarm was not settled within {} ms",
+                TX_QUIESCE_TIMEOUT.as_millis()
+            )))
+        }
+    }
+
+    /// Snapshot of every connected bus's write-barrier counter (cold path, may allocate).
+    fn in_flight_counters(&self) -> Vec<(BusId, Arc<AtomicU32>)> {
+        self.buses
+            .lock()
+            .iter()
+            .map(|(id, b)| (*id, Arc::clone(&b.tx_in_flight)))
+            .collect()
     }
 
     /// WP-4 (CRIT-05.3): registers a periodic TX job only if, at registration time and under
@@ -481,15 +563,18 @@ impl PipelineEngine {
                 ));
             }
             // WP-4: arming never clears the Panic latch (`cmd_clear_panic_latch` does).
-            if self.tx_panic_latched.load(Ordering::Acquire) {
+            if self.tx_panic_latched.load(Ordering::SeqCst) {
                 return Err(panic_latched_error());
             }
-            bus.tx_armed.store(true, Ordering::Release);
+            bus.tx_armed.store(true, Ordering::SeqCst);
         } else {
-            bus.tx_armed.store(false, Ordering::Release);
+            // SeqCst store, then the write barrier (see `cmd_panic_stop_tx`).
+            bus.tx_armed.store(false, Ordering::SeqCst);
             bus.diag.close_all();
+            let barrier = bus.disarm_barrier();
             drop(guard);
             self.tx_scheduler.lock().remove_jobs_for_bus(bus_id);
+            self.quiesce_bus_after_disarm(bus_id, barrier)?;
             let guard2 = self.buses.lock();
             let bus2 = guard2
                 .get(&bus_id)
@@ -513,21 +598,25 @@ impl PipelineEngine {
         arm_tx: bool,
     ) -> Result<BusHealthDto, HalError> {
         let target_armed = arm_tx && !listen_only;
+        // A Panic Stop / reset that lands while the channel is reopened bumps the epoch.
+        let epoch_at_start = self.tx_epoch.load(Ordering::SeqCst);
 
         {
             let guard = self.buses.lock();
             let bus = guard.get(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?;
-            if target_armed && self.tx_panic_latched.load(Ordering::Acquire) {
+            if target_armed && self.tx_panic_latched.load(Ordering::SeqCst) {
                 return Err(panic_latched_error());
             }
             if bus.listen_only == listen_only {
-                bus.tx_armed.store(target_armed, Ordering::Release);
+                bus.tx_armed.store(target_armed, Ordering::SeqCst);
                 if target_armed {
                     return Ok(bus.to_health_dto());
                 }
                 bus.diag.close_all();
+                let barrier = bus.disarm_barrier();
                 drop(guard);
                 self.tx_scheduler.lock().remove_jobs_for_bus(bus_id);
+                self.quiesce_bus_after_disarm(bus_id, barrier)?;
                 let guard2 = self.buses.lock();
                 let bus2 = guard2
                     .get(&bus_id)
@@ -560,7 +649,7 @@ impl PipelineEngine {
 
         // WP-4: a Panic Stop may have landed while the channel was reopened; never come back
         // armed in that case (the bus is reconnected disarmed instead).
-        let target_armed = target_armed && !self.tx_panic_latched.load(Ordering::Acquire);
+        let target_armed = target_armed && !self.tx_panic_latched.load(Ordering::SeqCst);
 
         let new_handle = self.spawn_connected_bus_handle(
             bus_id,
@@ -569,42 +658,78 @@ impl PipelineEngine {
             channel,
             target_armed,
         )?;
+        // The new bus is not in `buses` yet, so a Panic Stop / reset racing the reopen could
+        // not disarm it. Re-check under the buses lock (Panic bumps the epoch BEFORE it takes
+        // that lock): either we see the bump here, or Panic sees the inserted bus. Nobody can
+        // enqueue TX before the insert (its `tx_sender` is not published yet).
+        let mut guard = self.buses.lock();
+        if self.tx_epoch.load(Ordering::SeqCst) != epoch_at_start
+            || self.tx_panic_latched.load(Ordering::SeqCst)
+        {
+            new_handle.tx_armed.store(false, Ordering::SeqCst);
+        }
         let dto = new_handle.to_health_dto();
-        self.buses.lock().insert(bus_id, new_handle);
+        guard.insert(bus_id, new_handle);
         Ok(dto)
     }
 
     /// 5. `cmd_panic_stop_tx` -> Emergency stop: cancels all periodic TX jobs, disarms replay hardware TX, and disarms every bus.
+    ///
+    /// Contract: when this returns, no driver write that passed a bus-io safety gate before
+    /// the Panic is still running (write barrier, bounded by [`TX_QUIESCE_TIMEOUT`]; buses
+    /// that exceed it are reported in `in_flight_timeout_buses`), and no frame of the old
+    /// epoch can be written afterwards, even after Clear Panic + re-arm.
+    ///
+    /// Memory ordering (Dekker-style store->load handshake, all `SeqCst`):
+    /// * bus-io: `tx_in_flight.fetch_add(1)` -> load latch / epoch / armed -> `send_frame`
+    ///   -> `tx_in_flight.fetch_sub(1)`.
+    /// * here: epoch `fetch_add` + latch store + armed swap -> load `tx_in_flight` until 0.
+    ///
+    /// In the single total order of SeqCst operations, either the bus-io gate loads come after
+    /// our latch store (the gate rejects), or its `fetch_add` comes before our first
+    /// `tx_in_flight` load (we observe >= 1 and wait for the matching `fetch_sub`, whose
+    /// release makes the completed `send_frame` happen-before our return). Acquire/Release
+    /// alone would allow both sides to read the stale value (store->load reordering).
     pub fn cmd_panic_stop_tx(&self) -> PanicStopResultDto {
         // Order matters (WP-4): epoch + latch BEFORE the scheduler is cleared.
-        self.tx_epoch.fetch_add(1, Ordering::AcqRel);
-        self.tx_panic_latched.store(true, Ordering::Release);
+        self.tx_epoch.fetch_add(1, Ordering::SeqCst);
+        self.tx_panic_latched.store(true, Ordering::SeqCst);
         self.replay.disarm_hardware_tx();
         let stopped_periodic_jobs = self.tx_scheduler.lock().clear_all();
 
         let mut disarmed_buses = 0usize;
-        {
+        let in_flight = {
             let guard = self.buses.lock();
-            for bus in guard.values() {
-                if bus.tx_armed.swap(false, Ordering::AcqRel) {
+            let mut counters = Vec::with_capacity(guard.len());
+            for (bus_id, bus) in guard.iter() {
+                if bus.tx_armed.swap(false, Ordering::SeqCst) {
                     disarmed_buses += 1;
                 }
                 // D-003: every diag tap dies with Panic Stop (pending sends -> Closed).
                 bus.diag.close_all();
+                counters.push((*bus_id, Arc::clone(&bus.tx_in_flight)));
             }
+            counters
+        };
+        // Wait OUTSIDE the buses lock: bus-io threads never take it, but the aggregator and
+        // scheduler do, and they must not stall behind a slow driver write.
+        let in_flight_timeout_buses = wait_tx_quiesced(&in_flight, TX_QUIESCE_TIMEOUT);
+        if !in_flight_timeout_buses.is_empty() {
+            report_quiesce_timeout("panic stop", &in_flight_timeout_buses);
         }
 
         PanicStopResultDto {
             stopped_periodic_jobs,
             disarmed_buses,
             timestamp_us: now_monotonic_us(),
+            in_flight_timeout_buses,
         }
     }
 
     /// WP-4: `cmd_clear_panic_latch` -> clears the global Panic Stop latch ONLY. Buses stay
     /// disarmed; the operator must explicitly Arm Active Bus again.
     pub fn cmd_clear_panic_latch(&self) {
-        self.tx_panic_latched.store(false, Ordering::Release);
+        self.tx_panic_latched.store(false, Ordering::SeqCst);
     }
 
     /// `true` while the Panic Stop latch is engaged.
@@ -618,7 +743,7 @@ impl PipelineEngine {
     /// Nothing can transmit afterwards (no bus is connected).
     pub fn cmd_reset_session(&self) -> ResetSessionResultDto {
         // Invalidate anything already queued towards a bus-io thread.
-        self.tx_epoch.fetch_add(1, Ordering::AcqRel);
+        self.tx_epoch.fetch_add(1, Ordering::SeqCst);
         self.replay.disarm_hardware_tx();
         self.diag_sessions.clear();
 
@@ -626,21 +751,29 @@ impl PipelineEngine {
         {
             let guard = self.buses.lock();
             for bus in guard.values() {
-                if bus.tx_armed.swap(false, Ordering::AcqRel) {
+                if bus.tx_armed.swap(false, Ordering::SeqCst) {
                     disarmed_buses += 1;
                 }
                 bus.diag.close_all();
             }
         }
+        // Bounded write barrier (same handshake as Panic Stop) BEFORE the unbounded joins in
+        // `cmd_disconnect_all_buses`, so a stuck driver write is reported, not just waited on.
+        let in_flight_timeout_buses =
+            wait_tx_quiesced(&self.in_flight_counters(), TX_QUIESCE_TIMEOUT);
+        if !in_flight_timeout_buses.is_empty() {
+            report_quiesce_timeout("reset session", &in_flight_timeout_buses);
+        }
         let stopped_periodic_jobs = self.tx_scheduler.lock().clear_all();
         // Also clears the scheduler again, so a job registered in between cannot survive.
         let disconnected_buses = self.cmd_disconnect_all_buses();
-        self.tx_panic_latched.store(false, Ordering::Release);
+        self.tx_panic_latched.store(false, Ordering::SeqCst);
 
         ResetSessionResultDto {
             stopped_periodic_jobs,
             disarmed_buses,
             disconnected_buses,
+            in_flight_timeout_buses,
         }
     }
 
@@ -666,28 +799,13 @@ impl PipelineEngine {
     }
 
     /// 6. `cmd_load_preset_databases` -> Parses & merges `scripts/sample_vehicle.dbc` + `scripts/sample_bms.kcd`.
+    ///    WP-8: the preset files are embedded at build time (no runtime repo lookup).
     pub fn cmd_load_preset_databases(&self) -> Result<DatabaseSchemaDto, HalError> {
-        let scripts_dir = locate_preset_scripts_dir()?;
-        let dbc_path = scripts_dir.join("sample_vehicle.dbc");
-        let kcd_path = scripts_dir.join("sample_bms.kcd");
-
-        let dbc_bytes = fs::read(&dbc_path).map_err(|e| {
-            HalError::InvalidInput(format!(
-                "Failed to read preset DBC '{}': {e}",
-                dbc_path.display()
-            ))
-        })?;
-        let kcd_bytes = fs::read(&kcd_path).map_err(|e| {
-            HalError::InvalidInput(format!(
-                "Failed to read preset KCD '{}': {e}",
-                kcd_path.display()
-            ))
-        })?;
-
         let registry = FormatRegistry::new();
         let opts = ParseOptions::default();
-        let dbc_bundle = registry.parse_bytes(&dbc_bytes, Some("sample_vehicle.dbc"), &opts)?;
-        let kcd_bundle = registry.parse_bytes(&kcd_bytes, Some("sample_bms.kcd"), &opts)?;
+        let dbc_bundle =
+            registry.parse_bytes(PRESET_VEHICLE_DBC, Some(PRESET_VEHICLE_DBC_NAME), &opts)?;
+        let kcd_bundle = registry.parse_bytes(PRESET_BMS_KCD, Some(PRESET_BMS_KCD_NAME), &opts)?;
 
         let mut diagnostics = dbc_bundle.diagnostics;
         diagnostics.extend(kcd_bundle.diagnostics);
@@ -736,6 +854,7 @@ impl PipelineEngine {
         content_base64: String,
         append_to_existing: bool,
     ) -> Result<DatabaseSchemaDto, HalError> {
+        check_ipc_size("Database content", content_base64.len(), MAX_IPC_CONTENT_BYTES)?;
         let raw_bytes = decode_base64_db_bytes(&content_base64)?;
 
         let registry = FormatRegistry::new();
@@ -806,6 +925,7 @@ impl PipelineEngine {
         file_name: String,
         content_base64: String,
     ) -> Result<DatabaseSchemaDto, HalError> {
+        check_ipc_size("Database content", content_base64.len(), MAX_IPC_CONTENT_BYTES)?;
         let raw_bytes = decode_base64_db_bytes(&content_base64)?;
         let bundle =
             FormatRegistry::new().parse_bytes(&raw_bytes, Some(&file_name), &ParseOptions::default())?;
@@ -826,34 +946,17 @@ impl PipelineEngine {
         Ok(compiled.to_schema_dto(info))
     }
 
-    /// Reads `scripts/sample_vehicle.dbc` and `scripts/sample_bms.kcd` as Base64 `DbFileInputDto`
-    /// items for populating the multi-database catalog without mutating `StateTable`.
+    /// Returns the embedded `scripts/sample_vehicle.dbc` and `scripts/sample_bms.kcd` as Base64
+    /// `DbFileInputDto` items for populating the multi-database catalog without mutating `StateTable`.
     pub fn cmd_get_preset_database_files(&self) -> Result<Vec<DbFileInputDto>, HalError> {
-        let scripts_dir = locate_preset_scripts_dir()?;
-        let dbc_path = scripts_dir.join("sample_vehicle.dbc");
-        let kcd_path = scripts_dir.join("sample_bms.kcd");
-
-        let dbc_bytes = fs::read(&dbc_path).map_err(|e| {
-            HalError::InvalidInput(format!(
-                "Failed to read preset DBC '{}': {e}",
-                dbc_path.display()
-            ))
-        })?;
-        let kcd_bytes = fs::read(&kcd_path).map_err(|e| {
-            HalError::InvalidInput(format!(
-                "Failed to read preset KCD '{}': {e}",
-                kcd_path.display()
-            ))
-        })?;
-
         Ok(vec![
             DbFileInputDto {
-                file_name: "sample_vehicle.dbc".to_string(),
-                content_base64: BASE64_STD.encode(&dbc_bytes),
+                file_name: PRESET_VEHICLE_DBC_NAME.to_string(),
+                content_base64: BASE64_STD.encode(PRESET_VEHICLE_DBC),
             },
             DbFileInputDto {
-                file_name: "sample_bms.kcd".to_string(),
-                content_base64: BASE64_STD.encode(&kcd_bytes),
+                file_name: PRESET_BMS_KCD_NAME.to_string(),
+                content_base64: BASE64_STD.encode(PRESET_BMS_KCD),
             },
         ])
     }
@@ -873,6 +976,18 @@ impl PipelineEngine {
                 .send(AggregatorControl::SetBusDatabase(bus_id, None));
             return Ok(None);
         }
+        if files.len() > MAX_DB_FILES_PER_CALL {
+            return Err(HalError::InvalidInput(format!(
+                "Too many database files ({}, limit {MAX_DB_FILES_PER_CALL})",
+                files.len()
+            )));
+        }
+        let mut total_len = 0usize;
+        for f in &files {
+            check_ipc_size("Database content", f.content_base64.len(), MAX_IPC_CONTENT_BYTES)?;
+            total_len = total_len.saturating_add(f.content_base64.len());
+        }
+        check_ipc_size("Combined database content", total_len, MAX_IPC_DB_TOTAL_BYTES)?;
 
         let registry = FormatRegistry::new();
         let opts = ParseOptions::default();
@@ -961,6 +1076,7 @@ impl PipelineEngine {
         periodic_ms: Option<u32>,
         job_label: Option<String>,
     ) -> Result<TxTransmitResultDto, HalError> {
+        check_tx_request_sizes(Some(signal_values.len()), job_label.as_deref())?;
         // Epoch first, then the latch: see `register_periodic_job_checked`.
         let epoch = self.tx_epoch.load(Ordering::Acquire);
         if self.tx_panic_latched.load(Ordering::Acquire) {
@@ -1089,6 +1205,7 @@ impl PipelineEngine {
         periodic_ms: Option<u32>,
         job_label: Option<String>,
     ) -> Result<TxTransmitResultDto, HalError> {
+        check_tx_request_sizes(None, job_label.as_deref())?;
         // Epoch first, then the latch: see `register_periodic_job_checked`.
         let epoch = self.tx_epoch.load(Ordering::Acquire);
         if self.tx_panic_latched.load(Ordering::Acquire) {
@@ -1230,30 +1347,46 @@ impl PipelineEngine {
         count
     }
 
-    /// 17. `cmd_list_projects` -> Scans `./projects/*.nexusproj.json` (creating `./projects` if missing),
-    ///     extracts summary metadata, and returns entries sorted descending by `updated_at`.
+    /// WP-8: persistent storage locations of this engine.
+    pub fn data_root(&self) -> &DataRoot {
+        &self.data_root
+    }
+
+    /// 17. `cmd_list_projects` -> Scans `<projects>/*.nexusproj.json` (creating the directory if
+    ///     missing), extracts summary metadata, and returns entries sorted descending by
+    ///     `updated_at`. Symlinks, non-regular entries and invalid stems are skipped; files larger
+    ///     than [`MAX_PROJECT_FILE_BYTES`] are listed from metadata only.
     pub fn cmd_list_projects(&self) -> Result<Vec<ProjectSummaryDto>, HalError> {
-        fs::create_dir_all(&self.projects_dir)
+        let projects_dir = self.data_root.projects_dir();
+        crate::storage::create_private_dir_all(projects_dir)
             .map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
 
-        let entries = fs::read_dir(&self.projects_dir)
-            .map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
+        let entries =
+            fs::read_dir(projects_dir).map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
 
         let mut summaries = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
+        for entry in entries.flatten().take(MAX_LISTED_ENTRIES) {
+            // `DirEntry::file_type` does not follow symlinks.
+            match entry.file_type() {
+                Ok(ft) if ft.is_file() => {}
+                _ => continue,
             }
             let file_name = entry.file_name().to_string_lossy().to_string();
             let Some(raw_stem) = file_name.strip_suffix(".nexusproj.json") else {
                 continue;
             };
-            let safe_stem = sanitize_project_stem(raw_stem);
-
-            let meta = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
+            let Ok(safe_stem) = sanitize_project_stem(raw_stem) else {
+                continue;
+            };
+            // Only list files whose on-disk name is exactly the sanitized name, so every listed
+            // stem can be loaded/deleted again.
+            if safe_stem != raw_stem {
+                continue;
+            }
+            let path = entry.path();
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(m) if m.is_file() => m,
+                _ => continue,
             };
             let size_bytes = meta.len();
             let fallback_updated = meta
@@ -1263,10 +1396,14 @@ impl PipelineEngine {
                 .map(|d| format!("{}", d.as_secs()))
                 .unwrap_or_else(|| "0".to_string());
 
-            let (name, updated_at) = match fs::read_to_string(&path)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            {
+            let parsed = if size_bytes <= MAX_PROJECT_FILE_BYTES {
+                crate::storage::read_regular_file(&path, MAX_PROJECT_FILE_BYTES)
+                    .ok()
+                    .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+            } else {
+                None
+            };
+            let (name, updated_at) = match parsed {
                 Some(val) => {
                     let parsed_name = val
                         .get("name")
@@ -1304,17 +1441,37 @@ impl PipelineEngine {
         Ok(summaries)
     }
 
-    /// 18. `cmd_save_project` -> Sanitizes `file_stem` against path traversal, validates `project_json` as a JSON object,
-    ///     writes `./projects/<safe_stem>.nexusproj.json`, and returns its [`ProjectSummaryDto`].
+    /// Resolves `<projects>/<safe_stem>.nexusproj.json` (invalid stems and symlinks refused).
+    /// `strict` (load / delete): the stem must already be canonical, nothing is rewritten.
+    fn project_path(&self, file_stem: &str, strict: bool) -> Result<(String, PathBuf), HalError> {
+        let safe_stem = sanitize_project_stem(file_stem)?;
+        if strict {
+            let given = file_stem.trim();
+            let given = given.strip_suffix(".nexusproj.json").unwrap_or(given);
+            if given != safe_stem {
+                return Err(HalError::InvalidInput(format!(
+                    "Invalid project name '{}': expected '{safe_stem}'",
+                    given.escape_debug()
+                )));
+            }
+        }
+        let path = crate::storage::resolve_in_dir(
+            self.data_root.projects_dir(),
+            &format!("{safe_stem}.nexusproj.json"),
+        )?;
+        Ok((safe_stem, path))
+    }
+
+    /// 18. `cmd_save_project` -> Validates `file_stem` (invalid names are errors), validates
+    ///     `project_json` as a JSON object (max [`MAX_IPC_CONTENT_BYTES`]), writes
+    ///     `<projects>/<safe_stem>.nexusproj.json` atomically, and returns its [`ProjectSummaryDto`].
     pub fn cmd_save_project(
         &self,
         file_stem: String,
         project_json: String,
     ) -> Result<ProjectSummaryDto, HalError> {
-        fs::create_dir_all(&self.projects_dir)
-            .map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
-
-        let safe_stem = sanitize_project_stem(&file_stem);
+        check_ipc_size("Project JSON", project_json.len(), MAX_IPC_CONTENT_BYTES)?;
+        let (safe_stem, target_path) = self.project_path(&file_stem, false)?;
         let parsed: serde_json::Value = serde_json::from_str(&project_json)
             .map_err(|e| HalError::InvalidInput(format!("Invalid project JSON payload: {e}")))?;
         let obj = parsed.as_object().ok_or_else(|| {
@@ -1344,9 +1501,7 @@ impl PipelineEngine {
                 format!("{secs}")
             });
 
-        let target_path = self.projects_dir.join(format!("{safe_stem}.nexusproj.json"));
-        fs::write(&target_path, project_json.as_bytes())
-            .map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
+        crate::storage::write_regular_file_atomic(&target_path, project_json.as_bytes())?;
 
         Ok(ProjectSummaryDto {
             file_stem: safe_stem,
@@ -1356,28 +1511,30 @@ impl PipelineEngine {
         })
     }
 
-    /// 19. `cmd_load_project` -> Reads `./projects/<safe_stem>.nexusproj.json` and returns raw JSON string.
+    /// 19. `cmd_load_project` -> Reads `<projects>/<safe_stem>.nexusproj.json` (regular file,
+    ///     max [`MAX_PROJECT_FILE_BYTES`]) and returns the raw JSON string.
     pub fn cmd_load_project(&self, file_stem: String) -> Result<String, HalError> {
-        let safe_stem = sanitize_project_stem(&file_stem);
-        let target_path = self.projects_dir.join(format!("{safe_stem}.nexusproj.json"));
-        if !target_path.is_file() {
+        let (safe_stem, target_path) = self.project_path(&file_stem, true)?;
+        if !crate::storage::is_regular_file(&target_path) {
             return Err(HalError::InvalidInput(format!(
                 "Project '{safe_stem}' does not exist in projects directory"
             )));
         }
-        fs::read_to_string(&target_path).map_err(|e| HalError::Adapter(AdapterError::Io(e)))
+        let raw = crate::storage::read_regular_file(&target_path, MAX_PROJECT_FILE_BYTES)?;
+        String::from_utf8(raw).map_err(|_| {
+            HalError::InvalidInput(format!("Project '{safe_stem}' is not valid UTF-8"))
+        })
     }
 
-    /// 20. `cmd_delete_project` -> Deletes `./projects/<safe_stem>.nexusproj.json`.
+    /// 20. `cmd_delete_project` -> Deletes `<projects>/<safe_stem>.nexusproj.json` (symlinks refused).
     pub fn cmd_delete_project(&self, file_stem: String) -> Result<(), HalError> {
-        let safe_stem = sanitize_project_stem(&file_stem);
-        let target_path = self.projects_dir.join(format!("{safe_stem}.nexusproj.json"));
-        if !target_path.is_file() {
+        let (safe_stem, target_path) = self.project_path(&file_stem, true)?;
+        if !crate::storage::is_regular_file(&target_path) {
             return Err(HalError::InvalidInput(format!(
                 "Project '{safe_stem}' does not exist in projects directory"
             )));
         }
-        fs::remove_file(&target_path).map_err(|e| HalError::Adapter(AdapterError::Io(e)))
+        crate::storage::remove_regular_file(&target_path)
     }
 
     /// 21. `cmd_reset_telemetry` -> Resets `StateTable` (`Receive` rows, `Trace` ring, and RX/TX counters)
@@ -1390,8 +1547,9 @@ impl PipelineEngine {
     }
 
     /// 22. `cmd_list_traces` -> Lists persistent `.trc`, `.asc`, `.blf`, `.log`, and `.csv` files in `./traces/`.
+    ///     WP-8: metadata only; `frameCount` / `durationUs` are exact only when `statsKnown`.
     pub fn cmd_list_traces(&self) -> Result<TraceStorageInfoDto, HalError> {
-        list_trace_files(&self.traces_dir)
+        list_trace_files(self.data_root.traces_dir(), Some(&self.trace_stats))
     }
 
     /// 23. `cmd_save_trace_file` -> Sanitizes `file_name` and persists either binary `content_base64` (e.g. `.blf`)
@@ -1402,11 +1560,18 @@ impl PipelineEngine {
         content: Option<String>,
         content_base64: Option<String>,
     ) -> Result<TraceFileSummaryDto, HalError> {
+        check_trace_content_sizes(content.as_deref(), content_base64.as_deref())?;
+        let traces_dir = self.data_root.traces_dir();
         if let Some(b64) = content_base64.as_deref().filter(|s| !s.trim().is_empty()) {
             let raw_bytes = decode_base64_trace_bytes(b64)?;
-            save_trace_file_bytes(&self.traces_dir, &file_name, &raw_bytes)
+            save_trace_file_bytes_cached(traces_dir, &file_name, &raw_bytes, Some(&self.trace_stats))
         } else if let Some(text) = content {
-            save_trace_file(&self.traces_dir, &file_name, &text)
+            save_trace_file_bytes_cached(
+                traces_dir,
+                &file_name,
+                text.as_bytes(),
+                Some(&self.trace_stats),
+            )
         } else {
             Err(HalError::InvalidInput(
                 "Trace kaydında oynatılacak çerçeve bulunamadı".to_string(),
@@ -1416,12 +1581,18 @@ impl PipelineEngine {
 
     /// 24. `cmd_load_trace_file` -> Loads and parses `./traces/<safe_name>` into `LoadedTraceFileDto`.
     pub fn cmd_load_trace_file(&self, file_name: String) -> Result<LoadedTraceFileDto, HalError> {
-        load_trace_file(&self.traces_dir, &file_name)
+        load_trace_file_cached(self.data_root.traces_dir(), &file_name, Some(&self.trace_stats))
     }
 
     /// 25. `cmd_delete_trace_file` -> Deletes `./traces/<safe_name>`.
     pub fn cmd_delete_trace_file(&self, file_name: String) -> Result<(), HalError> {
-        delete_trace_file(&self.traces_dir, &file_name)
+        let res = delete_trace_file(self.data_root.traces_dir(), &file_name);
+        if res.is_ok() {
+            if let Ok(safe) = sanitize_trace_filename(&file_name) {
+                self.trace_stats.forget(&safe);
+            }
+        }
+        res
     }
 
     /// 26. `cmd_parse_trace_content` -> Statelessly parses binary `content_base64` (`.blf`) or text `content`
@@ -1432,6 +1603,7 @@ impl PipelineEngine {
         content: Option<String>,
         content_base64: Option<String>,
     ) -> Result<LoadedTraceFileDto, HalError> {
+        check_trace_content_sizes(content.as_deref(), content_base64.as_deref())?;
         if let Some(b64) = content_base64.as_deref().filter(|s| !s.trim().is_empty()) {
             let raw_bytes = decode_base64_trace_bytes(b64)?;
             parse_trace_bytes(&file_name, &raw_bytes)
@@ -1448,6 +1620,10 @@ impl PipelineEngine {
         &self,
         args: StartTraceReplayArgsDto,
     ) -> Result<TraceReplayStatusDto, HalError> {
+        check_trace_content_sizes(args.content.as_deref(), args.content_base64.as_deref())?;
+        if let Some(frames) = args.frames.as_ref() {
+            check_frame_count("Trace replay", frames.len())?;
+        }
         let resolve_name_hint = |default_name: &'static str| -> String {
             args.file_name
                 .as_deref()
@@ -1488,15 +1664,8 @@ impl PipelineEngine {
                 )
             } else if let Some(fname) = args.file_name.as_ref().filter(|s| !s.trim().is_empty())
             {
-                let safe_name = sanitize_trace_filename(fname);
-                let target_path = self.traces_dir.join(&safe_name);
-                if !target_path.is_file() {
-                    return Err(HalError::InvalidInput(format!(
-                        "Trace file '{safe_name}' does not exist in traces directory"
-                    )));
-                }
-                let raw_bytes =
-                    fs::read(&target_path).map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
+                let (safe_name, _path, raw_bytes) =
+                    read_trace_file_bytes(self.data_root.traces_dir(), fname)?;
                 (
                     parse_trace_entries_from_bytes(&safe_name, &raw_bytes)?,
                     safe_name,
@@ -1541,6 +1710,7 @@ impl PipelineEngine {
         _file_name: String,
         frames: Vec<ChronologicalFrameDto>,
     ) -> Result<String, HalError> {
+        check_frame_count("BLF export", frames.len())?;
         if frames.is_empty() {
             return Err(HalError::InvalidInput(
                 "Trace kaydında oynatılacak çerçeve bulunamadı".to_string(),
@@ -1581,6 +1751,78 @@ impl Drop for PipelineEngine {
 
 /// Prefix of every error caused by the Panic Stop latch (parsed by the HMI).
 pub const PANIC_LATCHED_PREFIX: &str = "PANIC_LATCHED:";
+
+/// Prefix of the disarm error returned when an in-flight driver write outlived
+/// [`TX_QUIESCE_TIMEOUT`] (the bus IS disarmed; parsed by the HMI).
+pub const TX_IN_FLIGHT_TIMEOUT_PREFIX: &str = "TX_IN_FLIGHT_TIMEOUT:";
+
+/// Upper bound Panic Stop / disarm / reset session wait for a driver write that passed the
+/// bus-io gate before them. Built-in drivers stay far below it: SocketCAN sockets are
+/// non-blocking (`EAGAIN`/`ENOBUFS` returns immediately), mock is a `try_send`, and SLCAN
+/// `write_all` is bounded by the serial port timeout (1..=10 ms per partial write).
+pub const TX_QUIESCE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// RAII half of the bus-io write barrier: `fetch_add` on creation (BEFORE the gate loads),
+/// `fetch_sub` on drop (AFTER `send_frame` returned, also on unwind out of a driver).
+struct TxInFlightGuard<'a>(&'a AtomicU32);
+
+impl<'a> TxInFlightGuard<'a> {
+    #[inline]
+    fn enter(counter: &'a AtomicU32) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for TxInFlightGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Waits until every counter is 0 or `timeout` elapses; returns the buses still in flight.
+/// Must be called AFTER the caller made the buses unable to pass the gate (SeqCst stores).
+/// Never allocates when nothing is in flight (the normal case returns at the first check).
+fn wait_tx_quiesced(counters: &[(BusId, Arc<AtomicU32>)], timeout: Duration) -> Vec<u8> {
+    let busy = |c: &Arc<AtomicU32>| c.load(Ordering::SeqCst) != 0;
+    if !counters.iter().any(|(_, c)| busy(c)) {
+        return Vec::new();
+    }
+    let deadline = Instant::now() + timeout;
+    let mut round = 0u32;
+    loop {
+        if !counters.iter().any(|(_, c)| busy(c)) {
+            return Vec::new();
+        }
+        if Instant::now() >= deadline {
+            return counters
+                .iter()
+                .filter(|(_, c)| busy(c))
+                .map(|(id, _)| *id)
+                .collect();
+        }
+        // A preempted writer needs CPU time, not our spinning: spin briefly, then yield, then
+        // sleep in short steps (the bound above stays exact to ~50 us).
+        if round < 64 {
+            std::hint::spin_loop();
+        } else if round < 256 {
+            thread::yield_now();
+        } else {
+            thread::sleep(Duration::from_micros(50));
+        }
+        round = round.saturating_add(1);
+    }
+}
+
+#[cold]
+fn report_quiesce_timeout(op: &str, buses: &[u8]) {
+    eprintln!(
+        "nexus-hal: ERROR {op}: driver write still in flight after {} ms on bus(es) {buses:?}; \
+         TX is latched/disarmed, but that one frame may still reach the wire",
+        TX_QUIESCE_TIMEOUT.as_millis()
+    );
+}
 
 #[cold]
 fn panic_latched_error() -> HalError {
@@ -1631,14 +1873,18 @@ fn run_bus_io_loop(
     tx_armed: Arc<AtomicBool>,
     tx_panic_latched: Arc<AtomicBool>,
     tx_epoch: Arc<AtomicU64>,
+    tx_in_flight: Arc<AtomicU32>,
     bus_state: Arc<AtomicU8>,
     tx_errors: Arc<AtomicU32>,
     rx_errors: Arc<AtomicU32>,
     diag_ctl_rx: Receiver<TapCtl>,
 ) {
-    let hook = *BUS_IO_THREAD_START_HOOK.lock();
-    if let Some(hook) = hook {
-        hook();
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        let hook = *BUS_IO_THREAD_START_HOOK.lock();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     let gate = GateRefs {
@@ -1675,40 +1921,45 @@ fn run_bus_io_loop(
                 },
             };
 
+            // Write barrier: announce "in flight" BEFORE the gate loads; released only after
+            // `send_frame` returned (Panic Stop / disarm wait for it, see `cmd_panic_stop_tx`).
+            let in_flight = TxInFlightGuard::enter(&tx_in_flight);
+
             // Authoritative safety gate, immediately before the driver write (Listen-Only,
             // Panic latch, Arm Active Bus, and the TX epoch the request was queued under).
             let verdict = match origin_idx {
                 Some(i) if taps.is_slot_closed(i) => Err(DiagTxReject::Closed),
                 _ => gate.verdict_for_epoch(req.epoch),
             };
-
-            let result: Result<RawCanFrame, (DiagTxReject, Option<AdapterError>)> = match verdict
-            {
+            let sent = match verdict {
                 Err(reason) => Err((reason, None)),
-                Ok(()) => match channel.send_frame(&req.frame) {
-                    Ok(()) => {
-                        if let Some(ref counter) = req.hw_tx_counter {
-                            counter.fetch_add(1, Ordering::Relaxed);
-                        }
-                        let mut tx_echo = req.frame.with_flags(nexus_core::FLAG_TX);
-                        tx_echo.bus_id = bus_id;
-                        if tx_echo.timestamp_us == 0 || origin_idx.is_some() {
-                            tx_echo.timestamp_us = now_monotonic_us().max(1);
-                        }
-                        if driver_has_self_loopback && req.suppress_echo {
-                            pending_suppressed_mock_echoes =
-                                pending_suppressed_mock_echoes.saturating_add(1);
-                        } else if !driver_has_self_loopback && !req.suppress_echo {
-                            // Synthesized TX echo for Trace / StateTable (diag frames included).
-                            if let Err(TrySendError::Full(_)) = frame_tx.try_send(tx_echo) {
-                                dropped_frames.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                        Ok(tx_echo)
-                    }
-                    Err(e) => Err((adapter_error_to_reject(&e), Some(e))),
-                },
+                Ok(()) => channel
+                    .send_frame(&req.frame)
+                    .map_err(|e| (adapter_error_to_reject(&e), Some(e))),
             };
+            drop(in_flight);
+
+            let result: Result<RawCanFrame, (DiagTxReject, Option<AdapterError>)> =
+                sent.map(|()| {
+                    if let Some(ref counter) = req.hw_tx_counter {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let mut tx_echo = req.frame.with_flags(nexus_core::FLAG_TX);
+                    tx_echo.bus_id = bus_id;
+                    if tx_echo.timestamp_us == 0 || origin_idx.is_some() {
+                        tx_echo.timestamp_us = now_monotonic_us().max(1);
+                    }
+                    if driver_has_self_loopback && req.suppress_echo {
+                        pending_suppressed_mock_echoes =
+                            pending_suppressed_mock_echoes.saturating_add(1);
+                    } else if !driver_has_self_loopback && !req.suppress_echo {
+                        // Synthesized TX echo for Trace / StateTable (diag frames included).
+                        if let Err(TrySendError::Full(_)) = frame_tx.try_send(tx_echo) {
+                            dropped_frames.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    tx_echo
+                });
 
             match result {
                 Ok(echo) => {
@@ -1976,44 +2227,60 @@ fn decode_base64_trace_bytes(content_base64: &str) -> Result<Vec<u8>, HalError> 
         .map_err(|e| HalError::InvalidInput(format!("Invalid Base64 trace content: {e}")))
 }
 
-fn locate_preset_scripts_dir() -> Result<PathBuf, HalError> {
-    let manifest_scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
-    let mut candidates = vec![
-        manifest_scripts,
-        PathBuf::from("scripts"),
-        PathBuf::from("../scripts"),
-        PathBuf::from("../../scripts"),
-    ];
+/// WP-8 / HIGH-09: preset sample databases are embedded at build time so packaged builds do
+/// not depend on the source checkout (`CARGO_MANIFEST_DIR`) at runtime.
+const PRESET_VEHICLE_DBC_NAME: &str = "sample_vehicle.dbc";
+const PRESET_BMS_KCD_NAME: &str = "sample_bms.kcd";
+const PRESET_VEHICLE_DBC: &[u8] = include_bytes!("../../../../scripts/sample_vehicle.dbc");
+const PRESET_BMS_KCD: &[u8] = include_bytes!("../../../../scripts/sample_bms.kcd");
 
-    if let Ok(exe) = std::env::current_exe() {
-        let mut cur = exe.parent();
-        for _ in 0..5 {
-            if let Some(dir) = cur {
-                candidates.push(dir.join("scripts"));
-                cur = dir.parent();
-            }
+/// WP-8: bounds the variable-length parts of TX requests (raw `data` is bounded to 64 bytes
+/// by `RawCanFrame::new_fd` / `new_classical`).
+fn check_tx_request_sizes(
+    signal_count: Option<usize>,
+    job_label: Option<&str>,
+) -> Result<(), HalError> {
+    if let Some(n) = signal_count {
+        if n > crate::storage::MAX_TX_SIGNAL_VALUES {
+            return Err(HalError::InvalidInput(format!(
+                "Too many signal values ({n}, limit {})",
+                crate::storage::MAX_TX_SIGNAL_VALUES
+            )));
         }
     }
-
-    for dir in candidates {
-        if dir.join("sample_vehicle.dbc").is_file() && dir.join("sample_bms.kcd").is_file() {
-            return Ok(dir);
-        }
+    if let Some(label) = job_label {
+        check_ipc_size("TX job label", label.len(), crate::storage::MAX_TX_JOB_LABEL_BYTES)?;
     }
-
-    Err(HalError::InvalidInput(
-        "Could not locate preset databases 'scripts/sample_vehicle.dbc' and 'scripts/sample_bms.kcd'"
-            .to_string(),
-    ))
+    Ok(())
 }
 
-/// Sanitizes an arbitrary project stem to `[a-zA-Z0-9_-]`, strictly eliminating `..`, `/`, and `\` path traversal.
-pub fn sanitize_project_stem(raw: &str) -> String {
+/// Rejects trace `content` / `content_base64` payloads above [`MAX_IPC_CONTENT_BYTES`].
+fn check_trace_content_sizes(
+    content: Option<&str>,
+    content_base64: Option<&str>,
+) -> Result<(), HalError> {
+    if let Some(c) = content {
+        check_ipc_size("Trace content", c.len(), MAX_IPC_CONTENT_BYTES)?;
+    }
+    if let Some(c) = content_base64 {
+        check_ipc_size("Trace content (base64)", c.len(), MAX_IPC_CONTENT_BYTES)?;
+    }
+    Ok(())
+}
+
+/// Validates a project stem and normalizes it to `[a-zA-Z0-9_-]` (whitespace -> `_`, other
+/// punctuation dropped). Path-like input (`/`, `\\`, `..`, leading `.`, `:`, control chars) is an
+/// error (WP-8), never rewritten.
+///
+/// WP-8: a stem that sanitizes to nothing (empty, `.`, `..`, only separators / punctuation) or to
+/// a Windows reserved device name is an error instead of a shared `untitled_project` default.
+pub fn sanitize_project_stem(raw: &str) -> Result<String, HalError> {
     let trimmed = raw
         .trim()
         .strip_suffix(".nexusproj.json")
         .or_else(|| raw.trim().strip_suffix(".json"))
         .unwrap_or_else(|| raw.trim());
+    crate::storage::reject_path_like_name("project name", trimmed)?;
 
     let mut out = String::with_capacity(trimmed.len().min(120));
     let mut last_underscore = false;
@@ -2033,31 +2300,569 @@ pub fn sanitize_project_stem(raw: &str) -> String {
 
     let cleaned = out.trim_matches(|c| c == '_' || c == '-');
     if cleaned.is_empty() {
-        "untitled_project".to_string()
-    } else {
-        cleaned.to_string()
+        return Err(HalError::InvalidInput(format!(
+            "Invalid project name '{}': use letters, digits, '-' or '_'",
+            raw.trim()
+        )));
+    }
+    if crate::storage::is_windows_reserved_stem(cleaned) {
+        return Err(HalError::InvalidInput(format!(
+            "Invalid project name '{cleaned}': reserved device name"
+        )));
+    }
+    Ok(cleaned.to_string())
+}
+
+/// WP-8 / HIGH-09 / HIGH-10: storage hardening at the engine command level.
+#[cfg(test)]
+mod wp8_storage_tests {
+    use super::*;
+    use crate::storage::MAX_IPC_CONTENT_BYTES;
+
+    const TRC: &str = "\
+;$FILEVERSION=2.1
+;$COLUMNS=N,O,T,B,I,d,L,D
+1 0.000 DT 1 0101 Rx 8 10 27 00 00 00 00 00 00
+2 25.000 DT 1 0101 Rx 8 20 4E 00 00 00 00 00 00
+";
+
+    fn engine(tag: &str) -> (PipelineEngine, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "nexuscan-wp8-{tag}-{}-{}",
+            std::process::id(),
+            nexus_core::now_monotonic_us()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let engine = PipelineEngine::with_data_root(
+            DriverRegistry::with_builtin_drivers(),
+            DataRoot::under(&root),
+        );
+        (engine, root)
+    }
+
+    /// Sorted (name, len, mtime) snapshot of a directory.
+    fn dir_snapshot(dir: &std::path::Path) -> Vec<(String, u64, Option<std::time::SystemTime>)> {
+        let mut v: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| {
+                let m = fs::symlink_metadata(e.path()).unwrap();
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    m.len(),
+                    m.modified().ok(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn with_data_root_creates_layout_and_uses_it() {
+        let (engine, root) = engine("layout");
+        assert!(root.join("projects").is_dir());
+        assert!(root.join("traces").is_dir());
+        engine
+            .cmd_save_trace_file("a.trc".into(), Some(TRC.into()), None)
+            .unwrap();
+        engine
+            .cmd_save_project("p1".into(), r#"{"name":"P1"}"#.into())
+            .unwrap();
+        assert!(root.join("traces/a.trc").is_file());
+        assert!(root.join("projects/p1.nexusproj.json").is_file());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn invalid_names_are_errors_and_write_nothing() {
+        let (engine, root) = engine("names");
+        for bad in ["../evil", "..", ".", "", "  ", ".dot", "a..b", "a/b", "a\\b", "CON"] {
+            assert!(
+                engine
+                    .cmd_save_trace_file(format!("{bad}.trc"), Some(TRC.into()), None)
+                    .is_err(),
+                "trace {bad:?} must be rejected"
+            );
+            assert!(
+                engine
+                    .cmd_save_project(bad.to_string(), "{}".into())
+                    .is_err(),
+                "project {bad:?} must be rejected"
+            );
+            assert!(engine.cmd_load_trace_file(bad.to_string()).is_err());
+            assert!(engine.cmd_delete_trace_file(bad.to_string()).is_err());
+        }
+        assert!(dir_snapshot(&root.join("traces")).is_empty());
+        assert!(dir_snapshot(&root.join("projects")).is_empty());
+        assert!(!root.join("evil.trc").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn oversized_payloads_are_rejected_before_parsing() {
+        let (engine, root) = engine("size");
+        let big = "x".repeat(MAX_IPC_CONTENT_BYTES + 1);
+        assert!(engine
+            .cmd_save_project("big".into(), big.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("too large"));
+        assert!(engine
+            .cmd_save_trace_file("big.trc".into(), Some(big.clone()), None)
+            .is_err());
+        assert!(engine
+            .cmd_save_trace_file("big.blf".into(), None, Some(big.clone()))
+            .is_err());
+        assert!(engine
+            .cmd_parse_trace_content("big.trc".into(), Some(big.clone()), None)
+            .is_err());
+        assert!(engine
+            .cmd_load_database_content("big.dbc".into(), big.clone(), false)
+            .is_err());
+        assert!(engine.cmd_parse_database_schema("big.dbc".into(), big).is_err());
+        let many = vec![(0u32, 0.0f64); crate::storage::MAX_TX_SIGNAL_VALUES + 1];
+        assert!(engine
+            .cmd_transmit_signal_frame(0, 0x100, false, many, None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("Too many signal values"));
+        let label = Some("l".repeat(crate::storage::MAX_TX_JOB_LABEL_BYTES + 1));
+        assert!(engine
+            .cmd_transmit_raw_frame(0, 0x100, false, false, false, vec![1], Some(100), label)
+            .unwrap_err()
+            .to_string()
+            .contains("too large"));
+        assert!(dir_snapshot(&root.join("traces")).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn list_traces_reads_metadata_only() {
+        let (engine, root) = engine("list");
+        let traces = root.join("traces");
+        // Garbage body with a trace extension: listing must not parse it.
+        fs::write(traces.join("garbage.asc"), b"\x00\xffnot a trace at all\x01").unwrap();
+        // Hidden temp-like file and non-canonical name are not listed.
+        fs::write(traces.join(".partial.trc.tmp"), b"x").unwrap();
+        fs::write(traces.join("has space.trc"), TRC).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = traces.join("locked.trc");
+            fs::write(&locked, TRC).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let listed = engine.cmd_list_traces().unwrap();
+        let names: Vec<_> = listed.files.iter().map(|f| f.file_name.as_str()).collect();
+        assert!(names.contains(&"garbage.asc"), "{names:?}");
+        assert!(!names.contains(&"has space.trc"));
+        assert!(!names.iter().any(|n| n.starts_with('.')));
+        for f in &listed.files {
+            assert!(!f.stats_known, "{} must not be parsed by list", f.file_name);
+            assert_eq!(f.frame_count, 0);
+            assert_eq!(f.duration_us, 0);
+        }
+        #[cfg(unix)]
+        assert!(names.contains(&"locked.trc"));
+
+        // Once saved / opened through the engine, stats become known via the cache.
+        engine
+            .cmd_save_trace_file("known.trc".into(), Some(TRC.into()), None)
+            .unwrap();
+        let listed = engine.cmd_list_traces().unwrap();
+        let known = listed.files.iter().find(|f| f.file_name == "known.trc").unwrap();
+        assert!(known.stats_known);
+        assert_eq!(known.frame_count, 2);
+        assert_eq!(known.duration_us, 25_000);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(traces.join("locked.trc"), fs::Permissions::from_mode(0o600));
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_trace_leaves_traces_dir_unchanged() {
+        let (engine, root) = engine("load");
+        let traces = root.join("traces");
+        fs::write(traces.join("cap.trc"), TRC).unwrap();
+        let before = dir_snapshot(&traces);
+        let loaded = engine.cmd_load_trace_file("cap.trc".into()).unwrap();
+        assert_eq!(loaded.frames.len(), 2);
+        assert!(loaded.summary.stats_known);
+        let parsed = engine
+            .cmd_parse_trace_content("imported.trc".into(), Some(TRC.into()), None)
+            .unwrap();
+        assert_eq!(parsed.frames.len(), 2);
+        assert_eq!(dir_snapshot(&traces), before, "open/parse must not write to disk");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_project_and_trace_are_refused() {
+        use std::os::unix::fs::symlink;
+        let (engine, root) = engine("symlink");
+        let outside = root.join("outside.txt");
+        fs::write(&outside, TRC).unwrap();
+        symlink(&outside, root.join("traces/link.trc")).unwrap();
+        symlink(&outside, root.join("projects/link.nexusproj.json")).unwrap();
+
+        assert!(engine.cmd_load_trace_file("link.trc".into()).is_err());
+        assert!(engine.cmd_delete_trace_file("link.trc".into()).is_err());
+        assert!(engine
+            .cmd_save_trace_file("link.trc".into(), Some(TRC.into()), None)
+            .is_err());
+        assert!(engine.cmd_load_project("link".into()).is_err());
+        assert!(engine.cmd_delete_project("link".into()).is_err());
+        assert!(engine
+            .cmd_save_project("link".into(), r#"{"name":"x"}"#.into())
+            .is_err());
+        // Listing skips symlinks.
+        assert!(engine.cmd_list_traces().unwrap().files.is_empty());
+        assert!(engine.cmd_list_projects().unwrap().is_empty());
+        // Target untouched, links still in place.
+        assert_eq!(fs::read_to_string(&outside).unwrap(), TRC);
+        assert!(fs::symlink_metadata(root.join("traces/link.trc"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn preset_databases_are_embedded() {
+        let (engine, root) = engine("preset");
+        let files = engine.cmd_get_preset_database_files().unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|f| !f.content_base64.is_empty()));
+        assert!(engine.cmd_load_preset_databases().is_ok());
+        let _ = fs::remove_dir_all(&root);
     }
 }
 
-fn locate_projects_dir() -> PathBuf {
-    if let Ok(scripts_dir) = locate_preset_scripts_dir() {
-        if let Some(workspace_root) = scripts_dir.parent() {
-            return workspace_root.join("projects");
+/// Write-barrier contract of Panic Stop / disarm (field-safety bug: a frame that passed the
+/// bus-io gate before the Panic reached the wire after `cmd_panic_stop_tx()` returned).
+/// A test channel blocks inside `send_frame` (i.e. AFTER the gate passed) under test control.
+#[cfg(test)]
+mod tx_write_barrier_tests {
+    use super::*;
+    use crate::drivers::mock_drv::MOCK0_DEVICE_ID;
+    use crate::traits::{AdapterCapabilities, BusHealthSnapshot, CanFilter};
+
+    /// mock0 wrapper: `send_frame` reports entry, then blocks until released (or `hold`).
+    struct GatedSendChannel {
+        inner: Box<dyn CanChannel>,
+        entered: Sender<()>,
+        release: Receiver<()>,
+        hold: Duration,
+        completed: Arc<Mutex<Vec<Instant>>>,
+    }
+
+    impl CanChannel for GatedSendChannel {
+        fn descriptor(&self) -> &DeviceDescriptor {
+            self.inner.descriptor()
+        }
+        fn capabilities(&self) -> &AdapterCapabilities {
+            self.inner.capabilities()
+        }
+        fn close(&mut self) -> Result<(), AdapterError> {
+            self.inner.close()
+        }
+        fn recv_batch(
+            &mut self,
+            out_batch: &mut [RawCanFrame],
+            timeout_ms: u32,
+        ) -> Result<usize, AdapterError> {
+            self.inner.recv_batch(out_batch, timeout_ms)
+        }
+        fn send_frame(&mut self, frame: &RawCanFrame) -> Result<(), AdapterError> {
+            let _ = self.entered.send(());
+            let _ = self.release.recv_timeout(self.hold);
+            let r = self.inner.send_frame(frame);
+            self.completed.lock().push(Instant::now());
+            r
+        }
+        fn set_filters(&mut self, filters: &[CanFilter]) -> Result<(), AdapterError> {
+            self.inner.set_filters(filters)
+        }
+        fn health(&self) -> BusHealthSnapshot {
+            self.inner.health()
         }
     }
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("projects")
-}
 
-fn locate_traces_dir() -> PathBuf {
-    if let Ok(scripts_dir) = locate_preset_scripts_dir() {
-        if let Some(workspace_root) = scripts_dir.parent() {
-            return workspace_root.join("traces");
+    struct Rig {
+        engine: PipelineEngine,
+        entered: Receiver<()>,
+        release: Sender<()>,
+        completed: Arc<Mutex<Vec<Instant>>>,
+    }
+
+    /// Engine with bus 0 = armed, active mock0 behind a [`GatedSendChannel`].
+    fn rig(hold: Duration) -> Rig {
+        let engine = PipelineEngine::new();
+        let cfg = ChannelConfigDto {
+            bus_id: 0,
+            listen_only: false,
+            ..ChannelConfigDto::default()
+        };
+        let (descriptor, inner) = engine
+            .registry
+            .open_by_device_id(MOCK0_DEVICE_ID, &cfg)
+            .expect("open mock0");
+        let (entered_tx, entered) = bounded(64);
+        let (release, release_rx) = bounded(64);
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let chan = GatedSendChannel {
+            inner,
+            entered: entered_tx,
+            release: release_rx,
+            hold,
+            completed: Arc::clone(&completed),
+        };
+        let handle = engine
+            .spawn_connected_bus_handle(0, descriptor, cfg, Box::new(chan), true)
+            .expect("spawn bus");
+        engine.buses.lock().insert(0, handle);
+        Rig {
+            engine,
+            entered,
+            release,
+            completed,
         }
     }
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("traces")
-}
 
+    fn one_shot(engine: &PipelineEngine) {
+        // The 50 ms ack timeout may expire while the test holds the driver; irrelevant here.
+        let _ = engine.cmd_transmit_raw_frame(0, 0x321, false, false, false, vec![0x11], None, None);
+    }
+
+    /// Enqueues `frame` with an explicit epoch, bypassing the command-side checks (emulates a
+    /// request that was queued before a Panic and drains after Clear Panic + re-arm).
+    fn enqueue_raw(engine: &PipelineEngine, epoch: u64) {
+        let guard = engine.buses.lock();
+        let bus = guard.get(&0).expect("bus 0");
+        let frame = RawCanFrame::new_classical(
+            0,
+            CanIdKey::new_standard(0x322).expect("id"),
+            &[0x22],
+            now_monotonic_us().max(1),
+        )
+        .expect("frame");
+        bus.tx_sender
+            .try_send(TxDispatchRequest {
+                frame,
+                ack: None,
+                suppress_echo: false,
+                hw_tx_counter: None,
+                origin: TxOrigin::Other,
+                epoch,
+            })
+            .expect("enqueue");
+    }
+
+    #[test]
+    fn panic_does_not_return_before_in_flight_write_completes_and_nothing_follows() {
+        let r = rig(Duration::from_secs(5));
+        let stale_epoch = r.engine.tx_epoch.load(Ordering::SeqCst);
+
+        thread::scope(|s| {
+            s.spawn(|| one_shot(&r.engine));
+            r.entered
+                .recv_timeout(Duration::from_secs(2))
+                .expect("gate passed, driver write blocked");
+
+            let (done_tx, done_rx) = bounded(1);
+            let engine = &r.engine;
+            s.spawn(move || {
+                let res = engine.cmd_panic_stop_tx();
+                let _ = done_tx.send((res, Instant::now()));
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+                "cmd_panic_stop_tx returned while a gated write was still in flight"
+            );
+            assert!(r.engine.is_panic_latched(), "latch is set before the wait");
+
+            r.release.send(()).expect("release driver");
+            let (res, returned_at) = done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("panic returns once the write finished");
+            let completed = r.completed.lock().clone();
+            assert_eq!(completed.len(), 1);
+            assert!(
+                completed[0] <= returned_at,
+                "write completed after cmd_panic_stop_tx returned"
+            );
+            assert!(res.in_flight_timeout_buses.is_empty(), "{res:?}");
+            assert_eq!(res.disarmed_buses, 1);
+        });
+
+        // Latched: nothing passes the gate (let the io thread drain it while latched).
+        enqueue_raw(&r.engine, r.engine.tx_epoch.load(Ordering::SeqCst));
+        assert!(
+            r.entered.recv_timeout(Duration::from_millis(100)).is_err(),
+            "a frame reached send_frame while Panic Stop is latched"
+        );
+        // Clear + re-arm: a request of the pre-Panic epoch still never reaches the driver.
+        r.engine.cmd_clear_panic_latch();
+        r.engine.cmd_arm_active_bus(0, true).expect("re-arm");
+        enqueue_raw(&r.engine, stale_epoch);
+        assert!(
+            r.entered.recv_timeout(Duration::from_millis(100)).is_err(),
+            "a frame reached send_frame after Panic Stop"
+        );
+        assert_eq!(r.completed.lock().len(), 1);
+
+        // Positive control: a fresh request after re-arm does reach the driver.
+        thread::scope(|s| {
+            s.spawn(|| one_shot(&r.engine));
+            r.entered
+                .recv_timeout(Duration::from_secs(2))
+                .expect("fresh TX after re-arm reaches the driver");
+            r.release.send(()).expect("release");
+        });
+        r.engine.cmd_disconnect_bus(0).expect("disconnect");
+    }
+
+    #[test]
+    fn panic_reports_driver_write_that_outlives_the_quiesce_timeout() {
+        let r = rig(Duration::from_secs(3));
+        thread::scope(|s| {
+            s.spawn(|| one_shot(&r.engine));
+            r.entered
+                .recv_timeout(Duration::from_secs(2))
+                .expect("gate passed, driver write blocked");
+
+            let t0 = Instant::now();
+            let res = r.engine.cmd_panic_stop_tx();
+            let waited = t0.elapsed();
+            assert!(
+                waited >= TX_QUIESCE_TIMEOUT && waited < TX_QUIESCE_TIMEOUT * 4,
+                "panic waited {waited:?}, expected ~{TX_QUIESCE_TIMEOUT:?}"
+            );
+            assert_eq!(res.in_flight_timeout_buses, vec![0]);
+            assert!(r.engine.is_panic_latched());
+            assert!(r.completed.lock().is_empty(), "the blocking write is still running");
+            r.release.send(()).expect("release driver");
+        });
+        r.engine.cmd_disconnect_bus(0).expect("disconnect");
+    }
+
+    #[test]
+    fn disarm_waits_for_in_flight_write_and_reports_timeout() {
+        let r = rig(Duration::from_secs(3));
+        thread::scope(|s| {
+            s.spawn(|| one_shot(&r.engine));
+            r.entered.recv_timeout(Duration::from_secs(2)).expect("blocked");
+            let (done_tx, done_rx) = bounded(1);
+            let engine = &r.engine;
+            s.spawn(move || {
+                let res = engine.cmd_arm_active_bus(0, false);
+                let _ = done_tx.send((res.map(|h| h.tx_armed), Instant::now()));
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+                "disarm returned while a gated write was still in flight"
+            );
+            r.release.send(()).expect("release");
+            let (res, returned_at) = done_rx.recv_timeout(Duration::from_secs(2)).expect("done");
+            assert!(!res.expect("disarm ok"), "bus must report disarmed");
+            assert!(r.completed.lock()[0] <= returned_at);
+        });
+
+        // Blocking driver: disarm still disarms, but reports the stuck write.
+        r.engine.cmd_arm_active_bus(0, true).expect("re-arm");
+        thread::scope(|s| {
+            s.spawn(|| one_shot(&r.engine));
+            r.entered.recv_timeout(Duration::from_secs(2)).expect("blocked");
+            let err = r
+                .engine
+                .cmd_arm_active_bus(0, false)
+                .expect_err("stuck write must be reported");
+            assert!(err.to_string().contains(TX_IN_FLIGHT_TIMEOUT_PREFIX), "{err}");
+            assert!(!r.engine.buses.lock()[&0].tx_armed.load(Ordering::SeqCst));
+            r.release.send(()).expect("release");
+        });
+        r.engine.cmd_disconnect_bus(0).expect("disconnect");
+    }
+
+    #[test]
+    fn request_queued_before_disarm_never_reaches_driver_after_fast_rearm() {
+        let r = rig(Duration::from_secs(3));
+        let epoch = r.engine.tx_epoch.load(Ordering::SeqCst);
+        // A's ack channel is pre-filled, so after A's write returns (in-flight already 0) the
+        // io thread parks in `ack.send` BEFORE it drains B: a deterministic pause exactly
+        // between "previous write done" and "next queued request reaches the gate".
+        let (ack_tx, ack_rx) = bounded::<Result<(), AdapterError>>(1);
+        ack_tx.send(Ok(())).expect("pre-fill ack");
+        {
+            let guard = r.engine.buses.lock();
+            let frame = RawCanFrame::new_classical(
+                0,
+                CanIdKey::new_standard(0x321).expect("id"),
+                &[0x11],
+                1,
+            )
+            .expect("frame");
+            guard[&0]
+                .tx_sender
+                .try_send(TxDispatchRequest {
+                    frame,
+                    ack: Some(ack_tx),
+                    suppress_echo: false,
+                    hw_tx_counter: None,
+                    origin: TxOrigin::Other,
+                    epoch,
+                })
+                .expect("enqueue A");
+        }
+        r.entered.recv_timeout(Duration::from_secs(2)).expect("A blocked in driver");
+        // B is queued while armed, behind A (same epoch: disarm does not bump the epoch, so
+        // only the queue-drain barrier can stop it).
+        enqueue_raw(&r.engine, epoch);
+
+        thread::scope(|s| {
+            let engine = &r.engine;
+            let (done_tx, done_rx) = bounded(1);
+            s.spawn(move || {
+                let _ = done_tx.send(engine.cmd_arm_active_bus(0, false).map(|h| h.tx_armed));
+            });
+            thread::sleep(Duration::from_millis(30));
+            r.release.send(()).expect("release A"); // A completes, io thread parks on the ack
+            let early = done_rx.recv_timeout(Duration::from_millis(100));
+            if early.is_ok() {
+                // Barrier missing: show the consequence (fast re-arm releases B) before failing.
+                r.engine.cmd_arm_active_bus(0, true).expect("re-arm");
+            }
+            let _ = ack_rx.recv(); // drain the pre-fill
+            let _ = ack_rx.recv_timeout(Duration::from_secs(1)); // A's ack: io thread resumes
+            assert!(
+                early.is_err(),
+                "disarm returned while a request queued before it was still pending"
+            );
+            let res = done_rx.recv_timeout(Duration::from_secs(2)).expect("disarm returns");
+            assert!(!res.expect("disarm ok"));
+            r.engine.cmd_arm_active_bus(0, true).expect("re-arm");
+        });
+        assert!(
+            r.entered.recv_timeout(Duration::from_millis(100)).is_err(),
+            "a request queued before disarm reached the driver after re-arm"
+        );
+        assert_eq!(r.completed.lock().len(), 1, "only A was written");
+        r.engine.cmd_disconnect_bus(0).expect("disconnect");
+    }
+
+    #[test]
+    fn quiesce_is_immediate_and_allocation_free_when_idle() {
+        let idle = Arc::new(AtomicU32::new(0));
+        let t0 = Instant::now();
+        let stuck = wait_tx_quiesced(&[(0, idle)], TX_QUIESCE_TIMEOUT);
+        assert!(stuck.is_empty() && stuck.capacity() == 0);
+        assert!(t0.elapsed() < Duration::from_millis(5));
+    }
+}

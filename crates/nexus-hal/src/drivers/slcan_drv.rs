@@ -345,6 +345,8 @@ pub fn discover_serial_ports() -> Vec<SerialPortInfoDto> {
                 continue;
             }
 
+            // `mut` is only used by the Linux sysfs enrichment below.
+            #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
             let mut info = match p.port_type {
                 SerialPortType::UsbPort(usb) => SerialPortInfoDto {
                     port_name: p.port_name.clone(),

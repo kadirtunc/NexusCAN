@@ -49,17 +49,17 @@ const _: () = {
 const fn _assert_replay_entry_traits<T: Copy + Clone + Send + Sync + Sized>() {}
 const _: () = _assert_replay_entry_traits::<CompiledReplayEntry>();
 
-/// Sanitizes an arbitrary trace file name against path traversal (`..`, `/`, `\`),
-/// preserving `.trc`, `.asc`, `.log`, `.csv`, or `.blf` extensions (defaulting to `.trc`).
-pub fn sanitize_trace_filename(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let base_segment = trimmed
-        .rsplit(['/', '\\'])
-        .find(|seg| {
-            let s = seg.trim();
-            !s.is_empty() && s != "." && s != ".."
-        })
-        .unwrap_or("");
+/// Validates and normalizes a user-supplied trace file name, preserving `.trc`, `.asc`,
+/// `.log`, `.csv`, or `.blf` extensions (defaulting to `.trc`; extension lower-cased).
+///
+/// WP-8 / HIGH-09: path-like input (separators, `..`, leading `.`, `:`, control characters)
+/// and names that normalize to nothing or to a Windows reserved device name are **errors**;
+/// they are never rewritten into a different / shared default name. The only normalization is
+/// whitespace and single interior dots -> `_` and dropping other punctuation; callers get the
+/// final name back in the returned summary.
+pub fn sanitize_trace_filename(raw: &str) -> Result<String, HalError> {
+    crate::storage::reject_path_like_name("trace file name", raw)?;
+    let base_segment = raw.trim();
 
     let (raw_stem, ext) = split_supported_trace_ext(base_segment);
 
@@ -78,14 +78,39 @@ pub fn sanitize_trace_filename(raw: &str) -> String {
         }
     }
 
-    let trimmed_stem = clean_stem.trim_matches(|c| c == '_' || c == '-');
-    let final_stem = if trimmed_stem.is_empty() {
-        "untitled_trace"
-    } else {
-        trimmed_stem
-    };
+    let final_stem = clean_stem.trim_matches(|c| c == '_' || c == '-');
+    if final_stem.is_empty() {
+        return Err(HalError::InvalidInput(format!(
+            "Invalid trace file name '{}': use letters, digits, '-' or '_'",
+            raw.trim()
+        )));
+    }
+    if crate::storage::is_windows_reserved_stem(final_stem) {
+        return Err(HalError::InvalidInput(format!(
+            "Invalid trace file name '{final_stem}': reserved device name"
+        )));
+    }
 
-    format!("{final_stem}.{ext}")
+    Ok(format!("{final_stem}.{ext}"))
+}
+
+/// Strict variant for names that must already exist on disk (load / delete / replay): the
+/// name must be exactly what [`sanitize_trace_filename`] produces, so nothing is rewritten.
+pub fn validate_existing_trace_filename(raw: &str) -> Result<String, HalError> {
+    let safe = sanitize_trace_filename(raw)?;
+    if safe != raw.trim() {
+        return Err(HalError::InvalidInput(format!(
+            "Invalid trace file name '{}': expected '{safe}'",
+            raw.trim().escape_debug()
+        )));
+    }
+    Ok(safe)
+}
+
+/// Display-only name for stateless parsing of in-memory content (never used for disk paths).
+fn trace_display_name(raw: &str) -> String {
+    sanitize_trace_filename(raw)
+        .unwrap_or_else(|_| format!("untitled_trace.{}", trace_format_from_filename(raw)))
 }
 
 /// Returns the canonical format tag (`"trc"`, `"asc"`, `"log"`, `"csv"`, or `"blf"`) for a trace file name.
@@ -182,48 +207,114 @@ fn system_time_to_iso8601_utc(st: SystemTime) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
+/// In-memory frame-count / duration cache for traces this engine has saved, loaded or
+/// replayed. `cmd_list_traces` never parses file bodies; it reports cached stats when the
+/// file's size + mtime still match, else `frameCount = 0`, `durationUs = 0`,
+/// `statsKnown = false`.
+#[derive(Default)]
+pub struct TraceStatsCache {
+    inner: Mutex<BTreeMap<String, CachedTraceStats>>,
+}
+
+#[derive(Clone, Copy)]
+struct CachedTraceStats {
+    size_bytes: u64,
+    modified: Option<SystemTime>,
+    frame_count: usize,
+    duration_us: u64,
+}
+
+impl TraceStatsCache {
+    /// Records stats for `file_name` against the file's current size + mtime.
+    pub fn record(&self, file_name: &str, meta: &fs::Metadata, frame_count: usize, duration_us: u64) {
+        let mut inner = self.inner.lock();
+        if inner.len() >= crate::storage::MAX_LISTED_ENTRIES && !inner.contains_key(file_name) {
+            inner.clear();
+        }
+        inner.insert(
+            file_name.to_string(),
+            CachedTraceStats {
+                size_bytes: meta.len(),
+                modified: meta.modified().ok(),
+                frame_count,
+                duration_us,
+            },
+        );
+    }
+
+    fn lookup(&self, file_name: &str, meta: &fs::Metadata) -> Option<(usize, u64)> {
+        let inner = self.inner.lock();
+        let c = inner.get(file_name)?;
+        (c.size_bytes == meta.len() && c.modified == meta.modified().ok())
+            .then_some((c.frame_count, c.duration_us))
+    }
+
+    pub fn forget(&self, file_name: &str) {
+        self.inner.lock().remove(file_name);
+    }
+}
+
 /// Lists all persistent `.trc`, `.asc`, `.log`, `.csv`, and `.blf` trace files in `traces_dir`
 /// (creating `traces_dir` if absent), sorted newest-first.
-pub fn list_trace_files(traces_dir: &Path) -> Result<TraceStorageInfoDto, HalError> {
-    fs::create_dir_all(traces_dir).map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
+///
+/// WP-8 / HIGH-10: metadata only (name, size, mtime, format from the extension + a BLF header
+/// sniff of the first bytes). File bodies are never read or parsed; symlinks and non-regular
+/// entries are skipped.
+pub fn list_trace_files(
+    traces_dir: &Path,
+    stats: Option<&TraceStatsCache>,
+) -> Result<TraceStorageInfoDto, HalError> {
+    crate::storage::create_private_dir_all(traces_dir)
+        .map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
     let canonical_dir = canonical_path_string(traces_dir);
+    let canonical_base = fs::canonicalize(traces_dir).unwrap_or_else(|_| traces_dir.to_path_buf());
 
     let dir_entries =
         fs::read_dir(traces_dir).map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
 
     let mut files = Vec::new();
-    for entry in dir_entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
+    for entry in dir_entries.flatten().take(crate::storage::MAX_LISTED_ENTRIES) {
+        // `DirEntry::file_type` does not follow symlinks.
+        match entry.file_type() {
+            Ok(ft) if ft.is_file() => {}
+            _ => continue,
         }
         let raw_name = entry.file_name().to_string_lossy().to_string();
-        if !is_supported_trace_file(&raw_name) {
+        if raw_name.starts_with('.') || !is_supported_trace_file(&raw_name) {
             continue;
         }
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
+        // Only list names that load / delete accept verbatim (no rewriting on the way back).
+        if validate_existing_trace_filename(&raw_name).is_err() {
+            continue;
+        }
+        let path = canonical_base.join(&raw_name);
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(m) if m.is_file() => m,
+            _ => continue,
         };
-        let raw_bytes = match fs::read(&path) {
-            Ok(b) => b,
-            Err(_) => continue,
+        let format = if trace_format_from_filename(&raw_name) == "blf" {
+            "blf"
+        } else {
+            // A BLF stream saved with a text extension is still reported as BLF.
+            let prefix = crate::storage::read_regular_file_prefix(&path, blf::BLF_FILE_HEADER_SIZE)
+                .unwrap_or_default();
+            effective_trace_format(&raw_name, &prefix)
         };
-        let parsed = parse_trace_entries_from_bytes(&raw_name, &raw_bytes).unwrap_or_default();
-        let duration_us = parsed.last().map_or(0, |e| e.rel_us);
         let updated_at = meta
             .modified()
             .map(system_time_to_iso8601_utc)
             .unwrap_or_else(|_| "1970-01-01T00:00:00.000Z".to_string());
+        let cached = stats.and_then(|c| c.lookup(&raw_name, &meta));
 
         files.push(TraceFileSummaryDto {
             file_name: raw_name.clone(),
-            file_path: canonical_path_string(&path),
-            format: effective_trace_format(&raw_name, &raw_bytes).to_string(),
+            file_path: path.to_string_lossy().to_string(),
+            format: format.to_string(),
             size_bytes: meta.len(),
-            frame_count: parsed.len(),
-            duration_us,
+            frame_count: cached.map_or(0, |c| c.0),
+            duration_us: cached.map_or(0, |c| c.1),
             updated_at,
+            stats_known: cached.is_some(),
         });
     }
 
@@ -239,35 +330,48 @@ pub fn list_trace_files(traces_dir: &Path) -> Result<TraceStorageInfoDto, HalErr
     })
 }
 
-/// Sanitizes `file_name`, validates binary `.blf` or text trace `raw_bytes`, writes verbatim to
-/// `traces_dir/<safe_name>`, and returns its [`TraceFileSummaryDto`].
+/// Sanitizes `file_name`, validates binary `.blf` or text trace `raw_bytes`, writes them
+/// (temp file + rename, symlinks refused) to `traces_dir/<safe_name>`, and returns its
+/// [`TraceFileSummaryDto`].
 pub fn save_trace_file_bytes(
     traces_dir: &Path,
     file_name: &str,
     raw_bytes: &[u8],
 ) -> Result<TraceFileSummaryDto, HalError> {
-    fs::create_dir_all(traces_dir).map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
-    let safe_name = sanitize_trace_filename(file_name);
+    save_trace_file_bytes_cached(traces_dir, file_name, raw_bytes, None)
+}
+
+pub(crate) fn save_trace_file_bytes_cached(
+    traces_dir: &Path,
+    file_name: &str,
+    raw_bytes: &[u8],
+    stats: Option<&TraceStatsCache>,
+) -> Result<TraceFileSummaryDto, HalError> {
+    let safe_name = sanitize_trace_filename(file_name)?;
     let entries = parse_trace_entries_from_bytes(&safe_name, raw_bytes)?;
     let duration_us = entries.last().map_or(0, |e| e.rel_us);
 
-    let target_path = traces_dir.join(&safe_name);
-    fs::write(&target_path, raw_bytes).map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
+    let target_path = crate::storage::resolve_in_dir(traces_dir, &safe_name)?;
+    crate::storage::write_regular_file_atomic(&target_path, raw_bytes)?;
 
-    let updated_at = fs::metadata(&target_path)
-        .ok()
+    let meta = fs::symlink_metadata(&target_path).ok();
+    if let (Some(cache), Some(meta)) = (stats, meta.as_ref()) {
+        cache.record(&safe_name, meta, entries.len(), duration_us);
+    }
+    let updated_at = meta
         .and_then(|m| m.modified().ok())
         .map(system_time_to_iso8601_utc)
         .unwrap_or_else(|| system_time_to_iso8601_utc(SystemTime::now()));
 
     Ok(TraceFileSummaryDto {
         file_name: safe_name.clone(),
-        file_path: canonical_path_string(&target_path),
+        file_path: target_path.to_string_lossy().to_string(),
         format: effective_trace_format(&safe_name, raw_bytes).to_string(),
         size_bytes: raw_bytes.len() as u64,
         frame_count: entries.len(),
         duration_us,
         updated_at,
+        stats_known: true,
     })
 }
 
@@ -280,20 +384,41 @@ pub fn save_trace_file(
     save_trace_file_bytes(traces_dir, file_name, content.as_bytes())
 }
 
-/// Loads and parses `traces_dir/<safe_name>` (binary `.blf` or text trace) into a [`LoadedTraceFileDto`].
-pub fn load_trace_file(traces_dir: &Path, file_name: &str) -> Result<LoadedTraceFileDto, HalError> {
-    let safe_name = sanitize_trace_filename(file_name);
-    let target_path = traces_dir.join(&safe_name);
-    if !target_path.is_file() {
+/// Resolves + reads `traces_dir/<safe_name>` (regular file only, size-capped).
+pub(crate) fn read_trace_file_bytes(
+    traces_dir: &Path,
+    file_name: &str,
+) -> Result<(String, std::path::PathBuf, Vec<u8>), HalError> {
+    let safe_name = validate_existing_trace_filename(file_name)?;
+    let target_path = crate::storage::resolve_in_dir(traces_dir, &safe_name)?;
+    if !crate::storage::is_regular_file(&target_path) {
         return Err(HalError::InvalidInput(format!(
             "Trace file '{safe_name}' does not exist in traces directory"
         )));
     }
+    let raw_bytes =
+        crate::storage::read_regular_file(&target_path, crate::storage::MAX_TRACE_FILE_BYTES)?;
+    Ok((safe_name, target_path, raw_bytes))
+}
 
-    let raw_bytes = fs::read(&target_path).map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
-    let meta = fs::metadata(&target_path).map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
+/// Loads and parses `traces_dir/<safe_name>` (binary `.blf` or text trace) into a [`LoadedTraceFileDto`].
+pub fn load_trace_file(traces_dir: &Path, file_name: &str) -> Result<LoadedTraceFileDto, HalError> {
+    load_trace_file_cached(traces_dir, file_name, None)
+}
+
+pub(crate) fn load_trace_file_cached(
+    traces_dir: &Path,
+    file_name: &str,
+    stats: Option<&TraceStatsCache>,
+) -> Result<LoadedTraceFileDto, HalError> {
+    let (safe_name, target_path, raw_bytes) = read_trace_file_bytes(traces_dir, file_name)?;
+    let meta =
+        fs::symlink_metadata(&target_path).map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
     let entries = parse_trace_entries_from_bytes(&safe_name, &raw_bytes)?;
     let duration_us = entries.last().map_or(0, |e| e.rel_us);
+    if let Some(cache) = stats {
+        cache.record(&safe_name, &meta, entries.len(), duration_us);
+    }
     let updated_at = meta
         .modified()
         .map(system_time_to_iso8601_utc)
@@ -301,28 +426,29 @@ pub fn load_trace_file(traces_dir: &Path, file_name: &str) -> Result<LoadedTrace
 
     let summary = TraceFileSummaryDto {
         file_name: safe_name.clone(),
-        file_path: canonical_path_string(&target_path),
+        file_path: target_path.to_string_lossy().to_string(),
         format: effective_trace_format(&safe_name, &raw_bytes).to_string(),
-        size_bytes: meta.len(),
+        size_bytes: raw_bytes.len() as u64,
         frame_count: entries.len(),
         duration_us,
         updated_at,
+        stats_known: true,
     };
     let frames = entries_to_chronological_dtos(&entries);
 
     Ok(LoadedTraceFileDto { summary, frames })
 }
 
-/// Deletes `traces_dir/<safe_name>`.
+/// Deletes `traces_dir/<safe_name>` (regular files only; symlinks are refused).
 pub fn delete_trace_file(traces_dir: &Path, file_name: &str) -> Result<(), HalError> {
-    let safe_name = sanitize_trace_filename(file_name);
-    let target_path = traces_dir.join(&safe_name);
-    if !target_path.is_file() {
+    let safe_name = validate_existing_trace_filename(file_name)?;
+    let target_path = crate::storage::resolve_in_dir(traces_dir, &safe_name)?;
+    if !crate::storage::is_regular_file(&target_path) {
         return Err(HalError::InvalidInput(format!(
             "Trace file '{safe_name}' does not exist in traces directory"
         )));
     }
-    fs::remove_file(&target_path).map_err(|e| HalError::Adapter(AdapterError::Io(e)))
+    crate::storage::remove_regular_file(&target_path)
 }
 
 /// Statelessly parses binary `.blf` or text (`.trc`, `.asc`, `.log`, `.csv`) bytes without writing to disk.
@@ -330,7 +456,7 @@ pub fn parse_trace_bytes(
     file_name: &str,
     raw_bytes: &[u8],
 ) -> Result<LoadedTraceFileDto, HalError> {
-    let safe_name = sanitize_trace_filename(file_name);
+    let safe_name = trace_display_name(file_name);
     let entries = parse_trace_entries_from_bytes(&safe_name, raw_bytes)?;
     let duration_us = entries.last().map_or(0, |e| e.rel_us);
 
@@ -342,6 +468,7 @@ pub fn parse_trace_bytes(
         frame_count: entries.len(),
         duration_us,
         updated_at: system_time_to_iso8601_utc(SystemTime::now()),
+        stats_known: true,
     };
     let frames = entries_to_chronological_dtos(&entries);
 
@@ -497,7 +624,8 @@ pub fn parse_trace_text(
 
     let mut compiled = Vec::with_capacity(raw_entries.len());
     for (ts, mut frame) in raw_entries {
-        let delta = (ts - origin_us).max(0);
+        // Finite-but-huge text timestamps saturate `f64 as i128` to i128::MIN/MAX (WP-6 fuzz).
+        let delta = ts.saturating_sub(origin_us).max(0);
         let rel_us = u64::try_from(delta).unwrap_or(u64::MAX);
         frame.timestamp_us = SYNTHETIC_TRACE_ORIGIN_US.saturating_add(rel_us);
         compiled.push(CompiledReplayEntry { rel_us, frame });
@@ -953,8 +1081,11 @@ fn parse_vector_asc_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
 }
 
 fn extract_iface_bus_id(iface: &str) -> BusId {
+    // Byte-wise scan: the last byte of a multi-byte UTF-8 char is a non-ASCII-digit continuation
+    // byte, so `idx + 1` is always a char boundary (char-wise `rfind` + 1 was not; WP-6 fuzz).
     let digits_start = iface
-        .rfind(|c: char| !c.is_ascii_digit())
+        .bytes()
+        .rposition(|b| !b.is_ascii_digit())
         .map_or(0, |idx| idx + 1);
     let suffix = &iface[digits_start..];
     if suffix.is_empty() {
@@ -1032,7 +1163,9 @@ fn parse_candump_log_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
             let (flags_nibble, hex_payload) = if rhs.is_empty() {
                 (0u8, "")
             } else if rhs.len() % 2 == 1 {
-                let Ok(nib) = u8::from_str_radix(&rhs[..1], 16) else {
+                // `get(..1)` is `None` when `rhs` starts with a multi-byte char (WP-6 fuzz);
+                // on success the first byte is ASCII, so `&rhs[1..]` below is a char boundary.
+                let Some(nib) = rhs.get(..1).and_then(|s| u8::from_str_radix(s, 16).ok()) else {
                     continue;
                 };
                 (nib, &rhs[1..])
@@ -2246,30 +2379,45 @@ mod tests {
 
     #[test]
     fn sanitize_trace_filename_blocks_path_traversal_and_preserves_extensions() {
-        assert_eq!(sanitize_trace_filename("../evil.trc"), "evil.trc");
-        assert_eq!(sanitize_trace_filename("..\\..\\etc\\passwd"), "passwd.trc");
-        assert_eq!(
-            sanitize_trace_filename("../../logs/dyno run 01.ASC"),
-            "dyno_run_01.asc"
-        );
-        assert_eq!(
-            sanitize_trace_filename("vcan_capture.LOG"),
-            "vcan_capture.log"
-        );
-        assert_eq!(
-            sanitize_trace_filename("bms_export.CSV"),
-            "bms_export.csv"
-        );
-        assert_eq!(
-            sanitize_trace_filename("../captures/Vector_CANFD_01.BLF"),
-            "Vector_CANFD_01.blf"
-        );
-        assert_eq!(sanitize_trace_filename(".."), "untitled_trace.trc");
-        assert_eq!(sanitize_trace_filename("   "), "untitled_trace.trc");
-        assert_eq!(
-            sanitize_trace_filename("bad..double..dots.unknown"),
-            "bad_double_dots_unknown.trc"
-        );
+        let ok = |raw: &str| sanitize_trace_filename(raw).expect(raw);
+        assert_eq!(ok("evil.trc"), "evil.trc");
+        assert_eq!(ok("dyno run 01.ASC"), "dyno_run_01.asc");
+        assert_eq!(ok("vcan_capture.LOG"), "vcan_capture.log");
+        assert_eq!(ok("bms_export.CSV"), "bms_export.csv");
+        assert_eq!(ok("Vector_CANFD_01.BLF"), "Vector_CANFD_01.blf");
+        assert_eq!(ok("run.2024.unknown"), "run_2024_unknown.trc");
+        assert_eq!(ok("capture"), "capture.trc");
+
+        // WP-8: path-like, empty, dotted and reserved names are errors, never rewritten.
+        for bad in [
+            "../evil.trc",
+            "..\\..\\etc\\passwd",
+            "../../logs/dyno run 01.ASC",
+            "/etc/passwd",
+            "C:evil.trc",
+            "..",
+            ".",
+            "",
+            "   ",
+            ".hidden.trc",
+            "bad..double..dots.unknown",
+            "x\0y.trc",
+            "line\nbreak.trc",
+            "!!!.trc",
+            "CON.trc",
+            "nul.asc",
+        ] {
+            assert!(
+                sanitize_trace_filename(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+
+        // Strict variant used for load / delete: no normalization at all.
+        assert_eq!(validate_existing_trace_filename("evil.trc").unwrap(), "evil.trc");
+        assert!(validate_existing_trace_filename("dyno run.asc").is_err());
+        assert!(validate_existing_trace_filename("upper.TRC").is_err());
+        assert!(validate_existing_trace_filename("noext").is_err());
     }
 
     #[test]
@@ -2416,8 +2564,11 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
 2 25.000 DT 1 0101 Rx 8 20 4E 00 00 00 00 00 00
 ";
 
-        // Attempt path traversal `../evil.trc` -> must land safely inside `traces_dir/evil.trc`!
-        let saved = save_trace_file(&traces_dir, "../evil.trc", trc_payload).expect("save evil.trc");
+        // WP-8: path traversal is an error, nothing is written anywhere.
+        assert!(save_trace_file(&traces_dir, "../evil.trc", trc_payload).is_err());
+        assert!(!tmp_root.join("evil.trc").exists());
+
+        let saved = save_trace_file(&traces_dir, "evil.trc", trc_payload).expect("save evil.trc");
         assert_eq!(saved.file_name, "evil.trc");
         assert_eq!(saved.format, "trc");
         assert_eq!(saved.frame_count, 2);
@@ -2425,12 +2576,13 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
         assert!(!tmp_root.join("evil.trc").exists());
         assert!(traces_dir.join("evil.trc").is_file());
 
-        let listed = list_trace_files(&traces_dir).expect("list traces");
+        let listed = list_trace_files(&traces_dir, None).expect("list traces");
         assert_eq!(listed.files.len(), 1);
         assert_eq!(listed.files[0].file_name, "evil.trc");
         assert!(!listed.traces_dir.is_empty());
 
-        let loaded = load_trace_file(&traces_dir, "../evil.trc").expect("load evil.trc");
+        assert!(load_trace_file(&traces_dir, "../evil.trc").is_err());
+        let loaded = load_trace_file(&traces_dir, "evil.trc").expect("load evil.trc");
         assert_eq!(loaded.summary.frame_count, 2);
         assert_eq!(loaded.frames.len(), 2);
         assert_eq!(
@@ -2439,7 +2591,7 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
         );
 
         delete_trace_file(&traces_dir, "evil.trc").expect("delete evil.trc");
-        assert!(list_trace_files(&traces_dir)
+        assert!(list_trace_files(&traces_dir, None)
             .expect("list empty")
             .files
             .is_empty());

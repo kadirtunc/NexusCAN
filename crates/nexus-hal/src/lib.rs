@@ -12,6 +12,7 @@ pub mod error;
 pub mod pipeline;
 pub mod registry;
 pub mod seedkey;
+pub mod storage;
 pub mod traits;
 
 pub use drivers::mock_drv::{MockCanChannel, MockCanDriver, MOCK0_DEVICE_ID, MOCK1_DEVICE_ID};
@@ -414,11 +415,22 @@ mod tests {
             received_snapshots.push(snap);
         }
 
-        // In ~220ms at 60Hz (16.67ms period), expect ~10..16 snapshots (strictly bounded, NOT per-frame!)
+        // In ~220ms at 60Hz (16.67ms period) expect ~13 snapshots. The invariants are the upper
+        // bound (NOT per-frame: ~11,000 frames arrive in the window) and the pacing (never faster
+        // than 60 Hz). The lower bound only proves periodic emission: under CPU starvation (parallel
+        // test binaries, 2-core CI runners) the OS may legitimately schedule the ticker less often.
         assert!(
-            (8..=18).contains(&received_snapshots.len()),
+            (2..=18).contains(&received_snapshots.len()),
             "Expected ~13 snapshots at 60Hz over 220ms, got {}",
             received_snapshots.len()
+        );
+        let first_ts = received_snapshots.first().expect("snapshots").timestamp_us;
+        let last_ts = received_snapshots.last().expect("snapshots").timestamp_us;
+        let intervals = (received_snapshots.len() - 1) as u64;
+        let mean_interval_us = last_ts.saturating_sub(first_ts) / intervals;
+        assert!(
+            mean_interval_us >= 14_000,
+            "60 Hz pacing violated: mean snapshot interval {mean_interval_us} us (< 14 ms)"
         );
 
         let last = received_snapshots.last().expect("at least one snapshot");
@@ -895,12 +907,21 @@ mod tests {
         assert_eq!(disconnected, 2);
 
         // 3. Path traversal sanitization & project CRUD
-        assert_eq!(sanitize_project_stem("../../../etc/passwd"), "etcpasswd");
-        assert_eq!(sanitize_project_stem("..."), "untitled_project");
+        // WP-8: traversal / empty / dotted stems are errors (no silent rewriting).
+        assert!(sanitize_project_stem("../../../etc/passwd").is_err());
+        assert!(sanitize_project_stem("...").is_err());
+        assert!(sanitize_project_stem("").is_err());
+        assert!(sanitize_project_stem(".hidden").is_err());
+        assert!(sanitize_project_stem("aux").is_err());
         assert_eq!(
-            sanitize_project_stem("BMS Hil Bench.nexusproj.json"),
+            sanitize_project_stem("BMS Hil Bench.nexusproj.json").unwrap(),
             "BMS_Hil_Bench"
         );
+        assert!(engine
+            .cmd_save_project("../escape".to_string(), "{}".to_string())
+            .is_err());
+        assert!(engine.cmd_load_project("../escape".to_string()).is_err());
+        assert!(engine.cmd_delete_project("..".to_string()).is_err());
 
         let p_old = engine
             .cmd_save_project(
@@ -912,11 +933,13 @@ mod tests {
 
         let p_new = engine
             .cmd_save_project(
-                "../beta_bench".to_string(),
+                "beta bench".to_string(),
                 r#"{"name":"Beta Bench","updatedAt":"2026-11-06T12:00:00Z"}"#.to_string(),
             )
-            .expect("save sanitized beta_bench");
+            .expect("save normalized beta_bench");
         assert_eq!(p_new.file_stem, "beta_bench");
+        // Load / delete are strict: the non-canonical spelling is rejected.
+        assert!(engine.cmd_load_project("beta bench".to_string()).is_err());
 
         let listed = engine.cmd_list_projects().expect("list projects");
         assert_eq!(listed.len(), 2);

@@ -236,13 +236,17 @@ pub(crate) struct GateRefs {
 
 impl GateRefs {
     /// Order matters for error reporting: Listen-Only > Panic latch > Disarmed.
+    ///
+    /// The loads are `SeqCst` on purpose: the bus-io gate is one half of a Dekker-style
+    /// handshake with Panic Stop / disarm (`tx_in_flight` RMW -> these loads, versus
+    /// latch/epoch/arm stores -> `tx_in_flight` load). See `PipelineEngine::cmd_panic_stop_tx`.
     #[inline]
     pub(crate) fn verdict(&self) -> Result<(), DiagTxReject> {
         if self.listen_only {
             Err(DiagTxReject::ListenOnly)
-        } else if self.panic_latched.load(Ordering::Acquire) {
+        } else if self.panic_latched.load(Ordering::SeqCst) {
             Err(DiagTxReject::PanicLatched)
-        } else if !self.tx_armed.load(Ordering::Acquire) {
+        } else if !self.tx_armed.load(Ordering::SeqCst) {
             Err(DiagTxReject::Disarmed)
         } else {
             Ok(())
@@ -252,7 +256,7 @@ impl GateRefs {
     /// Current TX epoch, captured when a request is enqueued.
     #[inline]
     pub(crate) fn epoch(&self) -> u64 {
-        self.tx_epoch.load(Ordering::Acquire)
+        self.tx_epoch.load(Ordering::SeqCst)
     }
 
     /// Authoritative dispatch-time verdict: [`Self::verdict`] plus "queued before the last

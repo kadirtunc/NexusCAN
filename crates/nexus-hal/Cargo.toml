@@ -8,6 +8,19 @@ license.workspace = true
 name = "nexus_bridge"
 path = "src/bin/nexus_bridge.rs"
 
+[[test]]
+name = "diag_tap_alloc"
+path = "tests/diag_tap_alloc.rs"
+# WP-8 / LOW-01: needs `pipeline::BUS_IO_THREAD_START_HOOK`, which only exists with the
+# `test-hooks` feature (never enabled in release builds).
+# Run with: cargo test -p nexus-hal --features test-hooks --test diag_tap_alloc
+required-features = ["test-hooks"]
+
+[features]
+default = []
+# Test-only instrumentation hooks (bus-io thread start hook). Never enable for shipping builds.
+test-hooks = []
+
 [dependencies]
 nexus-core = { workspace = true }
 nexus-netdb = { workspace = true }
