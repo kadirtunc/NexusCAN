@@ -19,7 +19,6 @@ nexus-netdb = { path = "crates/nexus-netdb" }
 nexus-hal = { path = "crates/nexus-hal" }
 nexus-cloud = { path = "crates/nexus-cloud" }
 nexus-protocols = { path = "crates/nexus-protocols" }
-nexus-seedkey-native = { path = "crates/nexus-seedkey-native" }
 
 # Serialization & Core Utilities
 serde = { version = "1.0", features = ["derive"] }
@@ -38,6 +37,8 @@ crossbeam-channel = "0.5"
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
 axum = { version = "0.8", features = ["ws", "json"] }
 tower-http = { version = "0.6", features = ["cors"] }
+# OS CSPRNG for the dev bridge auth token (WP-1)
+getrandom = "0.3"
 
 # Linux Native SocketCAN (used behind target_os = "linux" in nexus-hal)
 socketcan = "3.5"
@@ -51,7 +52,7 @@ winnow = "0.7"
 encoding_rs = "0.8"
 quick-xml = "0.37"
 
-# UDS SecurityAccess seed/key providers (nexus-protocols / nexus-seedkey-native)
+# UDS SecurityAccess seed/key providers (nexus-protocols; native providers are not part of v0.1)
 rhai = { version = "1", default-features = false, features = ["std", "sync", "no_module", "no_custom_syntax"] }
 libloading = "0.8"
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }

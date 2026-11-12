@@ -25,6 +25,7 @@ crossbeam-channel = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
+getrandom = { workspace = true }
 serialport = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -1,15 +1,29 @@
-//! Standalone local HTTP + 60Hz WebSocket Telemetry Bridge (`0.0.0.0:14210`).
+//! Standalone local HTTP + 60Hz WebSocket Telemetry Bridge (`127.0.0.1:14210`).
 //!
 //! Enables zero-WebKit browser / Vite development (`http://localhost:5173`) against the exact
 //! real Rust `PipelineEngine`, `StateTable`, `SocketCAN`, and `mock0` drivers.
+//!
+//! # Security (WP-1 / CRIT-01)
+//! The bridge can transmit on real CAN buses, so it is locked down even though it is a
+//! development tool:
+//! * Binds `127.0.0.1:14210` by default (`NEXUS_BRIDGE_ADDR` overrides; a non-loopback bind
+//!   prints a warning).
+//! * Random per-start bearer token (`NEXUS_BRIDGE_TOKEN` env, >= 32 chars, overrides), written
+//!   to a user-private token file (path printed, token never printed). See [`token_file_path`].
+//! * Every `/api/*` request needs `Authorization: Bearer <token>` (401 otherwise).
+//! * `Host` must be loopback or the bind host (403, DNS rebinding). A present `Origin` must be
+//!   in the allowlist (403). CORS is allowlist-only.
+//! * `/ws/telemetry`: Host/Origin checked at upgrade; the first client message must be
+//!   `{"type":"auth","token":"<token>"}` within 3 s, else the socket is closed with code 4401.
 
 use axum::{
     body::Bytes,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
+        FromRef, Path, Request, State,
     },
-    http::StatusCode,
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -25,11 +39,316 @@ use nexus_protocols::uds::dto::{
     DiagError, DiagErrorCode, DiagOrigin, DiagSessionConfigDto, EcuDiscoveryRequestDto,
     UdsRequestOptionsDto,
 };
+use nexus_protocols::uds::security::{KeyProviderSpecDto, SeedKeyError};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::{Path as FsPath, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::broadcast::error::RecvError;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+
+// ─── WP-1 security configuration ────────────────────────────────────────────
+
+/// Default bind address (loopback only).
+const DEFAULT_BIND_ADDR: &str = "127.0.0.1:14210";
+/// Minimum accepted length of `NEXUS_BRIDGE_TOKEN`.
+const MIN_TOKEN_LEN: usize = 32;
+/// Origins always allowed (Vite dev server).
+const DEFAULT_ALLOWED_ORIGINS: [&str; 2] = ["http://localhost:5173", "http://127.0.0.1:5173"];
+/// WebSocket: deadline for the first `{"type":"auth"}` message.
+const WS_AUTH_TIMEOUT: Duration = Duration::from_secs(3);
+/// WebSocket close code for missing / invalid auth.
+const WS_CLOSE_UNAUTHORIZED: u16 = 4401;
+/// Client -> bridge WebSocket messages are tiny (auth, ping): cap them.
+const WS_MAX_CLIENT_MESSAGE: usize = 64 * 1024;
+
+/// Immutable per-process security settings shared by every request.
+#[derive(Debug)]
+struct BridgeSecurity {
+    token: String,
+    allowed_origins: Vec<String>,
+    /// Extra accepted `Host` name (the configured non-loopback, non-wildcard bind host).
+    bind_host: Option<String>,
+}
+
+impl BridgeSecurity {
+    fn new(token: String, extra_origins: &str, bind_addr: SocketAddr) -> Self {
+        let mut allowed_origins: Vec<String> =
+            DEFAULT_ALLOWED_ORIGINS.iter().map(|s| (*s).to_string()).collect();
+        for o in extra_origins.split(',').map(str::trim).filter(|o| !o.is_empty()) {
+            let o = o.trim_end_matches('/').to_string();
+            if HeaderValue::from_str(&o).is_ok() && o != "null" && !allowed_origins.contains(&o) {
+                allowed_origins.push(o);
+            }
+        }
+        let ip = bind_addr.ip();
+        let bind_host = (!ip.is_loopback() && !ip.is_unspecified()).then(|| match ip {
+            std::net::IpAddr::V4(v4) => v4.to_string(),
+            std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+        });
+        Self {
+            token,
+            allowed_origins,
+            bind_host,
+        }
+    }
+
+    fn host_allowed(&self, host: &str) -> bool {
+        let Some(name) = host_name_without_port(host) else {
+            return false;
+        };
+        matches!(name.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+            || self.bind_host.as_deref() == Some(name.as_str())
+    }
+
+    fn origin_allowed(&self, origin: &str) -> bool {
+        self.allowed_origins.iter().any(|o| o == origin)
+    }
+
+    fn token_matches(&self, candidate: &str) -> bool {
+        constant_time_eq(self.token.as_bytes(), candidate.as_bytes())
+    }
+
+    fn cors_layer(&self) -> CorsLayer {
+        let origins: Vec<HeaderValue> = self
+            .allowed_origins
+            .iter()
+            .filter_map(|o| HeaderValue::from_str(o).ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+    }
+}
+
+/// Lower-cased host name of a `Host` header value (`name[:port]` / `[v6][:port]`), or `None`
+/// when malformed.
+fn host_name_without_port(host: &str) -> Option<String> {
+    let h = host.trim().to_ascii_lowercase();
+    if h.is_empty() {
+        return None;
+    }
+    let port_ok = |p: &str| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit());
+    if h.starts_with('[') {
+        let end = h.find(']')?;
+        let (name, rest) = h.split_at(end + 1);
+        return match rest.strip_prefix(':') {
+            None if rest.is_empty() => Some(name.to_string()),
+            Some(p) if port_ok(p) => Some(name.to_string()),
+            _ => None,
+        };
+    }
+    match h.split_once(':') {
+        None => Some(h),
+        Some((name, p)) if !name.is_empty() && port_ok(p) => Some(name.to_string()),
+        _ => None,
+    }
+}
+
+/// Length-revealing but content-constant-time byte comparison (token length is not secret).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    std::hint::black_box(diff) == 0
+}
+
+/// Token from `NEXUS_BRIDGE_TOKEN` (validated) or 32 random bytes from the OS CSPRNG, hex.
+fn resolve_token(env_token: Option<String>) -> Result<String, String> {
+    if let Some(t) = env_token {
+        let t = t.trim().to_string();
+        if t.len() < MIN_TOKEN_LEN {
+            return Err(format!(
+                "NEXUS_BRIDGE_TOKEN must be at least {MIN_TOKEN_LEN} characters"
+            ));
+        }
+        if !t.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err("NEXUS_BRIDGE_TOKEN must be printable ASCII without spaces".to_string());
+        }
+        return Ok(t);
+    }
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| format!("OS random generator failed: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Token file location (WP-1 contract, mirrored by the Vite dev setup):
+/// * `NEXUS_BRIDGE_TOKEN_FILE` if set;
+/// * unix: `$XDG_RUNTIME_DIR/nexuscan/bridge.token`, else
+///   `<temp_dir>/nexuscan-<username>/bridge.token`;
+/// * windows: `%LOCALAPPDATA%\NexusCAN\bridge.token`.
+fn token_file_path() -> Result<PathBuf, String> {
+    if let Some(p) = std::env::var_os("NEXUS_BRIDGE_TOKEN_FILE").filter(|p| !p.is_empty()) {
+        return Ok(PathBuf::from(p));
+    }
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .filter(|p| !p.is_empty())
+            .ok_or("LOCALAPPDATA is not set; set NEXUS_BRIDGE_TOKEN_FILE")?;
+        Ok(PathBuf::from(base).join("NexusCAN").join("bridge.token"))
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR").filter(|p| !p.is_empty()) {
+            return Ok(PathBuf::from(xdg).join("nexuscan").join("bridge.token"));
+        }
+        let user: String = std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            .take(64)
+            .collect();
+        let user = if user.is_empty() || user.starts_with('.') {
+            "user".to_string()
+        } else {
+            user
+        };
+        Ok(std::env::temp_dir()
+            .join(format!("nexuscan-{user}"))
+            .join("bridge.token"))
+    }
+}
+
+/// Writes `token` to `path` atomically (temp file + rename). Unix: parent dir 0700 (must be a
+/// real directory owned by us, not a symlink), file 0600.
+fn write_token_file(path: &FsPath, token: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .ok_or_else(|| format!("token file '{}' has no parent directory", path.display()))?;
+    let tmp = dir.join(format!(
+        ".{}.tmp-{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("bridge.token"),
+        std::process::id()
+    ));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| format!("cannot create '{}': {e}", dir.display()))?;
+        let meta = std::fs::symlink_metadata(dir)
+            .map_err(|e| format!("cannot stat '{}': {e}", dir.display()))?;
+        if !meta.is_dir() {
+            return Err(format!("'{}' is not a directory (symlink?)", dir.display()));
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot chmod 0700 '{}' (not owned by us?): {e}", dir.display()))?;
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| format!("cannot create '{}': {e}", tmp.display()))?;
+        // The directory must belong to the same user that just created the temp file
+        // (protects the shared temp-dir fallback against a pre-created foreign directory).
+        let file_uid = f.metadata().map(|m| m.uid()).map_err(|e| e.to_string())?;
+        if meta.uid() != file_uid {
+            drop(f);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("'{}' is owned by another user", dir.display()));
+        }
+        f.write_all(token.as_bytes())
+            .and_then(|()| f.sync_all())
+            .map_err(|e| format!("cannot write '{}': {e}", tmp.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create '{}': {e}", dir.display()))?;
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| format!("cannot create '{}': {e}", tmp.display()))?;
+        f.write_all(token.as_bytes())
+            .and_then(|()| f.sync_all())
+            .map_err(|e| format!("cannot write '{}': {e}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot move token file into '{}': {e}", path.display())
+    })
+}
+
+/// Router state: the engine plus the security settings.
+#[derive(Clone)]
+struct BridgeState {
+    engine: Arc<PipelineEngine>,
+    security: Arc<BridgeSecurity>,
+}
+
+impl FromRef<BridgeState> for Arc<PipelineEngine> {
+    fn from_ref(state: &BridgeState) -> Self {
+        Arc::clone(&state.engine)
+    }
+}
+
+fn forbidden(reason: &str) -> Response {
+    (StatusCode::FORBIDDEN, Json(json!({ "error": reason }))).into_response()
+}
+
+fn unauthorized() -> Response {
+    (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response()
+}
+
+/// Outermost guard (every request incl. CORS preflight and WS upgrade): Host + Origin.
+async fn host_origin_guard(
+    State(state): State<BridgeState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().authority().map(|a| a.as_str().to_string()));
+    match host {
+        Some(h) if state.security.host_allowed(&h) => {}
+        _ => return forbidden("forbidden host"),
+    }
+    if let Some(origin) = req.headers().get(header::ORIGIN) {
+        let ok = origin
+            .to_str()
+            .is_ok_and(|o| state.security.origin_allowed(o));
+        if !ok {
+            return forbidden("forbidden origin");
+        }
+    }
+    next.run(req).await
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?.trim();
+    let (scheme, token) = value.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
+}
+
+/// Inner guard (inside CORS, so allowed origins can read the 401): bearer token on `/api/*`.
+async fn api_token_guard(State(state): State<BridgeState>, req: Request, next: Next) -> Response {
+    let needs_token = req.method() != Method::OPTIONS && req.uri().path().starts_with("/api/");
+    if needs_token {
+        let ok = bearer_token(req.headers()).is_some_and(|t| state.security.token_matches(t));
+        if !ok {
+            return unauthorized();
+        }
+    }
+    next.run(req).await
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -246,6 +565,15 @@ struct DiagDiscoverEcusArgs {
     request: EcuDiscoveryRequestDto,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SeedKeyComputeAdhocArgs {
+    provider: KeyProviderSpecDto,
+    level: u8,
+    #[serde(alias = "seed_hex")]
+    seed_hex: String,
+}
+
 fn diag_bad_args(cmd: &str, e: serde_json::Error) -> Response {
     bad_request(
         DiagError::new(
@@ -339,26 +667,47 @@ async fn handle_diag_invoke(cmd: &str, payload: Value, engine: &Arc<PipelineEngi
     Some(resp)
 }
 
-fn build_router(engine: Arc<PipelineEngine>) -> Router {
+fn build_router(engine: Arc<PipelineEngine>, security: Arc<BridgeSecurity>) -> Router {
+    let state = BridgeState {
+        engine,
+        security: Arc::clone(&security),
+    };
+    // Layer order (outermost last): host/origin guard -> CORS -> token guard -> routes.
     Router::new()
         .route("/api/health", get(handle_health))
         .route("/ws/telemetry", get(handle_ws_upgrade))
         .route("/api/invoke/{cmd}", post(handle_invoke))
-        .layer(CorsLayer::permissive())
-        .with_state(engine)
+        .layer(middleware::from_fn_with_state(state.clone(), api_token_guard))
+        .layer(security.cors_layer())
+        .layer(middleware::from_fn_with_state(state.clone(), host_origin_guard))
+        .with_state(state)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr: SocketAddr = std::env::var("NEXUS_BRIDGE_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:14210".to_string())
+        .unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string())
         .parse()?;
+    if !bind_addr.ip().is_loopback() {
+        eprintln!(
+            "WARNING: NexusCAN Bridge is binding to non-loopback address {bind_addr}. \
+             Anyone who can reach this address and obtains the token can control your CAN buses."
+        );
+    }
+
+    let token = resolve_token(std::env::var("NEXUS_BRIDGE_TOKEN").ok())?;
+    let token_path = token_file_path()?;
+    write_token_file(&token_path, &token)?;
+    let extra_origins = std::env::var("NEXUS_BRIDGE_ALLOWED_ORIGINS").unwrap_or_default();
+    let security = Arc::new(BridgeSecurity::new(token, &extra_origins, bind_addr));
 
     let engine = Arc::new(PipelineEngine::new());
-    let app = build_router(Arc::clone(&engine));
+    let app = build_router(Arc::clone(&engine), Arc::clone(&security));
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     println!("NexusCAN Bridge listening on http://{bind_addr} (WS: ws://{bind_addr}/ws/telemetry)");
+    println!("Bridge auth token written to {}", token_path.display());
+    println!("Allowed origins: {}", security.allowed_origins.join(", "));
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
@@ -376,11 +725,41 @@ async fn handle_health() -> Json<Value> {
     }))
 }
 
-async fn handle_ws_upgrade(
-    ws: WebSocketUpgrade,
-    State(engine): State<Arc<PipelineEngine>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| stream_telemetry_ws(socket, engine))
+async fn handle_ws_upgrade(ws: WebSocketUpgrade, State(state): State<BridgeState>) -> Response {
+    ws.max_message_size(WS_MAX_CLIENT_MESSAGE)
+        .max_frame_size(WS_MAX_CLIENT_MESSAGE)
+        .on_upgrade(move |socket| ws_authenticate_then_stream(socket, state))
+}
+
+/// `true` if `msg` is `{"type":"auth","token":"<token>"}` with the right token.
+fn ws_auth_message_ok(msg: &Message, security: &BridgeSecurity) -> bool {
+    let Message::Text(text) = msg else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(text.as_str()) else {
+        return false;
+    };
+    v.get("type").and_then(Value::as_str) == Some("auth")
+        && v.get("token")
+            .and_then(Value::as_str)
+            .is_some_and(|t| security.token_matches(t))
+}
+
+async fn ws_authenticate_then_stream(mut socket: WebSocket, state: BridgeState) {
+    let authed = match tokio::time::timeout(WS_AUTH_TIMEOUT, socket.recv()).await {
+        Ok(Some(Ok(msg))) => ws_auth_message_ok(&msg, &state.security),
+        _ => false,
+    };
+    if !authed {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: WS_CLOSE_UNAUTHORIZED,
+                reason: "unauthorized".into(),
+            })))
+            .await;
+        return;
+    }
+    stream_telemetry_ws(socket, state.engine).await;
 }
 
 async fn stream_telemetry_ws(mut socket: WebSocket, engine: Arc<PipelineEngine>) {
@@ -510,6 +889,43 @@ async fn handle_invoke(
             }
         }
         "cmd_panic_stop_tx" => ok_json(engine.cmd_panic_stop_tx()),
+        "cmd_clear_panic_latch" => {
+            engine.cmd_clear_panic_latch();
+            ok_json(Value::Null)
+        }
+        "cmd_reset_session" => {
+            let eng = Arc::clone(&engine);
+            match tokio::task::spawn_blocking(move || eng.cmd_reset_session()).await {
+                Ok(res) => ok_json(res),
+                Err(e) => bad_request(format!("reset session worker failed: {e}")),
+            }
+        }
+        "cmd_seedkey_capabilities" => ok_json(engine.cmd_seedkey_capabilities()),
+        "cmd_seedkey_compute_adhoc" => {
+            let args: SeedKeyComputeAdhocArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => {
+                    return bad_request(
+                        SeedKeyError::InvalidInput(format!(
+                            "invalid arguments for cmd_seedkey_compute_adhoc: {e}"
+                        ))
+                        .to_ipc_string(),
+                    )
+                }
+            };
+            let eng = Arc::clone(&engine);
+            match tokio::task::spawn_blocking(move || {
+                eng.cmd_seedkey_compute_adhoc(&args.provider, args.level, &args.seed_hex)
+            })
+            .await
+            {
+                Ok(Ok(res)) => ok_json(res),
+                Ok(Err(e)) => bad_request(e.to_ipc_string()),
+                Err(e) => bad_request(
+                    SeedKeyError::Script(format!("seed/key worker failed: {e}")).to_ipc_string(),
+                ),
+            }
+        }
         "cmd_load_preset_databases" => match engine.cmd_load_preset_databases() {
             Ok(schema) => ok_json(schema),
             Err(e) => bad_request(e.to_string()),
@@ -780,6 +1196,360 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use nexus_hal::DriverRegistry;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef-test";
+
+    fn test_security() -> Arc<BridgeSecurity> {
+        Arc::new(BridgeSecurity::new(
+            TEST_TOKEN.to_string(),
+            "",
+            "127.0.0.1:14210".parse().expect("addr"),
+        ))
+    }
+
+    // ─── WP-1 pure security helpers ─────────────────────────────────────────
+
+    #[test]
+    fn host_header_parsing_and_rebinding_rules() {
+        let sec = test_security();
+        for ok in ["localhost", "localhost:14210", "LOCALHOST:5173", "127.0.0.1", "127.0.0.1:1", "[::1]", "[::1]:14210"] {
+            assert!(sec.host_allowed(ok), "{ok} must be allowed");
+        }
+        for bad in [
+            "", "evil.example", "evil.example:14210", "localhost.evil.example", "127.0.0.1.nip.io",
+            "localhost:abc", "localhost:", ":14210", "[::1]x", "::1", "0.0.0.0:14210", "192.168.1.5",
+            "localhost:14210:1",
+        ] {
+            assert!(!sec.host_allowed(bad), "{bad} must be rejected");
+        }
+        let lan = BridgeSecurity::new(TEST_TOKEN.into(), "", "192.168.1.5:14210".parse().unwrap());
+        assert!(lan.host_allowed("192.168.1.5:14210"));
+        assert!(!lan.host_allowed("192.168.1.6:14210"));
+        let any = BridgeSecurity::new(TEST_TOKEN.into(), "", "0.0.0.0:14210".parse().unwrap());
+        assert!(!any.host_allowed("0.0.0.0:14210"), "wildcard bind is never a valid Host");
+        assert!(any.host_allowed("localhost:14210"));
+    }
+
+    #[test]
+    fn origin_allowlist_and_env_extension() {
+        let sec = BridgeSecurity::new(
+            TEST_TOKEN.into(),
+            " https://hmi.lab.local/ , null,,http://127.0.0.1:4173",
+            "127.0.0.1:14210".parse().unwrap(),
+        );
+        assert!(sec.origin_allowed("http://localhost:5173"));
+        assert!(sec.origin_allowed("http://127.0.0.1:5173"));
+        assert!(sec.origin_allowed("https://hmi.lab.local"));
+        assert!(sec.origin_allowed("http://127.0.0.1:4173"));
+        assert!(!sec.origin_allowed("null"));
+        assert!(!sec.origin_allowed("http://localhost:5174"));
+        assert!(!sec.origin_allowed("http://evil.example"));
+    }
+
+    #[test]
+    fn token_resolution_compare_and_bearer_parsing() {
+        assert!(resolve_token(Some("short".into())).is_err());
+        assert!(resolve_token(Some(format!("{}x y", "a".repeat(32)))).is_err());
+        assert_eq!(resolve_token(Some(TEST_TOKEN.into())).unwrap(), TEST_TOKEN);
+        let a = resolve_token(None).unwrap();
+        let b = resolve_token(None).unwrap();
+        assert_eq!(a.len(), 64);
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b, "random tokens must differ");
+
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+
+        let mut h = HeaderMap::new();
+        h.insert(header::AUTHORIZATION, HeaderValue::from_static("bearer   tok123 "));
+        assert_eq!(bearer_token(&h), Some("tok123"));
+        h.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic tok123"));
+        assert_eq!(bearer_token(&h), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn token_file_is_private_and_atomically_replaced() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("nexuscan-tokentest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("sub").join("bridge.token");
+        write_token_file(&path, "first-token").expect("write 1");
+        write_token_file(&path, "second-token").expect("write 2");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second-token");
+        let fmode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let dmode = std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(fmode, 0o600);
+        assert_eq!(dmode, 0o700);
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind");
+        // A symlinked directory is refused.
+        let link_dir = dir.join("link");
+        std::os::unix::fs::symlink(path.parent().unwrap(), &link_dir).unwrap();
+        assert!(write_token_file(&link_dir.join("bridge.token"), "x").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── WP-1 end-to-end over a real socket (raw HTTP / WebSocket) ──────────
+
+    async fn spawn_server() -> SocketAddr {
+        let engine = Arc::new(PipelineEngine::new());
+        let app = build_router(engine, test_security());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        addr
+    }
+
+    /// Sends one raw HTTP/1.1 request; returns (status, raw response text).
+    async fn raw_http(addr: SocketAddr, method: &str, path: &str, headers: &[(&str, String)], body: &str) -> (u16, String) {
+        let mut req = format!("{method} {path} HTTP/1.1\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
+        for (k, v) in headers {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        req.push_str("\r\n");
+        req.push_str(body);
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        stream.write_all(req.as_bytes()).await.expect("write");
+        let mut buf = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut buf))
+            .await
+            .expect("response timeout")
+            .expect("read");
+        let text = String::from_utf8_lossy(&buf).to_string();
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        (status, text)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_rejects_missing_token_foreign_origin_and_rebinding_host() {
+        let addr = spawn_server().await;
+        let host = ("Host", format!("127.0.0.1:{}", addr.port()));
+        let auth = ("Authorization", format!("Bearer {TEST_TOKEN}"));
+        let ct = ("Content-Type", "application/json".to_string());
+        let invoke = "/api/invoke/cmd_list_devices";
+
+        let (st, body) = raw_http(addr, "POST", invoke, &[host.clone(), ct.clone()], "{}").await;
+        assert_eq!(st, 401, "{body}");
+        assert!(body.contains(r#"{"error":"unauthorized"}"#), "{body}");
+
+        let wrong = ("Authorization", format!("Bearer {TEST_TOKEN}x"));
+        let (st, _) = raw_http(addr, "POST", invoke, &[host.clone(), wrong, ct.clone()], "{}").await;
+        assert_eq!(st, 401);
+
+        let (st, _) = raw_http(addr, "GET", "/api/health", std::slice::from_ref(&host), "").await;
+        assert_eq!(st, 401, "health is under /api/* and needs the token too");
+
+        let (st, body) = raw_http(addr, "POST", invoke, &[host.clone(), auth.clone(), ct.clone()], "{}").await;
+        assert_eq!(st, 200, "{body}");
+        assert!(body.contains("mock:mock0"));
+
+        // DNS rebinding: valid token, attacker-controlled Host.
+        let evil_host = ("Host", format!("evil.example:{}", addr.port()));
+        let (st, _) = raw_http(addr, "POST", invoke, &[evil_host, auth.clone(), ct.clone()], "{}").await;
+        assert_eq!(st, 403);
+
+        // Foreign Origin (browser "simple request" CSRF): valid token, still refused.
+        let evil_origin = ("Origin", "http://evil.example".to_string());
+        let (st, _) = raw_http(addr, "POST", invoke, &[host.clone(), evil_origin.clone(), auth.clone(), ct.clone()], "{}").await;
+        assert_eq!(st, 403);
+
+        // Allowed origin: 200 with an exact (non-wildcard) CORS header.
+        let good_origin = ("Origin", "http://localhost:5173".to_string());
+        let (st, body) = raw_http(addr, "POST", invoke, &[host.clone(), good_origin.clone(), auth.clone(), ct.clone()], "{}").await;
+        assert_eq!(st, 200);
+        let lower = body.to_ascii_lowercase();
+        assert!(lower.contains("access-control-allow-origin: http://localhost:5173"), "{body}");
+        // ...and a missing token from an allowed origin is a readable 401 (CORS headers present).
+        let (st, body) = raw_http(addr, "POST", invoke, &[host.clone(), good_origin.clone(), ct.clone()], "{}").await;
+        assert_eq!(st, 401);
+        assert!(body.to_ascii_lowercase().contains("access-control-allow-origin: http://localhost:5173"));
+
+        // CORS preflight needs no token; foreign origin preflight is refused.
+        let pf = [
+            ("Access-Control-Request-Method", "POST".to_string()),
+            ("Access-Control-Request-Headers", "authorization,content-type".to_string()),
+        ];
+        let (st, body) = raw_http(addr, "OPTIONS", invoke, &[host.clone(), good_origin, pf[0].clone(), pf[1].clone()], "").await;
+        assert!((200..300).contains(&st), "{body}");
+        let lower = body.to_ascii_lowercase();
+        assert!(lower.contains("access-control-allow-origin: http://localhost:5173"), "{body}");
+        assert!(lower.contains("authorization"), "{body}");
+        let (st, _) = raw_http(addr, "OPTIONS", invoke, &[host, evil_origin, pf[0].clone(), pf[1].clone()], "").await;
+        assert_eq!(st, 403);
+    }
+
+    async fn ws_connect(addr: SocketAddr, extra: &[(&str, String)]) -> (u16, TcpStream) {
+        let mut req = format!(
+            "GET /ws/telemetry HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n",
+            addr.port()
+        );
+        for (k, v) in extra {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        req.push_str("\r\n");
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        stream.write_all(req.as_bytes()).await.expect("write");
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut byte))
+                .await
+                .expect("handshake timeout")
+                .expect("read");
+            if n == 0 {
+                break;
+            }
+            head.push(byte[0]);
+        }
+        let text = String::from_utf8_lossy(&head);
+        let status = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        (status, stream)
+    }
+
+    /// Reads one server frame: (opcode, payload).
+    async fn ws_read_frame(stream: &mut TcpStream, wait: Duration) -> Option<(u8, Vec<u8>)> {
+        tokio::time::timeout(wait, async {
+            let mut h = [0u8; 2];
+            stream.read_exact(&mut h).await.ok()?;
+            let mut len = u64::from(h[1] & 0x7F);
+            if len == 126 {
+                let mut b = [0u8; 2];
+                stream.read_exact(&mut b).await.ok()?;
+                len = u64::from(u16::from_be_bytes(b));
+            } else if len == 127 {
+                let mut b = [0u8; 8];
+                stream.read_exact(&mut b).await.ok()?;
+                len = u64::from_be_bytes(b);
+            }
+            let mut payload = vec![0u8; usize::try_from(len).ok()?];
+            stream.read_exact(&mut payload).await.ok()?;
+            Some((h[0] & 0x0F, payload))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn ws_send_text(stream: &mut TcpStream, text: &str) {
+        let mask = [0x11u8, 0x22, 0x33, 0x44];
+        let payload = text.as_bytes();
+        assert!(payload.len() < 126);
+        let mut frame = vec![0x81, 0x80 | payload.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        stream.write_all(&frame).await.expect("ws write");
+    }
+
+    fn close_code(payload: &[u8]) -> u16 {
+        u16::from_be_bytes([payload[0], payload[1]])
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn websocket_requires_auth_message_and_checks_origin() {
+        let addr = spawn_server().await;
+
+        // Foreign Origin is refused at upgrade.
+        let (st, _) = ws_connect(addr, &[("Origin", "http://evil.example".to_string())]).await;
+        assert_eq!(st, 403);
+
+        // No auth message -> closed with 4401 after ~3 s; no telemetry before that.
+        let (st, mut s) = ws_connect(addr, &[]).await;
+        assert_eq!(st, 101);
+        let (op, payload) = ws_read_frame(&mut s, Duration::from_secs(5)).await.expect("close frame");
+        assert_eq!(op, 0x8, "first frame must be Close, not telemetry");
+        assert_eq!(close_code(&payload), WS_CLOSE_UNAUTHORIZED);
+
+        // Wrong token -> 4401 immediately.
+        let (_, mut s) = ws_connect(addr, &[("Origin", "http://localhost:5173".to_string())]).await;
+        ws_send_text(&mut s, r#"{"type":"auth","token":"nope"}"#).await;
+        let (op, payload) = ws_read_frame(&mut s, Duration::from_secs(2)).await.expect("close frame");
+        assert_eq!((op, close_code(&payload)), (0x8, WS_CLOSE_UNAUTHORIZED));
+
+        // Correct auth -> telemetry text frames.
+        let (_, mut s) = ws_connect(addr, &[("Origin", "http://localhost:5173".to_string())]).await;
+        ws_send_text(&mut s, &format!(r#"{{"type":"auth","token":"{TEST_TOKEN}"}}"#)).await;
+        let (op, payload) = ws_read_frame(&mut s, Duration::from_secs(3)).await.expect("snapshot");
+        assert_eq!(op, 0x1, "expected a text snapshot");
+        let v: Value = serde_json::from_slice(&payload).expect("snapshot json");
+        assert!(v.get("seq").is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_panic_latch_reset_session_and_seedkey_commands() {
+        let engine = Arc::new(PipelineEngine::new());
+        let (st, _) = call_invoke(
+            &engine,
+            "cmd_connect_bus",
+            r#"{"deviceId":"mock:mock0","config":{"busId":0,"bitrate":500000,"dataBitrate":2000000,"enableFd":true,"listenOnly":false,"mockFpsPreset":500}}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call_invoke(&engine, "cmd_arm_active_bus", r#"{"busId":0,"armed":true}"#).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call_invoke(&engine, "cmd_panic_stop_tx", "").await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, v) = call_invoke(&engine, "cmd_arm_active_bus", r#"{"busId":0,"armed":true}"#).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().starts_with("PANIC_LATCHED:"), "{v}");
+        let (st, v) = call_invoke(&engine, "cmd_clear_panic_latch", "").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(v.is_null());
+        let (st, v) = call_invoke(&engine, "cmd_arm_active_bus", r#"{"busId":0,"armed":true}"#).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+
+        let (st, v) = call_invoke(&engine, "cmd_reset_session", "").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(v["disconnectedBuses"], 1);
+        assert_eq!(v["disarmedBuses"], 1);
+        assert_eq!(v["stoppedPeriodicJobs"], 0);
+        assert!(!engine.is_panic_latched());
+
+        let (st, v) = call_invoke(&engine, "cmd_seedkey_capabilities", "{}").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(v["nativeProvidersAllowed"], false);
+        assert_eq!(v["scriptAvailable"], true);
+
+        let body = json!({
+            "provider": {
+                "kind": "script",
+                "source": "fn calculate_key(seed, level) { let k = blob(); for b in seed { k.push(b ^ 0xA5); } k }",
+                "timeoutMs": 1000
+            },
+            "level": 1,
+            "seedHex": "11223344"
+        });
+        let (st, v) = call_invoke(&engine, "cmd_seedkey_compute_adhoc", &body.to_string()).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["keyHex"], "B48796E1");
+        assert_eq!(v["providerKind"], "script");
+
+        let body = json!({
+            "provider": { "kind": "external_process", "program": "/bin/sh", "args": ["-c", "id"] },
+            "level": 1,
+            "seedHex": "11223344"
+        });
+        let (st, v) = call_invoke(&engine, "cmd_seedkey_compute_adhoc", &body.to_string()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().starts_with("[seedkey:unsupported] "), "{v}");
+
+        let (st, v) = call_invoke(&engine, "cmd_seedkey_compute_adhoc", r#"{"level":1}"#).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().starts_with("[seedkey:invalid_input] "), "{v}");
+    }
 
     async fn call_invoke(engine: &Arc<PipelineEngine>, cmd: &str, body_str: &str) -> (StatusCode, Value) {
         let resp = handle_invoke(
@@ -899,7 +1669,7 @@ mod tests {
             tmp_projects.clone(),
             tmp_traces.clone(),
         ));
-        let _router = build_router(Arc::clone(&engine));
+        let _router = build_router(Arc::clone(&engine), test_security());
 
         // 1. Health endpoint
         let Json(health) = handle_health().await;
