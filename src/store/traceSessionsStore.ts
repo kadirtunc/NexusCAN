@@ -1,5 +1,7 @@
+import { csvQuote } from '../utils/csvSafe';
 import { useSyncExternalStore } from 'react';
 import { databaseStore } from './databaseStore';
+import { registerTxSource } from './txSources';
 import { plotStore } from './plotStore';
 import {
   ChronoRingBuffer,
@@ -737,7 +739,7 @@ export const traceSessionsStore = {
         const bytesHex = Array.from({ length: byteCount }, (_, b) =>
           formatByteHex(f.rawBytes[b] ?? 0),
         ).join(' ');
-        const esc = (s: string): string => `"${s.replace(/"/g, '""')}"`;
+        const esc = csvQuote;
         lines.push(
           `${i + 1},${relSec.toFixed(6)},${f.busId + 1},${proto},${idStr},${dirStr},${f.dlc},${esc(sym)},${esc(bytesHex)},${esc(decoded)}`,
         );
@@ -1199,6 +1201,14 @@ export function useTraceSessionsStore(): TraceSessionsState {
     traceSessionsStore.getState,
   );
 }
+
+// Panic Stop: a trace replay that transmits to hardware must stop (the replay itself is stopped, not
+// just muted, so it cannot resume transmitting later).
+registerTxSource('trace-replay-hw-tx', () => {
+  const replay = telemetryStore.getHeaderSlice().replay;
+  if (replay.state === 'idle' || !replay.transmitToHardware) return;
+  apiControlTraceReplay({ action: 'stop' }).catch(() => undefined);
+});
 
 if (typeof window !== 'undefined') {
   window.setTimeout(() => {

@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { invokeCmd } from '../services/ipcClient';
+import { registerTxSource } from './txSources';
 import { SESSION_LOST_CODES, formatDiagError, toDiagUiError } from '../services/diagErrors';
 import { t } from '../i18n';
 import type {
@@ -260,6 +261,9 @@ function stopPollingInternal(): void {
 }
 
 // ─── Real OBD-II live PIDs (service 0x01 via `cmd_diag_send_uds`; strictly sequential) ─────
+
+/** Bumped by Panic Stop: late results of in-flight discovery / DTC scans are dropped. */
+let diagOpGen = 0;
 
 let pidGen = 0;
 let pidTimer: ReturnType<typeof setTimeout> | null = null;
@@ -963,11 +967,14 @@ export const diagnosticsStore = {
       setState({ discovering: false, discovery });
       return discovery;
     }
+    const opGen = diagOpGen;
     try {
       const discovery = await diagInvoke('cmd_diag_discover_ecus', { request: req });
+      if (opGen !== diagOpGen) return null;
       setState({ discovering: false, discovery });
       return discovery;
     } catch (err) {
+      if (opGen !== diagOpGen) return null;
       setState({ discovering: false, discoveryError: toDiagUiError(err) });
       return null;
     }
@@ -1009,12 +1016,14 @@ export const diagnosticsStore = {
       return;
     }
 
+    const opGen = diagOpGen;
     try {
       const result = await diagInvoke('cmd_diag_read_stored_dtcs', {
         config: currentDto(),
         statusMask: null,
         origin: 'dtc',
       });
+      if (opGen !== diagOpGen) return;
       setState({
         storedDtcs: result.filter((d) => d.isConfirmed),
         pendingDtcs: result.filter((d) => d.isPending),
@@ -1023,6 +1032,7 @@ export const diagnosticsStore = {
       touchResponse();
       refreshSessionInfoSoon();
     } catch (err) {
+      if (opGen !== diagOpGen) return;
       setState({ isScanning: false });
       handleCommandError(err);
     }
@@ -1313,3 +1323,29 @@ export function useDiagnosticsSelector<T>(selector: (state: DiagnosticsState) =>
     () => selector(currentState),
   );
 }
+
+/**
+ * Panic Stop (TX source registry): halts OBD-II PID polling, abandons in-flight discovery / DTC
+ * scans (their late results are dropped) and switches the TesterPresent keep-alive off. Synchronous;
+ * the backend call to disable TesterPresent is fire-and-forget (the backend panic also disarms).
+ */
+function stopDiagnosticsTx(): void {
+  haltPidPolling();
+  diagOpGen += 1;
+  const patch: Partial<DiagnosticsState> = {};
+  if (currentState.discovering) patch.discovering = false;
+  if (currentState.isScanning) patch.isScanning = false;
+  if (currentState.session.testerPresentActive) {
+    patch.session = { ...currentState.session, testerPresentActive: false };
+    if (!currentState.mockMode && currentState.session.connected) {
+      diagInvoke('cmd_diag_set_tester_present', {
+        config: currentDto(),
+        enabled: false,
+        intervalMs: null,
+      }).catch(() => undefined);
+    }
+  }
+  if (Object.keys(patch).length > 0) setState(patch);
+}
+
+registerTxSource('diagnostics', stopDiagnosticsTx);

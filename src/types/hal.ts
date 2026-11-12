@@ -38,6 +38,9 @@ export interface ChannelConfigDto {
 
 export type BusStateKind = 'active' | 'warning' | 'passive' | 'busOff' | 'disconnected';
 
+/** How Listen-Only is enforced on a bus (backend `listen_only_enforcement`). */
+export type ListenOnlyEnforcementKind = 'hardware' | 'softwareOnly' | 'virtual';
+
 export interface BusHealthDto {
   busId: number;
   deviceId: string;
@@ -48,6 +51,8 @@ export interface BusHealthDto {
   busState: BusStateKind;
   txErrorCount: number;
   rxErrorCount: number;
+  /** `null` when the backend did not report it (older build / not connected). */
+  listenOnlyEnforcement?: ListenOnlyEnforcementKind | null;
 }
 
 export interface SerialPortInfoDto {

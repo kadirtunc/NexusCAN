@@ -1,16 +1,15 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Loader2, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useI18n } from '../i18n';
-import { disarmAllBuses, setBusTxArmed } from '../store/busTxControl';
+import { clearPanicLatch, describeTxError, disarmAllBuses, setBusTxArmed } from '../store/busTxControl';
+import { EnforcementBadge } from './EnforcementBadge';
 import { databaseStore } from '../store/databaseStore';
 import { useTelemetryHeader } from '../store/telemetryStore';
 import type { BusHealthDto } from '../types/hal';
 
 type AggregateKind = 'noBus' | 'passive' | 'active' | 'locked';
 
-function errText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
+const errText = describeTxError;
 
 /**
  * Global TX mode indicator + control (TopBar right corner). Always visible. Arming requires an
@@ -38,6 +37,17 @@ export const TxModeControl: React.FC = () => {
         : armedCount > 0
           ? 'active'
           : 'passive';
+
+  const latched = header.txPanicLatched;
+
+  const onClearPanic = async (): Promise<void> => {
+    try {
+      await clearPanicLatch();
+      setErrors({});
+    } catch (err) {
+      setErrors((prev) => ({ ...prev, [connected[0]?.busId ?? 0]: errText(err) }));
+    }
+  };
 
   const close = useCallback((): void => {
     setOpen(false);
@@ -102,7 +112,9 @@ export const TxModeControl: React.FC = () => {
   };
 
   const label =
-    kind === 'noBus'
+    latched
+      ? t('sec.tx.panicLatched')
+      : kind === 'noBus'
       ? t('shell.tx.noBus')
       : kind === 'locked'
         ? t('shell.tx.locked')
@@ -173,9 +185,17 @@ export const TxModeControl: React.FC = () => {
             )}
           </div>
 
-          {header.txPanicLatched && (
-            <div className="mb-2 px-2 py-1.5 border border-red-500/60 bg-red-900/20 text-red-300 text-[11.5px]">
-              {t('shell.tx.lockedHint')}
+          {latched && (
+            <div className="mb-2 flex items-center gap-2 px-2 py-1.5 border border-red-500/60 bg-red-900/20 text-red-300 text-[11.5px]">
+              <span className="font-mono tabular-nums font-bold">{t('sec.tx.panicLatched')}</span>
+              <span className="flex-1">{t('sec.tx.clearLatchFirst')}</span>
+              <button
+                type="button"
+                onClick={() => void onClearPanic()}
+                className="h-[24px] px-2 border border-red-400 text-red-200 text-[11px] font-bold cursor-pointer rounded-[3px]"
+              >
+                {t('sec.tx.clearPanic')}
+              </button>
             </div>
           )}
 
@@ -214,6 +234,7 @@ export const TxModeControl: React.FC = () => {
                       >
                         {badge.text}
                       </span>
+                      <EnforcementBadge kind={b.listenOnlyEnforcement ?? null} />
                       <span className="font-mono tabular-nums text-[10.5px] text-[var(--text-secondary)] min-w-[56px] text-right">
                         {b.busState}
                       </span>
@@ -235,7 +256,9 @@ export const TxModeControl: React.FC = () => {
                           <button
                             type="button"
                             onClick={() => setConfirmBus(b.busId)}
-                            className="h-[24px] px-2 border border-amber-500 text-amber-300 text-[11px] font-bold cursor-pointer rounded-[3px]"
+                            disabled={latched}
+                            title={latched ? t('sec.tx.clearLatchFirst') : undefined}
+                            className="h-[24px] px-2 border border-amber-500 text-amber-300 text-[11px] font-bold cursor-pointer rounded-[3px] disabled:cursor-not-allowed disabled:opacity-40"
                           >
                             {t('shell.tx.arm')}
                           </button>
@@ -251,6 +274,7 @@ export const TxModeControl: React.FC = () => {
                           <button
                             type="button"
                             autoFocus
+                            disabled={latched}
                             onClick={() => void applyMode(b.busId, true)}
                             className="h-[24px] px-2 bg-amber-500 text-slate-900 text-[11px] font-bold cursor-pointer rounded-[3px]"
                           >

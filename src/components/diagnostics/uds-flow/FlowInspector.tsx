@@ -6,6 +6,7 @@ import { getBlockDef } from './blockDefs';
 import { portColor } from './BlockNode';
 import { blockDescription, blockLabel, fieldPlaceholder, localizedText } from './blockText';
 import { useI18n } from '../../../i18n';
+import { isLegacyJsKeyScript } from './flowAlgos';
 import { flowFiles, useFlowFilesVersion } from './flowFiles';
 import { DIAG_BTN_SM } from '../diagUi';
 import {
@@ -136,7 +137,7 @@ const ConfigFieldInput: React.FC<FieldProps> = ({ field, value, onChange }) => {
       return (
         <div className="relative">
           <div className="pointer-events-none absolute left-1.5 top-1 select-none font-mono text-[10px] tracking-widest text-subtle">
-            JS
+            Rhai
           </div>
           <textarea
             value={strVal}
@@ -147,6 +148,14 @@ const ConfigFieldInput: React.FC<FieldProps> = ({ field, value, onChange }) => {
             className="w-full resize-y rounded-[2px] border border-hairline bg-canvas px-2 pb-2 pt-5 font-mono text-[11.5px] leading-[1.55] text-ink outline-none focus:border-focus"
             style={{ tabSize: 2 }}
           />
+          <div className="mt-1 text-[11px] leading-snug text-subtle">
+            {t('flow.rhaiHint')}
+          </div>
+          {isLegacyJsKeyScript(strVal) && (
+            <div className="mt-1 border border-warn bg-canvas px-2 py-1 text-[11px] text-warn">
+              {t('flow.legacyJsKey')}
+            </div>
+          )}
         </div>
       );
 

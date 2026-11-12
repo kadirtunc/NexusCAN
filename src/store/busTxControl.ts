@@ -1,4 +1,5 @@
-import { apiSetBusMode } from '../services/ipcClient';
+import { t } from '../i18n';
+import { apiClearPanicLatch, apiSetBusMode, isPanicLatchedError } from '../services/ipcClient';
 import type { BusHealthDto } from '../types/hal';
 import { connectionStore } from './connectionStore';
 import { telemetryStore } from './telemetryStore';
@@ -6,7 +7,7 @@ import { telemetryStore } from './telemetryStore';
 /**
  * Single source of truth for switching a physical bus between Listen-Only (passive) and active TX.
  * Used by the global TopBar TX control and the Connections view. Errors propagate to the caller.
- * Backend side effect: arming clears the Panic latch.
+ * Arming while the Panic latch is set fails (`PANIC_LATCHED:`); the operator must clear it explicitly.
  */
 export async function setBusTxArmed(busId: number, armed: boolean): Promise<BusHealthDto> {
   const updated = await apiSetBusMode(busId, !armed, armed);
@@ -29,4 +30,16 @@ export async function disarmAllBuses(): Promise<void> {
   if (failed) {
     throw failed.reason instanceof Error ? failed.reason : new Error(String(failed.reason));
   }
+}
+
+/** Explicit operator action: clears the global Panic latch (never arms anything). */
+export async function clearPanicLatch(): Promise<void> {
+  await apiClearPanicLatch();
+  telemetryStore.markPanicCleared();
+}
+
+/** Human-readable text for a bus mode / arm error (maps `PANIC_LATCHED:` to the clear-latch hint). */
+export function describeTxError(err: unknown): string {
+  if (isPanicLatchedError(err)) return t('sec.tx.clearLatchFirst');
+  return err instanceof Error ? err.message : String(err);
 }

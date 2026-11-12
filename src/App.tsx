@@ -18,9 +18,8 @@ import { type StatusBanner, TopBar } from './components/TopBar';
 import { TraceView } from './components/TraceView';
 import {
   apiClearDatabase,
-  apiDisconnectAllBuses,
   apiListDevices,
-  apiPanicStopTx,
+  resetSessionCompat,
   apiResetTelemetry,
   apiSetBusMode,
   subscribeTelemetry,
@@ -39,6 +38,7 @@ import {
 import { isToolpackEnabled } from './types/toolpacks';
 import { telemetryStore, useTelemetryHeader } from './store/telemetryStore';
 import { transmitStore, useTransmitStore } from './store/transmitStore';
+import { ImportedProjectNotice } from './components/ImportedProjectNotice';
 import { performPanicStop } from './store/panicStop';
 import { workbenchStore, useWorkbenchStore } from './store/workbenchStore';
 import { traceSessionsStore, useTraceSessionsStore } from './store/traceSessionsStore';
@@ -131,8 +131,8 @@ export const App: React.FC = () => {
       void (async () => {
         const restored = await projectStore.restoreActiveSessionOnReload(applyQuickBarState);
         if (!restored) {
-          await apiPanicStopTx().catch(() => null);
-          await apiDisconnectAllBuses().catch(() => 0);
+          // Fresh start: reset WITHOUT latching panic (legacy fallback inside).
+          await resetSessionCompat();
           await apiClearDatabase().catch(() => undefined);
           await apiResetTelemetry().catch(() => undefined);
           telemetryStore.clearAllBuses();
@@ -537,6 +537,7 @@ export const App: React.FC = () => {
         onStatusMessage={setStatusBanner}
         onApplyQuickBar={applyQuickBarState}
       />
+      <ImportedProjectNotice />
 
       {/* Main Body: Center Tabbed / Split Workspace + Side ProjectExplorerDock */}
       <div className="flex-1 min-h-0 flex flex-row overflow-hidden select-none">

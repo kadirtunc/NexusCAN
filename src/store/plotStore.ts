@@ -1,3 +1,4 @@
+import { csvSafeText } from '../utils/csvSafe';
 import { useSyncExternalStore } from 'react';
 import type { DatabaseSchemaDto, MessageSchemaDto, SignalSchemaDto } from '../types/netdb';
 import type { ChronologicalFrameDto, FrameTelemetryDto } from '../types/telemetry';
@@ -1582,7 +1583,8 @@ export const plotStore = {
       colHeaders.push(e.unit ? `${baseName} [${e.unit}]` : baseName);
     }
 
-    const escapeCsv = (str: string): string => {
+    const escapeCsv = (raw: string): string => {
+      const str = csvSafeText(raw);
       if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
         return `"${str.replace(/"/g, '""')}"`;
       }

@@ -1,3 +1,5 @@
+import { buildSignalTable } from '../utils/signalTable';
+import { registerTxSource } from './txSources';
 import { useSyncExternalStore } from 'react';
 import type { DatabaseSchemaDto, SignalSchemaDto } from '../types/netdb';
 import type { PeriodicTxJobDto } from '../types/telemetry';
@@ -268,19 +270,11 @@ export const transmitStore = {
    */
   hydrateWithSchema(schema: TxSchemaSource): void {
     if (!schema) return;
-    const sigTableCache = new Map<DatabaseSchemaDto, (SignalSchemaDto | undefined)[]>();
-    const sigTableFor = (sch: DatabaseSchemaDto): (SignalSchemaDto | undefined)[] => {
+    const sigTableCache = new Map<DatabaseSchemaDto, readonly (SignalSchemaDto | undefined)[]>();
+    const sigTableFor = (sch: DatabaseSchemaDto): readonly (SignalSchemaDto | undefined)[] => {
       const cached = sigTableCache.get(sch);
       if (cached) return cached;
-      let maxSigId = -1;
-      for (const sg of sch.signals) {
-        if (sg.signalId > maxSigId) maxSigId = sg.signalId;
-      }
-      const table: (SignalSchemaDto | undefined)[] =
-        maxSigId >= 0 ? new Array<SignalSchemaDto | undefined>(maxSigId + 1) : [];
-      for (const sg of sch.signals) {
-        table[sg.signalId] = sg;
-      }
+      const table = buildSignalTable(sch.signals);
       sigTableCache.set(sch, table);
       return table;
     };
@@ -509,6 +503,9 @@ export const transmitStore = {
     emitChange();
   },
 };
+
+// Panic Stop: all periodic TX entries are marked paused (backend jobs are stopped by the backend panic).
+registerTxSource('transmit-periodic', () => transmitStore.markAllPaused());
 
 export function useTransmitStore(): TransmitStoreState {
   return useSyncExternalStore(

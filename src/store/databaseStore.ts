@@ -1,3 +1,4 @@
+import { buildSignalTable } from '../utils/signalTable';
 import { useSyncExternalStore } from 'react';
 import type {
   DatabaseSchemaDto,
@@ -75,17 +76,7 @@ export function buildBusSchemaLookup(schema: DatabaseSchemaDto): BusSchemaLookup
     messagesByArbKey.set(makeArbLookupKey(msg.arbId, msg.isExtended), msg);
   }
 
-  let maxSignalId = -1;
-  for (const sig of schema.signals) {
-    if (sig.signalId > maxSignalId) {
-      maxSignalId = sig.signalId;
-    }
-  }
-  const signalsById: (SignalSchemaDto | undefined)[] =
-    maxSignalId >= 0 ? new Array<SignalSchemaDto | undefined>(maxSignalId + 1) : [];
-  for (const sig of schema.signals) {
-    signalsById[sig.signalId] = sig;
-  }
+  const signalsById = buildSignalTable(schema.signals);
 
   return {
     schema,

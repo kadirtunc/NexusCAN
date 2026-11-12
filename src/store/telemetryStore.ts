@@ -312,6 +312,12 @@ export const telemetryStore = {
     notifySet(headerListeners);
   },
 
+  /** Optimistic local update after `cmd_clear_panic_latch`; the next snapshot confirms it. */
+  markPanicCleared(): void {
+    headerSlice = { ...headerSlice, txPanicLatched: false };
+    notifySet(headerListeners);
+  },
+
   setMaxChronoBufferRows(limit: number): void {
     const clamped = Math.max(
       MIN_CHRONO_BUFFER_ROWS,

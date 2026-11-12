@@ -339,14 +339,12 @@ const udsBlocks: BlockDef[] = [
       access_level: '01',
       algorithm: 'xor_ff',
       constant: '5A3C1E8F',
-      script: `// seed: Uint8Array, level: number (access level subfunction)
-// Dönüş: Uint8Array (hesaplanan key)
-function calculateKey(seed, level) {
-  const key = new Uint8Array(seed.length);
-  for (let i = 0; i < seed.length; i++) {
-    key[i] = (seed[i] ^ 0xFF) & 0xFF;
-  }
-  return key;
+      script: `// Rhai (sandboxed, runs in the backend). seed: blob, level: int
+// Return a blob or an array of ints 0..255
+fn calculate_key(seed, level) {
+  let key = blob();
+  for b in seed { key.push(b ^ 0xFF); }
+  key
 }`,
     },
     configSchema: [
@@ -368,7 +366,7 @@ function calculateKey(seed, level) {
           { value: 'right_rotate', label: 'Right Rotate 2  —  key = ROR(seed,2) ^ const' },
           { value: 'crc16',        label: 'CRC-16/IBM  —  key = CRC16(seed)' },
           { value: 'crc32',        label: 'CRC-32  —  key = CRC32(seed)' },
-          { value: 'custom',       label: 'Custom Script (JS)' },
+          { value: 'custom',       label: 'Custom Script (Rhai)' },
         ],
       },
       {
@@ -381,7 +379,7 @@ function calculateKey(seed, level) {
         key: 'script',
         labelKey: 'diagBlk.customScriptActiveWhenAlgorithmCustom',
         type: 'code',
-        placeholder: 'function calculateKey(seed, level) { ... }',
+        placeholder: 'fn calculate_key(seed, level) { ... }',
       },
     ],
   },
@@ -720,7 +718,7 @@ function calculateKey(seed, level) {
           { value: 'right_rotate', label: 'Right Rotate 2  —  key = ROR(seed,2) ^ const' },
           { value: 'crc16',        label: 'CRC-16/IBM  —  key = CRC16(seed)' },
           { value: 'crc32',        label: 'CRC-32  —  key = CRC32(seed)' },
-          { value: 'custom',       label: 'Custom Script (JS)' },
+          { value: 'custom',       label: 'Custom Script (Rhai)' },
         ],
       },
     ],

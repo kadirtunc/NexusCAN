@@ -1,4 +1,6 @@
 import { t } from '../../../i18n';
+import { apiSeedKeyComputeAdhoc } from '../../../services/ipcClient';
+import { parseSeedKeyError } from '../../../types/seedkey';
 
 // ─── Security key algorithms ──────────────────────────────────────────────────
 
@@ -27,12 +29,14 @@ export function ror32(val: number, shift: number): number {
   return ((val >>> shift) | (val << (32 - shift))) >>> 0;
 }
 
-export function calculateKey(
+/**
+ * Built-in algorithms only (pure TS, no code execution). `custom` is NOT handled here: use
+ * `computeKey`, which delegates to the sandboxed Rhai provider in the backend.
+ */
+export function calculateBuiltinKey(
   algorithm: string,
   seed: Uint8Array,
-  level: number,
   constantHex: string,
-  script: string,
 ): Uint8Array {
   const constVal = parseInt(constantHex.replace(/[^0-9a-fA-F]/g, '') || '5A3C1E8F', 16) >>> 0;
 
@@ -101,17 +105,66 @@ export function calculateKey(
       ]);
     }
 
-    case 'custom': {
-      // eslint-disable-next-line no-new-func
-      const fn = new Function('seed', 'level', `${script}\nreturn calculateKey(seed, level);`);
-      const result = fn(seed, level);
-      if (result instanceof Uint8Array) return result;
-      if (Array.isArray(result)) return new Uint8Array(result);
-      throw new Error(t('diagEng.calcKeyReturn'));
-    }
+    case 'custom':
+      throw new Error(t('flow.customNeedsBackend'));
 
     default:
       return seed.map((b) => b ^ 0xFF);
   }
 }
 
+
+/**
+ * A pre-v0.1 custom block holds JavaScript (`function calculateKey(seed, level) {...}`). That code is
+ * never executed any more; the block fails with a rewrite hint.
+ */
+export function isLegacyJsKeyScript(script: string): boolean {
+  if (/\bfn\s+calculate_key\b/.test(script)) return false;
+  return /\bfunction\b|\bUint8Array\b|=>|\bnew\s/.test(script);
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.replace(/[^0-9a-fA-F]/g, '');
+  const out = new Uint8Array(Math.floor(clean.length / 2));
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  let out = '';
+  for (const b of bytes) out += b.toString(16).padStart(2, '0');
+  return out.toUpperCase();
+}
+
+const CUSTOM_SCRIPT_TIMEOUT_MS = 1000;
+
+/**
+ * Key for a flow SecurityAccess block. Built-ins are computed locally; `custom` runs the Rhai
+ * script in the backend sandbox (`cmd_seedkey_compute_adhoc`, provider kind `script`).
+ */
+export async function computeKey(
+  algorithm: string,
+  seed: Uint8Array,
+  level: number,
+  constantHex: string,
+  script: string,
+): Promise<Uint8Array> {
+  if (algorithm !== 'custom') {
+    return calculateBuiltinKey(algorithm, seed, constantHex);
+  }
+  if (isLegacyJsKeyScript(script)) {
+    throw new Error(t('flow.legacyJsKey'));
+  }
+  try {
+    const res = await apiSeedKeyComputeAdhoc(
+      { kind: 'script', source: script, timeoutMs: CUSTOM_SCRIPT_TIMEOUT_MS },
+      level,
+      bytesToHex(seed),
+    );
+    return hexToBytes(res.keyHex);
+  } catch (e) {
+    const parsed = parseSeedKeyError(e);
+    if (parsed !== null) throw new Error(parsed.message);
+    throw e instanceof Error ? e : new Error(String(e));
+  }
+}

@@ -143,6 +143,13 @@ export interface PanicStopResultDto {
   timestampUs: number;
 }
 
+/** `cmd_reset_session`: cold-start reset. Does NOT latch panic; clears the latch. */
+export interface ResetSessionResultDto {
+  stoppedPeriodicJobs: number;
+  disarmedBuses: number;
+  disconnectedBuses: number;
+}
+
 export interface TxTransmitResultDto {
   jobId: number | null;
   encodedDlc: number;

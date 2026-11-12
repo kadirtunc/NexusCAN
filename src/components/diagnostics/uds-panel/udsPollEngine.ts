@@ -8,6 +8,7 @@
  * only notifies on transitions, so a healthy 1-10 Hz poll causes zero React re-renders here.
  */
 import { useCallback, useSyncExternalStore } from 'react';
+import { registerTxSource } from '../../../store/txSources';
 import { UdsTransportError, type UdsTransportErrorKind } from '../../../store/diagnosticsStore';
 import type { SimulationRuntimeBus } from '../../simulation/simulationRuntimeBus';
 import type { UdsWidgetDto } from '../../../types/uds';
@@ -52,7 +53,11 @@ function sameStatus(a: UdsReadStatus, b: UdsReadStatus): boolean {
   return true;
 }
 
+let pollEngineSeq = 0;
+
 export class UdsPollEngine {
+  private readonly txSourceId = `uds-poll:${++pollEngineSeq}`;
+  private unregisterTx: (() => void) | null = null;
   private states: RequestState[] = [];
   private config: UdsPollConfig = { defaultPollMs: 1000, mock: false };
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -109,11 +114,18 @@ export class UdsPollEngine {
       s.queued = false;
     }
     this.queue = [];
+    // A polling loop on a real session transmits requests on its own schedule: Panic Stop must stop it.
+    this.unregisterTx?.();
+    this.unregisterTx = this.config.mock
+      ? null
+      : registerTxSource(this.txSourceId, () => this.stop());
     this.timer = setInterval(() => this.tick(), TICK_MS);
     this.tick();
   }
 
   public stop(): void {
+    this.unregisterTx?.();
+    this.unregisterTx = null;
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;

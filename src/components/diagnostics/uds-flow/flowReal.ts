@@ -8,7 +8,7 @@ import { flowStore } from './FlowStore';
 import type { FlowBlock, FlowConnection, FlowDiagram } from './types';
 import type { RunContext } from './FlowEngine';
 import type { FlowTransport } from './flowTransport';
-import { calculateKey, crc16ibm, crc32 } from './flowAlgos';
+import { computeKey, crc16ibm, crc32 } from './flowAlgos';
 import { flowFiles } from './flowFiles';
 import { flowPrompt } from './flowPrompt';
 import {
@@ -458,7 +458,7 @@ export class RealFlowExecutor {
           key = b;
         } else {
           try {
-            key = calculateKey(algorithm, seed, odd, constantHex, script);
+            key = await computeKey(algorithm, seed, odd, constantHex, script);
           } catch (e) {
             throw new Error(t('diagEng.scriptError', { msg: e instanceof Error ? e.message : String(e) }));
           }
@@ -483,7 +483,7 @@ export class RealFlowExecutor {
         const seed = asBytes(seedIn);
         let expected: Uint8Array;
         if (seed) {
-          expected = calculateKey(String(cfg['algorithm'] ?? 'xor_ff'), seed, 0, String(cfg['constant'] ?? '5A3C1E8F'), String(cfg['script'] ?? ''));
+          expected = await computeKey(String(cfg['algorithm'] ?? 'xor_ff'), seed, 0, String(cfg['constant'] ?? '5A3C1E8F'), String(cfg['script'] ?? ''));
         } else {
           expected = Uint8Array.from(hexField(cfg['expected_key'], 'expected_key'));
         }

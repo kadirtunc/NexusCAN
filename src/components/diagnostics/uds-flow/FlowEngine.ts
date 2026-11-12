@@ -1,11 +1,12 @@
 import type { FlowBlock, FlowDiagram } from './types';
 import { flowStore } from './FlowStore';
 import { t } from '../../../i18n';
-import { crc16ibm, crc32, calculateKey } from './flowAlgos';
+import { crc16ibm, crc32, computeKey } from './flowAlgos';
 import { demoFlowTransport, demoDelay, realFlowTransport } from './flowTransport';
 import { RealFlowExecutor } from './flowReal';
 import { flowPrompt } from './flowPrompt';
 import { diagnosticsStore } from '../../../store/diagnosticsStore';
+import { registerTxSource } from '../../../store/txSources';
 
 // ─── Transports (see flowTransport.ts) ───────────────────────────────────────
 
@@ -102,7 +103,10 @@ const REAL_STRUCTURAL: ReadonlySet<string> = new Set(['start', 'end', 'delay', '
 
 // ─── Engine ───────────────────────────────────────────────────────────────────
 
+let flowEngineSeq = 0;
+
 export class FlowEngine {
+  private readonly _txSourceId = `uds-flow:${++flowEngineSeq}`;
   private _stopped = false;
   private _paused  = false;
   private _resumeResolve: (() => void) | null = null;
@@ -131,6 +135,15 @@ export class FlowEngine {
       ? null
       : new RealFlowExecutor(realFlowTransport, this._ctx, (b, msg) => log(b.id, b.label, `[${ts()}]   ${msg}`));
 
+    // A flow run can transmit UDS requests on its own schedule: Panic Stop must be able to abort it.
+    const unregisterTx = this._demo
+      ? null
+      : registerTxSource(this._txSourceId, () => {
+          this.stop();
+          flowStore.setRunning(false);
+          flowStore.setPaused(false);
+        });
+
     flowStore.setRunning(true);
     flowStore.resetBlockStatuses();
     flowStore.clearRunLog();
@@ -143,6 +156,7 @@ export class FlowEngine {
       flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
         message: `[${ts()}] ✗ ${t('diagEng.startNotFound')}` });
       flowStore.setRunning(false);
+      unregisterTx?.();
       return;
     }
 
@@ -152,6 +166,7 @@ export class FlowEngine {
       flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
         message: `[${ts()}] ✗ ${err instanceof Error ? err.message : String(err)}` });
     }
+    unregisterTx?.();
 
     flowStore.setRunning(false);
     flowStore.setPaused(false);
@@ -475,7 +490,7 @@ export class FlowEngine {
         log(block.id, block.label, `[${ts()}]   [2/3] ${t('diagEng.keyCalc', { algorithm })}`);
         let keyBytes: Uint8Array;
         try {
-          keyBytes = calculateKey(algorithm, seedBytes, oddLevel, constantHex, script);
+          keyBytes = await computeKey(algorithm, seedBytes, oddLevel, constantHex, script);
         } catch (e) {
           throw new Error(t('diagEng.scriptError', { msg: e instanceof Error ? e.message : String(e) }));
         }

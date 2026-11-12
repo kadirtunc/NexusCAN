@@ -7,12 +7,15 @@ import type {
   DriverProbeReportDto,
   ProjectSummaryDto,
 } from '../types/hal';
+import { t } from '../i18n';
 import type { DatabaseSchemaDto } from '../types/netdb';
+import type { ComputeKeyResultDto, KeyProviderSpecDto } from '../types/seedkey';
 import type {
   ChronologicalFrameDto,
   LoadedTraceFileDto,
   PanicStopResultDto,
   PeriodicTxJobDto,
+  ResetSessionResultDto,
   StartTraceReplayArgsDto,
   TelemetrySnapshotDto,
   TraceFileSummaryDto,
@@ -39,10 +42,84 @@ interface BridgeErrorPayload {
   message?: string;
 }
 
+// ─── Browser-mode bridge authentication ──────────────────────────────────────
+// The local bridge requires `Authorization: Bearer <token>` on every `/api/invoke/*` request and an
+// `{"type":"auth","token":…}` first WebSocket message. The Vite dev server (same origin, loopback
+// only) hands the token out from `/__nexus/bridge-token`. Tauri desktop uses IPC and skips all this.
+// The token is never placed in a URL and never logged.
+
+const BRIDGE_TOKEN_ENDPOINT = '/__nexus/bridge-token';
+
+let cachedBridgeToken: string | null = null;
+let tokenInFlight: Promise<string> | null = null;
+
+function isTokenPayload(value: unknown): value is { token: string } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { token?: unknown }).token === 'string' &&
+    (value as { token: string }).token.length > 0
+  );
+}
+
+async function requestBridgeToken(): Promise<string> {
+  let response: Response;
+  try {
+    response = await fetch(BRIDGE_TOKEN_ENDPOINT, {
+      method: 'GET',
+      cache: 'no-store',
+      credentials: 'same-origin',
+    });
+  } catch {
+    throw new Error(t('bridge.tokenMissing'));
+  }
+  if (!response.ok) throw new Error(t('bridge.tokenMissing'));
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error(t('bridge.tokenMissing'));
+  }
+  if (!isTokenPayload(payload)) throw new Error(t('bridge.tokenMissing'));
+  return payload.token;
+}
+
+/** Lazily fetches and caches the bridge token; `force` drops the cache (after a 401). */
+export function getBridgeToken(force = false): Promise<string> {
+  if (!force && cachedBridgeToken !== null) return Promise.resolve(cachedBridgeToken);
+  if (tokenInFlight !== null) return tokenInFlight;
+  if (force) cachedBridgeToken = null;
+  const pending = requestBridgeToken()
+    .then((token) => {
+      cachedBridgeToken = token;
+      return token;
+    })
+    .finally(() => {
+      tokenInFlight = null;
+    });
+  tokenInFlight = pending;
+  return pending;
+}
+
+async function postBridge(
+  cmd: string,
+  args: Record<string, unknown> | undefined,
+  token: string,
+): Promise<Response> {
+  return fetch(`http://${getBridgeHost()}:${BRIDGE_PORT}/api/invoke/${cmd}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(args ?? {}),
+  });
+}
+
 /**
  * Dual-transport command invocation:
  * - Native Tauri v2 Desktop WebView: `@tauri-apps/api/core` `invoke<T>`
- * - Browser Port Mode (`http://localhost:5173`): HTTP POST to `nexus_bridge` `:14210`
+ * - Browser Port Mode (`http://127.0.0.1:5173`): authenticated HTTP POST to `nexus_bridge` `:14210`
  */
 export async function invokeCmd<T>(
   cmd: string,
@@ -52,12 +129,11 @@ export async function invokeCmd<T>(
     return invoke<T>(cmd, args);
   }
 
-  const bridgeHost = getBridgeHost();
-  const response = await fetch(`http://${bridgeHost}:${BRIDGE_PORT}/api/invoke/${cmd}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(args ?? {}),
-  });
+  let response = await postBridge(cmd, args, await getBridgeToken());
+  if (response.status === 401) {
+    // Token rotated (bridge restarted): refetch once and retry once.
+    response = await postBridge(cmd, args, await getBridgeToken(true));
+  }
 
   if (!response.ok) {
     let errText = `${response.status} ${response.statusText}`;
@@ -229,20 +305,29 @@ export function subscribeTelemetry(
     }
   };
 
-  const connectWebSocket = (): void => {
-    if (disposed) return;
-    clearReconnectTimer();
+  let warnedAuth = false;
 
+  const scheduleReconnect = (): void => {
+    clearReconnectTimer();
+    reconnectTimer = window.setTimeout(connectWebSocket, 1500);
+  };
+
+  const openSocket = (token: string): void => {
+    if (disposed) return;
     const bridgeHost = getBridgeHost();
     try {
       const socket = new WebSocket(`ws://${bridgeHost}:${BRIDGE_PORT}/ws/telemetry`);
       ws = socket;
+      let authenticated = false;
 
       socket.onopen = () => {
         if (disposed) {
           socket.close();
           return;
         }
+        // First message MUST be the auth frame (bridge closes with 4401 after 3 s otherwise).
+        socket.send(JSON.stringify({ type: 'auth', token }));
+        authenticated = true;
         onStatus?.(true);
       };
 
@@ -262,18 +347,36 @@ export function subscribeTelemetry(
         }
       };
 
-      socket.onclose = () => {
+      socket.onclose = (ev: CloseEvent) => {
         if (disposed) return;
         onStatus?.(false);
         ws = null;
-        clearReconnectTimer();
-        reconnectTimer = window.setTimeout(connectWebSocket, 1500);
+        if (ev.code === 4401 || !authenticated) {
+          // Stale token (bridge restarted): drop the cache so the next attempt refetches.
+          cachedBridgeToken = null;
+        }
+        scheduleReconnect();
       };
     } catch {
       onStatus?.(false);
-      clearReconnectTimer();
-      reconnectTimer = window.setTimeout(connectWebSocket, 1500);
+      scheduleReconnect();
     }
+  };
+
+  const connectWebSocket = (): void => {
+    if (disposed) return;
+    clearReconnectTimer();
+    getBridgeToken()
+      .then(openSocket)
+      .catch((e: unknown) => {
+        if (disposed) return;
+        onStatus?.(false);
+        if (!warnedAuth) {
+          warnedAuth = true;
+          console.warn(e instanceof Error ? e.message : t('bridge.tokenMissing'));
+        }
+        scheduleReconnect();
+      });
   };
 
   connectWebSocket();
@@ -339,6 +442,48 @@ export function apiPanicStopTx(): Promise<PanicStopResultDto> {
   return invokeCmd<PanicStopResultDto>('cmd_panic_stop_tx', {});
 }
 
+/** Errors from arming while the panic latch is set start with this prefix. */
+export const PANIC_LATCHED_PREFIX = 'PANIC_LATCHED:';
+
+export function isPanicLatchedError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  return msg.includes(PANIC_LATCHED_PREFIX);
+}
+
+/** Explicit operator action: clears the global panic latch (does not arm anything). */
+export function apiClearPanicLatch(): Promise<null> {
+  return invokeCmd<null>('cmd_clear_panic_latch', {});
+}
+
+/** Cold-start reset: stops jobs, disarms + disconnects buses WITHOUT latching panic; clears the latch. */
+export function apiResetSession(): Promise<ResetSessionResultDto> {
+  return invokeCmd<ResetSessionResultDto>('cmd_reset_session', {});
+}
+
+/**
+ * Session reset that never latches Panic. Falls back to the legacy panic+disconnect pair ONLY when
+ * the backend does not know `cmd_reset_session` (older build).
+ */
+export async function resetSessionCompat(): Promise<void> {
+  try {
+    await apiResetSession();
+  } catch (err) {
+    if (!isUnknownCommandError(err)) return;
+    await apiPanicStopTx().catch(() => null);
+    await apiDisconnectAllBuses().catch(() => 0);
+  }
+}
+
+/** True when the backend rejects a command name (older backend build). */
+export function isUnknownCommandError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes('unknown nexuscan ipc command') ||
+    msg.includes('unknown command') ||
+    (msg.includes('command') && msg.includes('not found'))
+  );
+}
+
 export function apiResetTelemetry(): Promise<void> {
   return invokeCmd<void>('cmd_reset_telemetry', {});
 }
@@ -375,6 +520,14 @@ export function apiParseDatabaseSchema(
     fileName,
     contentBase64,
   });
+}
+
+export function apiSeedKeyComputeAdhoc(
+  provider: KeyProviderSpecDto,
+  level: number,
+  seedHex: string,
+): Promise<ComputeKeyResultDto> {
+  return invokeCmd<ComputeKeyResultDto>('cmd_seedkey_compute_adhoc', { provider, level, seedHex });
 }
 
 export function apiGetPresetDatabaseFiles(): Promise<DbFileInputDto[]> {

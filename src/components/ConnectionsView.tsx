@@ -47,6 +47,7 @@ import type {
   DriverFamilyStatusDto,
 } from '../types/hal';
 import { BusStateBadge } from './BusStateBadge';
+import { EnforcementBadge } from './EnforcementBadge';
 import type { StatusBanner } from './TopBar';
 import { DatabaseBindingPicker } from './DatabaseBindingPicker';
 import { useDatabaseStore } from '../store/databaseStore';
@@ -461,11 +462,24 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
 
   const serialPorts = connState.probeReport?.serialPorts ?? [];
 
+  const softwareOnlyBuses = header.buses.filter(
+    (b) => b.connected && b.listenOnly && !b.txArmed && b.listenOnlyEnforcement === 'softwareOnly',
+  );
+
   return (
     <div
       style={{ backgroundColor: 'var(--bg-panel)' }}
       className="flex flex-col flex-1 min-h-0 overflow-hidden select-none"
     >
+      {softwareOnlyBuses.map((b) => (
+        <div
+          key={`sw-lo-${b.busId}`}
+          role="alert"
+          className="shrink-0 px-3 py-1.5 border-b border-amber-500/70 bg-amber-900/20 text-amber-200 text-[11.5px]"
+        >
+          {t('sec.enf.softwareWarn', { bus: b.busId + 1, channel: b.channelName })}
+        </div>
+      ))}
       {/* ==================================================================== */}
       {/* 1. COMPACT 28PX DRIVER STATUS STRIP + COLLAPSIBLE DETAILS DRAWER     */}
       {/* ==================================================================== */}
@@ -973,7 +987,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                         </td>
 
                         <td>
-                          <div className="pcan-cell">
+                          <div className="pcan-cell gap-1.5">
                             <BusStateBadge
                               busState={liveBus?.busState ?? 'offline'}
                               connected={Boolean(liveBus?.connected)}
@@ -983,6 +997,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                               rxErrorCount={liveBus?.rxErrorCount ?? 0}
                               compact
                             />
+                            <EnforcementBadge kind={liveBus?.listenOnlyEnforcement ?? null} />
                           </div>
                         </td>
 

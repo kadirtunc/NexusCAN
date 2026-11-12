@@ -3,12 +3,11 @@ import {
   apiClearDatabase,
   apiConnectBus,
   apiDeleteProject,
-  apiDisconnectAllBuses,
   apiGetPresetDatabaseFiles,
   apiListPeriodicTx,
   apiListProjects,
   apiLoadProject,
-  apiPanicStopTx,
+  resetSessionCompat,
   apiParseDatabaseSchema,
   apiResetTelemetry,
   apiSaveProject,
@@ -48,6 +47,7 @@ import {
   writeActiveSessionMetaSync,
 } from '../utils/workspaceDb';
 import type { CloudProjectBindingV1 } from '../utils/workspaceDiff';
+import { sanitizeProject } from '../utils/projectSanitize';
 
 export interface QuickBarConnectionState {
   selectedDeviceId: string;
@@ -101,6 +101,15 @@ export interface ProjectStoreState {
   acknowledgmentsModalOpen: boolean;
   enabledToolpacks: readonly EngineeringToolpackId[];
   cloudBinding: CloudProjectBindingV1 | null;
+  /** Set after opening an external project file: connections are NOT opened automatically. */
+  importNotice: ImportNotice | null;
+}
+
+export interface ImportNotice {
+  /** Profiles that asked to connect (still Listen-Only). */
+  profileIds: readonly string[];
+  /** Withheld until the user confirms. */
+  cloudBinding: CloudProjectBindingV1 | null;
 }
 
 export function sanitizeProjectFileStem(input: string): string {
@@ -128,6 +137,7 @@ let currentState: ProjectStoreState = {
   acknowledgmentsModalOpen: false,
   enabledToolpacks: [...DEFAULT_ENABLED_TOOLPACKS],
   cloudBinding: null,
+  importNotice: null,
 };
 
 const listeners = new Set<() => void>();
@@ -482,6 +492,54 @@ export const projectStore = {
     await projectStore.refreshSavedProjects();
   },
 
+  /** Dismisses the "N connection profiles want to connect" notice without connecting. */
+  dismissImportNotice(): void {
+    if (currentState.importNotice === null) return;
+    currentState = { ...currentState, importNotice: null };
+    emitChange();
+  },
+
+  /** User confirmed: adopt the cloud binding that came with an imported file. */
+  adoptImportedCloudBinding(): void {
+    const notice = currentState.importNotice;
+    if (notice === null || notice.cloudBinding === null) return;
+    currentState = {
+      ...currentState,
+      cloudBinding: notice.cloudBinding,
+      importNotice: { ...notice, cloudBinding: null },
+    };
+    emitChange();
+  },
+
+  /**
+   * User confirmed: connect the imported profiles that asked to connect. They are still
+   * Listen-Only (forced by the sanitizer); arming TX remains a separate explicit action.
+   */
+  async connectImportedProfiles(): Promise<{ connected: number; warnings: string[] }> {
+    const notice = currentState.importNotice;
+    if (notice === null) return { connected: 0, warnings: [] };
+    const wanted = new Set(notice.profileIds);
+    const warnings: string[] = [];
+    let connected = 0;
+    for (const prof of connectionStore.getState().profiles) {
+      if (!wanted.has(prof.id)) continue;
+      try {
+        const { deviceId, config } = buildChannelConfigForProfile({ ...prof, listenOnly: true });
+        const health = await apiConnectBus(deviceId, config);
+        telemetryStore.upsertBusHealth(health);
+        connected += 1;
+      } catch (err) {
+        warnings.push(`${prof.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    currentState = {
+      ...currentState,
+      importNotice: notice.cloudBinding !== null ? { profileIds: [], cloudBinding: notice.cloudBinding } : null,
+    };
+    emitChange();
+    return { connected, warnings };
+  },
+
   /**
    * Restores a complete `NexusProjectFileV1` across backend & frontend stores.
    * If `options.isReload === true` (e.g. F5 reload):
@@ -490,17 +548,20 @@ export const projectStore = {
    * - Preserves the exact active tab without forcing 'rxtx'.
    */
   async restoreProject(
-    project: NexusProjectFileV1,
+    projectIn: unknown,
     onApplyQuickBar?: (qb: QuickBarConnectionState) => void,
     options?: { isReload?: boolean },
   ): Promise<{ reconnectedCount: number; connectionWarnings: string[] }> {
     const isReload = Boolean(options?.isReload);
+    // Every load path is validated; only a reload of the user's own last session keeps connections.
+    const sanitized = sanitizeProject(projectIn, isReload ? 'own' : 'external');
+    const project = sanitized.project;
     isRestoring = true;
 
     try {
       if (!isReload) {
-        await apiPanicStopTx().catch(() => null);
-        await apiDisconnectAllBuses().catch(() => 0);
+        // Reset without latching Panic (old backends lack the command: fall back).
+        await resetSessionCompat();
         await apiClearDatabase().catch(() => undefined);
         telemetryStore.clearAllBuses();
         transmitStore.markAllPaused();
@@ -650,9 +711,11 @@ export const projectStore = {
       const activeIds = new Set<string>(
         project.connections?.activeConnectedProfileIds ?? [],
       );
-      const profilesToConnect = (project.connections?.profiles ?? []).filter(
-        (p) => activeIds.has(p.id) || p.autoConnectOnProjectLoad,
-      );
+      const profilesToConnect = isReload
+        ? (project.connections?.profiles ?? []).filter(
+            (p) => activeIds.has(p.id) || p.autoConnectOnProjectLoad,
+          )
+        : [];
 
       let reconnectedCount = 0;
       const connectionWarnings: string[] = [];
@@ -693,6 +756,14 @@ export const projectStore = {
         dirty: false,
         enabledToolpacks: normalizedToolpacks,
         cloudBinding: project.cloudBinding ?? null,
+        importNotice:
+          !isReload &&
+          (sanitized.connectCandidates.length > 0 || sanitized.pendingCloudBinding !== null)
+            ? {
+                profileIds: sanitized.connectCandidates.map((p) => p.id),
+                cloudBinding: sanitized.pendingCloudBinding,
+              }
+            : null,
       };
 
       writeActiveSessionMetaSync({
@@ -768,8 +839,7 @@ export const projectStore = {
       autoSaveTimer = null;
     }
 
-    await apiPanicStopTx().catch(() => null);
-    await apiDisconnectAllBuses().catch(() => 0);
+    await resetSessionCompat();
     await apiClearDatabase().catch(() => undefined);
     await apiResetTelemetry().catch(() => undefined);
 
@@ -842,8 +912,7 @@ export const projectStore = {
     await clearActiveProjectFromLocalDb();
 
     // 2. Disarm backend
-    await apiPanicStopTx().catch(() => null);
-    await apiDisconnectAllBuses().catch(() => 0);
+    await resetSessionCompat();
     await apiClearDatabase().catch(() => undefined);
     await apiResetTelemetry().catch(() => undefined);
 

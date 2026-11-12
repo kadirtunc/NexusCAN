@@ -1,3 +1,4 @@
+import { describeTxError } from '../store/busTxControl';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CheckCircle2,
@@ -2832,7 +2833,7 @@ const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
       onStatusMessage({
         kind: 'error',
         message: t('rxtx.dock.armTxError', {
-          error: err instanceof Error ? err.message : String(err),
+          error: describeTxError(err),
         }),
       });
     } finally {
@@ -2861,7 +2862,7 @@ const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
       onStatusMessage({
         kind: 'error',
         message: t('rxtx.dock.switchToActiveTxError', {
-          error: err instanceof Error ? err.message : String(err),
+          error: describeTxError(err),
         }),
       });
     } finally {

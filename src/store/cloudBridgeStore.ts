@@ -271,7 +271,8 @@ export function normalizeCloudBaseUrl(rawUrl: string): string {
   if (/^https?:\/\//i.test(trimmed)) {
     return trimmed;
   }
-  return `http://${trimmed}`;
+  // Cloud is experimental; scheme-less input defaults to TLS.
+  return `https://${trimmed}`;
 }
 
 function buildBridgeWebSocketUrl(

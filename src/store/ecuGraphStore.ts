@@ -27,6 +27,7 @@ import {
   type GraphPos,
 } from '../components/diagnostics/ecu-graph/graphModel';
 import { diagnosticsStore, UdsTransportError } from './diagnosticsStore';
+import { registerTxSource } from './txSources';
 
 export interface GraphViewport {
   /** Screen position (CSS px) of the world origin (the tester node). */
@@ -173,6 +174,12 @@ async function readIdentificationDid(did: number): Promise<{ text: string } | { 
     return { error: String(err), abort: false, timeout: false };
   }
 }
+
+/** Bumped by Panic Stop: the sequential identification-DID read loop stops at the next DID. */
+let identAbortGen = 0;
+registerTxSource('ecu-graph-identify', () => {
+  identAbortGen += 1;
+});
 
 export const ecuGraphStore = {
   subscribe(listener: () => void): () => void {
@@ -332,8 +339,10 @@ export const ecuGraphStore = {
     let rejected = 0;
     let lastError: string | null = null;
     let timeouts = 0;
+    const gen = identAbortGen;
     try {
       for (let did = IDENT_DID_FIRST; did <= IDENT_DID_LAST; did++) {
+        if (gen !== identAbortGen) break;
         if (!isActive(key)) {
           lastError = t('ecuGraph.err.sessionLost');
           break;

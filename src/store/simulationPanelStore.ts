@@ -3,6 +3,7 @@ import {
   apiStopPeriodicTx,
   apiTransmitSignalFrame,
 } from '../services/ipcClient';
+import { registerTxSource } from './txSources';
 import type { DatabaseSchemaDto, MessageSchemaDto, SignalSchemaDto } from '../types/netdb';
 import type {
   NexusSimulationPanelFileV1,
@@ -1256,6 +1257,9 @@ export const simulationPanelStore = {
     emitChange();
   },
 };
+
+// Panic Stop: stop all periodic stimulus jobs started from simulation panel widgets.
+registerTxSource('simulation-stimulus', () => simulationPanelStore.stopAllPeriodicStimulusJobs());
 
 export function useSimulationPanelStore(): SimulationPanelStoreState {
   return useSyncExternalStore(
