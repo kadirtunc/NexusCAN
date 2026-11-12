@@ -27,15 +27,15 @@ echo ""
 echo "[1/3] USB-CAN Donanımları (gs_usb/candleLight, CANable, PCAN, Kvaser, SLCAN) için udev kuralları yazılıyor..."
 sudo tee /etc/udev/rules.d/99-nexuscan-usb.rules >/dev/null <<'EOF'
 # OpenMoko / Geschwister Schneider gs_usb & candleLight (CANable, CANtact, etc.)
-SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="606f", MODE="0666", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="606f", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 # Microchip / CANable DFU & gs_usb variants
-SUBSYSTEM=="usb", ATTR{idVendor}=="04d8", ATTR{idProduct}=="0053", MODE="0666", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="04d8", ATTR{idProduct}=="0053", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 # PEAK-System PCAN-USB / PCAN-USB FD
-SUBSYSTEM=="usb", ATTR{idVendor}=="0c72", MODE="0666", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0c72", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 # Kvaser Leaf / Memorator USB-CAN
-SUBSYSTEM=="usb", ATTR{idVendor}=="0bfd", MODE="0666", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bfd", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 # STMicroelectronics Virtual COM Port (SLCAN adapters)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", MODE="0666", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", MODE="0660", GROUP="dialout", TAG+="uaccess"
 EOF
 
 sudo udevadm control --reload-rules 2>/dev/null || true

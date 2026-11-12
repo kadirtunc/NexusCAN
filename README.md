@@ -110,8 +110,8 @@ cd tests/hil/ecusim
 ./build/ecusim -i vcan0 -c config/manual-charger.json   --req 0x7E7 --resp 0x7EF --func 0x7DF &
 cd ../../..
 
-# 2. Backend (local only) and UI
-NEXUS_BRIDGE_ADDR=127.0.0.1:14210 cargo run --release -p nexus-hal --bin nexus_bridge &
+# 2. Backend and UI (both bind to 127.0.0.1; the UI fetches the bridge token locally)
+cargo run --release -p nexus-hal --bin nexus_bridge &   # loopback only, per-run auth token
 npm install && npm run dev        # open http://localhost:5173
 ```
 
@@ -161,7 +161,7 @@ NexusCAN is a **v0.1 preview**. What is real today and what is next, without mar
 | Area | Available | Next |
 |---|---|---|
 | Adapters | SocketCAN (Linux), SLCAN (serial, all OS), mock0/mock1 simulators, file replay | **gs_usb / candleLight in pure Rust** (Windows · macOS · Linux, no driver install), PCAN-Basic, Kvaser |
-| Safety | Listen-Only default, confirmed Arm, Stop All TX, TX gate on every path | Hardware-level Listen-Only on SocketCAN (today it is a software TX lock; the controller can still ACK) |
+| Safety | Listen-Only default (hardware listen-only on SocketCAN with `CAP_NET_ADMIN`, shown per bus as HW / SW / virtual), confirmed Arm, Stop All TX with explicit Clear Panic, TX gate on every path | Hardware listen-only on every adapter family (gs_usb, PCAN, Kvaser) |
 | Diagnostics | UDS client, ECU graph, traffic dock, DID/DTC/console, OBD-II Mode 01, flow editor | Flashing (`34/36/37`), multi-ECU sessions, ODX/CDD, key-provider integration for SecurityAccess |
 | Recording | Trace capture and replay, BLF/ASC/TRC/CSV/candump | Lossless backend recorder with triggers, ASAM MF4 |
 | Protocols | UDS (ISO 14229), ISO-TP (ISO 15765-2), J1939 PGN decoding via DBC | J1939 transport and DM1/DM2, CANopen, XCP |
