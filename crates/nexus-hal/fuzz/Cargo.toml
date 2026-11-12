@@ -1,0 +1,43 @@
+# cargo-fuzz harness for the nexus-hal trace parsers (WP-6). NOT part of the stable workspace build:
+# this directory has its own `[workspace]` and requires a nightly toolchain. See README.md.
+[package]
+name = "nexus-hal-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+nexus-hal = { path = ".." }
+nexus-core = { path = "../../nexus-core" }
+
+# Standalone workspace so the root `crates/*` workspace never builds (or locks) this crate.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "blf_parse"
+path = "fuzz_targets/blf_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trace_text_parse"
+path = "fuzz_targets/trace_text_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trace_bytes_autodetect"
+path = "fuzz_targets/trace_bytes_autodetect.rs"
+test = false
+doc = false
+bench = false

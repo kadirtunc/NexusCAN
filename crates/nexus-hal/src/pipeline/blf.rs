@@ -520,6 +520,43 @@ pub fn encode_blf_bytes(entries: &[CompiledReplayEntry]) -> Result<Vec<u8>, HalE
             inner_stream.push(dlc);
             inner_stream.extend_from_slice(&raw_id.to_le_bytes());
             inner_stream.extend_from_slice(&data8);
+        } else if u8::try_from(u16::from(frame.bus_id) + 1).is_err() {
+            // The 1-based channel (bus 255 -> channel 256) does not fit the `u8` channel of
+            // `CAN_FD_MESSAGE_64`, so fall back to `CAN_FD_MESSAGE` (`object_type = 100`) whose
+            // channel is a `u16`. Vector `VBLCANFDMessage` body is a fixed 84 bytes
+            // (20-byte header + `mData[64]`): `object_size = 32 + 84 = 116` (4-byte aligned).
+            let valid_len = usize::from(frame.dlc).min(MAX_CAN_FD_DLC);
+            let object_size = 32u32 + 20 + 64;
+            write_inner_v1_header(&mut inner_stream, object_size, BLF_OBJ_CAN_FD_MESSAGE, ts_ns);
+
+            let channel = u16::from(frame.bus_id) + 1;
+            // `mFlags`: bit0 = TX direction, bit7 = RTR (same as `CAN_MESSAGE`).
+            let flags =
+                (if frame.is_tx() { 0x01u8 } else { 0u8 }) | (if frame.is_rtr() { 0x80u8 } else { 0u8 });
+            let dlc_code = len_to_canfd_dlc_code(valid_len as u8);
+            // `mCANFDFlags`: bit0 = EDL (FD), bit1 = BRS, bit2 = ESI. Always EDL, mirroring the
+            // unconditional `0x1000` of the type-101 writer below.
+            let mut fd_flags = 0x01u8;
+            if frame.is_brs() {
+                fd_flags |= 0x02;
+            }
+            if frame.is_esi() {
+                fd_flags |= 0x04;
+            }
+            let mut data64 = [0u8; 64];
+            data64[..valid_len].copy_from_slice(&frame.data[..valid_len]);
+
+            inner_stream.extend_from_slice(&channel.to_le_bytes()); // 0..2: channel
+            inner_stream.push(flags); // 2: flags
+            inner_stream.push(dlc_code); // 3: dlc
+            inner_stream.extend_from_slice(&raw_id.to_le_bytes()); // 4..8: id
+            inner_stream.extend_from_slice(&0u32.to_le_bytes()); // 8..12: frame_length
+            inner_stream.push(0u8); // 12: arb_bit_count
+            inner_stream.push(fd_flags); // 13: canfd_flags
+            inner_stream.push(valid_len as u8); // 14: valid_data_bytes
+            inner_stream.push(0u8); // 15: reserved1
+            inner_stream.extend_from_slice(&0u32.to_le_bytes()); // 16..20: reserved2
+            inner_stream.extend_from_slice(&data64); // 20..84: data[64]
         } else {
             // `CAN_FD_MESSAGE_64` (`object_type = 101`, `object_size = 32 + 40 + valid_len` + 4B padding)
             let valid_len = usize::from(frame.dlc).min(MAX_CAN_FD_DLC);
