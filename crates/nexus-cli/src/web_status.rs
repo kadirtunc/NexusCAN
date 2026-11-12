@@ -7,8 +7,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::State;
-use axum::response::Html;
+use axum::extract::{Request, State};
+use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use nexus_cloud::{BridgeTargetHz, BridgeTelemetryFrame, BusHealthWireDto, FrameTelemetryWireDto};
@@ -245,9 +247,81 @@ async fn handle_get_health(State(state): State<Arc<SharedAgentState>>) -> Json<A
     Json(state.snapshot())
 }
 
+/// Lower-cased host name of a `Host` header (`name[:port]` / `[v6][:port]`); `None` if malformed.
+fn host_name_without_port(host: &str) -> Option<String> {
+    let h = host.trim().to_ascii_lowercase();
+    if h.is_empty() {
+        return None;
+    }
+    let port_ok = |p: &str| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit());
+    if h.starts_with('[') {
+        let end = h.find(']')?;
+        let (name, rest) = h.split_at(end + 1);
+        return match rest.strip_prefix(':') {
+            None if rest.is_empty() => Some(name.to_string()),
+            Some(p) if port_ok(p) => Some(name.to_string()),
+            _ => None,
+        };
+    }
+    match h.split_once(':') {
+        None => Some(h),
+        Some((name, p)) if !name.is_empty() && port_ok(p) => Some(name.to_string()),
+        _ => None,
+    }
+}
+
+/// WP-1: `Host` allowlist (DNS-rebinding protection): `localhost`, `127.0.0.1`, `[::1]` (any
+/// port) or the configured non-wildcard bind host.
+fn web_host_allowed(host: &str, bind_host: Option<&str>) -> bool {
+    match host_name_without_port(host) {
+        Some(name) => {
+            matches!(name.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+                || bind_host.is_some_and(|b| b == name)
+        }
+        None => false,
+    }
+}
+
+/// Accepted extra `Host` name for a bind address (`None` for loopback / wildcard binds).
+fn bind_host_name(addr: &SocketAddr) -> Option<String> {
+    let ip = addr.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then(|| match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+    })
+}
+
+async fn host_guard(State(bind_host): State<Option<Arc<str>>>, req: Request, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().authority().map(|a| a.as_str().to_string()));
+    match host {
+        Some(h) if web_host_allowed(&h, bind_host.as_deref()) => next.run(req).await,
+        _ => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "forbidden host" })),
+        )
+            .into_response(),
+    }
+}
+
 /// Builds the strictly Read-Only `axum` router exposing `GET /`, `GET /index.html`,
-/// `GET /api/live`, `GET /api/status`, and `GET /api/health`.
+/// `GET /api/live`, `GET /api/status`, and `GET /api/health`. Only loopback `Host` headers are
+/// accepted (see [`build_status_router_for_bind`] for non-loopback binds).
 pub fn build_status_router(state: Arc<SharedAgentState>) -> Router {
+    build_status_router_with_host(state, None)
+}
+
+/// Same as [`build_status_router`], additionally accepting the bind address as `Host`.
+pub fn build_status_router_for_bind(state: Arc<SharedAgentState>, bind_addr: &SocketAddr) -> Router {
+    build_status_router_with_host(state, bind_host_name(bind_addr))
+}
+
+fn build_status_router_with_host(state: Arc<SharedAgentState>, bind_host: Option<String>) -> Router {
+    let bind_host: Option<Arc<str>> = bind_host.map(Arc::from);
     Router::new()
         .route("/", get(handle_get_index))
         .route("/index.html", get(handle_get_index))
@@ -255,6 +329,7 @@ pub fn build_status_router(state: Arc<SharedAgentState>) -> Router {
         .route("/api/status", get(handle_get_status))
         .route("/api/health", get(handle_get_health))
         .with_state(state)
+        .layer(middleware::from_fn_with_state(bind_host, host_guard))
 }
 
 /// Binds a `TcpListener` on `bind_addr` and spawns the read-only `axum` server with clean graceful shutdown.
@@ -265,7 +340,7 @@ pub async fn spawn_web_status_server(
 ) -> Result<(SocketAddr, JoinHandle<()>), std::io::Error> {
     let listener = TcpListener::bind(bind_addr).await?;
     let local_addr = listener.local_addr()?;
-    let router = build_status_router(state);
+    let router = build_status_router_for_bind(state, &local_addr);
 
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, router)
@@ -1060,3 +1135,23 @@ pub const EDGE_HMI_INDEX_HTML: &str = r##"<!DOCTYPE html>
 </body>
 </html>
 "##;
+
+#[cfg(test)]
+mod host_guard_tests {
+    use super::*;
+
+    #[test]
+    fn host_allowlist_blocks_dns_rebinding() {
+        for ok in ["localhost", "localhost:8080", "127.0.0.1:9", "[::1]", "[::1]:80"] {
+            assert!(web_host_allowed(ok, None), "{ok}");
+        }
+        for bad in ["evil.example", "evil.example:8080", "localhost.evil.example", "", "127.0.0.1:x", "::1"] {
+            assert!(!web_host_allowed(bad, None), "{bad}");
+        }
+        let lan: SocketAddr = "10.0.0.7:8080".parse().unwrap();
+        let bind = bind_host_name(&lan);
+        assert!(web_host_allowed("10.0.0.7:8080", bind.as_deref()));
+        assert!(!web_host_allowed("10.0.0.8:8080", bind.as_deref()));
+        assert_eq!(bind_host_name(&"0.0.0.0:1".parse().unwrap()), None);
+    }
+}

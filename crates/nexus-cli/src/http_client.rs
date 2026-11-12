@@ -16,8 +16,13 @@ const MAX_HTTP_RESPONSE_BYTES: usize = 16 * 1024 * 1024; // 16 MiB safety cap
 
 #[derive(Debug, Error)]
 pub enum HttpClientError {
+    /// The URL is always redacted (`nexus_cloud::redact_url`): no token / credentials.
     #[error("Unsupported or invalid HTTP URL '{0}' (only http:// is supported without external TLS proxy)")]
     UnsupportedUrl(String),
+
+    /// WP-10: plaintext HTTP to a non-loopback host (URL redacted).
+    #[error("{msg} (refusing '{0}')", msg = nexus_cloud::TLS_NOT_SUPPORTED_MSG)]
+    InsecureTransport(String),
 
     #[error("HTTP request timed out after 4s")]
     Timeout,
@@ -172,10 +177,13 @@ struct ParsedHttpUrl {
 }
 
 fn parse_http_url(url: &str) -> Result<ParsedHttpUrl, HttpClientError> {
+    if url.trim().starts_with("https://") {
+        return Err(HttpClientError::InsecureTransport(nexus_cloud::redact_url(url)));
+    }
     let rest = url
         .trim()
         .strip_prefix("http://")
-        .ok_or_else(|| HttpClientError::UnsupportedUrl(url.to_string()))?;
+        .ok_or_else(|| HttpClientError::UnsupportedUrl(nexus_cloud::redact_url(url)))?;
 
     let (authority, path_part) = match rest.find('/') {
         Some(idx) => (&rest[..idx], &rest[idx..]),
@@ -183,24 +191,24 @@ fn parse_http_url(url: &str) -> Result<ParsedHttpUrl, HttpClientError> {
     };
 
     if authority.is_empty() {
-        return Err(HttpClientError::UnsupportedUrl(url.to_string()));
+        return Err(HttpClientError::UnsupportedUrl(nexus_cloud::redact_url(url)));
     }
 
     let (connect_host, port) = if authority.starts_with('[') {
         // IPv6 authority e.g. [::1]:3000 or [::1]
         let end_bracket = authority
             .find(']')
-            .ok_or_else(|| HttpClientError::UnsupportedUrl(url.to_string()))?;
+            .ok_or_else(|| HttpClientError::UnsupportedUrl(nexus_cloud::redact_url(url)))?;
         let ipv6_host = &authority[1..end_bracket];
         let after = &authority[end_bracket + 1..];
         let p = if let Some(port_str) = after.strip_prefix(':') {
             port_str
                 .parse::<u16>()
-                .map_err(|_| HttpClientError::UnsupportedUrl(url.to_string()))?
+                .map_err(|_| HttpClientError::UnsupportedUrl(nexus_cloud::redact_url(url)))?
         } else if after.is_empty() {
             80
         } else {
-            return Err(HttpClientError::UnsupportedUrl(url.to_string()));
+            return Err(HttpClientError::UnsupportedUrl(nexus_cloud::redact_url(url)));
         };
         (ipv6_host.to_string(), p)
     } else {
@@ -208,15 +216,19 @@ fn parse_http_url(url: &str) -> Result<ParsedHttpUrl, HttpClientError> {
             Some((h, p_str)) => {
                 let p = p_str
                     .parse::<u16>()
-                    .map_err(|_| HttpClientError::UnsupportedUrl(url.to_string()))?;
+                    .map_err(|_| HttpClientError::UnsupportedUrl(nexus_cloud::redact_url(url)))?;
                 (h.to_string(), p)
             }
             None => (authority.to_string(), 80),
         }
     };
 
-    if connect_host.is_empty() {
-        return Err(HttpClientError::UnsupportedUrl(url.to_string()));
+    if connect_host.is_empty() || authority.contains('@') {
+        return Err(HttpClientError::UnsupportedUrl(nexus_cloud::redact_url(url)));
+    }
+    // WP-10: no TLS yet -> plaintext only towards a loopback test server.
+    if !nexus_cloud::is_loopback_host(&connect_host) {
+        return Err(HttpClientError::InsecureTransport(nexus_cloud::redact_url(url)));
     }
 
     Ok(ParsedHttpUrl {
@@ -362,4 +374,28 @@ fn decode_chunked_body(mut input: &[u8]) -> Result<Vec<u8>, HttpClientError> {
         input = &input[chunk_len + 2..];
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod wp10_url_tests {
+    use super::*;
+
+    #[test]
+    fn http_url_is_loopback_only_and_errors_never_contain_secrets() {
+        assert!(parse_http_url("http://127.0.0.1:3000/api/x?token=nxc_tok_secret").is_ok());
+        assert!(parse_http_url("http://localhost:3000").is_ok());
+        for bad in [
+            "http://cloud.nexuscan.io/api?token=nxc_tok_secret",
+            "https://cloud.nexuscan.io/api?token=nxc_tok_secret",
+        ] {
+            let err = parse_http_url(bad).err().expect("refused");
+            let msg = err.to_string();
+            assert!(matches!(err, HttpClientError::InsecureTransport(_)), "{msg}");
+            assert!(!msg.contains("nxc_tok_secret"), "{msg}");
+        }
+        let err = parse_http_url("ftp://h/?token=nxc_tok_secret").err().expect("invalid");
+        assert!(!err.to_string().contains("nxc_tok_secret"));
+        let err = parse_http_url("http://u:nxc_tok_secret@127.0.0.1/").err().expect("creds");
+        assert!(!err.to_string().contains("nxc_tok_secret"));
+    }
 }

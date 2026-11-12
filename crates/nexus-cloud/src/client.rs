@@ -51,7 +51,18 @@ pub enum BridgeClientError {
 
     #[error("Schema upload callback failed: {0}")]
     SchemaUploadFailed(String),
+
+    /// WP-10: plaintext transport to a non-loopback host (the URL is redacted).
+    #[error("{msg} (refusing '{0}')", msg = crate::url_safety::TLS_NOT_SUPPORTED_MSG)]
+    InsecureTransport(String),
+
+    /// HIGH-04: inbound WebSocket frame larger than [`MAX_WS_FRAME_PAYLOAD`].
+    #[error("WebSocket frame of {len} bytes exceeds the {max} byte limit", max = MAX_WS_FRAME_PAYLOAD)]
+    FrameTooLarge { len: u64 },
 }
+
+/// HIGH-04: maximum accepted inbound WebSocket frame payload (checked before allocating).
+pub const MAX_WS_FRAME_PAYLOAD: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct BridgeClientConfig {
@@ -541,9 +552,11 @@ struct ParsedWsUrl {
 }
 
 fn parse_ws_url(url: &str) -> Result<ParsedWsUrl, BridgeClientError> {
-    let rest = url
-        .strip_prefix("ws://")
-        .ok_or_else(|| BridgeClientError::InvalidEndpointUrl(url.to_string()))?;
+    let invalid = || BridgeClientError::InvalidEndpointUrl(crate::url_safety::redact_url(url));
+    if url.starts_with("wss://") {
+        return Err(BridgeClientError::InsecureTransport(crate::url_safety::redact_url(url)));
+    }
+    let rest = url.strip_prefix("ws://").ok_or_else(invalid)?;
     let (authority, path_part) = match rest.find('/') {
         Some(idx) => (&rest[..idx], &rest[idx..]),
         None => (rest, "/api/bridge/ws"),
@@ -552,13 +565,17 @@ fn parse_ws_url(url: &str) -> Result<ParsedWsUrl, BridgeClientError> {
         Some((h, p)) => {
             let parsed_port = p
                 .parse::<u16>()
-                .map_err(|_| BridgeClientError::InvalidEndpointUrl(url.to_string()))?;
+                .map_err(|_| invalid())?;
             (h.to_string(), parsed_port)
         }
         None => (authority.to_string(), 80),
     };
-    if host.is_empty() {
-        return Err(BridgeClientError::InvalidEndpointUrl(url.to_string()));
+    if host.is_empty() || authority.contains('@') {
+        return Err(invalid());
+    }
+    // WP-10: no TLS yet -> plaintext only towards a loopback test server.
+    if !crate::url_safety::is_loopback_host(&host) {
+        return Err(BridgeClientError::InsecureTransport(crate::url_safety::redact_url(url)));
     }
     Ok(ParsedWsUrl {
         host,
@@ -628,17 +645,24 @@ impl BridgeTransport for TcpWsTransport {
                 let is_masked = (hdr[1] & 0x80) != 0;
                 let len_code = u64::from(hdr[1] & 0x7f);
 
-                let payload_len = if len_code <= 125 {
-                    len_code as usize
+                let payload_len_u64 = if len_code <= 125 {
+                    len_code
                 } else if len_code == 126 {
                     let mut ext = [0u8; 2];
                     self.stream.read_exact(&mut ext).await?;
-                    u16::from_be_bytes(ext) as usize
+                    u64::from(u16::from_be_bytes(ext))
                 } else {
                     let mut ext = [0u8; 8];
                     self.stream.read_exact(&mut ext).await?;
-                    u64::from_be_bytes(ext) as usize
+                    u64::from_be_bytes(ext)
                 };
+                // HIGH-04: reject oversized frames BEFORE allocating; close with 1009.
+                if payload_len_u64 > MAX_WS_FRAME_PAYLOAD {
+                    let _ = self.write_masked_frame(0x08, &1009u16.to_be_bytes()).await;
+                    let _ = self.stream.shutdown().await;
+                    return Err(BridgeClientError::FrameTooLarge { len: payload_len_u64 });
+                }
+                let payload_len = payload_len_u64 as usize;
 
                 let mut mask = [0u8; 4];
                 if is_masked {
@@ -686,5 +710,61 @@ impl BridgeTransport for TcpWsTransport {
             let _ = self.stream.shutdown().await;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod wp10_tests {
+    use super::*;
+
+    #[test]
+    fn plaintext_ws_only_to_loopback_and_errors_are_redacted() {
+        for ok in [
+            "ws://127.0.0.1:3000/api/bridge/ws",
+            "ws://localhost:3000/api/bridge/ws?token=nxc_tok_secret",
+        ] {
+            assert!(parse_ws_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "ws://cloud.nexuscan.io/api/bridge/ws?token=nxc_tok_secret",
+            "ws://10.0.0.5:3000/x?token=nxc_tok_secret",
+            "wss://cloud.nexuscan.io/api/bridge/ws?token=nxc_tok_secret",
+        ] {
+            let err = parse_ws_url(bad).err().expect("must be refused");
+            let msg = err.to_string();
+            assert!(matches!(err, BridgeClientError::InsecureTransport(_)), "{msg}");
+            assert!(msg.contains("TLS not yet supported"), "{msg}");
+            assert!(!msg.contains("nxc_tok_secret"), "token leaked: {msg}");
+        }
+        let err = parse_ws_url("http://x?token=nxc_tok_secret").err().expect("bad scheme");
+        assert!(!err.to_string().contains("nxc_tok_secret"));
+        let err = parse_ws_url("ws://user:pw@127.0.0.1:1/").err().expect("credentials");
+        assert!(!err.to_string().contains("pw@"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn oversized_inbound_frame_is_rejected_before_allocation() {
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            // Text frame claiming a 1 TiB payload (64-bit length), no payload follows.
+            let mut hdr = vec![0x81u8, 127];
+            hdr.extend_from_slice(&(1u64 << 40).to_be_bytes());
+            sock.write_all(&hdr).await.expect("write");
+            let mut buf = [0u8; 64];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            buf
+        });
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        let mut transport = TcpWsTransport {
+            stream,
+            mask_counter: 1,
+        };
+        let err = transport.recv_text().await.expect_err("must fail");
+        assert!(matches!(err, BridgeClientError::FrameTooLarge { len } if len == 1 << 40), "{err}");
+        let close = server.await.expect("server");
+        assert_eq!(close[0], 0x88, "client must send a Close frame");
     }
 }

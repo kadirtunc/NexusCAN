@@ -201,7 +201,10 @@ impl EffectiveAgentConfig {
         if !cloud_url.starts_with("http://") && !cloud_url.starts_with("https://") {
             return Err(ConfigError::InvalidUrl {
                 field: "cloud.url",
-                detail: format!("expected http:// or https:// scheme, got '{cloud_url}'"),
+                detail: format!(
+                    "expected http:// or https:// scheme, got '{}'",
+                    nexus_cloud::redact_url(&cloud_url)
+                ),
             });
         }
 
@@ -230,7 +233,10 @@ impl EffectiveAgentConfig {
                 if !explicit_ws.starts_with("ws://") && !explicit_ws.starts_with("wss://") {
                     return Err(ConfigError::InvalidUrl {
                         field: "cloud.ws_bridge_url",
-                        detail: format!("expected ws:// or wss:// scheme, got '{explicit_ws}'"),
+                        detail: format!(
+                            "expected ws:// or wss:// scheme, got '{}'",
+                            nexus_cloud::redact_url(&explicit_ws)
+                        ),
                     });
                 }
                 explicit_ws
@@ -365,7 +371,10 @@ pub fn derive_ws_bridge_url(cloud_url: &str) -> Result<String, ConfigError> {
     } else {
         Err(ConfigError::InvalidUrl {
             field: "cloud.url",
-            detail: format!("expected http:// or https:// URL, got '{cloud_url}'"),
+            detail: format!(
+                "expected http:// or https:// URL, got '{}'",
+                nexus_cloud::redact_url(cloud_url)
+            ),
         })
     }
 }

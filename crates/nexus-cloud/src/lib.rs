@@ -19,12 +19,13 @@ pub mod client;
 pub mod pairing;
 pub mod protocol;
 pub mod sha256;
+pub mod url_safety;
 
 pub use cadence::{CadenceDecimator, ExponentialBackoff};
 pub use client::{
     spawn_bridge_client, BoxFuture, BridgeClientConfig, BridgeClientError, BridgeClientHandle,
     BridgeClientMetrics, BridgeConnector, BridgeTransport, ChannelBridgeTransport, SchemaUploader,
-    TcpWsConnector,
+    TcpWsConnector, MAX_WS_FRAME_PAYLOAD,
 };
 pub use pairing::{
     DeviceApiToken, DevicePairingState, PairingCode, PairingError, DEVICE_TOKEN_PREFIX,
@@ -37,6 +38,7 @@ pub use protocol::{
     InboundCloudMessage, LiveSignalWireDto, RateControlFrame, SchemaAckFrame, SchemaAckStatus,
 };
 pub use sha256::{sha256_digest, sha256_hex};
+pub use url_safety::{is_loopback_host, redact_url, TLS_NOT_SUPPORTED_MSG};
 
 #[cfg(test)]
 mod tests {

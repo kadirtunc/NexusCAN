@@ -930,6 +930,24 @@ listen_only = false
             .expect("GET /api/health must succeed");
         assert_eq!(health_code, 200);
 
+        // 4b. WP-1: DNS-rebinding Host header is refused with 403.
+        {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut stream = tokio::net::TcpStream::connect(status_addr)
+                .await
+                .expect("connect web status");
+            stream
+                .write_all(
+                    b"GET /api/status HTTP/1.1\r\nHost: evil.example:8080\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write");
+            let mut resp = Vec::new();
+            stream.read_to_end(&mut resp).await.expect("read");
+            let text = String::from_utf8_lossy(&resp);
+            assert!(text.starts_with("HTTP/1.1 403"), "rebinding Host must be 403: {text}");
+        }
+
         // 5. Trigger clean shutdown and verify rapid termination
         let t_stop = Instant::now();
         let final_snap = agent_handle.shutdown().await;

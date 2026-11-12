@@ -55,8 +55,13 @@ impl LoadedEdgeDatabase {
 
 #[derive(Debug, Error)]
 pub enum WsBridgeError {
+    /// The URL is always redacted (`nexus_cloud::redact_url`): no token / credentials.
     #[error("Unsupported or invalid WebSocket URL '{0}' (expected ws://host[:port]/path)")]
     InvalidWsUrl(String),
+
+    /// WP-10: plaintext WebSocket to a non-loopback host (URL redacted).
+    #[error("{msg} (refusing '{0}')", msg = nexus_cloud::TLS_NOT_SUPPORTED_MSG)]
+    InsecureTransport(String),
 
     #[error("WebSocket TCP connect/upgrade timed out")]
     ConnectTimeout,
@@ -135,10 +140,13 @@ struct ParsedWsEndpoint {
 }
 
 fn parse_ws_endpoint(url: &str) -> Result<ParsedWsEndpoint, WsBridgeError> {
+    if url.trim().starts_with("wss://") {
+        return Err(WsBridgeError::InsecureTransport(nexus_cloud::redact_url(url)));
+    }
     let rest = url
         .trim()
         .strip_prefix("ws://")
-        .ok_or_else(|| WsBridgeError::InvalidWsUrl(url.to_string()))?;
+        .ok_or_else(|| WsBridgeError::InvalidWsUrl(nexus_cloud::redact_url(url)))?;
 
     let (authority, path_part) = match rest.find('/') {
         Some(idx) => (&rest[..idx], &rest[idx..]),
@@ -146,23 +154,23 @@ fn parse_ws_endpoint(url: &str) -> Result<ParsedWsEndpoint, WsBridgeError> {
     };
 
     if authority.is_empty() {
-        return Err(WsBridgeError::InvalidWsUrl(url.to_string()));
+        return Err(WsBridgeError::InvalidWsUrl(nexus_cloud::redact_url(url)));
     }
 
     let (connect_host, port) = if authority.starts_with('[') {
         let end_bracket = authority
             .find(']')
-            .ok_or_else(|| WsBridgeError::InvalidWsUrl(url.to_string()))?;
+            .ok_or_else(|| WsBridgeError::InvalidWsUrl(nexus_cloud::redact_url(url)))?;
         let ipv6_host = &authority[1..end_bracket];
         let after = &authority[end_bracket + 1..];
         let p = if let Some(port_str) = after.strip_prefix(':') {
             port_str
                 .parse::<u16>()
-                .map_err(|_| WsBridgeError::InvalidWsUrl(url.to_string()))?
+                .map_err(|_| WsBridgeError::InvalidWsUrl(nexus_cloud::redact_url(url)))?
         } else if after.is_empty() {
             80
         } else {
-            return Err(WsBridgeError::InvalidWsUrl(url.to_string()));
+            return Err(WsBridgeError::InvalidWsUrl(nexus_cloud::redact_url(url)));
         };
         (ipv6_host.to_string(), p)
     } else {
@@ -170,15 +178,19 @@ fn parse_ws_endpoint(url: &str) -> Result<ParsedWsEndpoint, WsBridgeError> {
             Some((h, p_str)) => {
                 let p = p_str
                     .parse::<u16>()
-                    .map_err(|_| WsBridgeError::InvalidWsUrl(url.to_string()))?;
+                    .map_err(|_| WsBridgeError::InvalidWsUrl(nexus_cloud::redact_url(url)))?;
                 (h.to_string(), p)
             }
             None => (authority.to_string(), 80),
         }
     };
 
-    if connect_host.is_empty() {
-        return Err(WsBridgeError::InvalidWsUrl(url.to_string()));
+    if connect_host.is_empty() || authority.contains('@') {
+        return Err(WsBridgeError::InvalidWsUrl(nexus_cloud::redact_url(url)));
+    }
+    // WP-10: no TLS yet -> plaintext only towards a loopback test server.
+    if !nexus_cloud::is_loopback_host(&connect_host) {
+        return Err(WsBridgeError::InsecureTransport(nexus_cloud::redact_url(url)));
     }
 
     Ok(ParsedWsEndpoint {
@@ -1051,4 +1063,38 @@ async fn handle_inbound_text_frame(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod wp10_url_tests {
+    use super::*;
+
+    #[test]
+    fn ws_endpoint_is_loopback_only_and_errors_never_contain_the_token() {
+        assert!(parse_ws_endpoint("ws://127.0.0.1:3000/api/bridge/ws?token=nxc_tok_secret").is_ok());
+        assert!(parse_ws_endpoint("ws://[::1]:3000/api/bridge/ws").is_ok());
+        assert!(parse_ws_endpoint("ws://localhost/api/bridge/ws").is_ok());
+        for bad in [
+            "ws://cloud.nexuscan.io/api/bridge/ws?token=nxc_tok_secret",
+            "wss://cloud.nexuscan.io/api/bridge/ws?token=nxc_tok_secret",
+            "ws://192.168.0.10:3000/api/bridge/ws?token=nxc_tok_secret",
+        ] {
+            let err = parse_ws_endpoint(bad).err().expect("refused");
+            let msg = err.to_string();
+            assert!(matches!(err, WsBridgeError::InsecureTransport(_)), "{msg}");
+            assert!(msg.contains("TLS not yet supported"), "{msg}");
+            assert!(!msg.contains("nxc_tok_secret"), "token leaked: {msg}");
+        }
+        for invalid in [
+            "http://127.0.0.1:3000/?token=nxc_tok_secret",
+            "ws://127.0.0.1:notaport/?token=nxc_tok_secret",
+            "ws://:3000/?token=nxc_tok_secret",
+            "ws://u:nxc_tok_secret@127.0.0.1:3000/",
+        ] {
+            let err = parse_ws_endpoint(invalid).err().expect("invalid");
+            let msg = err.to_string();
+            assert!(matches!(err, WsBridgeError::InvalidWsUrl(_)), "{msg}");
+            assert!(!msg.contains("nxc_tok_secret"), "token leaked: {msg}");
+        }
+    }
 }
