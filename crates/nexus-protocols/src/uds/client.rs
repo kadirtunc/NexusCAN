@@ -29,7 +29,9 @@ mod format;
 mod nrc;
 
 pub use capture::{classify_kind, IsoTpCapture, TxnTag, ISOTP_CAPTURE_CAPACITY};
-pub use conversation::CONVERSATION_CAPACITY;
+pub use bridge::{ISOTP_MAX_WFT, MAX_RESPONSE_PDU};
+pub use conversation::{CONVERSATION_BYTE_BUDGET, CONVERSATION_CAPACITY};
+pub use engine::MAX_REQUEST_PDU;
 pub use format::{decode_did_record, format_dtc_code, response_matches};
 pub use nrc::nrc_name;
 

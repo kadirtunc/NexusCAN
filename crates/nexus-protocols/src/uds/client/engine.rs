@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use super::bridge::{BridgeShared, PduMark, PortAdapter, PortMsg};
+use super::bridge::{BridgeShared, PduMark, PortAdapter, PortMsg, ISOTP_MAX_WFT, MAX_RESPONSE_PDU};
 use super::capture::TxnTag;
 use super::conversation::{Conversation, NewEvent};
 use super::format::{negative_code, parse_session_timing, request_sid_of_response, request_suppresses_positive, response_matches};
@@ -49,6 +49,10 @@ pub const ISOTP_TIMEOUT: Duration = Duration::from_millis(1000);
 const RX_EXTENSION: Duration = Duration::from_millis(100);
 /// Absolute upper bound for one exchange (safety net only).
 const MAX_EXCHANGE: Duration = Duration::from_secs(600);
+/// Largest request PDU accepted (`automotive` would segment up to 4 GiB over CAN-FD).
+pub const MAX_REQUEST_PDU: usize = 64 * 1024;
+/// Largest STmin an ECU can demand (0x7F); used to size the send deadline of long requests.
+const MAX_STMIN: Duration = Duration::from_millis(127);
 /// Best-effort S3 loss heuristic: NRC 0x7F / 0x33 in a believed non-default session after the
 /// tester was silent at least this long (and TesterPresent off) → assume the ECU fell back to
 /// the default session. 2 s is the usual S3client; S3server is 5 s (ecusim: 3 s).
@@ -277,6 +281,36 @@ impl Inner {
         }
     }
 
+    /// Total time allowed for sending one request: `max(P2*client, N_Bs × (N_WFTmax + 1))` plus the
+    /// worst-case STmin for every consecutive frame of a multi-frame request.
+    fn send_budget(&self, len: usize) -> Duration {
+        let (_, p2s) = self.timings();
+        let base = p2s.max(ISOTP_TIMEOUT * (ISOTP_MAX_WFT + 1));
+        let cf_payload = if self.config.use_fd { 63 } else { 7 };
+        let cfs = len.saturating_sub(self.max_sf_len()).div_ceil(cf_payload);
+        base + MAX_STMIN * u32::try_from(cfs).unwrap_or(u32::MAX).min(100_000)
+    }
+
+    /// Tears the ISO-TP stack down after an aborted send; [`Self::ensure_stack`] rebuilds it.
+    /// The old worker is joined (off the runtime thread) before a new one may share the port queue.
+    async fn reset_stack(&self, eng: &mut Engine) {
+        let Some(old) = eng.stack.take() else { return };
+        old.rx_task.abort();
+        let adapter = old.adapter.clone();
+        drop(old);
+        let kick = self.kick.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            // `close` signals shutdown and joins; the worker notices on its next wake-up.
+            let waker = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1));
+                let _ = kick.try_send(PortMsg::Kick);
+            });
+            adapter.close();
+            let _ = waker.join();
+        })
+        .await;
+    }
+
     // ─── stack lifecycle ────────────────────────────────────────────────────
 
     fn ensure_stack(self: &Arc<Self>, eng: &mut Engine) -> Result<(), DiagError> {
@@ -477,6 +511,12 @@ impl Inner {
         if self.is_closed() {
             return Err(self.closed_error());
         }
+        if req.len() > MAX_REQUEST_PDU {
+            return Err(err(
+                DiagErrorCode::InvalidInput,
+                format!("request PDU of {} bytes exceeds the {MAX_REQUEST_PDU}-byte limit", req.len()),
+            ));
+        }
         if addressing == UdsAddressing::Functional {
             if self.func_cfg.is_none() {
                 return Err(err(DiagErrorCode::InvalidInput, "functional addressing requested but no functionalId configured"));
@@ -509,6 +549,8 @@ impl Inner {
         let (tx, mut rx) = mpsc::channel::<RxItem>(32);
         *self.slot.lock() = Some(tx);
         self.bridge.clear_reject();
+        // Accept response First Frames from now on (idle FFs are dropped, HIGH-07.3).
+        self.bridge.open_rx();
         self.bridge.arm_tx();
         let arm_seq = self.bridge.seq_now();
         // Traffic Dock: every frame captured from here until `tag` drops belongs to this
@@ -517,8 +559,38 @@ impl Inner {
         let tag = self.bridge.capture.begin_txn();
         let _ = self.kick.try_send(PortMsg::Kick);
 
-        let sent = Transport::send(transport, req).await;
+        // HIGH-07.2: `automotive` restarts N_Bs on every FC.WAIT, so a misbehaving ECU could hold
+        // the send (and the session lock) forever. Bound it by a WAIT count (sender-side N_WFTmax)
+        // and a total send deadline; on abort the ISO-TP stack is rebuilt for the next request.
+        let budget = self.send_budget(req.len());
+        let sent = tokio::select! {
+            r = Transport::send(transport, req) => Ok(r),
+            () = self.bridge.wait_fc_limit() => Err("isotp_fc_wait"),
+            () = tokio::time::sleep(budget) => Err("isotp_send_deadline"),
+        };
         let confirm = self.bridge.disarm_tx();
+        let sent = match sent {
+            Ok(r) => r,
+            Err(detail) => {
+                self.finish_slot(&mut rx, None);
+                self.push_failure(
+                    NewEvent::new(ConversationEventKind::Timeout, addressing, now_monotonic_us())
+                        .sid(Some(sid))
+                        .bytes(req)
+                        .detail(detail)
+                        .origin(origin),
+                    Some(&tag),
+                );
+                drop(tag);
+                self.reset_stack(eng).await;
+                let msg = if detail == "isotp_fc_wait" {
+                    format!("request not sent: ECU answered with more than {ISOTP_MAX_WFT} Flow Control WAIT frames")
+                } else {
+                    format!("request not sent within {} ms (flow control / TX confirmation stalled)", budget.as_millis())
+                };
+                return Err(err(DiagErrorCode::TimeoutIsotp, msg));
+            }
+        };
         if let Err(e) = sent {
             self.finish_slot(&mut rx, None);
             return Err(self.send_error(e, req, addressing, origin, &tag));
@@ -562,7 +634,24 @@ impl Inner {
         let mut deadline = req.at + total.map_or(p2c, |t| t.min(MAX_EXCHANGE));
         let mut pending: u32 = 0;
         loop {
-            let item = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), rx.recv()).await;
+            let item = tokio::select! {
+                r = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), rx.recv()) => r,
+                len = self.bridge.wait_oversize(arm_seq) => {
+                    // HIGH-07.1: the FF was dropped before `automotive` (no FC.CTS, nothing buffered).
+                    let elapsed = us(req.at.elapsed());
+                    self.push(
+                        NewEvent::new(ConversationEventKind::TransportError, req.addressing, req.ts.saturating_add(elapsed))
+                            .sid(sid)
+                            .request(Some(req.seq), Some(elapsed))
+                            .detail("isotp_pdu_too_large")
+                            .origin(req.origin),
+                    );
+                    return Err(err(
+                        DiagErrorCode::IsotpError,
+                        format!("response too large: First Frame announces {len} bytes (limit {MAX_RESPONSE_PDU})"),
+                    ));
+                }
+            };
             let item = match item {
                 Ok(Some(i)) => i,
                 Ok(None) => RxItem::Ended,
@@ -679,6 +768,7 @@ impl Inner {
 
     /// Ends an exchange: stop routing PDUs to it and log whatever is still queued as stale.
     fn finish_slot(&self, rx: &mut mpsc::Receiver<RxItem>, current: Option<&ReqInfo>) {
+        self.bridge.close_rx();
         *self.slot.lock() = None;
         rx.close();
         while let Ok(item) = rx.try_recv() {

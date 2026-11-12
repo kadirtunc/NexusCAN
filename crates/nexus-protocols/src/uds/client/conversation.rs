@@ -11,6 +11,10 @@ use crate::uds::dto::{ConversationEventDto, ConversationEventKind, ConversationP
 /// Ring capacity (contract: ≥ 10 000 events).
 pub const CONVERSATION_CAPACITY: usize = 16_384;
 const _: () = assert!(CONVERSATION_CAPACITY >= 10_000);
+/// Byte budget for the payloads (`bytes`) retained in the ring (MED-03 / HIGH-07.1). The entry
+/// count alone does not bound memory: 16 384 × 64 KiB responses would be 1 GiB. Oldest events are
+/// evicted first; the newest event is always kept.
+pub const CONVERSATION_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// Upper bound for one page, independent of the caller's `max`.
 pub const MAX_PAGE: usize = 10_000;
 
@@ -75,6 +79,8 @@ impl NewEvent {
 pub struct Conversation {
     events: VecDeque<ConversationEventDto>,
     capacity: usize,
+    byte_budget: usize,
+    bytes: usize,
     next_seq: u64,
 }
 
@@ -86,17 +92,37 @@ impl Default for Conversation {
 
 impl Conversation {
     pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_limits(capacity, CONVERSATION_BYTE_BUDGET)
+    }
+
+    pub fn with_limits(capacity: usize, byte_budget: usize) -> Self {
         let capacity = capacity.max(1);
-        Self { events: VecDeque::with_capacity(capacity.min(1024)), capacity, next_seq: 1 }
+        Self { events: VecDeque::with_capacity(capacity.min(1024)), capacity, byte_budget, bytes: 0, next_seq: 1 }
+    }
+
+    fn event_bytes(e: &ConversationEventDto) -> usize {
+        e.bytes.len() + e.detail.as_ref().map_or(0, String::len)
+    }
+
+    /// Payload bytes currently retained.
+    #[cfg(test)]
+    pub fn retained_bytes(&self) -> usize {
+        self.bytes
     }
 
     /// Appends an event and returns its `seq` (starts at 1).
     pub fn push(&mut self, ev: NewEvent) -> u64 {
         let seq = self.next_seq;
         self.next_seq += 1;
-        if self.events.len() == self.capacity {
-            self.events.pop_front();
+        let incoming = ev.bytes.len() + ev.detail.as_ref().map_or(0, String::len);
+        while !self.events.is_empty()
+            && (self.events.len() >= self.capacity || self.bytes + incoming > self.byte_budget)
+        {
+            if let Some(old) = self.events.pop_front() {
+                self.bytes -= Self::event_bytes(&old);
+            }
         }
+        self.bytes += incoming;
         self.events.push_back(ConversationEventDto {
             seq,
             timestamp_us: ev.timestamp_us,
@@ -209,6 +235,26 @@ mod tests {
         assert!(p.truncated);
         assert_eq!(p.events.len(), 3);
         assert_eq!(p.last_seq, 3);
+    }
+
+    #[test]
+    fn byte_budget_evicts_oldest_and_bounds_memory() {
+        let mut c = Conversation::with_limits(1000, 10_000);
+        let big = vec![0u8; 4_000];
+        for i in 0..10 {
+            c.push(NewEvent::new(ConversationEventKind::Response, UdsAddressing::Physical, i).bytes(&big));
+        }
+        assert!(c.retained_bytes() <= 10_000, "{}", c.retained_bytes());
+        let p = c.since(0, 100);
+        assert_eq!(p.events.len(), 2);
+        assert!(p.truncated);
+        assert_eq!(p.last_seq, 10);
+        // A single event larger than the budget is still kept (alone).
+        c.push(NewEvent::new(ConversationEventKind::Response, UdsAddressing::Physical, 11).bytes(&vec![1u8; 20_000]));
+        assert_eq!(c.since(0, 100).events.len(), 1);
+        c.push(ev(12));
+        assert_eq!(c.since(0, 100).events.len(), 1);
+        assert_eq!(c.retained_bytes(), 2);
     }
 
     #[test]

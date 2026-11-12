@@ -20,7 +20,7 @@
 //! confirmation time, and where each received ISO-TP PDU started (stale detection).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,30 @@ const IDLE_WAIT: Duration = Duration::from_millis(250);
 const MIN_WAIT: Duration = Duration::from_micros(200);
 /// Bus id used inside `automotive` (one port = one bus).
 pub const CRATE_BUS: u8 = 0;
+/// Largest ISO-TP response PDU the client reassembles (HIGH-07.1). A First Frame announcing more
+/// (e.g. the 32-bit escape `10 00 FF FF FF F0`) is refused before `automotive` sees it: no FC.CTS is
+/// sent and nothing is buffered. Classic CAN FFs are ≤ 4095 by encoding; this caps the escape form.
+pub const MAX_RESPONSE_PDU: usize = 64 * 1024;
+/// Most Flow Control WAIT frames accepted while sending one request (sender-side N_WFTmax,
+/// HIGH-07.2). `automotive` restarts N_Bs on every WAIT and would otherwise wait forever.
+pub const ISOTP_MAX_WFT: u32 = 10;
+/// A multi-frame reception whose last frame is older than this is no longer "in progress"
+/// (ISO-TP N_Cr is 1000 ms); keeps a stalled / refused FF from extending the response deadline.
+const TRACKER_STALE: Duration = Duration::from_millis(1100);
+
+/// Announced PDU length of a First Frame (`None` if `data` is not a well-formed FF).
+fn first_frame_len(data: &[u8]) -> Option<usize> {
+    let b0 = *data.first()?;
+    if b0 >> 4 != 1 || data.len() < 8 {
+        return None;
+    }
+    let short = (usize::from(b0 & 0x0F) << 8) | usize::from(*data.get(1)?);
+    if short != 0 {
+        return Some(short);
+    }
+    let b = data.get(2..6)?;
+    Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+}
 
 /// Message from the pump (or the client) to the adapter running in the ISO-TP worker.
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +120,7 @@ struct Partial {
     total: usize,
     received: usize,
     next_sn: u8,
+    last_at: Instant,
 }
 
 /// Minimal passive ISO-TP length tracker for frames on the response id. It mirrors the
@@ -163,6 +188,7 @@ impl RxTracker {
                     total,
                     received,
                     next_sn: 1,
+                    last_at: at,
                 });
             }
             2 => {
@@ -173,6 +199,7 @@ impl RxTracker {
                 }
                 p.received += dlc.saturating_sub(1);
                 p.next_sn = (p.next_sn + 1) & 0x0F;
+                p.last_at = at;
                 if p.received >= p.total {
                     self.partial = None;
                     self.push(PduMark {
@@ -209,7 +236,12 @@ impl RxTracker {
 
     /// Start sequence of a multi-frame reception in progress, if any.
     pub fn in_progress_since(&self) -> Option<u64> {
-        self.partial.map(|p| p.start_seq)
+        self.partial.filter(|p| p.last_at.elapsed() <= TRACKER_STALE).map(|p| p.start_seq)
+    }
+
+    /// Forget a reception in progress (its First Frame was superseded by a refused one).
+    fn reset_partial(&mut self) {
+        self.partial = None;
     }
 }
 
@@ -241,6 +273,20 @@ pub struct BridgeShared {
     pub dropped: AtomicU64,
     /// Preallocated ring of every Rx / TxConfirmed frame (ISO-TP Monitor).
     pub capture: IsoTpCapture,
+    /// An exchange is waiting for a response. While `false` the session is idle and a First
+    /// Frame on the response id (another tester's ECU answer) is NOT passed to `automotive`, whose
+    /// persistent receiver would otherwise transmit FC.CTS on our behalf (HIGH-07.3).
+    rx_open: AtomicBool,
+    /// FC.WAIT frames received since [`Self::arm_tx`].
+    fc_waits: AtomicU32,
+    /// Most recent oversized First Frame refused while an exchange was open: `(pump seq, length)`.
+    oversize: Mutex<Option<(u64, usize)>>,
+    /// Wakes the engine for [`Self::wait_fc_limit`] / [`Self::wait_oversize`].
+    alert: tokio::sync::Notify,
+    /// First Frames refused because the announced length exceeds [`MAX_RESPONSE_PDU`].
+    pub refused_oversize_ff: AtomicU64,
+    /// First Frames dropped while idle (no FC sent for someone else's transfer).
+    pub dropped_idle_ff: AtomicU64,
 }
 
 impl BridgeShared {
@@ -254,6 +300,47 @@ impl BridgeShared {
             hal_closed: AtomicBool::new(false),
             dropped: AtomicU64::new(0),
             capture: IsoTpCapture::default(),
+            rx_open: AtomicBool::new(false),
+            fc_waits: AtomicU32::new(0),
+            oversize: Mutex::new(None),
+            alert: tokio::sync::Notify::new(),
+            refused_oversize_ff: AtomicU64::new(0),
+            dropped_idle_ff: AtomicU64::new(0),
+        }
+    }
+
+    /// An exchange starts waiting for its response (call before the request can reach the bus).
+    pub fn open_rx(&self) {
+        self.rx_open.store(true, Ordering::Release);
+    }
+
+    /// The exchange ended: the session is idle again.
+    pub fn close_rx(&self) {
+        self.rx_open.store(false, Ordering::Release);
+    }
+
+    /// Resolves once more than [`ISOTP_MAX_WFT`] FC.WAIT frames arrived since [`Self::arm_tx`].
+    pub async fn wait_fc_limit(&self) {
+        loop {
+            // Register before checking so a notification between check and await is not lost.
+            let notified = self.alert.notified();
+            if self.fc_waits.load(Ordering::Acquire) > ISOTP_MAX_WFT {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Resolves with the announced length of an oversized First Frame refused after `after_seq`.
+    pub async fn wait_oversize(&self, after_seq: u64) -> usize {
+        loop {
+            let notified = self.alert.notified();
+            if let Some((seq, len)) = *self.oversize.lock() {
+                if seq > after_seq {
+                    return len;
+                }
+            }
+            notified.await;
         }
     }
 
@@ -267,6 +354,7 @@ impl BridgeShared {
         let mut a = self.tx_arm.lock();
         a.armed = true;
         a.confirm = None;
+        self.fc_waits.store(0, Ordering::Release);
     }
 
     /// Stops recording and returns the last confirmation seen since [`Self::arm_tx`].
@@ -297,10 +385,34 @@ impl BridgeShared {
         *self.last_reject.lock() = Some(r);
     }
 
-    fn observe(&self, ev: &DiagPortEvent, seq: u64, at: Instant) {
+    /// Observes one port event in bus order and decides whether it is forwarded to `automotive`
+    /// (`false` = dropped before the ISO-TP stack; it is still in the ISO-TP Monitor capture).
+    fn observe(&self, ev: &DiagPortEvent, seq: u64, at: Instant) -> bool {
         match ev {
             DiagPortEvent::Rx(f) => {
                 if self.addressing.is_response(f) && f.is_fd() == self.addressing.fd {
+                    let data = f.payload();
+                    if let Some(len) = first_frame_len(data) {
+                        if !self.rx_open.load(Ordering::Acquire) {
+                            // Idle: not our transfer. Without the FF, `automotive` ignores the CFs too.
+                            self.dropped_idle_ff.fetch_add(1, Ordering::Relaxed);
+                            self.tracker.lock().reset_partial();
+                            return false;
+                        }
+                        if len > MAX_RESPONSE_PDU {
+                            self.refused_oversize_ff.fetch_add(1, Ordering::Relaxed);
+                            self.tracker.lock().reset_partial();
+                            *self.oversize.lock() = Some((seq, len));
+                            self.alert.notify_waiters();
+                            return false;
+                        }
+                    } else if data.first().is_some_and(|b| *b == 0x31) && self.tx_arm.lock().armed {
+                        // FC.WAIT for the request being sent.
+                        let n = self.fc_waits.fetch_add(1, Ordering::AcqRel) + 1;
+                        if n > ISOTP_MAX_WFT {
+                            self.alert.notify_waiters();
+                        }
+                    }
                     self.tracker.lock().feed(f, seq, at);
                 }
             }
@@ -316,6 +428,7 @@ impl BridgeShared {
             }
             DiagPortEvent::TxRejected(_, why) => self.record_reject(*why),
         }
+        true
     }
 }
 
@@ -347,7 +460,9 @@ pub fn pump_loop(
             }
             DiagPortEvent::TxRejected(..) => {}
         }
-        shared.observe(&ev, seq, Instant::now());
+        if !shared.observe(&ev, seq, Instant::now()) {
+            continue;
+        }
         if tx.try_send(PortMsg::Event(ev)).is_err() {
             shared.dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -583,6 +698,76 @@ mod tests {
                 (4, IsoTpDirection::Rx, IsoTpFrameKind::Consecutive, 14),
             ]
         );
+    }
+
+    fn shared() -> BridgeShared {
+        BridgeShared::new(Addressing { request_id: 0x7E2, response_id: 0x7EA, functional_id: None, extended: false, fd: false })
+    }
+
+    #[test]
+    fn first_frame_len_parses_short_and_escape_forms() {
+        assert_eq!(first_frame_len(&[0x1F, 0xFF, 0, 0, 0, 0, 0, 0]), Some(4095));
+        assert_eq!(first_frame_len(&[0x10, 0x00, 0xFF, 0xFF, 0xFF, 0xF0, 0, 0]), Some(0xFFFF_FFF0));
+        assert_eq!(first_frame_len(&[0x10, 0x14, 0, 0, 0]), None, "short DLC");
+        assert_eq!(first_frame_len(&[0x21, 0, 0, 0, 0, 0, 0, 0]), None, "CF");
+    }
+
+    #[test]
+    fn idle_first_frame_is_not_forwarded_to_isotp() {
+        let s = shared();
+        let ff = DiagPortEvent::Rx(rx(0x7EA, &[0x10, 0x14, 0x62, 0xF1, 0x90, 1, 2, 3], 1));
+        assert!(!s.observe(&ff, 1, Instant::now()), "idle FF must be dropped (no FC.CTS)");
+        assert_eq!(s.dropped_idle_ff.load(Ordering::Relaxed), 1);
+        let sf = DiagPortEvent::Rx(rx(0x7EA, &[0x03, 0x7F, 0x22, 0x31, 0, 0, 0, 0], 2));
+        assert!(s.observe(&sf, 2, Instant::now()), "SFs are still forwarded (logged as stale)");
+        s.open_rx();
+        assert!(s.observe(&ff, 3, Instant::now()), "FF during an exchange is forwarded");
+        s.close_rx();
+        assert!(!s.observe(&ff, 4, Instant::now()));
+    }
+
+    #[test]
+    fn oversized_first_frame_is_refused_and_signalled() {
+        let s = shared();
+        s.open_rx();
+        let huge = DiagPortEvent::Rx(rx(0x7EA, &[0x10, 0x00, 0xFF, 0xFF, 0xFF, 0xF0, 0x62, 0xF1], 1));
+        assert!(!s.observe(&huge, 7, Instant::now()));
+        assert_eq!(*s.oversize.lock(), Some((7, 0xFFFF_FFF0)));
+        assert!(!s.rx_in_progress_after(0), "a refused FF must not extend the response deadline");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap_or_else(|e| panic!("{e}"));
+        let len = rt.block_on(async { tokio::time::timeout(Duration::from_millis(100), s.wait_oversize(6)).await });
+        assert_eq!(len.ok(), Some(0xFFFF_FFF0));
+        // An older refusal does not fail a newer exchange.
+        let stale = rt.block_on(async { tokio::time::timeout(Duration::from_millis(20), s.wait_oversize(7)).await });
+        assert!(stale.is_err());
+        let limit = DiagPortEvent::Rx(rx(0x7EA, &[0x10, 0x00, 0x00, 0x01, 0x00, 0x00, 0x62, 0xF1], 2));
+        assert!(s.observe(&limit, 8, Instant::now()), "exactly MAX_RESPONSE_PDU is accepted");
+    }
+
+    #[test]
+    fn fc_wait_frames_are_counted_only_while_sending() {
+        let s = shared();
+        let wait = DiagPortEvent::Rx(rx(0x7EA, &[0x31, 0, 0, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA], 1));
+        s.observe(&wait, 1, Instant::now());
+        assert_eq!(s.fc_waits.load(Ordering::Acquire), 0);
+        s.arm_tx();
+        for i in 0..=ISOTP_MAX_WFT {
+            s.observe(&wait, 2 + u64::from(i), Instant::now());
+        }
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap_or_else(|e| panic!("{e}"));
+        let hit = rt.block_on(async { tokio::time::timeout(Duration::from_millis(100), s.wait_fc_limit()).await });
+        assert!(hit.is_ok());
+        s.arm_tx();
+        let reset = rt.block_on(async { tokio::time::timeout(Duration::from_millis(20), s.wait_fc_limit()).await });
+        assert!(reset.is_err(), "arm_tx resets the WAIT count");
+    }
+
+    #[test]
+    fn tracker_partial_goes_stale_after_n_cr() {
+        let mut t = RxTracker::default();
+        let old = Instant::now().checked_sub(Duration::from_secs(2)).unwrap_or_else(Instant::now);
+        t.feed(&rx(0x7EA, &[0x10, 0x14, 0x62, 0xF1, 0x90, 1, 2, 3], 1), 5, old);
+        assert_eq!(t.in_progress_since(), None, "FF without CFs for > N_Cr is not in progress");
     }
 
     #[test]
