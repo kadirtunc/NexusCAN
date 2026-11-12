@@ -1,18 +1,51 @@
-//! Tauri v2 application entry point registering `AppState` and all 20 IPC commands.
+//! Tauri v2 application entry point: resolves the persistent data directory, registers
+//! `AppState` and every IPC command listed in [`app_commands::APP_COMMANDS`].
 
 #![forbid(unsafe_code)]
 
+pub mod app_commands;
 pub mod commands;
 pub mod pipeline;
 
+use nexus_hal::storage::DataRoot;
 use pipeline::AppState;
+use tauri::{Manager, WebviewWindowBuilder};
+
+/// WP-8 / HIGH-09: persistent `projects/` + `traces/` location.
+///
+/// * Release builds: always `app_local_data_dir()` (e.g. `~/.local/share/io.nexuscan.analyzer`,
+///   `%LOCALAPPDATA%\io.nexuscan.analyzer`, `~/Library/Application Support/io.nexuscan.analyzer`).
+///   No environment override and no dependence on the build machine's source checkout.
+/// * Debug builds: `NEXUS_DATA_DIR` if set, else the repo-relative dev layout
+///   (`<repo>/projects`, `<repo>/traces`) so `cargo tauri dev` keeps using the checkout.
+fn resolve_data_root<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<DataRoot, Box<dyn std::error::Error>> {
+    #[cfg(debug_assertions)]
+    {
+        let _ = app;
+        Ok(DataRoot::resolve_default())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        Ok(DataRoot::under(app.path().app_local_data_dir()?))
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app_state = AppState::new();
-
     tauri::Builder::default()
-        .manage(app_state)
+        .setup(|app| {
+            let data_root = resolve_data_root(app.handle())?;
+            data_root.ensure_dirs()?;
+            app.manage(AppState::with_data_root(data_root));
+            // The main window is declared with `"create": false` and built only after
+            // `AppState` is managed, so no IPC call can observe a missing state.
+            for window_config in app.config().app.windows.clone() {
+                WebviewWindowBuilder::from_config(app.handle(), &window_config)?.build()?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::cmd_list_devices,
             commands::cmd_probe_drivers,

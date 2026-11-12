@@ -2213,6 +2213,7 @@ dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
  "flate2",
+ "getrandom 0.3.4",
  "indexmap 2.14.2",
  "nexus-core",
  "nexus-netdb",
