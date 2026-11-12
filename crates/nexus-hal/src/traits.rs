@@ -96,7 +96,7 @@ impl ListenOnlyEnforcement {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Hardware => "hardware",
-            Self::SoftwareOnly => "software_only",
+            Self::SoftwareOnly => "softwareOnly",
             Self::Virtual => "virtual",
         }
     }

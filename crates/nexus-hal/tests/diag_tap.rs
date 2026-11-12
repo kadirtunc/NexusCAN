@@ -142,7 +142,11 @@ fn gate_refuses_to_open_taps() {
     let err = engine.open_diag_tap(0, &filters, 64).err().expect("panic");
     assert_eq!(err.code, DiagErrorCode::PanicLatched);
 
-    engine.cmd_arm_active_bus(0, true).expect("re-arm clears panic");
+    // WP-4: arming no longer clears the latch; it must be cleared explicitly.
+    let err = engine.cmd_arm_active_bus(0, true).expect_err("arm while latched");
+    assert!(err.to_string().starts_with("PANIC_LATCHED:"), "{err}");
+    engine.cmd_clear_panic_latch();
+    engine.cmd_arm_active_bus(0, true).expect("re-arm after clearing the latch");
     assert!(engine.open_diag_tap(0, &filters, 64).is_ok());
 
     let err = engine.open_diag_tap(0, &[], 64).err().expect("no filters");
@@ -307,6 +311,7 @@ fn diag_commands_respect_gate_and_manage_sessions() {
     // A refused reopen must not discard the closed session and its log.
     let after = engine.cmd_diag_get_conversation(cfg2.clone(), 0, None).expect("page").events.len();
     assert!(after >= before, "conversation lost after gate refusal ({before} -> {after})");
+    engine.cmd_clear_panic_latch();
     engine.cmd_arm_active_bus(0, true).expect("re-arm");
     engine.cmd_diag_open_session(cfg2.clone()).expect("reopen after re-arm");
 
@@ -322,4 +327,43 @@ fn diag_commands_respect_gate_and_manage_sessions() {
     engine.cmd_diag_close_session(cfg2).expect("close is idempotent");
     std::thread::sleep(Duration::from_millis(20));
     assert_eq!(engine.diag_tap_count(0), 0);
+}
+
+/// HIGH-07.4: TX verdicts must survive an RX burst that fills the tap's event queue.
+#[test]
+fn tx_verdicts_are_not_lost_when_rx_queue_is_full() {
+    let engine = engine();
+    let cfg = ChannelConfigDto {
+        bus_id: 0,
+        listen_only: false,
+        mock_fps_preset: Some(10_000),
+        ..ChannelConfigDto::default()
+    };
+    engine
+        .cmd_connect_bus(MOCK0_DEVICE_ID.to_string(), cfg)
+        .expect("connect mock0");
+    engine.cmd_arm_active_bus(0, true).expect("arm");
+
+    // Accept-all filter + minimum depth: the mock traffic floods the queue immediately.
+    let accept_all = DiagTapFilter { id: 0, mask: 0, extended: None };
+    let tap = engine.open_diag_tap(0, &[accept_all], 16).expect("tap");
+    std::thread::sleep(Duration::from_millis(40));
+    assert!(tap.status().rx_dropped() > 0, "RX queue must be saturated for this test");
+
+    const SENDS: usize = 8;
+    for i in 0..SENDS {
+        tap.send(frame(REQ, i as u8)).expect("queued");
+    }
+    std::thread::sleep(Duration::from_millis(40));
+
+    let mut confirmed = 0usize;
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while confirmed < SENDS && Instant::now() < deadline {
+        match tap.recv_timeout(Duration::from_millis(5)) {
+            Some(DiagPortEvent::TxConfirmed(f)) if f.arb_id == REQ => confirmed += 1,
+            Some(DiagPortEvent::TxRejected(_, why)) => panic!("unexpected reject {why:?}"),
+            _ => {}
+        }
+    }
+    assert_eq!(confirmed, SENDS, "every TxConfirmed must reach the origin tap under RX flood");
 }

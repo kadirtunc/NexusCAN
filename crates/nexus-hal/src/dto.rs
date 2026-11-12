@@ -84,11 +84,10 @@ pub struct BusHealthDto {
     pub bus_state: String,
     pub tx_error_count: u32,
     pub rx_error_count: u32,
-    /// D-005: how Listen-Only is enforced, present only while `listen_only == true`.
-    /// `"hardware"` (controller silent mode), `"software_only"` (TX blocked in software, the
+    /// D-005 / WP-5: how Listen-Only is enforced; `null` while the bus is not listen-only.
+    /// `"hardware"` (controller silent mode), `"softwareOnly"` (TX blocked in software, the
     /// physical controller may still ACK frames: HMI must warn), `"virtual"` (vcan/mock).
-    /// Optional & omitted when `None` so older HMI builds keep working.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub listen_only_enforcement: Option<String>,
 }
 
@@ -186,6 +185,15 @@ pub struct PanicStopResultDto {
     pub stopped_periodic_jobs: usize,
     pub disarmed_buses: usize,
     pub timestamp_us: u64,
+}
+
+/// WP-4: result of `cmd_reset_session` (cold-start reset that never latches Panic Stop).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetSessionResultDto {
+    pub stopped_periodic_jobs: usize,
+    pub disarmed_buses: usize,
+    pub disconnected_buses: usize,
 }
 
 /// Result returned by `cmd_transmit_signal_frame` and `cmd_transmit_raw_frame`.

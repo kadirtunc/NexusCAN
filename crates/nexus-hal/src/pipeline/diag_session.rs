@@ -238,6 +238,7 @@ impl PipelineEngine {
             listen_only: bus.listen_only,
             tx_armed: Arc::clone(&bus.tx_armed),
             panic_latched: Arc::clone(&self.tx_panic_latched),
+            tx_epoch: Arc::clone(&self.tx_epoch),
         };
         gate.verdict()
             .map_err(|r| reject_to_diag_error(bus_id, r))?;

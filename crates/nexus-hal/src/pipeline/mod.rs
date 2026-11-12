@@ -14,7 +14,7 @@ use crate::drivers::probe::probe_all_drivers;
 use crate::dto::{
     BusHealthDto, ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto, DeviceDescriptorDto,
     DriverProbeReportDto, LoadedTraceFileDto, PanicStopResultDto, PeriodicTxJobDto,
-    ProjectSummaryDto, StartTraceReplayArgsDto, TelemetrySnapshotDto, TraceFileSummaryDto,
+    ProjectSummaryDto, ResetSessionResultDto, StartTraceReplayArgsDto, TelemetrySnapshotDto, TraceFileSummaryDto,
     TraceReplayControlArgsDto, TraceReplayStatusDto, TraceStorageInfoDto, TxTransmitResultDto,
 };
 use crate::error::{AdapterError, HalError};
@@ -70,6 +70,10 @@ pub(crate) struct TxDispatchRequest {
     pub(crate) hw_tx_counter: Option<Arc<AtomicU64>>,
     /// D-003: diag-tap TX verdicts (`TxConfirmed` / `TxRejected`) go to the origin tap only.
     pub(crate) origin: TxOrigin,
+    /// WP-4: TX epoch observed when the request was enqueued. Panic Stop and
+    /// `cmd_reset_session` bump the engine epoch, so a request queued before them is rejected
+    /// by the bus-io gate even if the bus is cleared + re-armed before the queue drains.
+    pub(crate) epoch: u64,
 }
 
 /// Test-only instrumentation: runs once at the start of every bus-io thread (used by the
@@ -93,6 +97,8 @@ pub(crate) struct ConnectedBusHandle {
     diag: Arc<DiagBusShared>,
     /// D-005: how Listen-Only is enforced (`None` when the bus is active).
     listen_only_enforcement: Option<ListenOnlyEnforcement>,
+    /// WP-4: engine-wide TX epoch (shared with every bus, scheduler and replay).
+    pub(crate) tx_epoch: Arc<AtomicU64>,
 }
 
 impl ConnectedBusHandle {
@@ -164,6 +170,8 @@ pub struct PipelineEngine {
     ctrl_tx: Sender<AggregatorControl>,
     dropped_frames: Arc<AtomicU64>,
     tx_panic_latched: Arc<AtomicBool>,
+    /// WP-4: bumped by Panic Stop / reset session; see [`TxDispatchRequest::epoch`].
+    tx_epoch: Arc<AtomicU64>,
     engine_stop: Arc<AtomicBool>,
     snapshot_bcast_tx: broadcast::Sender<TelemetrySnapshotDto>,
     latest_snapshot: Arc<RwLock<Option<TelemetrySnapshotDto>>>,
@@ -212,6 +220,7 @@ impl PipelineEngine {
         let tx_scheduler = Arc::new(Mutex::new(TxScheduler::new()));
         let dropped_frames = Arc::new(AtomicU64::new(0));
         let tx_panic_latched = Arc::new(AtomicBool::new(false));
+        let tx_epoch = Arc::new(AtomicU64::new(0));
         let engine_stop = Arc::new(AtomicBool::new(false));
         let latest_snapshot = Arc::new(RwLock::new(None));
 
@@ -250,13 +259,14 @@ impl PipelineEngine {
 
         let sched_stop = Arc::clone(&engine_stop);
         let sched_panic = Arc::clone(&tx_panic_latched);
+        let sched_epoch = Arc::clone(&tx_epoch);
         let sched_buses = Arc::clone(&buses);
         let sched_table = Arc::clone(&tx_scheduler);
 
         let scheduler_handle = thread::Builder::new()
             .name("nexus-tx-scheduler".to_string())
             .spawn(move || {
-                run_tx_scheduler_loop(sched_stop, sched_panic, sched_buses, sched_table);
+                run_tx_scheduler_loop(sched_stop, sched_panic, sched_epoch, sched_buses, sched_table);
             })
             .expect("failed to spawn nexus-tx-scheduler thread");
 
@@ -273,6 +283,7 @@ impl PipelineEngine {
             ctrl_tx,
             dropped_frames,
             tx_panic_latched,
+            tx_epoch,
             engine_stop,
             snapshot_bcast_tx,
             latest_snapshot,
@@ -336,6 +347,7 @@ impl PipelineEngine {
         let io_frame_tx = self.frame_tx.clone();
         let io_dropped = Arc::clone(&self.dropped_frames);
         let io_panic = Arc::clone(&self.tx_panic_latched);
+        let io_epoch = Arc::clone(&self.tx_epoch);
 
         let io_join = thread::Builder::new()
             .name(format!("nexus-bus-io-{bus_id}"))
@@ -351,6 +363,7 @@ impl PipelineEngine {
                     io_engine_stop,
                     io_armed,
                     io_panic,
+                    io_epoch,
                     io_state,
                     io_tx_err,
                     io_rx_err,
@@ -373,7 +386,43 @@ impl PipelineEngine {
             io_join: Some(io_join),
             diag,
             listen_only_enforcement,
+            tx_epoch: Arc::clone(&self.tx_epoch),
         })
+    }
+
+    /// WP-4 (CRIT-05.3): registers a periodic TX job only if, at registration time and under
+    /// BOTH the buses and scheduler locks, the Panic latch is clear, no Panic Stop / reset
+    /// happened since the request started (`epoch`), and the bus is still armed and active.
+    ///
+    /// Lock order is buses -> scheduler (nobody takes them the other way round nested).
+    /// Panic Stop bumps the epoch and sets the latch BEFORE it clears the scheduler, so either
+    /// this check fails, or the job is registered first and then removed by `clear_all`.
+    fn register_periodic_job_checked(
+        &self,
+        bus_id: BusId,
+        label: String,
+        can_id: CanIdKey,
+        period_ms: u32,
+        frame: RawCanFrame,
+        epoch: u64,
+    ) -> Result<u64, HalError> {
+        let guard = self.buses.lock();
+        let mut sched = self.tx_scheduler.lock();
+        let bus = guard.get(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?;
+        if self.tx_panic_latched.load(Ordering::Acquire)
+            || self.tx_epoch.load(Ordering::Acquire) != epoch
+        {
+            return Err(panic_latched_error());
+        }
+        if bus.listen_only {
+            return Err(HalError::Adapter(AdapterError::ListenOnlyMode));
+        }
+        if !bus.tx_armed.load(Ordering::Acquire) {
+            return Err(HalError::SafetyLock(format!(
+                "Bus {bus_id} TX was disarmed before the periodic job could be registered"
+            )));
+        }
+        Ok(sched.register_job(label, bus_id, can_id, period_ms, frame))
     }
 
     /// 1. `cmd_list_devices` -> Discovers all available hardware and virtual CAN channels.
@@ -431,8 +480,11 @@ impl PipelineEngine {
                         .to_string(),
                 ));
             }
+            // WP-4: arming never clears the Panic latch (`cmd_clear_panic_latch` does).
+            if self.tx_panic_latched.load(Ordering::Acquire) {
+                return Err(panic_latched_error());
+            }
             bus.tx_armed.store(true, Ordering::Release);
-            self.tx_panic_latched.store(false, Ordering::Release);
         } else {
             bus.tx_armed.store(false, Ordering::Release);
             bus.diag.close_all();
@@ -465,10 +517,12 @@ impl PipelineEngine {
         {
             let guard = self.buses.lock();
             let bus = guard.get(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?;
+            if target_armed && self.tx_panic_latched.load(Ordering::Acquire) {
+                return Err(panic_latched_error());
+            }
             if bus.listen_only == listen_only {
                 bus.tx_armed.store(target_armed, Ordering::Release);
                 if target_armed {
-                    self.tx_panic_latched.store(false, Ordering::Release);
                     return Ok(bus.to_health_dto());
                 }
                 bus.diag.close_all();
@@ -504,9 +558,9 @@ impl PipelineEngine {
             .registry
             .open_by_device_id(&exact_device_id, &updated_config)?;
 
-        if target_armed {
-            self.tx_panic_latched.store(false, Ordering::Release);
-        }
+        // WP-4: a Panic Stop may have landed while the channel was reopened; never come back
+        // armed in that case (the bus is reconnected disarmed instead).
+        let target_armed = target_armed && !self.tx_panic_latched.load(Ordering::Acquire);
 
         let new_handle = self.spawn_connected_bus_handle(
             bus_id,
@@ -522,6 +576,8 @@ impl PipelineEngine {
 
     /// 5. `cmd_panic_stop_tx` -> Emergency stop: cancels all periodic TX jobs, disarms replay hardware TX, and disarms every bus.
     pub fn cmd_panic_stop_tx(&self) -> PanicStopResultDto {
+        // Order matters (WP-4): epoch + latch BEFORE the scheduler is cleared.
+        self.tx_epoch.fetch_add(1, Ordering::AcqRel);
         self.tx_panic_latched.store(true, Ordering::Release);
         self.replay.disarm_hardware_tx();
         let stopped_periodic_jobs = self.tx_scheduler.lock().clear_all();
@@ -543,6 +599,70 @@ impl PipelineEngine {
             disarmed_buses,
             timestamp_us: now_monotonic_us(),
         }
+    }
+
+    /// WP-4: `cmd_clear_panic_latch` -> clears the global Panic Stop latch ONLY. Buses stay
+    /// disarmed; the operator must explicitly Arm Active Bus again.
+    pub fn cmd_clear_panic_latch(&self) {
+        self.tx_panic_latched.store(false, Ordering::Release);
+    }
+
+    /// `true` while the Panic Stop latch is engaged.
+    pub fn is_panic_latched(&self) -> bool {
+        self.tx_panic_latched.load(Ordering::Acquire)
+    }
+
+    /// WP-4: `cmd_reset_session` -> cold-start / "new session" reset that does NOT latch
+    /// Panic Stop: stops every periodic TX job, disarms replay hardware TX, closes every diag
+    /// session and tap, disarms and disconnects every bus, then clears the Panic latch.
+    /// Nothing can transmit afterwards (no bus is connected).
+    pub fn cmd_reset_session(&self) -> ResetSessionResultDto {
+        // Invalidate anything already queued towards a bus-io thread.
+        self.tx_epoch.fetch_add(1, Ordering::AcqRel);
+        self.replay.disarm_hardware_tx();
+        self.diag_sessions.clear();
+
+        let mut disarmed_buses = 0usize;
+        {
+            let guard = self.buses.lock();
+            for bus in guard.values() {
+                if bus.tx_armed.swap(false, Ordering::AcqRel) {
+                    disarmed_buses += 1;
+                }
+                bus.diag.close_all();
+            }
+        }
+        let stopped_periodic_jobs = self.tx_scheduler.lock().clear_all();
+        // Also clears the scheduler again, so a job registered in between cannot survive.
+        let disconnected_buses = self.cmd_disconnect_all_buses();
+        self.tx_panic_latched.store(false, Ordering::Release);
+
+        ResetSessionResultDto {
+            stopped_periodic_jobs,
+            disarmed_buses,
+            disconnected_buses,
+        }
+    }
+
+    /// WP-2: `cmd_seedkey_capabilities` (native seed/key providers are never allowed in v0.1).
+    pub fn cmd_seedkey_capabilities(
+        &self,
+    ) -> nexus_protocols::uds::security::SeedKeyCapabilitiesDto {
+        crate::seedkey::capabilities()
+    }
+
+    /// WP-2: `cmd_seedkey_compute_adhoc` (portable providers only). BLOCKING: call it from
+    /// `spawn_blocking` (Tauri) / a blocking task (bridge).
+    pub fn cmd_seedkey_compute_adhoc(
+        &self,
+        provider: &nexus_protocols::uds::security::KeyProviderSpecDto,
+        level: u8,
+        seed_hex: &str,
+    ) -> Result<
+        nexus_protocols::uds::security::ComputeKeyResultDto,
+        nexus_protocols::uds::security::SeedKeyError,
+    > {
+        crate::seedkey::compute_adhoc(provider, level, seed_hex)
     }
 
     /// 6. `cmd_load_preset_databases` -> Parses & merges `scripts/sample_vehicle.dbc` + `scripts/sample_bms.kcd`.
@@ -841,11 +961,10 @@ impl PipelineEngine {
         periodic_ms: Option<u32>,
         job_label: Option<String>,
     ) -> Result<TxTransmitResultDto, HalError> {
+        // Epoch first, then the latch: see `register_periodic_job_checked`.
+        let epoch = self.tx_epoch.load(Ordering::Acquire);
         if self.tx_panic_latched.load(Ordering::Acquire) {
-            return Err(HalError::SafetyLock(
-                "TX Panic Stop is latched; explicitly re-arm the target bus before transmitting"
-                    .to_string(),
-            ));
+            return Err(panic_latched_error());
         }
 
         let compiled = {
@@ -907,6 +1026,7 @@ impl PipelineEngine {
                 suppress_echo: false,
                 hw_tx_counter: None,
                 origin: TxOrigin::Other,
+                epoch,
             })
             .map_err(|_| HalError::BusNotConnected(bus_id))?;
 
@@ -929,11 +1049,9 @@ impl PipelineEngine {
                 let label = job_label
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or(default_label);
-                Some(
-                    self.tx_scheduler
-                        .lock()
-                        .register_job(label, bus_id, can_id, ms, tx_frame),
-                )
+                Some(self.register_periodic_job_checked(
+                    bus_id, label, can_id, ms, tx_frame, epoch,
+                )?)
             }
             _ => None,
         };
@@ -971,11 +1089,10 @@ impl PipelineEngine {
         periodic_ms: Option<u32>,
         job_label: Option<String>,
     ) -> Result<TxTransmitResultDto, HalError> {
+        // Epoch first, then the latch: see `register_periodic_job_checked`.
+        let epoch = self.tx_epoch.load(Ordering::Acquire);
         if self.tx_panic_latched.load(Ordering::Acquire) {
-            return Err(HalError::SafetyLock(
-                "TX Panic Stop is latched; explicitly re-arm the target bus before transmitting"
-                    .to_string(),
-            ));
+            return Err(panic_latched_error());
         }
 
         let tx_sender = {
@@ -1031,6 +1148,7 @@ impl PipelineEngine {
                 suppress_echo: false,
                 hw_tx_counter: None,
                 origin: TxOrigin::Other,
+                epoch,
             })
             .map_err(|_| HalError::BusNotConnected(bus_id))?;
 
@@ -1069,11 +1187,9 @@ impl PipelineEngine {
                 let label = job_label
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or(default_label);
-                Some(
-                    self.tx_scheduler
-                        .lock()
-                        .register_job(label, bus_id, can_id, ms, tx_frame),
-                )
+                Some(self.register_periodic_job_checked(
+                    bus_id, label, can_id, ms, tx_frame, epoch,
+                )?)
             }
             _ => None,
         };
@@ -1463,6 +1579,16 @@ impl Drop for PipelineEngine {
     }
 }
 
+/// Prefix of every error caused by the Panic Stop latch (parsed by the HMI).
+pub const PANIC_LATCHED_PREFIX: &str = "PANIC_LATCHED:";
+
+#[cold]
+fn panic_latched_error() -> HalError {
+    HalError::SafetyLock(format!(
+        "{PANIC_LATCHED_PREFIX} TX is panic-latched; clear the panic latch first"
+    ))
+}
+
 /// Maps a gate/driver verdict to the legacy `AdapterError` acked to UI TX callers.
 /// Only called when an ack channel exists (UI commands), never for diag / scheduler TX.
 #[cold]
@@ -1504,6 +1630,7 @@ fn run_bus_io_loop(
     engine_stop: Arc<AtomicBool>,
     tx_armed: Arc<AtomicBool>,
     tx_panic_latched: Arc<AtomicBool>,
+    tx_epoch: Arc<AtomicU64>,
     bus_state: Arc<AtomicU8>,
     tx_errors: Arc<AtomicU32>,
     rx_errors: Arc<AtomicU32>,
@@ -1518,6 +1645,7 @@ fn run_bus_io_loop(
         listen_only,
         tx_armed,
         panic_latched: tx_panic_latched,
+        tx_epoch,
     };
     let mut rx_batch = [RawCanFrame::zeroed(); 256];
     let mut taps = TapTable::new();
@@ -1547,10 +1675,11 @@ fn run_bus_io_loop(
                 },
             };
 
-            // Authoritative safety gate, immediately before the driver write.
+            // Authoritative safety gate, immediately before the driver write (Listen-Only,
+            // Panic latch, Arm Active Bus, and the TX epoch the request was queued under).
             let verdict = match origin_idx {
                 Some(i) if taps.is_slot_closed(i) => Err(DiagTxReject::Closed),
-                _ => gate.verdict(),
+                _ => gate.verdict_for_epoch(req.epoch),
             };
 
             let result: Result<RawCanFrame, (DiagTxReject, Option<AdapterError>)> = match verdict
@@ -1783,10 +1912,14 @@ fn emit_snapshot_now(
 fn run_tx_scheduler_loop(
     engine_stop: Arc<AtomicBool>,
     tx_panic_latched: Arc<AtomicBool>,
+    tx_epoch: Arc<AtomicU64>,
     buses: Arc<Mutex<BTreeMap<BusId, ConnectedBusHandle>>>,
     tx_scheduler: Arc<Mutex<TxScheduler>>,
 ) {
     while !engine_stop.load(Ordering::Acquire) {
+        // Epoch captured BEFORE the due frames are collected: frames of a job that a Panic
+        // Stop removed in between are rejected by the bus-io gate even after a re-arm.
+        let epoch = tx_epoch.load(Ordering::Acquire);
         if tx_panic_latched.load(Ordering::Acquire) {
             tx_scheduler.lock().clear_all();
             thread::sleep(Duration::from_millis(2));
@@ -1806,13 +1939,17 @@ fn run_tx_scheduler_loop(
             let guard = buses.lock();
             for (bus_id, frame) in due {
                 if let Some(bus) = guard.get(&bus_id) {
-                    if !bus.listen_only && bus.tx_armed.load(Ordering::Acquire) {
+                    if !bus.listen_only
+                        && !tx_panic_latched.load(Ordering::Acquire)
+                        && bus.tx_armed.load(Ordering::Acquire)
+                    {
                         let _ = bus.tx_sender.try_send(TxDispatchRequest {
                             frame,
                             ack: None,
                             suppress_echo: false,
                             hw_tx_counter: None,
                             origin: TxOrigin::Other,
+                            epoch,
                         });
                     }
                 }

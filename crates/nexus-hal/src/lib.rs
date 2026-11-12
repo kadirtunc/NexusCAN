@@ -11,6 +11,7 @@ pub mod dto;
 pub mod error;
 pub mod pipeline;
 pub mod registry;
+pub mod seedkey;
 pub mod traits;
 
 pub use drivers::mock_drv::{MockCanChannel, MockCanDriver, MOCK0_DEVICE_ID, MOCK1_DEVICE_ID};
@@ -24,7 +25,8 @@ pub use drivers::socketcan_drv::{SocketCanChannel, SocketCanDriver};
 pub use dto::{
     AdapterCapabilitiesDto, BusHealthDto, ChannelConfigDto, ChronologicalFrameDto,
     DeviceDescriptorDto, DriverFamilyStatusDto, DriverProbeReportDto, FrameTelemetryDto,
-    LiveSignalDto, PanicStopResultDto, PeriodicTxJobDto, ProjectSummaryDto, SerialPortInfoDto,
+    LiveSignalDto, PanicStopResultDto, PeriodicTxJobDto, ProjectSummaryDto, ResetSessionResultDto,
+    SerialPortInfoDto,
     TelemetrySnapshotDto, TxTransmitResultDto,
 };
 pub use error::{AdapterError, HalError};
@@ -32,7 +34,7 @@ pub use pipeline::{
     sanitize_project_stem,
     state_table::{
         MuxPathKey, RetainedSignalSlot, StateTable, BYTE_HIGHLIGHT_WINDOW_US,
-        CHRONOLOGICAL_RING_CAP, MAX_BUS_SLOTS,
+        CHRONOLOGICAL_RING_CAP, MAX_BUS_SLOTS, MAX_STATE_TABLE_MESSAGES,
     },
     tx_scheduler::{find_clamped_signals, PeriodicJobEntry, TxScheduler},
     PipelineEngine, FRAME_RING_CAPACITY, SNAPSHOT_INTERVAL_US,

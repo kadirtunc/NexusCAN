@@ -26,6 +26,29 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
 
 const SYS_CLASS_NET: &str = "/sys/class/net";
+
+/// Linux `CAN_EFF_FLAG` (bit 31 of `can_id`): frame uses a 29-bit extended identifier.
+const LINUX_CAN_EFF_FLAG: u32 = 0x8000_0000;
+
+/// MED-07: maps a [`CanFilter`] to the kernel `struct can_filter` `(can_id, can_mask)` pair.
+///
+/// The kernel compares `CAN_EFF_FLAG` as part of the id only when it is set in the mask:
+/// * `extended == Some(true)`  → EFF bit set in id and mask: 29-bit frames only.
+/// * `extended == Some(false)` → EFF bit clear in id, set in mask: 11-bit frames only.
+/// * `extended == None`        → EFF bit clear in the mask: matches both formats.
+pub(crate) fn kernel_filter(f: &CanFilter) -> (u32, u32) {
+    match f.extended {
+        Some(true) => (
+            (f.id & EXT_CAN_ID_MASK) | LINUX_CAN_EFF_FLAG,
+            (f.mask & EXT_CAN_ID_MASK) | LINUX_CAN_EFF_FLAG,
+        ),
+        Some(false) => (
+            f.id & STD_CAN_ID_MASK,
+            (f.mask & STD_CAN_ID_MASK) | LINUX_CAN_EFF_FLAG,
+        ),
+        None => (f.id & EXT_CAN_ID_MASK, f.mask & EXT_CAN_ID_MASK),
+    }
+}
 const ARPHRD_CAN: &str = "280";
 
 /// Set to `1` to never touch the controller mode via netlink (Listen-Only then stays a
@@ -492,7 +515,10 @@ impl CanChannel for SocketCanChannel {
 
         let sc_filters: Vec<ScFilter> = filters
             .iter()
-            .map(|f| ScFilter::new(f.id, f.mask))
+            .map(|f| {
+                let (id, mask) = kernel_filter(f);
+                ScFilter::new(id, mask)
+            })
             .collect();
         match sock {
             SocketHandle::Classical(s) => s.set_filters(&sc_filters)?,
@@ -625,6 +651,36 @@ fn convert_any_frame(any: CanAnyFrame, bus_id: BusId, timestamp_us: u64) -> RawC
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Kernel `can_filter` semantics: `(rx_id & mask) == (filter_id & mask)`.
+    fn kernel_accepts(filter: (u32, u32), raw_can_id: u32) -> bool {
+        (raw_can_id & filter.1) == (filter.0 & filter.1)
+    }
+
+    #[test]
+    fn kernel_filter_sets_eff_flag_per_extended_selector() {
+        let std_frame_0x123 = 0x123u32;
+        let ext_frame_0x123 = 0x123u32 | LINUX_CAN_EFF_FLAG;
+
+        let ext_only = kernel_filter(&CanFilter { id: 0x123, mask: 0x1FFF_FFFF, extended: Some(true) });
+        assert_eq!(ext_only, (0x8000_0123, 0x9FFF_FFFF));
+        assert!(kernel_accepts(ext_only, ext_frame_0x123));
+        assert!(!kernel_accepts(ext_only, std_frame_0x123));
+
+        let std_only = kernel_filter(&CanFilter { id: 0x123, mask: 0x7FF, extended: Some(false) });
+        assert_eq!(std_only, (0x123, 0x8000_07FF));
+        assert!(kernel_accepts(std_only, std_frame_0x123));
+        assert!(!kernel_accepts(std_only, ext_frame_0x123));
+        // Standard filter ids are masked to 11 bits.
+        assert_eq!(kernel_filter(&CanFilter { id: 0xFFFF, mask: 0xFFFF, extended: Some(false) }).0, 0x7FF);
+
+        let both = kernel_filter(&CanFilter { id: 0x123, mask: 0x7FF, extended: None });
+        assert_eq!(both, (0x123, 0x7FF));
+        assert!(kernel_accepts(both, std_frame_0x123));
+        assert!(kernel_accepts(both, ext_frame_0x123));
+        // Caller-supplied flag bits never leak into the kernel filter.
+        assert_eq!(kernel_filter(&CanFilter { id: 0xE000_0123, mask: 0xFFFF_FFFF, extended: None }), (0x123, 0x1FFF_FFFF));
+    }
 
     #[test]
     fn virtual_interfaces_never_touch_netlink() {

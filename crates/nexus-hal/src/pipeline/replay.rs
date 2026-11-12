@@ -2183,7 +2183,14 @@ fn dispatch_due_frames(
         if hw_tx_enabled && !tx_panic_latched.load(Ordering::Acquire) {
             let guard = buses.lock();
             if let Some(bus) = guard.get(&out_frame.bus_id) {
-                if bus.is_connected() && !bus.listen_only && bus.tx_armed.load(Ordering::Acquire) {
+                // Epoch captured under the buses lock, before the arm check: a racing Panic
+                // Stop either disarms here or invalidates the epoch at the bus-io gate.
+                let epoch = bus.tx_epoch.load(Ordering::Acquire);
+                if bus.is_connected()
+                    && !bus.listen_only
+                    && !tx_panic_latched.load(Ordering::Acquire)
+                    && bus.tx_armed.load(Ordering::Acquire)
+                {
                     let mut hw_frame = out_frame;
                     hw_frame.flags &= !FLAG_TX;
                     let _ = bus.tx_sender.try_send(TxDispatchRequest {
@@ -2192,6 +2199,7 @@ fn dispatch_due_frames(
                         suppress_echo: true,
                         hw_tx_counter: Some(Arc::clone(&shared.hw_tx_frames)),
                         origin: super::diag_tap::TxOrigin::Other,
+                        epoch,
                     });
                 }
             }

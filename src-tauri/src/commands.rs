@@ -8,7 +8,8 @@ use nexus_hal::{
     dto::{
         BusHealthDto, ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto, DeviceDescriptorDto,
         DriverProbeReportDto, LoadedTraceFileDto, PanicStopResultDto, PeriodicTxJobDto,
-        ProjectSummaryDto, StartTraceReplayArgsDto, TelemetrySnapshotDto, TraceFileSummaryDto,
+        ProjectSummaryDto, ResetSessionResultDto, StartTraceReplayArgsDto, TelemetrySnapshotDto,
+        TraceFileSummaryDto,
         TraceReplayControlArgsDto, TraceReplayStatusDto, TraceStorageInfoDto, TxTransmitResultDto,
     },
     error::HalError,
@@ -19,6 +20,9 @@ use nexus_protocols::uds::dto::{
     ConversationPageDto, DiagError, DiagErrorCode, DiagOrigin, DiagSessionConfigDto, DiagSessionInfoDto,
     DidReadResultDto, DtcEntryDto, EcuDiscoveryRequestDto, EcuDiscoveryResultDto, IsoTpFramePageDto,
     UdsRequestOptionsDto, UdsResponseDto,
+};
+use nexus_protocols::uds::security::{
+    ComputeKeyResultDto, KeyProviderSpecDto, SeedKeyCapabilitiesDto, SeedKeyError,
 };
 use std::sync::Arc;
 use serde::Serialize;
@@ -109,6 +113,57 @@ pub async fn cmd_panic_stop_tx(
     state: State<'_, AppState>,
 ) -> Result<PanicStopResultDto, AppError> {
     Ok(state.engine.cmd_panic_stop_tx())
+}
+
+/// WP-4: clears the Panic Stop latch only (buses stay disarmed).
+#[tauri::command]
+pub async fn cmd_clear_panic_latch(state: State<'_, AppState>) -> Result<(), AppError> {
+    state.engine.cmd_clear_panic_latch();
+    Ok(())
+}
+
+/// WP-4: cold-start reset (stops TX jobs, closes diag, disarms + disconnects all buses,
+/// clears the latch). Never latches Panic Stop.
+#[tauri::command]
+pub async fn cmd_reset_session(
+    state: State<'_, AppState>,
+) -> Result<ResetSessionResultDto, AppError> {
+    let engine = Arc::clone(&state.engine);
+    tauri::async_runtime::spawn_blocking(move || engine.cmd_reset_session())
+        .await
+        .map_err(|e| AppError::Ipc(format!("reset session worker failed: {e}")))
+}
+
+// ─── WP-2 seed/key (contract planning/contracts/seedkey-v1.md) ──────────────
+// Errors are `"[seedkey:<code>] <message>"` strings (`SeedKeyError::to_ipc_string`).
+
+#[tauri::command]
+pub async fn cmd_seedkey_capabilities(
+    state: State<'_, AppState>,
+) -> Result<SeedKeyCapabilitiesDto, String> {
+    Ok(state.engine.cmd_seedkey_capabilities())
+}
+
+/// Computes a key with an unsaved provider (`builtin` / `table` / `script`). Native kinds are
+/// refused in v0.1. Runs on the blocking pool (Rhai scripts run up to their timeout).
+#[tauri::command]
+pub async fn cmd_seedkey_compute_adhoc(
+    state: State<'_, AppState>,
+    provider: KeyProviderSpecDto,
+    level: u8,
+    seed_hex: String,
+) -> Result<ComputeKeyResultDto, String> {
+    let engine = Arc::clone(&state.engine);
+    match tauri::async_runtime::spawn_blocking(move || {
+        engine.cmd_seedkey_compute_adhoc(&provider, level, &seed_hex)
+    })
+    .await
+    {
+        Ok(res) => res.map_err(|e| e.to_ipc_string()),
+        Err(join_err) => {
+            Err(SeedKeyError::Script(format!("seed/key worker failed: {join_err}")).to_ipc_string())
+        }
+    }
 }
 
 #[tauri::command]

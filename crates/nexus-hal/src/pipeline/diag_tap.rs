@@ -38,6 +38,11 @@ pub const DEFAULT_TAP_DEPTH: usize = 1_024;
 const MIN_TAP_DEPTH: usize = 16;
 const MAX_TAP_DEPTH: usize = 65_536;
 const TAP_CTL_DEPTH: usize = 64;
+/// HIGH-07.4: depth of the per-tap priority queue that carries `TxConfirmed` / `TxRejected`
+/// verdicts which did not fit into the (RX-congested) main event queue. Verdicts are never
+/// dropped because of RX bursts; they are only lost if the consumer stops reading entirely
+/// and more than this many verdicts pile up.
+pub const TAP_VERDICT_DEPTH: usize = 512;
 /// Upper bound for the defensive sleep of `recv_timeout` on a closed, drained tap.
 const CLOSED_RECV_BACKOFF: Duration = Duration::from_millis(10);
 
@@ -97,6 +102,7 @@ pub(crate) enum TapCtl {
         gen: u32,
         filters: [Option<DiagTapFilter>; MAX_TAP_FILTERS],
         events: Sender<DiagPortEvent>,
+        verdicts: Sender<DiagPortEvent>,
         shared: Arc<TapShared>,
     },
     Remove {
@@ -161,6 +167,7 @@ impl DiagBusShared {
         let shared = Arc::new(TapShared::default());
         let gen = self.next_gen.fetch_add(1, Ordering::Relaxed).max(1);
         let (events_tx, events_rx) = bounded::<DiagPortEvent>(depth);
+        let (verdicts_tx, verdicts_rx) = bounded::<DiagPortEvent>(TAP_VERDICT_DEPTH);
 
         let slot = {
             let mut guard = self.slots.lock();
@@ -176,6 +183,7 @@ impl DiagBusShared {
             gen,
             filters: fs,
             events: events_tx,
+            verdicts: verdicts_tx,
             shared: Arc::clone(&shared),
         };
         if self.ctl_tx.send(add).is_err() {
@@ -187,6 +195,7 @@ impl DiagBusShared {
             gen,
             shared,
             events: events_rx,
+            verdicts: verdicts_rx,
         })
     }
 
@@ -205,6 +214,7 @@ pub(crate) struct RegisteredTap {
     pub(crate) gen: u32,
     pub(crate) shared: Arc<TapShared>,
     pub(crate) events: Receiver<DiagPortEvent>,
+    pub(crate) verdicts: Receiver<DiagPortEvent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +230,8 @@ pub(crate) struct GateRefs {
     pub(crate) listen_only: bool,
     pub(crate) tx_armed: Arc<AtomicBool>,
     pub(crate) panic_latched: Arc<AtomicBool>,
+    /// WP-4: engine TX epoch (bumped by Panic Stop / reset session).
+    pub(crate) tx_epoch: Arc<AtomicU64>,
 }
 
 impl GateRefs {
@@ -236,6 +248,23 @@ impl GateRefs {
             Ok(())
         }
     }
+
+    /// Current TX epoch, captured when a request is enqueued.
+    #[inline]
+    pub(crate) fn epoch(&self) -> u64 {
+        self.tx_epoch.load(Ordering::Acquire)
+    }
+
+    /// Authoritative dispatch-time verdict: [`Self::verdict`] plus "queued before the last
+    /// Panic Stop / reset session" (reported as `PanicLatched`).
+    #[inline]
+    pub(crate) fn verdict_for_epoch(&self, req_epoch: u64) -> Result<(), DiagTxReject> {
+        self.verdict()?;
+        if req_epoch != self.epoch() {
+            return Err(DiagTxReject::PanicLatched);
+        }
+        Ok(())
+    }
 }
 
 /// [`DiagCanPort`] implementation over a bus-io tap. Dropping it closes and unregisters the tap.
@@ -246,6 +275,8 @@ pub struct HalDiagPort {
     gen: u32,
     shared: Arc<TapShared>,
     events: Receiver<DiagPortEvent>,
+    /// HIGH-07.4 priority path for TX verdicts that overflowed `events`.
+    verdicts: Receiver<DiagPortEvent>,
     tx: Sender<TxDispatchRequest>,
     gate: GateRefs,
     registry: Arc<DiagBusShared>,
@@ -267,6 +298,7 @@ impl HalDiagPort {
             gen: reg.gen,
             shared: reg.shared,
             events: reg.events,
+            verdicts: reg.verdicts,
             tx,
             gate,
             registry,
@@ -281,6 +313,24 @@ impl HalDiagPort {
     /// Tap slot index on its bus (diagnostics / tests).
     pub fn slot(&self) -> u8 {
         self.slot
+    }
+
+    fn recv_main_timeout(&self, timeout: Duration) -> Option<DiagPortEvent> {
+        match self.events.recv_timeout(timeout) {
+            Ok(ev) => Some(ev),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => self.on_main_disconnected(timeout),
+        }
+    }
+
+    /// Bus-io thread gone (disconnect / mode change): queues drained, tap closed.
+    fn on_main_disconnected(&self, timeout: Duration) -> Option<DiagPortEvent> {
+        if let Ok(ev) = self.verdicts.try_recv() {
+            return Some(ev);
+        }
+        self.shared.close();
+        self.closed_backoff(timeout);
+        None
     }
 
     fn closed_backoff(&self, timeout: Duration) {
@@ -311,6 +361,9 @@ impl DiagCanPort for HalDiagPort {
     }
 
     fn send(&self, mut frame: RawCanFrame) -> Result<(), DiagTxReject> {
+        // Capture the epoch BEFORE the gate check: a Panic Stop racing with this call either
+        // fails the gate here or invalidates the epoch for the bus-io dispatch gate.
+        let epoch = self.gate.epoch();
         self.gate_check()?;
         frame.bus_id = self.bus_id;
         frame.flags &= !nexus_core::FLAG_TX;
@@ -323,6 +376,7 @@ impl DiagCanPort for HalDiagPort {
                 slot: self.slot,
                 gen: self.gen,
             },
+            epoch,
         };
         match self.tx.try_send(req) {
             Ok(()) => Ok(()),
@@ -335,19 +389,28 @@ impl DiagCanPort for HalDiagPort {
     }
 
     fn recv_timeout(&self, timeout: Duration) -> Option<DiagPortEvent> {
-        match self.events.recv_timeout(timeout) {
-            Ok(ev) => Some(ev),
-            Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => {
-                // Bus-io thread gone (disconnect / mode change): queue drained, tap closed.
-                self.shared.close();
-                self.closed_backoff(timeout);
-                None
-            }
+        // Priority path first: overflowed TX verdicts (normally empty).
+        if let Ok(ev) = self.verdicts.try_recv() {
+            return Some(ev);
+        }
+        crossbeam_channel::select_biased! {
+            recv(self.verdicts) -> r => match r {
+                Ok(ev) => Some(ev),
+                // Bus-io side gone; fall back to the main queue (drains, then disconnects).
+                Err(_) => self.recv_main_timeout(timeout),
+            },
+            recv(self.events) -> r => match r {
+                Ok(ev) => Some(ev),
+                Err(_) => self.on_main_disconnected(timeout),
+            },
+            default(timeout) => None,
         }
     }
 
     fn try_recv(&self) -> Option<DiagPortEvent> {
+        if let Ok(ev) = self.verdicts.try_recv() {
+            return Some(ev);
+        }
         match self.events.try_recv() {
             Ok(ev) => Some(ev),
             Err(TryRecvError::Empty) => None,
@@ -389,6 +452,7 @@ struct TapSlot {
     gen: u32,
     filters: [Option<DiagTapFilter>; MAX_TAP_FILTERS],
     events: Sender<DiagPortEvent>,
+    verdicts: Sender<DiagPortEvent>,
     shared: Arc<TapShared>,
 }
 
@@ -432,6 +496,7 @@ impl TapTable {
                     gen,
                     filters,
                     events,
+                    verdicts,
                     shared,
                 }) => {
                     if let Some(entry) = self.slots.get_mut(usize::from(slot)) {
@@ -439,6 +504,7 @@ impl TapTable {
                             gen,
                             filters,
                             events,
+                            verdicts,
                             shared,
                         });
                         changed = true;
@@ -477,12 +543,22 @@ impl TapTable {
     }
 
     /// Sends a TX verdict to the origin tap only.
+    ///
+    /// HIGH-07.4: the verdict normally travels in the main event queue (keeps bus order with
+    /// RX). If an RX burst filled that queue, it goes to the tap's dedicated verdict queue
+    /// instead, which the port drains first, so `TxConfirmed` / `TxRejected` are never lost
+    /// to RX congestion.
     #[inline]
     pub(crate) fn notify(&mut self, idx: usize, ev: DiagPortEvent) {
         if let Some(s) = &self.slots[idx] {
-            // A full queue loses the confirmation; the client then times out (ISO-TP N_As),
-            // which is the correct failure mode for an overloaded consumer.
-            if let Err(TrySendError::Disconnected(_)) = s.events.try_send(ev) {
+            let disconnected = match s.events.try_send(ev) {
+                Ok(()) => false,
+                Err(TrySendError::Full(ev)) => {
+                    matches!(s.verdicts.try_send(ev), Err(TrySendError::Disconnected(_)))
+                }
+                Err(TrySendError::Disconnected(_)) => true,
+            };
+            if disconnected {
                 self.slots[idx] = None;
                 self.recount();
             }

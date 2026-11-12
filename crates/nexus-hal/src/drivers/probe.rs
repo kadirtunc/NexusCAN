@@ -508,6 +508,24 @@ fn scan_linux_candlelight_usb_devices() -> Vec<String> {
     out
 }
 
+/// HIGH-02.3: resolves the exact SocketCAN interface for a vendor family (PCAN / Kvaser /
+/// gs_usb) on Linux.
+///
+/// Only the REQUESTED channel is accepted, and only if it is both a live SocketCAN interface
+/// and one of the interfaces bound to this family's kernel driver. There is deliberately no
+/// "first interface found" fallback: opening a different physical bus than the one the user
+/// selected is a field-safety hazard. A missing channel is reported as an error by the caller.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn resolve_family_socketcan_iface(
+    requested_ch: &str,
+    family_channels: &[String],
+    all_socketcan_ifaces: &[String],
+) -> Option<String> {
+    let in_family = family_channels.iter().any(|c| c == requested_ch);
+    let is_live = all_socketcan_ifaces.iter().any(|c| c == requested_ch);
+    (in_family && is_live).then(|| requested_ch.to_string())
+}
+
 /// PEAK-System `PCAN-Basic` / Linux `peak_usb` driver adapter.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PcanDriver;
@@ -586,15 +604,8 @@ impl AdapterDriver for PcanDriver {
         #[cfg(target_os = "linux")]
         {
             let all_sc = list_linux_socketcan_interfaces(None);
-            let target_sc = if all_sc.iter().any(|i| i == requested_ch) {
-                Some(requested_ch.to_string())
-            } else {
-                status
-                    .detected_channels
-                    .iter()
-                    .find(|ch| all_sc.iter().any(|sc| sc == *ch))
-                    .cloned()
-            };
+            let target_sc =
+                resolve_family_socketcan_iface(requested_ch, &status.detected_channels, &all_sc);
 
             if let Some(sc_iface) = target_sc {
                 let sc_drv = SocketCanDriver::new();
@@ -701,15 +712,8 @@ impl AdapterDriver for KvaserDriver {
         #[cfg(target_os = "linux")]
         {
             let all_sc = list_linux_socketcan_interfaces(None);
-            let target_sc = if all_sc.iter().any(|i| i == requested_ch) {
-                Some(requested_ch.to_string())
-            } else {
-                status
-                    .detected_channels
-                    .iter()
-                    .find(|ch| all_sc.iter().any(|sc| sc == *ch))
-                    .cloned()
-            };
+            let target_sc =
+                resolve_family_socketcan_iface(requested_ch, &status.detected_channels, &all_sc);
 
             if let Some(sc_iface) = target_sc {
                 let sc_drv = SocketCanDriver::new();
@@ -816,15 +820,8 @@ impl AdapterDriver for GsUsbDriver {
         #[cfg(target_os = "linux")]
         {
             let all_sc = list_linux_socketcan_interfaces(None);
-            let target_sc = if all_sc.iter().any(|i| i == requested_ch) {
-                Some(requested_ch.to_string())
-            } else {
-                status
-                    .detected_channels
-                    .iter()
-                    .find(|ch| all_sc.iter().any(|sc| sc == *ch))
-                    .cloned()
-            };
+            let target_sc =
+                resolve_family_socketcan_iface(requested_ch, &status.detected_channels, &all_sc);
 
             if let Some(sc_iface) = target_sc {
                 let sc_drv = SocketCanDriver::new();
@@ -841,5 +838,30 @@ impl AdapterDriver for GsUsbDriver {
             status.searched_paths.join(", "),
             status.install_hint
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_family_socketcan_iface;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn vendor_family_never_falls_back_to_another_interface() {
+        let family = v(&["can1"]);
+        let all = v(&["can0", "can1", "vcan0"]);
+        assert_eq!(resolve_family_socketcan_iface("can1", &family, &all).as_deref(), Some("can1"));
+        // Requested channel missing -> no fallback to the first family / SocketCAN interface.
+        assert_eq!(resolve_family_socketcan_iface("can7", &family, &all), None);
+        assert_eq!(resolve_family_socketcan_iface("PCAN_USBBUS1", &family, &all), None);
+        assert_eq!(resolve_family_socketcan_iface("0", &family, &all), None);
+        // A live interface of ANOTHER driver (e.g. vcan0, or a gs_usb can0) is not this family's.
+        assert_eq!(resolve_family_socketcan_iface("vcan0", &family, &all), None);
+        assert_eq!(resolve_family_socketcan_iface("can0", &family, &all), None);
+        // Family channel that is not a live SocketCAN interface (e.g. went down).
+        assert_eq!(resolve_family_socketcan_iface("can1", &family, &v(&["can0"])), None);
     }
 }

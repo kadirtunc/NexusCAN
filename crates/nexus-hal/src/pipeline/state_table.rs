@@ -232,6 +232,11 @@ impl ChronologicalRing {
     }
 }
 
+/// HIGH-08: maximum number of live `(bus, id, mux path)` rows. Frames that would create a
+/// row beyond this cap are still counted in rates and the chronological trace ring, but do
+/// not get a Receive row (bounded memory under random-ID floods / fuzzed 29-bit traffic).
+pub const MAX_STATE_TABLE_MESSAGES: usize = 16_384;
+
 /// Real-time telemetry state table owned exclusively by the 60Hz aggregator thread.
 ///
 /// Rows are created dynamically **only on frame arrival** per `(BusId, CanIdKey, MuxPathKey)` —
@@ -250,6 +255,9 @@ pub struct StateTable {
     last_snapshot_us: u64,
     smoothed_fps_rx: f64,
     smoothed_fps_tx: f64,
+    /// Frames that were not given a row because [`MAX_STATE_TABLE_MESSAGES`] was reached.
+    overflow_frames: u64,
+    overflow_logged: bool,
 }
 
 impl Default for StateTable {
@@ -275,6 +283,30 @@ impl StateTable {
             last_snapshot_us: 0,
             smoothed_fps_rx: 0.0,
             smoothed_fps_tx: 0.0,
+            overflow_frames: 0,
+            overflow_logged: false,
+        }
+    }
+
+    /// Number of live message rows.
+    pub fn message_row_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Frames dropped from the Receive table because [`MAX_STATE_TABLE_MESSAGES`] was reached.
+    pub fn overflow_frames(&self) -> u64 {
+        self.overflow_frames
+    }
+
+    #[cold]
+    fn note_row_overflow(&mut self) {
+        self.overflow_frames = self.overflow_frames.saturating_add(1);
+        if !self.overflow_logged {
+            self.overflow_logged = true;
+            eprintln!(
+                "nexus-hal: StateTable reached {MAX_STATE_TABLE_MESSAGES} message rows; \
+                 frames with new IDs are no longer tracked in the Receive table"
+            );
         }
     }
 
@@ -416,6 +448,8 @@ impl StateTable {
         self.window_wire_bits = 0;
         self.smoothed_fps_rx = 0.0;
         self.smoothed_fps_tx = 0.0;
+        self.overflow_frames = 0;
+        self.overflow_logged = false;
     }
 
     /// Ingests a single [`RawCanFrame`] on the hot path without per-frame String/Vec allocations.
@@ -461,6 +495,10 @@ impl StateTable {
         };
 
         let key = (frame.bus_id, can_id, mux_path);
+        if self.messages.len() >= MAX_STATE_TABLE_MESSAGES && !self.messages.contains_key(&key) {
+            self.note_row_overflow();
+            return;
+        }
         let state = self
             .messages
             .entry(key)
@@ -731,6 +769,46 @@ fn compute_cycle_health(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_rows_are_capped_under_random_29bit_flood() {
+        let mut table = StateTable::new();
+        // xorshift64: deterministic pseudo-random 29-bit ids.
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let total = MAX_STATE_TABLE_MESSAGES * 2;
+        for i in 0..total {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let id = (x as u32) & 0x1FFF_FFFF;
+            let key = CanIdKey::new_extended(id).expect("29-bit id");
+            let frame = RawCanFrame::new_classical(0, key, &[i as u8; 8], (i as u64 + 1) * 10)
+                .expect("frame");
+            table.ingest_frame(&frame);
+        }
+        assert_eq!(table.message_row_count(), MAX_STATE_TABLE_MESSAGES);
+        assert!(table.overflow_frames() >= (total - MAX_STATE_TABLE_MESSAGES) as u64 - 64);
+        // Rates still count every frame.
+        assert_eq!(table.total_frames_rx, total as u64);
+
+        // Existing rows keep updating at the cap.
+        let first = CanIdKey::new_extended({
+            let mut y: u64 = 0x9E37_79B9_7F4A_7C15;
+            y ^= y << 13;
+            y ^= y >> 7;
+            y ^= y << 17;
+            (y as u32) & 0x1FFF_FFFF
+        })
+        .expect("id");
+        let before = table.overflow_frames();
+        let frame = RawCanFrame::new_classical(0, first, &[0xEE; 8], 99_999_999).expect("frame");
+        table.ingest_frame(&frame);
+        assert_eq!(table.overflow_frames(), before, "known id must not count as overflow");
+
+        table.reset_all();
+        assert_eq!(table.message_row_count(), 0);
+        assert_eq!(table.overflow_frames(), 0);
+    }
     use nexus_netdb::{DatabaseInfoDto, FormatRegistry, ParseOptions};
 
     fn compile_dbc_str(name: &str, dbc_text: &str) -> (Arc<CompiledDatabase>, u32) {

@@ -277,6 +277,63 @@ pub fn encode_slcan_frame(
     Ok(pos)
 }
 
+/// HIGH-01: canonical USB-serial / COM port names accepted for SLCAN even when the OS
+/// enumeration does not list them (yet): `/dev/ttyUSB<n>`, `/dev/ttyACM<n>`,
+/// `/dev/serial/by-id/<name>`, macOS `/dev/cu.<name>` / `/dev/tty.usb<name>`, Windows
+/// `COM<n>` (optionally `\\.\COM<n>`). Anything else (`/dev/mem`, `/dev/sda`, files,
+/// `..` traversal, nested paths) is rejected.
+pub fn is_canonical_serial_port_name(name: &str) -> bool {
+    fn digits(s: &str) -> bool {
+        !s.is_empty() && s.len() <= 4 && s.bytes().all(|b| b.is_ascii_digit())
+    }
+    fn simple_component(s: &str) -> bool {
+        !s.is_empty()
+            && s.len() <= 200
+            && s != "."
+            && s != ".."
+            && !s.contains("..")
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'+'))
+    }
+    if let Some(n) = name.strip_prefix("/dev/ttyUSB").or_else(|| name.strip_prefix("/dev/ttyACM")) {
+        return digits(n);
+    }
+    if let Some(rest) = name.strip_prefix("/dev/serial/by-id/") {
+        return simple_component(rest);
+    }
+    if let Some(rest) = name.strip_prefix("/dev/cu.") {
+        return simple_component(rest);
+    }
+    if let Some(rest) = name.strip_prefix("/dev/tty.usb") {
+        return rest.is_empty() || simple_component(rest);
+    }
+    let win = name.strip_prefix(r"\\.\").unwrap_or(name);
+    if win.len() > 3 && win[..3].eq_ignore_ascii_case("COM") {
+        return digits(&win[3..]);
+    }
+    false
+}
+
+/// HIGH-01: only ports enumerated by the OS (`serialport::available_ports()` / our sysfs
+/// scan) or canonical USB-serial / COM names may be opened as SLCAN adapters.
+fn validate_slcan_port(port: &str) -> Result<(), AdapterError> {
+    if is_canonical_serial_port_name(port) {
+        return Ok(());
+    }
+    let listed = serialport::available_ports()
+        .map(|ports| ports.iter().any(|p| p.port_name == port))
+        .unwrap_or(false)
+        || discover_serial_ports().iter().any(|p| p.port_name == port);
+    if listed {
+        return Ok(());
+    }
+    Err(AdapterError::Driver(format!(
+        "Refusing to open '{port}' as an SLCAN adapter: not an enumerated serial port and not a \
+         canonical USB-serial name (/dev/ttyUSB*, /dev/ttyACM*, /dev/serial/by-id/*, /dev/cu.*, \
+         /dev/tty.usb*, COMn)"
+    )))
+}
+
 /// Enumerates host serial / USB-CDC ports across Windows, macOS, and Linux (enriching sysfs USB metadata without `libudev`).
 pub fn discover_serial_ports() -> Vec<SerialPortInfoDto> {
     let mut by_name: BTreeMap<String, SerialPortInfoDto> = BTreeMap::new();
@@ -538,6 +595,8 @@ impl AdapterDriver for SlcanDriver {
                 )
             })?
             .to_string();
+
+        validate_slcan_port(&resolved_port)?;
 
         let baud_rate = config.serial_baud_rate.unwrap_or(1_000_000).max(9_600);
         let assert_dtr_rts = config.serial_dtr_rts.unwrap_or(true);
@@ -818,5 +877,56 @@ impl CanChannel for SlcanChannel {
 impl Drop for SlcanChannel {
     fn drop(&mut self) {
         let _ = self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_serial_port_names_allowlist() {
+        for ok in [
+            "/dev/ttyUSB0",
+            "/dev/ttyACM12",
+            "/dev/serial/by-id/usb-CANable_2.0_ABC123-if00",
+            "/dev/cu.usbmodem14101",
+            "/dev/tty.usbserial-A1B2",
+            "COM3",
+            "com17",
+            r"\\.\COM12",
+        ] {
+            assert!(is_canonical_serial_port_name(ok), "{ok} must be accepted");
+        }
+        for bad in [
+            "",
+            "/dev/mem",
+            "/dev/sda",
+            "/dev/ttyS0",
+            "/dev/ttyUSB",
+            "/dev/ttyUSB0/../../mem",
+            "/dev/serial/by-id/../../sda",
+            "/dev/serial/by-id/a/b",
+            "/dev/cu.",
+            "/etc/passwd",
+            "COM",
+            "COM1;rm",
+            "CON",
+            "../COM3",
+        ] {
+            assert!(!is_canonical_serial_port_name(bad), "{bad} must be rejected");
+        }
+    }
+
+    #[test]
+    fn open_rejects_non_serial_device_paths() {
+        let drv = SlcanDriver::new();
+        let desc = SlcanDriver::descriptor_for_port("/dev/mem");
+        let cfg = ChannelConfig {
+            serial_port: Some("/dev/mem".to_string()),
+            ..ChannelConfig::default()
+        };
+        let err = drv.open_channel(&desc, &cfg).err().expect("must refuse /dev/mem");
+        assert!(err.to_string().contains("Refusing to open '/dev/mem'"), "{err}");
     }
 }
