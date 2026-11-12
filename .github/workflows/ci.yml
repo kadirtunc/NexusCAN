@@ -117,6 +117,14 @@ jobs:
       - name: Type-check frontend
         run: npx tsc -p tsconfig.app.json --noEmit
 
+      - name: Frontend unit tests (every npm test:* script)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for s in $(node -e 'console.log(Object.keys(require("./package.json").scripts).filter(k=>k.startsWith("test:")).join(" "))'); do
+            echo "::group::$s"; npm run -s "$s"; echo "::endgroup::"
+          done
+
       # `tauri::generate_context!` needs `frontendDist` (../dist) at compile time.
       - name: Build frontend
         run: npm run build
