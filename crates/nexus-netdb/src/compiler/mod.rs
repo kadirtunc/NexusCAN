@@ -2,7 +2,7 @@ pub mod bit_plan;
 pub mod mux_tree;
 
 pub use bit_plan::NormalizedBitSpan;
-pub use mux_tree::{MuxBranch, MuxDecisionTree};
+pub use mux_tree::{MuxBranch, MuxDecisionTree, MAX_MUX_DEPTH};
 
 use crate::error::DbError;
 use crate::ir::{
@@ -81,6 +81,23 @@ impl CompiledSignal {
     }
 }
 
+/// Normalizes a signal's `[min|max]` engineering range for TX clamping / RX range checks.
+///
+/// Returns `(min, max, has_bounds)`:
+/// - `[0|0]` (the DBC convention for "no range") -> unbounded.
+/// - Inverted ranges (`min > max`) are **swapped**, never treated as "unbounded": an OEM typo must not
+///   silently disable TX clamping. The DBC parser additionally emits an `INVERTED_BOUNDS` warning.
+/// - A NaN bound is treated as open on that side (`-inf` / `+inf`), so `clamp` can never panic.
+pub fn normalize_bounds(min: f64, max: f64) -> (f64, f64, bool) {
+    let mut lo = if min.is_nan() { f64::NEG_INFINITY } else { min };
+    let mut hi = if max.is_nan() { f64::INFINITY } else { max };
+    if lo > hi {
+        std::mem::swap(&mut lo, &mut hi);
+    }
+    let unbounded = (lo == 0.0 && hi == 0.0) || (lo == f64::NEG_INFINITY && hi == f64::INFINITY);
+    (lo, hi, !unbounded)
+}
+
 /// Pre-compiled execution plan for a CAN/CAN-FD message.
 #[derive(Clone, Debug)]
 pub struct CompiledMessage {
@@ -141,8 +158,10 @@ impl CompiledDatabase {
                 let bit_span =
                     NormalizedBitSpan::compile(sig_def.start_bit, sig_def.bit_len, sig_def.byte_order)?;
 
-                let has_bounds = sig_def.has_bounds();
+                let (min, max, has_bounds) = normalize_bounds(sig_def.min, sig_def.max);
                 let has_enum_table = !sig_def.enum_values.is_empty();
+                // A NaN/Inf start value (e.g. GenSigStartValue * factor overflow) is never packed.
+                let initial_value = sig_def.initial_value.filter(|v| v.is_finite());
 
                 let comp_sig = CompiledSignal {
                     id,
@@ -154,13 +173,13 @@ impl CompiledDatabase {
                     value_type: sig_def.value_type,
                     factor: sig_def.factor,
                     offset: sig_def.offset,
-                    min: sig_def.min,
-                    max: sig_def.max,
+                    min,
+                    max,
                     unit: sig_def.unit.clone(),
                     receivers: sig_def.receivers.clone(),
                     mux_role: sig_def.mux_role.clone(),
                     bit_span,
-                    initial_value: sig_def.initial_value,
+                    initial_value,
                     has_bounds,
                     has_enum_table,
                     enum_values: sig_def.enum_values.clone(),
@@ -182,6 +201,12 @@ impl CompiledDatabase {
                     if let Some(&sw_id) = name_to_id.get(switch_signal_name) {
                         *switch_signal = sw_id;
                         referenced_switches.insert(switch_signal_name.clone());
+                    } else {
+                        // Unresolvable switch name (typo / truncated file). Leaving the parser default
+                        // `switch_signal = 0` would silently bind it to global signal 0 of an unrelated
+                        // message (wrong decode tree, and the TX encoder would pack a foreign signal).
+                        // Fall back to decoding it unconditionally.
+                        sig.mux_role = MuxRole::Static;
                     }
                 }
             }

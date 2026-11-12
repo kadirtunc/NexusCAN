@@ -1,3 +1,4 @@
+use crate::compiler::MAX_MUX_DEPTH;
 use crate::error::{DbError, DbParseError, ParseDiagnostic};
 use crate::formats::encoding::decode_text_lossless;
 use crate::formats::{
@@ -68,6 +69,9 @@ impl DatabaseFormatExporter for KcdFormat {
         ))
     }
 }
+
+/// Largest `<LabelGroup from=".." to="..">` span expanded into individual enum entries.
+const MAX_LABEL_GROUP_SPAN: u64 = 64;
 
 struct KcdMuxLevel {
     switch_name: String,
@@ -159,6 +163,19 @@ impl<'a> KcdParser<'a> {
                             container_state = ContainerState::InConsumer;
                         }
                         "Multiplex" => {
+                            // HIGH-06: bound cascaded `<Multiplex>` nesting. This is a hard error even in
+                            // fault-tolerant mode: silently dropping levels would change signal semantics.
+                            if mux_stack.len() >= MAX_MUX_DEPTH {
+                                let pos = reader.buffer_position();
+                                return Err(DbParseError::Fatal {
+                                    message: format!(
+                                        "KCD <Multiplex> nesting depth exceeds the maximum of {} (byte offset {})",
+                                        MAX_MUX_DEPTH, pos
+                                    ),
+                                    line: None,
+                                    column: None,
+                                });
+                            }
                             let mut m_name = "Mux".to_string();
                             let mut offset: u16 = 0;
                             let mut length: u8 = 8;
@@ -690,7 +707,9 @@ impl<'a> KcdParser<'a> {
         }
         if let (Some(f), Some(t)) = (from, to) {
             let (min_val, max_val) = if f <= t { (f, t) } else { (t, f) };
-            if (max_val - min_val) <= 64 && !name.is_empty() {
+            // `max_val - min_val` overflows for extreme i64 bounds (HIGH-05): in debug it panics, in
+            // release it wraps negative, passes the guard and iterates ~2^63 values (freeze / OOM).
+            if max_val.abs_diff(min_val) <= MAX_LABEL_GROUP_SPAN && !name.is_empty() {
                 for val in min_val..=max_val {
                     sig.enum_values.entry(val).or_insert_with(|| name.clone());
                 }

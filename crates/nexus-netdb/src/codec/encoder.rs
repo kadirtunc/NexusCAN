@@ -1,4 +1,4 @@
-use crate::compiler::CompiledDatabase;
+use crate::compiler::{CompiledDatabase, MAX_MUX_DEPTH};
 use crate::error::EncodeError;
 use crate::ir::mux::{MuxRole, SignalId};
 use crate::ir::SignalValueType;
@@ -30,6 +30,21 @@ impl CompiledDatabase {
             }
         }
 
+        // 1b. Industrial TX Safety Rule: never transmit NaN / ±Inf. Clamping cannot repair a NaN and
+        //     `NaN as int` silently becomes 0 (a plausible-looking but wrong command).
+        for &(sig_id, val) in signal_values {
+            if !val.is_finite() {
+                let signal_name = self
+                    .get_signal(sig_id)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                return Err(EncodeError::NonFiniteValue {
+                    signal_name,
+                    value: val,
+                });
+            }
+        }
+
         // 2. Resolve multiplexer switch requirements & detect conflicts (zero-alloc SmallVec)
         let mut resolved_values: SmallVec<[(SignalId, f64); 32]> = SmallVec::new();
         for &(sig_id, val) in signal_values {
@@ -43,19 +58,30 @@ impl CompiledDatabase {
         // Check each multiplexed signal in the input and enforce/auto-populate its switch hierarchy (multi-hop ancestor walk)
         for &(sig_id, _) in signal_values {
             let mut cur_sig_id = sig_id;
-            let mut hops = 0;
+            let mut mux_hops = 0usize;
             while let Some(cur_sig) = self.get_signal(cur_sig_id) {
-                hops += 1;
-                if hops > 16 {
-                    break;
-                }
                 if let MuxRole::Multiplexed {
                     switch_signal,
                     ranges,
                     ..
                 } = &cur_sig.mux_role
                 {
+                    mux_hops += 1;
+                    if mux_hops > MAX_MUX_DEPTH {
+                        // Compile never yields a deeper tree, so this is a cycle without a master
+                        // switch or a hand-built database: refuse instead of silently truncating.
+                        return Err(EncodeError::MuxTooDeep {
+                            signal_id: sig_id,
+                            max: MAX_MUX_DEPTH,
+                        });
+                    }
                     let target_switch_id = *switch_signal;
+                    if !msg.all_signal_ids.contains(&target_switch_id) {
+                        return Err(EncodeError::SignalNotInMessage {
+                            signal_id: target_switch_id,
+                            message_key: msg.can_id.schema_key(),
+                        });
+                    }
                     let required_range = ranges.first().copied().unwrap_or_default();
 
                     if let Some(existing_sw_val) = resolved_values
@@ -91,6 +117,11 @@ impl CompiledDatabase {
         // 4. Initialize signals with initial_value (GenSigStartValue) if defined and not explicitly set
         for sig in &msg.all_signals {
             if let Some(init_phys) = sig.initial_value {
+                // Defaults of signals whose scaling cannot be inverted are left at raw 0 rather than
+                // failing every encode of the message; an explicit value for them still errors.
+                if sig.factor == 0.0 || !sig.factor.is_finite() || !sig.offset.is_finite() {
+                    continue;
+                }
                 if !resolved_values.iter().any(|(s, _)| *s == sig.id) {
                     match &sig.mux_role {
                         MuxRole::Static | MuxRole::MasterSwitch => {
@@ -143,20 +174,46 @@ impl CompiledDatabase {
             .get_signal(signal_id)
             .ok_or(EncodeError::SignalNotFound(signal_id))?;
 
-        // Industrial TX Safety Rule: Clamp physical value to engineering bounds
+        if !phys_val.is_finite() {
+            return Err(EncodeError::NonFiniteValue {
+                signal_name: sig.name.clone(),
+                value: phys_val,
+            });
+        }
+        // factor == 0 (or non-finite factor/offset) makes physical -> raw non-invertible: dividing would
+        // yield ±Inf/NaN which the integer casts below silently turn into 0 / saturated raw values.
+        if sig.factor == 0.0 || !sig.factor.is_finite() || !sig.offset.is_finite() {
+            return Err(EncodeError::InvalidScaling {
+                signal_name: sig.name.clone(),
+                factor: sig.factor,
+                offset: sig.offset,
+            });
+        }
+
+        // Industrial TX Safety Rule: Clamp physical value to engineering bounds.
+        // `min <= max` and non-NaN are guaranteed by `compiler::normalize_bounds`; use max/min instead
+        // of `f64::clamp` anyway so a hand-built `CompiledSignal` can never trigger its panic.
         let clamped_phys = if sig.has_bounds {
-            phys_val.clamp(sig.min, sig.max)
+            phys_val.max(sig.min).min(sig.max)
         } else {
             phys_val
         };
 
         let raw = match sig.value_type {
             SignalValueType::Float32 => {
-                let f_val = ((clamped_phys - sig.offset) / sig.factor) as f32;
+                // Saturate to the finite f32 range instead of letting `as f32` produce ±Inf.
+                let f_val = ((clamped_phys - sig.offset) / sig.factor)
+                    .clamp(f32::MIN as f64, f32::MAX as f64) as f32;
                 f_val.to_bits() as u64
             }
             SignalValueType::Float64 => {
                 let f_val = (clamped_phys - sig.offset) / sig.factor;
+                if !f_val.is_finite() {
+                    return Err(EncodeError::NonFiniteValue {
+                        signal_name: sig.name.clone(),
+                        value: phys_val,
+                    });
+                }
                 f_val.to_bits()
             }
             SignalValueType::Signed => {

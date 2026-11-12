@@ -183,11 +183,28 @@ impl CompiledDatabase {
         }
 
         // 3. Build SignalSchemaDto (dense ordering matching self.signals)
+        // Parent message lookup table (O(n)); a per-signal linear search over all messages was O(n^2),
+        // turning a large hostile file into a multi-second UI freeze.
+        let mut parent_key: Vec<Option<usize>> = vec![None; self.signals.len()];
+        for (mi, m) in self.messages.iter().enumerate() {
+            for &sid in &m.all_signal_ids {
+                if let Some(slot) = parent_key.get_mut(sid as usize) {
+                    if slot.is_none() {
+                        *slot = Some(mi);
+                    }
+                }
+            }
+        }
+        let message_keys: Vec<String> = self.messages.iter().map(|m| m.can_id.schema_key()).collect();
+
         let mut signals = Vec::with_capacity(self.signals.len());
         for sig in &self.signals {
-            // Find parent message key
-            let parent_msg = self.messages.iter().find(|m| m.all_signal_ids.contains(&sig.id));
-            let message_key = parent_msg.map(|m| m.can_id.schema_key()).unwrap_or_default();
+            let message_key = parent_key
+                .get(sig.id as usize)
+                .copied()
+                .flatten()
+                .map(|mi| message_keys[mi].clone())
+                .unwrap_or_default();
 
             let byte_order_str = match sig.byte_order {
                 ByteOrder::LittleEndian => "littleEndian",

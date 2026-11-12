@@ -300,14 +300,24 @@ impl<'a> DbcParser<'a> {
     }
 
     fn parse_bo(&mut self) -> Option<u32> {
-        let raw_id = match self.parse_u64() {
-            Some(id) => id as u32,
+        let bo_line = self
+            .tokens
+            .get(self.pos.saturating_sub(1))
+            .map(|st| st.line)
+            .unwrap_or(1);
+        let raw_id = match self.parse_raw_id() {
+            Some(id) => id,
             None => {
                 self.add_diag(
                     DiagnosticSeverity::Error,
                     "MALFORMED_BO",
-                    "Expected CAN message ID in BO_ statement",
+                    "Expected CAN message ID (<= 32 bits) in BO_ statement",
                 );
+                // Recover at the next line: BO_ has no terminating ';', so the generic
+                // skip-to-semicolon recovery would swallow every following message.
+                while self.peek_spanned().is_some_and(|st| st.line == bo_line) {
+                    self.next();
+                }
                 return None;
             }
         };
@@ -324,7 +334,8 @@ impl<'a> DbcParser<'a> {
             self.next();
         }
 
-        let dlc = self.parse_u64().unwrap_or(8) as u8;
+        // Saturate instead of wrapping: DLC 264 must not silently become 8.
+        let dlc = self.parse_u64().map_or(8, sat_u8);
 
         let transmitter = match self.next() {
             Some(SpannedToken {
@@ -383,6 +394,15 @@ impl<'a> DbcParser<'a> {
                     "ORPHAN_SG",
                     "Found SG_ statement before any BO_ message definition",
                 );
+                // SG_ has no terminating ';': drop the rest of this line only.
+                let sg_line = self
+                    .tokens
+                    .get(self.pos.saturating_sub(1))
+                    .map(|st| st.line)
+                    .unwrap_or(1);
+                while self.peek_spanned().is_some_and(|st| st.line == sg_line) {
+                    self.next();
+                }
                 return;
             }
         };
@@ -472,13 +492,15 @@ impl<'a> DbcParser<'a> {
         }
 
         // start_bit | bit_len @ byte_order value_type
-        let start_bit = self.parse_u64().unwrap_or(0) as u16;
+        // Saturating narrowing: an over-range value must fail bit-plan compilation, never wrap into a
+        // plausible in-range coordinate (65541 -> 5).
+        let start_bit = self.parse_u64().map_or(0, |v| u16::try_from(v).unwrap_or(u16::MAX));
 
         if matches!(self.peek(), Some(Token::Pipe)) {
             self.next();
         }
 
-        let bit_len = self.parse_u64().unwrap_or(1) as u8;
+        let bit_len = self.parse_u64().map_or(1, sat_u8);
 
         if matches!(self.peek(), Some(Token::At)) {
             self.next();
@@ -521,6 +543,26 @@ impl<'a> DbcParser<'a> {
         let max = self.parse_signed_float().unwrap_or(0.0);
         if matches!(self.peek(), Some(Token::RBracket)) {
             self.next();
+        }
+        if min > max {
+            self.add_diag(
+                DiagnosticSeverity::Warning,
+                "INVERTED_BOUNDS",
+                format!(
+                    "Signal '{}' has inverted range [{}|{}]; it is normalized to [{}|{}] for TX clamping",
+                    sig_name, min, max, max, min
+                ),
+            );
+        }
+        if factor == 0.0 || !factor.is_finite() || !offset.is_finite() {
+            self.add_diag(
+                DiagnosticSeverity::Warning,
+                "INVALID_SCALING",
+                format!(
+                    "Signal '{}' has unusable scaling ({},{}); TX encoding of this signal is refused",
+                    sig_name, factor, offset
+                ),
+            );
         }
 
         // "unit"
@@ -614,8 +656,8 @@ impl<'a> DbcParser<'a> {
     }
 
     fn parse_bo_tx_bu(&mut self) {
-        let raw_id = match self.parse_u64() {
-            Some(id) => id as u32,
+        let raw_id = match self.parse_raw_id() {
+            Some(id) => id,
             None => {
                 self.skip_statement();
                 return;
@@ -700,8 +742,7 @@ impl<'a> DbcParser<'a> {
                     }
                     "BO_" => {
                         self.next();
-                        if let Some(raw_id) = self.parse_u64() {
-                            let raw_id = raw_id as u32;
+                        if let Some(raw_id) = self.parse_raw_id() {
                             if let Some(SpannedToken {
                                 token: Token::QuotedString(comment),
                                 ..
@@ -720,8 +761,7 @@ impl<'a> DbcParser<'a> {
                     }
                     "SG_" => {
                         self.next();
-                        if let Some(raw_id) = self.parse_u64() {
-                            let raw_id = raw_id as u32;
+                        if let Some(raw_id) = self.parse_raw_id() {
                             if let Some(SpannedToken {
                                 token: Token::Word(sig_name),
                                 ..
@@ -938,8 +978,8 @@ impl<'a> DbcParser<'a> {
                     }
                     "BO_" => {
                         self.next();
-                        let raw_id = match self.parse_u64() {
-                            Some(id) => id as u32,
+                        let raw_id = match self.parse_raw_id() {
+                            Some(id) => id,
                             None => {
                                 self.skip_statement();
                                 return;
@@ -958,8 +998,8 @@ impl<'a> DbcParser<'a> {
                     }
                     "SG_" => {
                         self.next();
-                        let raw_id = match self.parse_u64() {
-                            Some(id) => id as u32,
+                        let raw_id = match self.parse_raw_id() {
+                            Some(id) => id,
                             None => {
                                 self.skip_statement();
                                 return;
@@ -1064,8 +1104,8 @@ impl<'a> DbcParser<'a> {
     }
 
     fn parse_val(&mut self) {
-        let raw_id = match self.parse_u64() {
-            Some(id) => id as u32,
+        let raw_id = match self.parse_raw_id() {
+            Some(id) => id,
             None => {
                 self.skip_statement();
                 return;
@@ -1142,8 +1182,8 @@ impl<'a> DbcParser<'a> {
     }
 
     fn parse_sig_valtype(&mut self) {
-        let raw_id = match self.parse_u64() {
-            Some(id) => id as u32,
+        let raw_id = match self.parse_raw_id() {
+            Some(id) => id,
             None => {
                 self.skip_statement();
                 return;
@@ -1202,8 +1242,8 @@ impl<'a> DbcParser<'a> {
 
     fn parse_sg_mul_val(&mut self) {
         // SG_MUL_VAL_ <raw_id> <muxed_sig> <switch_sig> <range_list> ;
-        let raw_id = match self.parse_u64() {
-            Some(id) => id as u32,
+        let raw_id = match self.parse_raw_id() {
+            Some(id) => id,
             None => {
                 self.skip_statement();
                 return;
@@ -1272,8 +1312,8 @@ impl<'a> DbcParser<'a> {
     }
 
     fn parse_sig_group(&mut self) {
-        let raw_id = match self.parse_u64() {
-            Some(id) => id as u32,
+        let raw_id = match self.parse_raw_id() {
+            Some(id) => id,
             None => {
                 self.skip_statement();
                 return;
@@ -1291,7 +1331,7 @@ impl<'a> DbcParser<'a> {
             }
         };
 
-        let rep = self.parse_u64().unwrap_or(1) as u32;
+        let rep = self.parse_u64().map_or(1, |v| u32::try_from(v).unwrap_or(u32::MAX));
 
         if matches!(self.peek(), Some(Token::Colon)) {
             self.next();
@@ -1354,6 +1394,13 @@ impl<'a> DbcParser<'a> {
         }
     }
 
+    /// Parses a DBC raw message ID. IDs that do not fit 32 bits are rejected (None) rather than truncated,
+    /// which would alias them onto an unrelated message.
+    fn parse_raw_id(&mut self) -> Option<u32> {
+        let v = self.parse_u64()?;
+        u32::try_from(v).ok()
+    }
+
     fn parse_signed_int(&mut self) -> Option<i64> {
         let mut sign = 1i64;
         if let Some(tok) = self.peek() {
@@ -1367,20 +1414,27 @@ impl<'a> DbcParser<'a> {
 
         if let Some(tok) = self.peek() {
             match tok {
+                // Widen to i128 before applying the sign: `-9223372036854775808` arrives as
+                // `Minus, Int(9223372036854775808)` and `(2^63 as i64) * -1` overflows (LOW-02).
+                // Values outside i64 are rejected (None) instead of wrapping (u64::MAX must not become -1).
                 Token::Int(i) => {
-                    let v = *i as i64 * sign;
+                    let v = i64::try_from(i128::from(*i) * i128::from(sign)).ok();
                     self.next();
-                    Some(v)
+                    v
                 }
                 Token::Float(f) => {
-                    let v = (*f as i64) * sign;
+                    let v = if f.is_finite() && f.abs() < 9.3e18 {
+                        i64::try_from((*f as i128) * i128::from(sign)).ok()
+                    } else {
+                        None
+                    };
                     self.next();
-                    Some(v)
+                    v
                 }
                 Token::Word(w) => {
                     if let Ok(v) = w.parse::<i64>() {
                         self.next();
-                        Some(v * sign)
+                        v.checked_mul(sign)
                     } else {
                         None
                     }
@@ -1458,7 +1512,7 @@ impl<'a> DbcParser<'a> {
             if let Some(attr) = msg.attributes.get("GenMsgCycleTime") {
                 if let Some(cycle) = attr.as_i64() {
                     if cycle > 0 {
-                        msg.expected_cycle_ms = Some(cycle as u32);
+                        msg.expected_cycle_ms = u32::try_from(cycle).ok();
                     }
                 }
             }
@@ -1507,6 +1561,11 @@ impl<'a> DbcParser<'a> {
             }
         }
     }
+}
+
+#[inline]
+fn sat_u8(v: u64) -> u8 {
+    u8::try_from(v).unwrap_or(u8::MAX)
 }
 
 fn is_known_dbc_keyword(w: &str) -> bool {

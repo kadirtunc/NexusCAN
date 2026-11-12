@@ -18,7 +18,7 @@ pub mod ui_dto;
 
 pub use codec::{DecodeSummary, DecodedSignalSample};
 pub use compiler::{
-    bit_plan::NormalizedBitSpan, mux_tree::{MuxBranch, MuxDecisionTree}, CompiledDatabase,
+    bit_plan::NormalizedBitSpan, mux_tree::{MuxBranch, MuxDecisionTree, MAX_MUX_DEPTH}, CompiledDatabase,
     CompiledMessage, CompiledSignal,
 };
 pub use error::{

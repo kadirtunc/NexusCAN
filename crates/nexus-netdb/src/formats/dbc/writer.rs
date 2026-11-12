@@ -5,6 +5,7 @@ use crate::ir::{
     ByteOrder, NetworkDatabase, SignalValueType,
 };
 use nexus_core::VECTOR_INDEPENDENT_SIG_MSG_ID;
+use std::borrow::Cow;
 use std::fmt::Write;
 
 /// Canonical Vector .dbc text exporter.
@@ -24,7 +25,7 @@ impl<'a> DbcWriter<'a> {
     pub fn write_to_string(mut self) -> Result<String, DbError> {
         // 1. VERSION
         let ver = self.db.version.as_deref().unwrap_or("");
-        writeln!(self.out, "VERSION \"{}\"", ver).map_err(|e| DbError::Generic(e.to_string()))?;
+        writeln!(self.out, "VERSION \"{}\"", esc(ver)).map_err(|e| DbError::Generic(e.to_string()))?;
         self.out.push('\n');
 
         // 2. NS_ (New Symbols)
@@ -65,16 +66,16 @@ impl<'a> DbcWriter<'a> {
         // 4. BU_
         self.out.push_str("BU_:");
         for node_name in self.db.nodes.keys() {
-            write!(self.out, " {}", node_name).map_err(|e| DbError::Generic(e.to_string()))?;
+            write!(self.out, " {}", ident(node_name)).map_err(|e| DbError::Generic(e.to_string()))?;
         }
         self.out.push_str("\n\n");
 
         // 5. VAL_TABLE_
         for vt in self.db.value_tables.values() {
-            write!(self.out, "VAL_TABLE_ {}", vt.name)
+            write!(self.out, "VAL_TABLE_ {}", ident(&vt.name))
                 .map_err(|e| DbError::Generic(e.to_string()))?;
             for (val, desc) in &vt.entries {
-                write!(self.out, " {} \"{}\"", val, desc)
+                write!(self.out, " {} \"{}\"", val, esc(desc))
                     .map_err(|e| DbError::Generic(e.to_string()))?;
             }
             self.out.push_str(" ;\n");
@@ -86,11 +87,18 @@ impl<'a> DbcWriter<'a> {
         // 6. BO_ & SG_
         for msg in self.db.messages.values() {
             let raw_id = msg.can_id.to_dbc_raw_id();
-            let transmitter = msg.transmitters.first().map(|s| s.as_str()).unwrap_or("Vector__XXX");
+            let transmitter = msg
+                .transmitters
+                .first()
+                .map(|s| ident(s))
+                .unwrap_or(Cow::Borrowed("Vector__XXX"));
             writeln!(
                 self.out,
                 "BO_ {} {}: {} {}",
-                raw_id, msg.name, msg.dlc, transmitter
+                raw_id,
+                ident(&msg.name),
+                msg.dlc,
+                transmitter
             )
             .map_err(|e| DbError::Generic(e.to_string()))?;
 
@@ -125,13 +133,17 @@ impl<'a> DbcWriter<'a> {
                 let receivers = if sig.receivers.is_empty() {
                     "Vector__XXX".to_string()
                 } else {
-                    sig.receivers.join(",")
+                    sig.receivers
+                        .iter()
+                        .map(|r| ident(r))
+                        .collect::<Vec<_>>()
+                        .join(",")
                 };
 
                 writeln!(
                     self.out,
                     " SG_ {}{} : {}|{}@{}{} ({},{}) [{}|{}] \"{}\" {}",
-                    sig.name,
+                    ident(&sig.name),
                     mux_str,
                     sig.start_bit,
                     sig.bit_len,
@@ -141,7 +153,7 @@ impl<'a> DbcWriter<'a> {
                     sig.offset,
                     sig.min,
                     sig.max,
-                    sig.unit,
+                    esc(&sig.unit),
                     receivers
                 )
                 .map_err(|e| DbError::Generic(e.to_string()))?;
@@ -172,13 +184,17 @@ impl<'a> DbcWriter<'a> {
                 let receivers = if sig.receivers.is_empty() {
                     "Vector__XXX".to_string()
                 } else {
-                    sig.receivers.join(",")
+                    sig.receivers
+                        .iter()
+                        .map(|r| ident(r))
+                        .collect::<Vec<_>>()
+                        .join(",")
                 };
 
                 writeln!(
                     self.out,
                     " SG_ {} : {}|{}@{}{} ({},{}) [{}|{}] \"{}\" {}",
-                    sig.name,
+                    ident(&sig.name),
                     sig.start_bit,
                     sig.bit_len,
                     bo_char,
@@ -187,7 +203,7 @@ impl<'a> DbcWriter<'a> {
                     sig.offset,
                     sig.min,
                     sig.max,
-                    sig.unit,
+                    esc(&sig.unit),
                     receivers
                 )
                 .map_err(|e| DbError::Generic(e.to_string()))?;
@@ -202,7 +218,7 @@ impl<'a> DbcWriter<'a> {
                 write!(self.out, "BO_TX_BU_ {} :", raw_id)
                     .map_err(|e| DbError::Generic(e.to_string()))?;
                 for tx in &msg.transmitters {
-                    write!(self.out, " {}", tx).map_err(|e| DbError::Generic(e.to_string()))?;
+                    write!(self.out, " {}", ident(tx)).map_err(|e| DbError::Generic(e.to_string()))?;
                 }
                 self.out.push_str(" ;\n");
             }
@@ -211,19 +227,19 @@ impl<'a> DbcWriter<'a> {
 
         // 8. CM_ Comments
         if let Some(ref c) = self.db.comment {
-            writeln!(self.out, "CM_ \"{}\" ;", escape_quotes(c))
+            writeln!(self.out, "CM_ \"{}\" ;", esc(c))
                 .map_err(|e| DbError::Generic(e.to_string()))?;
         }
         for (node_name, node) in &self.db.nodes {
             if let Some(ref c) = node.comment {
-                writeln!(self.out, "CM_ BU_ {} \"{}\" ;", node_name, escape_quotes(c))
+                writeln!(self.out, "CM_ BU_ {} \"{}\" ;", ident(node_name), esc(c))
                     .map_err(|e| DbError::Generic(e.to_string()))?;
             }
         }
         for msg in self.db.messages.values() {
             let raw_id = msg.can_id.to_dbc_raw_id();
             if let Some(ref c) = msg.comment {
-                writeln!(self.out, "CM_ BO_ {} \"{}\" ;", raw_id, escape_quotes(c))
+                writeln!(self.out, "CM_ BO_ {} \"{}\" ;", raw_id, esc(c))
                     .map_err(|e| DbError::Generic(e.to_string()))?;
             }
             for sig in &msg.signals {
@@ -232,8 +248,8 @@ impl<'a> DbcWriter<'a> {
                         self.out,
                         "CM_ SG_ {} {} \"{}\" ;",
                         raw_id,
-                        sig.name,
-                        escape_quotes(c)
+                        ident(&sig.name),
+                        esc(c)
                     )
                     .map_err(|e| DbError::Generic(e.to_string()))?;
                 }
@@ -259,7 +275,7 @@ impl<'a> DbcWriter<'a> {
                 AttributeValueType::Enum { values } => {
                     let formatted = values
                         .iter()
-                        .map(|v| format!("\"{}\"", escape_quotes(v)))
+                        .map(|v| format!("\"{}\"", esc(v)))
                         .collect::<Vec<_>>()
                         .join(",");
                     format!("ENUM {}", formatted)
@@ -269,7 +285,7 @@ impl<'a> DbcWriter<'a> {
             writeln!(
                 self.out,
                 "BA_DEF_ {}\"{}\" {} ;",
-                target_str, def.name, type_str
+                target_str, esc(&def.name), type_str
             )
             .map_err(|e| DbError::Generic(e.to_string()))?;
         }
@@ -278,7 +294,7 @@ impl<'a> DbcWriter<'a> {
         for def in self.db.attribute_defs.values() {
             if let Some(ref val) = def.default_value {
                 let val_str = format_attr_value(val);
-                writeln!(self.out, "BA_DEF_DEF_ \"{}\" {} ;", def.name, val_str)
+                writeln!(self.out, "BA_DEF_DEF_ \"{}\" {} ;", esc(&def.name), val_str)
                     .map_err(|e| DbError::Generic(e.to_string()))?;
             }
         }
@@ -288,7 +304,7 @@ impl<'a> DbcWriter<'a> {
             writeln!(
                 self.out,
                 "BA_ \"{}\" {} ;",
-                name,
+                esc(name),
                 format_attr_value(val)
             )
             .map_err(|e| DbError::Generic(e.to_string()))?;
@@ -298,8 +314,8 @@ impl<'a> DbcWriter<'a> {
                 writeln!(
                     self.out,
                     "BA_ \"{}\" BU_ {} {} ;",
-                    name,
-                    node_name,
+                    esc(name),
+                    ident(node_name),
                     format_attr_value(val)
                 )
                 .map_err(|e| DbError::Generic(e.to_string()))?;
@@ -311,7 +327,7 @@ impl<'a> DbcWriter<'a> {
                 writeln!(
                     self.out,
                     "BA_ \"{}\" BO_ {} {} ;",
-                    name,
+                    esc(name),
                     raw_id,
                     format_attr_value(val)
                 )
@@ -322,9 +338,9 @@ impl<'a> DbcWriter<'a> {
                     writeln!(
                         self.out,
                         "BA_ \"{}\" SG_ {} {} {} ;",
-                        name,
+                        esc(name),
                         raw_id,
-                        sig.name,
+                        ident(&sig.name),
                         format_attr_value(val)
                     )
                     .map_err(|e| DbError::Generic(e.to_string()))?;
@@ -338,10 +354,10 @@ impl<'a> DbcWriter<'a> {
             let raw_id = msg.can_id.to_dbc_raw_id();
             for sig in &msg.signals {
                 if !sig.enum_values.is_empty() {
-                    write!(self.out, "VAL_ {} {}", raw_id, sig.name)
+                    write!(self.out, "VAL_ {} {}", raw_id, ident(&sig.name))
                         .map_err(|e| DbError::Generic(e.to_string()))?;
                     for (val, label) in &sig.enum_values {
-                        write!(self.out, " {} \"{}\"", val, escape_quotes(label))
+                        write!(self.out, " {} \"{}\"", val, esc(label))
                             .map_err(|e| DbError::Generic(e.to_string()))?;
                     }
                     self.out.push_str(" ;\n");
@@ -356,11 +372,11 @@ impl<'a> DbcWriter<'a> {
             for sig in &msg.signals {
                 match sig.value_type {
                     SignalValueType::Float32 => {
-                        writeln!(self.out, "SIG_VALTYPE_ {} {} : 1 ;", raw_id, sig.name)
+                        writeln!(self.out, "SIG_VALTYPE_ {} {} : 1 ;", raw_id, ident(&sig.name))
                             .map_err(|e| DbError::Generic(e.to_string()))?;
                     }
                     SignalValueType::Float64 => {
-                        writeln!(self.out, "SIG_VALTYPE_ {} {} : 2 ;", raw_id, sig.name)
+                        writeln!(self.out, "SIG_VALTYPE_ {} {} : 2 ;", raw_id, ident(&sig.name))
                             .map_err(|e| DbError::Generic(e.to_string()))?;
                     }
                     _ => {}
@@ -388,7 +404,10 @@ impl<'a> DbcWriter<'a> {
                         writeln!(
                             self.out,
                             "SG_MUL_VAL_ {} {} {} {} ;",
-                            raw_id, sig.name, switch_signal_name, range_strs
+                            raw_id,
+                            ident(&sig.name),
+                            ident(switch_signal_name),
+                            range_strs
                         )
                         .map_err(|e| DbError::Generic(e.to_string()))?;
                     }
@@ -404,11 +423,13 @@ impl<'a> DbcWriter<'a> {
                 write!(
                     self.out,
                     "SIG_GROUP_ {} {} {} :",
-                    raw_id, grp.name, grp.group_id
+                    raw_id,
+                    ident(&grp.name),
+                    grp.group_id
                 )
                 .map_err(|e| DbError::Generic(e.to_string()))?;
                 for s in &grp.signals {
-                    write!(self.out, " {}", s).map_err(|e| DbError::Generic(e.to_string()))?;
+                    write!(self.out, " {}", ident(s)).map_err(|e| DbError::Generic(e.to_string()))?;
                 }
                 self.out.push_str(" ;\n");
             }
@@ -418,15 +439,51 @@ impl<'a> DbcWriter<'a> {
     }
 }
 
-fn escape_quotes(s: &str) -> String {
-    s.replace('"', "\\\"")
+/// Escapes a value for use inside a DBC `"..."` string so untrusted text (e.g. from a `.kcd` comment)
+/// cannot terminate the string and inject statements. Mirrors the lexer's `\\`, `\"`, `\n`, `\r`.
+fn esc(s: &str) -> Cow<'_, str> {
+    if !s.contains(['"', '\\', '\n', '\r']) {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Sanitizes a DBC identifier (message / signal / node / table / group name). DBC identifiers are
+/// C identifiers; any other character (space, `;`, `"`, `:`, newline, ...) from a foreign format is
+/// replaced by `_` so it cannot alter statement structure. An empty name becomes `_`.
+fn ident(s: &str) -> Cow<'_, str> {
+    let valid_first = s
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    if valid_first && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Cow::Borrowed(s);
+    }
+    let mut out: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    if !out.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+        out.insert(0, '_');
+    }
+    Cow::Owned(out)
 }
 
 fn format_attr_value(val: &AttributeValue) -> String {
     match val {
         AttributeValue::Int(i) => i.to_string(),
         AttributeValue::Float(f) => f.to_string(),
-        AttributeValue::String(s) => format!("\"{}\"", escape_quotes(s)),
+        AttributeValue::String(s) => format!("\"{}\"", esc(s)),
         AttributeValue::Enum { index, .. } => index.to_string(),
     }
 }

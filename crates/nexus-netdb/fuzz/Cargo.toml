@@ -1,0 +1,43 @@
+# cargo-fuzz harness for nexus-netdb (WP-6). NOT part of the stable workspace build:
+# this directory has its own `[workspace]` and requires a nightly toolchain. See README.md.
+[package]
+name = "nexus-netdb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+nexus-netdb = { path = ".." }
+nexus-core = { path = "../../nexus-core" }
+
+# Standalone workspace so the root `crates/*` workspace never builds (or locks) this crate.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "dbc_parse_compile"
+path = "fuzz_targets/dbc_parse_compile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kcd_parse_compile"
+path = "fuzz_targets/kcd_parse_compile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_roundtrip"
+path = "fuzz_targets/codec_roundtrip.rs"
+test = false
+doc = false
+bench = false

@@ -149,18 +149,22 @@ pub struct SignalDef {
 
 impl SignalDef {
     /// Returns true if engineering min/max bounds are actively defined.
+    ///
+    /// Inverted ranges (`min > max`) count as bounded (they are normalized by swapping); see
+    /// [`crate::compiler::normalize_bounds`].
     #[inline]
     pub fn has_bounds(&self) -> bool {
-        !(self.min == 0.0 && self.max == 0.0) && self.min <= self.max
+        crate::compiler::normalize_bounds(self.min, self.max).2
     }
 
     /// Evaluates whether a physical engineering value falls within defined min/max bounds.
     #[inline]
     pub fn is_value_in_bounds(&self, val: f64) -> bool {
-        if !self.has_bounds() {
+        let (lo, hi, bounded) = crate::compiler::normalize_bounds(self.min, self.max);
+        if !bounded {
             true
         } else {
-            val >= self.min - 1e-9 && val <= self.max + 1e-9
+            val >= lo - 1e-9 && val <= hi + 1e-9
         }
     }
 }

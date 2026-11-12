@@ -114,6 +114,19 @@ pub enum EncodeError {
     #[error("Bit plan layout error: {0}")]
     BitPlan(#[from] BitPlanError),
 
+    #[error("Physical value {value} for signal '{signal_name}' is not a finite number; refusing to transmit")]
+    NonFiniteValue { signal_name: String, value: f64 },
+
+    #[error("Signal '{signal_name}' has unusable scaling (factor {factor}, offset {offset}); cannot invert physical -> raw")]
+    InvalidScaling {
+        signal_name: String,
+        factor: f64,
+        offset: f64,
+    },
+
+    #[error("Multiplexer ancestor chain of signal ID {signal_id} exceeds the maximum depth of {max} (cycle or over-deep cascade)")]
+    MuxTooDeep { signal_id: u32, max: usize },
+
     #[error("Physical value {value} for signal '{signal_name}' is out of valid bounds [{min}, {max}]")]
     ValueOutOfRange {
         signal_name: String,
@@ -157,6 +170,13 @@ pub enum DbError {
 
     #[error("Cyclic multiplexer dependency detected: {0}")]
     CyclicMux(String),
+
+    #[error("Cascaded multiplexer nesting depth {depth} exceeds the maximum of {max} (switch signal '{switch}')")]
+    MuxTooDeep {
+        depth: usize,
+        max: usize,
+        switch: String,
+    },
 
     #[error("Bit plan error: {0}")]
     BitPlan(#[from] BitPlanError),

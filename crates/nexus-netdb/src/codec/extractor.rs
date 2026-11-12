@@ -1,4 +1,4 @@
-use crate::compiler::{CompiledDatabase, CompiledSignal, MuxDecisionTree};
+use crate::compiler::{CompiledDatabase, CompiledSignal, MuxDecisionTree, MAX_MUX_DEPTH};
 use crate::ir::mux::SignalId;
 use nexus_core::{CanIdKey, RawCanFrame};
 
@@ -80,6 +80,7 @@ impl CompiledDatabase {
                 &mut decoded_count,
                 out_switches,
                 &mut switch_count,
+                1,
             );
         }
 
@@ -102,6 +103,10 @@ impl CompiledDatabase {
     }
 }
 
+/// Recursion is bounded by `depth <= MAX_MUX_DEPTH`. `CompiledDatabase::compile` never builds a deeper
+/// tree, but the fields are public, so a hand-assembled tree is also cut off here instead of being able
+/// to exhaust the stack on the RX hot path.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_mux_tree(
     tree: &MuxDecisionTree,
     payload: &[u8],
@@ -110,7 +115,11 @@ fn evaluate_mux_tree(
     decoded_count: &mut usize,
     out_switches: &mut [(SignalId, i64)],
     switch_count: &mut usize,
+    depth: usize,
 ) {
+    if depth > MAX_MUX_DEPTH {
+        return;
+    }
     let switch_sig = match all_signals.get(tree.switch_signal_id as usize) {
         Some(s) => s,
         None => return,
@@ -154,6 +163,7 @@ fn evaluate_mux_tree(
                     decoded_count,
                     out_switches,
                     switch_count,
+                    depth + 1,
                 );
             }
         }
