@@ -16,7 +16,7 @@ use nexus_core::{
 use serialport::{ClearBuffer, SerialPort, SerialPortType};
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Maximum encoded ASCII length of a 64-byte CAN-FD Lawicel frame (`B` + 8 ID + 1 DLC + 128 hex + `\r` = 139B).
 pub const MAX_SLCAN_ASCII_LEN: usize = 148;
@@ -82,6 +82,29 @@ const LAWICEL_REPLY_SCAN_MAX: usize = 16;
 /// timeout (USB-CDC adapters typically answer within 1-2 ms; 50 ms leaves margin for hubs).
 const LAWICEL_REPLY_WINDOW: Duration = Duration::from_millis(50);
 
+/// Input drain: the line counts as quiet once no byte arrived for this long.
+const LAWICEL_DRAIN_QUIET: Duration = Duration::from_millis(20);
+
+/// Input drain: upper bound on one drain; a line still busy after this is "streaming".
+const LAWICEL_DRAIN_CAP: Duration = Duration::from_millis(200);
+
+/// Timing of the Lawicel open handshake (production: [`LAWICEL_TIMING`]; tests shrink it).
+#[derive(Clone, Copy, Debug)]
+struct HandshakeTiming {
+    /// Per-command reply window.
+    reply_window: Duration,
+    /// Quiet period that ends an input drain.
+    drain_quiet: Duration,
+    /// Total cap of an input drain.
+    drain_cap: Duration,
+}
+
+const LAWICEL_TIMING: HandshakeTiming = HandshakeTiming {
+    reply_window: LAWICEL_REPLY_WINDOW,
+    drain_quiet: LAWICEL_DRAIN_QUIET,
+    drain_cap: LAWICEL_DRAIN_CAP,
+};
+
 /// Reply to one Lawicel ASCII command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LawicelReply {
@@ -89,56 +112,118 @@ enum LawicelReply {
     Ack,
     /// `BEL` (0x07): command refused.
     Nack,
-    /// No `CR` / `BEL` within [`LAWICEL_REPLY_WINDOW`] or [`LAWICEL_REPLY_SCAN_MAX`] bytes.
+    /// No `CR` / `BEL` within the reply window or [`LAWICEL_REPLY_SCAN_MAX`] bytes.
     NoReply,
+    /// (strict mode only) a `CR` terminated a non-empty line other than the command echo.
+    Unexpected,
+}
+
+/// How strictly a `CR` is accepted as the acknowledgement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplyMode {
+    /// Setup commands (`C`, `Sx`, `Yx`, `O`): stray bytes before the `CR` are tolerated, but a
+    /// line that looks like a received frame (`t`/`T`/`r`/`R`/`d`/`D`/`b`/`B`) or the echoed
+    /// command is skipped, never taken as the acknowledgement.
+    Lenient,
+    /// `L`: only a bare `CR`, or the exact echo `L\r` followed by a bare `CR`, is an `Ack`.
+    /// Any other line before a `CR` is [`LawicelReply::Unexpected`].
+    Strict,
+}
+
+/// First byte of a Lawicel received-frame line.
+#[inline]
+const fn is_frame_line_start(b: u8) -> bool {
+    matches!(b, b't' | b'T' | b'r' | b'R' | b'd' | b'D' | b'b' | b'B')
 }
 
 /// Reads the reply to the Lawicel command `echo` (without its trailing `\r`).
 ///
-/// Scans at most [`LAWICEL_REPLY_SCAN_MAX`] bytes for `CR` / `BEL`. Stray bytes before the
-/// `CR` are tolerated; a line that is exactly the echoed command (`L\r` from echoing firmware)
-/// is skipped rather than taken as the acknowledgement.
+/// Scans at most [`LAWICEL_REPLY_SCAN_MAX`] bytes for `CR` / `BEL`; `BEL` anywhere is a `Nack`.
+/// What a `CR` means depends on `mode` (see [`ReplyMode`]); the echoed command line is
+/// skipped once in both modes.
 fn read_lawicel_reply<P: Read + ?Sized>(
     port: &mut P,
     echo: &[u8],
     window: Duration,
+    mode: ReplyMode,
 ) -> LawicelReply {
-    let deadline = std::time::Instant::now() + window;
+    let deadline = Instant::now() + window;
     let mut line = [0u8; LAWICEL_REPLY_SCAN_MAX];
     let mut line_len = 0usize;
+    let mut echo_seen = false;
     let mut scanned = 0usize;
     let mut buf = [0u8; LAWICEL_REPLY_SCAN_MAX];
-    while scanned < LAWICEL_REPLY_SCAN_MAX && std::time::Instant::now() < deadline {
+    while scanned < LAWICEL_REPLY_SCAN_MAX && Instant::now() < deadline {
         let want = LAWICEL_REPLY_SCAN_MAX - scanned;
         let n = match port.read(&mut buf[..want]) {
             Ok(0) => return LawicelReply::NoReply,
             Ok(n) => n,
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::TimedOut
-                        | io::ErrorKind::WouldBlock
-                        | io::ErrorKind::Interrupted
-                ) =>
-            {
-                continue
-            }
+            Err(e) if is_transient_read_error(&e) => continue,
             Err(_) => return LawicelReply::NoReply,
         };
         for &b in &buf[..n] {
             scanned += 1;
-            match b {
-                0x07 => return LawicelReply::Nack,
-                b'\r' if !echo.is_empty() && &line[..line_len] == echo => line_len = 0,
-                b'\r' => return LawicelReply::Ack,
-                other => {
-                    line[line_len] = other;
+            if b == 0x07 {
+                return LawicelReply::Nack;
+            }
+            if b != b'\r' {
+                // `scanned <= LAWICEL_REPLY_SCAN_MAX`, so `line_len` stays in bounds.
+                if let Some(slot) = line.get_mut(line_len) {
+                    *slot = b;
                     line_len += 1;
                 }
+                continue;
+            }
+            let text = &line[..line_len];
+            line_len = 0;
+            if text.is_empty() {
+                return LawicelReply::Ack;
+            }
+            if !echo_seen && !echo.is_empty() && text == echo {
+                echo_seen = true;
+                continue;
+            }
+            match mode {
+                ReplyMode::Strict => return LawicelReply::Unexpected,
+                ReplyMode::Lenient if is_frame_line_start(text[0]) => continue,
+                ReplyMode::Lenient => return LawicelReply::Ack,
             }
         }
     }
     LawicelReply::NoReply
+}
+
+#[inline]
+fn is_transient_read_error(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    )
+}
+
+/// Reads and discards input until no byte arrived for `quiet`, bounded by `cap`.
+///
+/// Returns `true` when the line went quiet, `false` when it was still busy after `cap` (the
+/// adapter keeps streaming frames) or the port failed. Cold path; stack buffer only.
+fn drain_until_quiet<P: Read + ?Sized>(port: &mut P, quiet: Duration, cap: Duration) -> bool {
+    let start = Instant::now();
+    let mut last_rx = start;
+    let mut buf = [0u8; 64];
+    loop {
+        let now = Instant::now();
+        if now.duration_since(last_rx) >= quiet {
+            return true;
+        }
+        if now.duration_since(start) >= cap {
+            return false;
+        }
+        match port.read(&mut buf) {
+            Ok(0) => std::thread::sleep(Duration::from_millis(1)),
+            Ok(_) => last_rx = Instant::now(),
+            Err(e) if is_transient_read_error(&e) => {}
+            Err(_) => return false,
+        }
+    }
 }
 
 /// Writes one Lawicel command and reads its reply.
@@ -147,6 +232,7 @@ fn lawicel_command<P: Read + Write + ?Sized>(
     cmd: &[u8],
     port_name: &str,
     window: Duration,
+    mode: ReplyMode,
 ) -> Result<LawicelReply, AdapterError> {
     port.write_all(cmd)
         .and_then(|()| port.flush())
@@ -156,30 +242,76 @@ fn lawicel_command<P: Read + Write + ?Sized>(
             ))
         })?;
     let echo = cmd.strip_suffix(b"\r").unwrap_or(cmd);
-    Ok(read_lawicel_reply(port, echo, window))
+    Ok(read_lawicel_reply(port, echo, window, mode))
+}
+
+/// Why the adapter's listen-only state could not be confirmed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListenOnlyUnverified {
+    /// `L` was answered with anything but an acceptable `CR` (see [`ReplyMode::Strict`]).
+    Reply(LawicelReply),
+    /// The input never went quiet before `L`; `L` was not sent.
+    Streaming,
+    /// `L` was acknowledged, but an earlier setup command was refused / unanswered or the line
+    /// did not go quiet after `C`, so the reply stream may be shifted.
+    SetupSuspect,
+}
+
+impl ListenOnlyUnverified {
+    const fn describe(self) -> &'static str {
+        match self {
+            Self::Reply(LawicelReply::Nack) => "refused it (BEL)",
+            Self::Reply(LawicelReply::Unexpected) => {
+                "answered it with an unexpected line instead of a bare CR"
+            }
+            Self::Reply(_) => "did not acknowledge it in time",
+            Self::Streaming => {
+                "kept streaming data and never went quiet, so it was not sent (the reply could \
+                 not be told apart from received frames)"
+            }
+            Self::SetupSuspect => {
+                "acknowledged it, but an earlier setup command (C/Sx/Yx) was refused or \
+                 unanswered, so that acknowledgement cannot be trusted"
+            }
+        }
+    }
 }
 
 /// Lawicel open handshake: `C`, `Sx`, optional `Yx`, then `L` (Listen-Only) or `O`.
 ///
-/// Every command's reply is read before the next one is sent, so the reply to `L` is not
-/// confused with leftovers from setup. Replies to setup commands and to `O` are not enforced
-/// (unchanged from before). For `L`:
-/// * `CR` → [`ListenOnlyEnforcement::Hardware`] (adapter-side silent mode).
-/// * `BEL`, no reply, or anything else → the adapter refused or ignored listen-only. `C` is
-///   sent (in case it silently entered listen-only), then:
-///   * `require_hardware_listen_only`: fail-closed error, the CAN channel is never opened (the
-///     caller drops, i.e. closes, the serial port).
-///   * otherwise: Lawicel has no other way to receive frames, so the channel is opened with
-///     `O` (normal mode: the adapter WILL ACK frames) and reported
-///     [`ListenOnlyEnforcement::SoftwareOnly`]; NexusCAN's software TX lock stays in force
-///     (`send_frame` rejects) and the HMI shows the software-only warning.
+/// Every command's reply is read before the next one is sent. Replies are kept in step:
+/// * After `C` and again right before `L`, the input is drained until it is quiet for
+///   `drain_quiet` (bounded by `drain_cap`), so frames still streaming from an adapter left
+///   open by a crashed session are not mistaken for replies.
+/// * Setup replies are read leniently ([`ReplyMode::Lenient`]); a frame-looking line is never
+///   an acknowledgement. `O`'s reply is not enforced.
+///
+/// For `L`, [`ListenOnlyEnforcement::Hardware`] is reported only when ALL of these hold:
+/// * the line went quiet before `L` (otherwise `L` is not sent at all);
+/// * every setup command (`C`, `Sx`, `Yx`) got an `Ack` and the line went quiet after `C`
+///   (an `Ack` to `L` after a refused / unanswered setup command is NOT trusted: the replies
+///   may be shifted by one);
+/// * `L` got a bare `CR`, or the exact echo `L\r` followed by a bare `CR`
+///   ([`ReplyMode::Strict`]). `BEL`, timeout, or any other line → not acknowledged.
+///
+/// Honest limit: even then `Hardware` is the ADAPTER'S CLAIM, not proof. Lawicel has no
+/// command to read back the mode, and some clone firmwares answer `CR` to every command
+/// (including `L`) while still ACKing on the bus.
+///
+/// When not acknowledged, `C` is sent (in case it silently entered listen-only), then:
+/// * `require_hardware_listen_only`: fail-closed error, the CAN channel is never opened (the
+///   caller drops, i.e. closes, the serial port).
+/// * otherwise: Lawicel has no other way to receive frames, so the channel is opened with `O`
+///   (normal mode: the adapter WILL ACK frames) and reported
+///   [`ListenOnlyEnforcement::SoftwareOnly`]; NexusCAN's software TX lock stays in force
+///   (`send_frame` rejects) and the HMI shows the software-only warning.
 ///
 /// Active (non-listen-only) channels return `SoftwareOnly` (not consulted by the pipeline).
 fn slcan_open_handshake<P: Read + Write + ?Sized>(
     port: &mut P,
     config: &ChannelConfig,
     port_name: &str,
-    window: Duration,
+    timing: HandshakeTiming,
 ) -> Result<ListenOnlyEnforcement, AdapterError> {
     let init = slcan_init_sequence(
         config.bitrate,
@@ -187,31 +319,50 @@ fn slcan_open_handshake<P: Read + Write + ?Sized>(
         config.enable_fd,
         config.listen_only,
     );
+    let window = timing.reply_window;
+    let mut setup_suspect = false;
+    let mut unverified = None;
     for cmd in init {
-        let reply = lawicel_command(port, cmd, port_name, window)?;
-        if cmd != b"L\r" {
+        if cmd == b"L\r" {
+            if !drain_until_quiet(port, timing.drain_quiet, timing.drain_cap) {
+                unverified = Some(ListenOnlyUnverified::Streaming);
+                break;
+            }
+            let reply = lawicel_command(port, cmd, port_name, window, ReplyMode::Strict)?;
+            unverified = match (reply, setup_suspect) {
+                (LawicelReply::Ack, false) => return Ok(ListenOnlyEnforcement::Hardware),
+                (LawicelReply::Ack, true) => Some(ListenOnlyUnverified::SetupSuspect),
+                (other, _) => Some(ListenOnlyUnverified::Reply(other)),
+            };
+            break;
+        }
+        let reply = lawicel_command(port, cmd, port_name, window, ReplyMode::Lenient)?;
+        if cmd == b"O\r" {
             continue;
         }
-        if reply == LawicelReply::Ack {
-            return Ok(ListenOnlyEnforcement::Hardware);
+        if reply != LawicelReply::Ack {
+            setup_suspect = true;
         }
-        let _ = lawicel_command(port, b"C\r", port_name, window);
-        if config.require_hardware_listen_only {
-            let what = if reply == LawicelReply::Nack {
-                "refused it (BEL)"
-            } else {
-                "did not acknowledge it in time"
-            };
-            return Err(AdapterError::hw_listen_only_unavailable(&format!(
-                "SLCAN adapter on '{port_name}' {what}: the adapter firmware does not support the \
-                 Lawicel listen-only command (`L`), so its CAN channel was not opened and the \
-                 serial port was closed. Use firmware with `L` support, or clear 'require \
-                 hardware listen-only' to accept the software-only TX lock."
-            )));
+        if cmd == b"C\r" && !drain_until_quiet(port, timing.drain_quiet, timing.drain_cap) {
+            setup_suspect = true;
         }
-        let _ = lawicel_command(port, b"O\r", port_name, window)?;
-        return Ok(ListenOnlyEnforcement::SoftwareOnly);
     }
+    let Some(why) = unverified else {
+        // Active channel (`O` sent).
+        return Ok(ListenOnlyEnforcement::SoftwareOnly);
+    };
+    let _ = lawicel_command(port, b"C\r", port_name, window, ReplyMode::Lenient);
+    if config.require_hardware_listen_only {
+        return Err(AdapterError::hw_listen_only_unavailable(&format!(
+            "SLCAN adapter on '{port_name}' {}: hardware listen-only via the Lawicel \
+             listen-only command (`L`) could not be confirmed, so its CAN channel was not \
+             opened and the serial port was closed. Use firmware with `L` support (and retry \
+             once a previous session's stream has stopped), or clear 'require hardware \
+             listen-only' to accept the software-only TX lock.",
+            why.describe()
+        )));
+    }
+    let _ = lawicel_command(port, b"O\r", port_name, window, ReplyMode::Lenient)?;
     Ok(ListenOnlyEnforcement::SoftwareOnly)
 }
 
@@ -761,7 +912,7 @@ impl AdapterDriver for SlcanDriver {
 
         // On `Err` the port is dropped here, i.e. closed (WP-5 fail-closed path included).
         let listen_only_enforcement =
-            slcan_open_handshake(&mut *port, config, &resolved_port, LAWICEL_REPLY_WINDOW)?;
+            slcan_open_handshake(&mut *port, config, &resolved_port, LAWICEL_TIMING)?;
 
         let mut actual_desc = device.clone();
         if actual_desc.channel_name != resolved_port {
@@ -1060,23 +1211,74 @@ mod tests {
         }
     }
 
-    /// Scripted Lawicel adapter: replies per command, records everything written.
+    /// Reply script for one command: bytes (`None` = never answers) released after
+    /// `delay_reads` further `read` calls (0 = immediately).
+    #[derive(Clone, Copy)]
+    struct Scripted {
+        bytes: Option<&'static [u8]>,
+        delay_reads: usize,
+    }
+
+    /// Scripted Lawicel adapter: replies per command (default: immediate `CR`), optional
+    /// pre-loaded / continuous frame stream, records everything written.
     struct ScriptedPort {
-        /// Reply bytes for `L\r`; `None` = never answers (timeout).
-        l_reply: Option<&'static [u8]>,
+        replies: std::collections::HashMap<&'static str, Scripted>,
         written: Vec<u8>,
         pending: std::collections::VecDeque<u8>,
         cmd_buf: Vec<u8>,
+        /// Frame line appended on every `read` while streaming.
+        stream_line: Option<&'static [u8]>,
+        /// `true`: the stream stops once `C\r` is received (adapter honours close).
+        stream_stops_on_close: bool,
+        reads: usize,
+        /// `(release at read count, bytes)`.
+        scheduled: Vec<(usize, &'static [u8])>,
     }
 
     impl ScriptedPort {
         fn new(l_reply: Option<&'static [u8]>) -> Self {
-            Self {
-                l_reply,
+            let mut port = Self {
+                replies: std::collections::HashMap::new(),
                 written: Vec::new(),
                 pending: std::collections::VecDeque::new(),
                 cmd_buf: Vec::new(),
+                stream_line: None,
+                stream_stops_on_close: true,
+                reads: 0,
+                scheduled: Vec::new(),
+            };
+            port.replies.insert(
+                "L",
+                Scripted {
+                    bytes: l_reply,
+                    delay_reads: 0,
+                },
+            );
+            port
+        }
+        /// Overrides the reply to `cmd` (without `\r`).
+        fn reply(mut self, cmd: &'static str, bytes: Option<&'static [u8]>, delay: usize) -> Self {
+            self.replies.insert(
+                cmd,
+                Scripted {
+                    bytes,
+                    delay_reads: delay,
+                },
+            );
+            self
+        }
+        /// Bytes already waiting in the input buffer (arrived after `clear()`).
+        fn preload(mut self, line: &[u8], count: usize) -> Self {
+            for _ in 0..count {
+                self.pending.extend(line);
             }
+            self
+        }
+        /// Continuous frame stream from an adapter left open (`O`) by a crashed session.
+        fn streaming(mut self, line: &'static [u8], stops_on_close: bool) -> Self {
+            self.stream_line = Some(line);
+            self.stream_stops_on_close = stops_on_close;
+            self
         }
         /// Commands written, in order, as strings without `\r`.
         fn commands(&self) -> Vec<String> {
@@ -1094,12 +1296,22 @@ mod tests {
                 self.written.push(b);
                 self.cmd_buf.push(b);
                 if b == b'\r' {
-                    let reply: Option<&[u8]> = if self.cmd_buf.as_slice() == b"L\r" {
-                        self.l_reply
-                    } else {
-                        Some(b"\r")
-                    };
-                    self.pending.extend(reply.unwrap_or_default());
+                    let cmd = String::from_utf8_lossy(&self.cmd_buf[..self.cmd_buf.len() - 1])
+                        .into_owned();
+                    if cmd == "C" && self.stream_stops_on_close {
+                        self.stream_line = None;
+                    }
+                    let s = self.replies.get(cmd.as_str()).copied().unwrap_or(Scripted {
+                        bytes: Some(b"\r"),
+                        delay_reads: 0,
+                    });
+                    if let Some(bytes) = s.bytes {
+                        if s.delay_reads == 0 {
+                            self.pending.extend(bytes);
+                        } else {
+                            self.scheduled.push((self.reads + s.delay_reads, bytes));
+                        }
+                    }
                     self.cmd_buf.clear();
                 }
             }
@@ -1112,6 +1324,20 @@ mod tests {
 
     impl Read for ScriptedPort {
         fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            let reads = self.reads;
+            let mut i = 0;
+            while i < self.scheduled.len() {
+                if self.scheduled[i].0 <= reads {
+                    let (_, bytes) = self.scheduled.remove(i);
+                    self.pending.extend(bytes);
+                } else {
+                    i += 1;
+                }
+            }
+            if let Some(line) = self.stream_line {
+                self.pending.extend(line);
+            }
             if self.pending.is_empty() {
                 std::thread::sleep(Duration::from_millis(1));
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "timeout"));
@@ -1124,22 +1350,63 @@ mod tests {
         }
     }
 
-    const TEST_WINDOW: Duration = Duration::from_millis(15);
+    const TEST_TIMING: HandshakeTiming = HandshakeTiming {
+        reply_window: Duration::from_millis(15),
+        drain_quiet: Duration::from_millis(5),
+        drain_cap: Duration::from_millis(40),
+    };
+
+    fn run(
+        mut port: ScriptedPort,
+        listen_only: bool,
+        require_hw: bool,
+        enable_fd: bool,
+    ) -> (Result<ListenOnlyEnforcement, AdapterError>, Vec<String>) {
+        let cfg = ChannelConfig {
+            listen_only,
+            require_hardware_listen_only: require_hw,
+            enable_fd,
+            ..ChannelConfig::default()
+        };
+        let r = slcan_open_handshake(&mut port, &cfg, "COM9", TEST_TIMING);
+        (r, port.commands())
+    }
 
     fn handshake(
         l_reply: Option<&'static [u8]>,
         listen_only: bool,
         require_hw: bool,
     ) -> (Result<ListenOnlyEnforcement, AdapterError>, Vec<String>) {
-        let mut port = ScriptedPort::new(l_reply);
-        let cfg = ChannelConfig {
-            listen_only,
-            require_hardware_listen_only: require_hw,
-            enable_fd: false,
-            ..ChannelConfig::default()
-        };
-        let r = slcan_open_handshake(&mut port, &cfg, "COM9", TEST_WINDOW);
-        (r, port.commands())
+        run(ScriptedPort::new(l_reply), listen_only, require_hw, false)
+    }
+
+    /// Asserts "not Hardware": `Err(fail-closed)` with the flag, `SoftwareOnly` (via `C`, `O`)
+    /// without it.
+    fn assert_not_hardware(
+        (r, cmds): (Result<ListenOnlyEnforcement, AdapterError>, Vec<String>),
+        require_hw: bool,
+        what: &str,
+    ) {
+        if require_hw {
+            let err = r.expect_err(what);
+            assert!(err.is_hw_listen_only_unavailable(), "{what}: {err}");
+            assert!(!cmds.iter().any(|c| c == "O"), "{what}: never O: {cmds:?}");
+            assert_eq!(
+                cmds.last().map(String::as_str),
+                Some("C"),
+                "{what}: {cmds:?}"
+            );
+        } else {
+            assert_eq!(
+                r.expect(what),
+                ListenOnlyEnforcement::SoftwareOnly,
+                "{what}"
+            );
+            assert!(
+                cmds.ends_with(&["C".into(), "O".into()]),
+                "{what}: {cmds:?}"
+            );
+        }
     }
 
     #[test]
@@ -1180,8 +1447,8 @@ mod tests {
     }
 
     #[test]
-    fn echo_and_stray_bytes_are_tolerated_within_bound() {
-        // Echoed command, then the real reply.
+    fn l_reply_acceptance_is_strict() {
+        // Echoed command, then a bare CR: accepted.
         assert_eq!(
             handshake(Some(b"L\r\r"), true, true).0.expect("ok"),
             ListenOnlyEnforcement::Hardware
@@ -1189,15 +1456,175 @@ mod tests {
         assert!(handshake(Some(b"L\r\x07"), true, true).0.is_err());
         // Only the echo: not an acknowledgement.
         assert!(handshake(Some(b"L\r"), true, true).0.is_err());
-        // Stray bytes before CR.
-        assert_eq!(
-            handshake(Some(b"zz\r"), true, true).0.expect("ok"),
-            ListenOnlyEnforcement::Hardware
-        );
+        // Stray bytes before CR are NOT an acknowledgement for `L` any more.
+        assert_not_hardware(handshake(Some(b"zz\r"), true, true), true, "zz");
+        assert_not_hardware(handshake(Some(b"zz\r"), true, false), false, "zz");
+        // Echo twice is not "echo + bare CR".
+        assert!(handshake(Some(b"L\rL\r\r"), true, true).0.is_err());
         // CR beyond the 16-byte scan bound is not accepted.
         assert!(handshake(Some(b"0123456789ABCDEF\r"), true, true)
             .0
             .is_err());
+    }
+
+    /// (f) A received-frame line terminated by CR is never `L`'s acknowledgement.
+    #[test]
+    fn frame_line_before_cr_is_not_l_ack() {
+        for reply in [
+            &b"t123\r"[..],
+            b"T1234567811\r",
+            b"r1230\r",
+            b"b1230\r",
+            b"L\rt123\r",
+        ] {
+            for require in [true, false] {
+                let what = String::from_utf8_lossy(reply).into_owned();
+                assert_not_hardware(handshake(Some(reply), true, require), require, &what);
+            }
+        }
+    }
+
+    /// (a) Adapter left open by a crashed session keeps delivering `t1000\r` lines after
+    /// `clear()`; `L` answered by BEL. Previously these lines were taken as the replies to
+    /// `C` / `S6` / `L` and `Hardware` was reported.
+    #[test]
+    fn frame_stream_with_l_refused_is_fail_closed_with_flag() {
+        // Backlog only (adapter honours `C`).
+        let backlog = ScriptedPort::new(Some(b"\x07")).preload(b"t1000\r", 40);
+        let (r, cmds) = run(backlog, true, true, false);
+        let err = r.expect_err("backlog: must refuse");
+        assert!(err.is_hw_listen_only_unavailable(), "{err}");
+        assert!(!cmds.iter().any(|c| c == "O"), "{cmds:?}");
+        assert_eq!(cmds, ["C", "S6", "L", "C"]);
+
+        // Backlog plus a stream that `C` does stop.
+        let stopped = ScriptedPort::new(Some(b"\x07"))
+            .preload(b"t1000\r", 40)
+            .streaming(b"t1000\r", true);
+        let (r, cmds) = run(stopped, true, true, false);
+        assert!(r
+            .expect_err("stopped stream")
+            .is_hw_listen_only_unavailable());
+        assert!(!cmds.iter().any(|c| c == "O"), "{cmds:?}");
+
+        // Adapter ignores `C` and never stops streaming: `L` is not even sent.
+        let endless = ScriptedPort::new(Some(b"\x07"))
+            .preload(b"t1000\r", 40)
+            .streaming(b"t1000\r", false);
+        let (r, cmds) = run(endless, true, true, false);
+        let err = r.expect_err("endless stream: must refuse");
+        assert!(err.is_hw_listen_only_unavailable(), "{err}");
+        assert!(err.to_string().contains("never went quiet"), "{err}");
+        assert_eq!(cmds, ["C", "S6", "C"], "no L, never O");
+    }
+
+    /// (b) Same streams without the flag: `SoftwareOnly`, opened via `C`, `O`.
+    #[test]
+    fn frame_stream_without_flag_falls_back_to_software_only() {
+        let backlog = ScriptedPort::new(Some(b"\x07")).preload(b"t1000\r", 40);
+        let (r, cmds) = run(backlog, true, false, false);
+        assert_eq!(r.expect("opens"), ListenOnlyEnforcement::SoftwareOnly);
+        assert_eq!(cmds, ["C", "S6", "L", "C", "O"]);
+
+        let endless = ScriptedPort::new(Some(b"\x07"))
+            .preload(b"t1000\r", 40)
+            .streaming(b"t1000\r", false);
+        let (r, cmds) = run(endless, true, false, false);
+        assert_eq!(r.expect("opens"), ListenOnlyEnforcement::SoftwareOnly);
+        assert_eq!(cmds, ["C", "S6", "C", "O"]);
+    }
+
+    /// Even an adapter that would ACK `L` is not trusted while frames are streaming.
+    #[test]
+    fn frame_stream_never_yields_hardware_even_if_l_acked() {
+        for stops in [true, false] {
+            for require in [true, false] {
+                let port = ScriptedPort::new(Some(b"\r"))
+                    .preload(b"t1000\r", 40)
+                    .streaming(b"t1000\r", stops);
+                assert_not_hardware(
+                    run(port, true, require, false),
+                    require,
+                    &format!("stops_on_close={stops}"),
+                );
+            }
+        }
+    }
+
+    /// (c) `S6`'s CR arrives after its reply window (would previously shift into `L`'s reply).
+    #[test]
+    fn late_setup_reply_never_yields_hardware() {
+        for l_reply in [&b"\x07"[..], b"\r"] {
+            for require in [true, false] {
+                let port = ScriptedPort::new(Some(l_reply)).reply("S6", Some(b"\r"), 40);
+                let (r, cmds) = run(port, true, require, false);
+                assert!(
+                    !matches!(r, Ok(ListenOnlyEnforcement::Hardware)),
+                    "{l_reply:?} require={require}: {r:?}"
+                );
+                assert_not_hardware((r, cmds), require, "late S6");
+            }
+        }
+        // `L` CR after a late setup reply: the error names the distrusted setup.
+        let port = ScriptedPort::new(Some(b"\r")).reply("S6", Some(b"\r"), 40);
+        let err = run(port, true, true, false).0.expect_err("refuse");
+        assert!(err.to_string().contains("earlier setup command"), "{err}");
+    }
+
+    /// (d) A NACKed (or unanswered) setup command makes a later `L` CR untrustworthy.
+    #[test]
+    fn nacked_setup_command_distrusts_l_ack() {
+        let cases: [(&'static str, Option<&'static [u8]>, bool); 5] = [
+            ("C", Some(b"\x07"), false),
+            ("S6", Some(b"\x07"), false),
+            ("S6", None, false),
+            ("Y2", Some(b"\x07"), true),
+            ("S6", Some(b"t1000\r"), false),
+        ];
+        for (cmd, reply, fd) in cases {
+            for require in [true, false] {
+                let port = ScriptedPort::new(Some(b"\r")).reply(cmd, reply, 0);
+                let what = format!("{cmd} -> {reply:?} require={require}");
+                assert_not_hardware(run(port, true, require, fd), require, &what);
+            }
+        }
+    }
+
+    /// (e) A clean adapter is unaffected by the drains: `Hardware`, unchanged sequence.
+    #[test]
+    fn clean_adapter_is_hardware_with_unchanged_sequence() {
+        let (r, cmds) = run(ScriptedPort::new(Some(b"\r")), true, true, false);
+        assert_eq!(r.expect("open"), ListenOnlyEnforcement::Hardware);
+        assert_eq!(cmds, ["C", "S6", "L"]);
+        let (r, cmds) = run(ScriptedPort::new(Some(b"\r")), true, true, true);
+        assert_eq!(r.expect("open fd"), ListenOnlyEnforcement::Hardware);
+        assert_eq!(cmds, ["C", "S6", "Y2", "L"]);
+        // Echoing firmware (every command echoed, then CR).
+        let echo = ScriptedPort::new(Some(b"L\r\r"))
+            .reply("C", Some(b"C\r\r"), 0)
+            .reply("S6", Some(b"S6\r\r"), 0);
+        let (r, cmds) = run(echo, true, true, false);
+        assert_eq!(r.expect("echo"), ListenOnlyEnforcement::Hardware);
+        assert_eq!(cmds, ["C", "S6", "L"]);
+    }
+
+    #[test]
+    fn drain_until_quiet_respects_quiet_and_cap() {
+        let mut quiet = ScriptedPort::new(None).preload(b"t1000\r", 10);
+        assert!(drain_until_quiet(
+            &mut quiet,
+            Duration::from_millis(5),
+            Duration::from_millis(40)
+        ));
+        assert!(quiet.pending.is_empty(), "backlog discarded");
+        let mut busy = ScriptedPort::new(None).streaming(b"t1000\r", false);
+        let t0 = Instant::now();
+        assert!(!drain_until_quiet(
+            &mut busy,
+            Duration::from_millis(5),
+            Duration::from_millis(40)
+        ));
+        assert!(t0.elapsed() < Duration::from_millis(500), "bounded by cap");
     }
 
     #[test]

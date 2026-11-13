@@ -56,9 +56,65 @@ const ARPHRD_CAN: &str = "280";
 /// few milliseconds is not acceptable.
 pub const ENV_DISABLE_HW_LISTEN_ONLY: &str = "NEXUS_SOCKETCAN_NO_HW_LISTEN_ONLY";
 
-/// `vcan*` / `vxcan*` have no physical controller (no ACK slot to suppress).
+/// Kernel facts used to decide whether a SocketCAN netdev is virtual (`vcan` / `vxcan`).
+///
+/// The netlink link kind (`IFLA_INFO_KIND`) is not exposed by the `socketcan` crate's
+/// `InterfaceDetails`, and querying it directly would need a new direct `neli` dependency. So
+/// virtualness is derived from two facts that only a virtual CAN netdev has *together*:
+/// * no `/sys/class/net/<iface>/device` link (no USB/PCI/SPI/platform parent device), and
+/// * no CAN link data over netlink (`IFLA_INFO_DATA` / `IFLA_CAN_CTRLMODE`). Every kernel
+///   `candev` driver (link kind `"can"`) reports a ctrlmode, `vcan` / `vxcan` never do.
+///
+/// `slcan` netdevs also lack a parent device, but they are `candev`s and report a ctrlmode,
+/// so they are NOT virtual (their listen-only state is then decided by the ctrlmode logic).
+/// The interface name is never consulted: a physical controller renamed to `vcan*` (udev rule,
+/// `ip link set name`) stays physical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IfaceKindFacts {
+    /// `Some(true)` = `device` link present; `None` = unknown (interface missing, I/O error).
+    has_parent_device: Option<bool>,
+    /// `Some(true)` = netlink reported CAN ctrlmode data; `None` = netlink query failed.
+    reports_can_ctrlmode: Option<bool>,
+}
+
+/// Pure classifier for [`IfaceKindFacts`]. Fail-safe: any unknown fact → NOT virtual, so the
+/// interface goes through the hardware listen-only / fail-closed path.
+const fn classify_virtual(facts: IfaceKindFacts) -> bool {
+    matches!(
+        facts,
+        IfaceKindFacts {
+            has_parent_device: Some(false),
+            reports_can_ctrlmode: Some(false),
+        }
+    )
+}
+
+/// Reads [`IfaceKindFacts`] for `iface` (read-only sysfs + unprivileged netlink `GETLINK`).
+fn iface_kind_facts(iface: &str) -> IfaceKindFacts {
+    let dir = Path::new(SYS_CLASS_NET).join(iface);
+    let has_parent_device = if dir.is_dir() {
+        match fs::symlink_metadata(dir.join("device")) {
+            Ok(_) => Some(true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Some(false),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let reports_can_ctrlmode = CanInterface::open(iface)
+        .ok()
+        .and_then(|nl| nl.details().ok())
+        .map(|d| d.can.ctrl_mode.is_some());
+    IfaceKindFacts {
+        has_parent_device,
+        reports_can_ctrlmode,
+    }
+}
+
+/// `vcan` / `vxcan` have no physical controller (no ACK slot to suppress). Decided from kernel
+/// facts, never from the name (see [`IfaceKindFacts`]); unknown → not virtual.
 fn is_virtual_iface(iface: &str) -> bool {
-    iface.starts_with("vcan") || iface.starts_with("vxcan")
+    classify_virtual(iface_kind_facts(iface))
 }
 
 /// Outcome of trying to put a physical controller into listen-only ctrlmode (D-005).
@@ -72,7 +128,8 @@ struct HwListenOnlyOutcome {
 /// D-005: tries to put the CAN controller of `iface` into the kernel `listen-only` ctrlmode
 /// (`ip link set canX type can listen-only on`) before our socket is opened.
 ///
-/// * `vcan*` / `vxcan*` → [`ListenOnlyEnforcement::Virtual`], no netlink call at all.
+/// * `vcan` / `vxcan` (by kernel facts, not by name; see [`is_virtual_iface`]) →
+///   [`ListenOnlyEnforcement::Virtual`], only a read-only netlink query, no mode change.
 /// * Controller already in listen-only → `Hardware` (left as is, not restored).
 /// * Needs `CAP_NET_ADMIN`. The kernel refuses ctrlmode changes while the link is up
 ///   (`EBUSY`), so the link is taken down, reconfigured and brought up again (this resets the
@@ -755,12 +812,58 @@ mod tests {
     }
 
     #[test]
-    fn virtual_interfaces_never_touch_netlink() {
-        for name in ["vcan0", "vcan12", "vxcan1"] {
+    fn virtual_classification_requires_both_kernel_facts() {
+        let facts = |dev, ctrl| IfaceKindFacts {
+            has_parent_device: dev,
+            reports_can_ctrlmode: ctrl,
+        };
+        // vcan / vxcan: no parent device, no CAN link data.
+        assert!(classify_virtual(facts(Some(false), Some(false))));
+        // slcan: no parent device, but a candev with ctrlmode → physical path.
+        assert!(!classify_virtual(facts(Some(false), Some(true))));
+        // USB/PCI controller (whatever its name, e.g. renamed to `vcan0`).
+        assert!(!classify_virtual(facts(Some(true), Some(true))));
+        assert!(!classify_virtual(facts(Some(true), Some(false))));
+        // Any unknown fact → fail-safe, not virtual.
+        for f in [
+            facts(None, Some(false)),
+            facts(Some(false), None),
+            facts(None, None),
+        ] {
+            assert!(!classify_virtual(f), "{f:?}");
+        }
+    }
+
+    /// Names alone never make an interface virtual: missing `vcan*` / `vxcan*` names (facts
+    /// unknown) go through the hardware path and degrade to `SoftwareOnly`.
+    #[test]
+    fn virtual_looking_names_are_not_trusted() {
+        for name in ["vcan_nexus_missing", "vxcan_nexus_missing"] {
+            assert!(!is_virtual_iface(name), "{name}");
             let out = try_enable_hw_listen_only(name);
-            assert_eq!(out.enforcement, ListenOnlyEnforcement::Virtual);
+            assert_eq!(out.enforcement, ListenOnlyEnforcement::SoftwareOnly);
             assert!(!out.restore_on_close);
         }
+    }
+
+    /// A real `vcan0` (when present) is classified virtual from kernel facts.
+    #[test]
+    fn real_vcan_is_virtual_when_present() {
+        if !Path::new(SYS_CLASS_NET).join("vcan0").exists() {
+            eprintln!("vcan0 not present; skipping");
+            return;
+        }
+        let facts = iface_kind_facts("vcan0");
+        assert_eq!(
+            facts,
+            IfaceKindFacts {
+                has_parent_device: Some(false),
+                reports_can_ctrlmode: Some(false),
+            }
+        );
+        let out = try_enable_hw_listen_only("vcan0");
+        assert_eq!(out.enforcement, ListenOnlyEnforcement::Virtual);
+        assert!(!out.restore_on_close);
     }
 
     #[test]

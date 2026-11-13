@@ -31,5 +31,6 @@ These are design invariants. A way to break any of them is a security bug:
 
 <!-- Finalised before each release. -->
 - Hardware listen-only on Linux SocketCAN needs `CAP_NET_ADMIN`. Without it the bus is marked **software-only** listen-only: NexusCAN will not transmit, but the CAN controller may still acknowledge frames. For sensitive buses, the opt-in fail-closed option (`requireHardwareListenOnly` on a connection, `--require-hw-listen-only` / `require_hw_listen_only = true` for the headless agent) refuses to open such a channel (`HW_LISTEN_ONLY_UNAVAILABLE:` error) instead of falling back to software-only.
+- For serial SLCAN (Lawicel) adapters, "hardware" listen-only means the adapter acknowledged the `L` command with a clean `CR`. That is the firmware's claim, not proof: Lawicel has no command to read the mode back, and some clone firmwares answer `CR` to every command. Verify an unfamiliar adapter on a bench bus (no ACKs from it) before trusting it on a sensitive bus.
 - The NexusCloud client and the headless agent are experimental and off by default. TLS is not implemented yet; they refuse non-loopback servers until it is.
 - Parsers for `.dbc`, `.kcd`, `.blf`, `.asc`, `.trc`, `.csv` and candump logs handle untrusted input and are fuzz-tested (cargo-fuzz, short runs in CI), but only open files you would be willing to share.
