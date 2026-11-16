@@ -33,6 +33,7 @@ pub struct NewEvent {
     pub nrc: Option<u8>,
     pub detail: Option<String>,
     pub origin: DiagOrigin,
+    pub retry_index: Option<u8>,
 }
 
 impl NewEvent {
@@ -48,7 +49,12 @@ impl NewEvent {
             nrc: None,
             detail: None,
             origin: DiagOrigin::Other,
+            retry_index: None,
         }
+    }
+    pub fn retry(mut self, index: Option<u8>) -> Self {
+        self.retry_index = index;
+        self
     }
     pub fn origin(mut self, origin: DiagOrigin) -> Self {
         self.origin = origin;
@@ -143,6 +149,7 @@ impl Conversation {
             nrc: ev.nrc,
             detail: ev.detail,
             origin: ev.origin,
+            retry_index: ev.retry_index,
         });
         seq
     }

@@ -7,6 +7,8 @@
 #![cfg(target_os = "linux")]
 
 mod common;
+#[path = "support/isotp_ecu.rs"]
+mod isotp_ecu;
 
 use std::time::{Duration, Instant};
 
@@ -580,4 +582,148 @@ fn idle_cpu_and_thread_cleanup() {
         after <= threads_before,
         "threads left behind: before {threads_before}, after {after}"
     );
+}
+
+// ─── ISO 15765-2 extended / mixed addressing on vcan0 ───────────────────────────────────────
+//
+// ecusim (kernel CAN_ISOTP, C fixture outside this crate) has no address-byte option, so the
+// peer is a raw-socket ECU driven by `support/isotp_ecu.rs` on test-only ids 0x6D1 / 0x6D9.
+
+mod addressed {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use socketcan::frame::FdFlags;
+    use socketcan::{
+        CanAnyFrame, CanDataFrame, CanFdFrame, CanFdSocket, CanFilter, EmbeddedFrame, Socket,
+        SocketOptions, StandardId,
+    };
+
+    use super::common::{config, serial, Ids, SocketCanPort, IFACE};
+    use super::isotp_ecu::IsoTpEcu;
+    use nexus_protocols::uds::client::UdsSession;
+    use nexus_protocols::uds::dto::{AddressFormatDto, UdsRequestOptionsDto};
+
+    const IDS: Ids = Ids {
+        req: 0x6D1,
+        resp: 0x6D9,
+        func: 0x6DD,
+    };
+
+    fn vcan(fd: bool) -> bool {
+        let net = std::path::Path::new("/sys/class/net").join(IFACE);
+        let mtu = std::fs::read_to_string(net.join("mtu")).unwrap_or_default();
+        if !net.exists() || (fd && mtu.trim() != "72") {
+            eprintln!("SKIP (HIL): {IFACE} missing or not CAN-FD capable");
+            return false;
+        }
+        true
+    }
+
+    /// Raw-socket ECU thread; stopped and joined on drop.
+    struct RawEcu {
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl RawEcu {
+        fn start(mut ecu: IsoTpEcu, fd: bool) -> Self {
+            let sock = CanFdSocket::open(IFACE).expect("ecu socket");
+            sock.set_filters(&[CanFilter::new(IDS.req, 0x7FF | 0x8000_0000 | 0x4000_0000)])
+                .expect("filter");
+            sock.set_read_timeout(Duration::from_millis(20))
+                .expect("timeout");
+            let stop = Arc::new(AtomicBool::new(false));
+            let s2 = stop.clone();
+            let thread = std::thread::spawn(move || {
+                let id = StandardId::new(IDS.resp as u16).expect("id");
+                while !s2.load(Ordering::Acquire) {
+                    let data = match sock.read_frame() {
+                        Ok(CanAnyFrame::Normal(f)) => f.data().to_vec(),
+                        Ok(CanAnyFrame::Fd(f)) => f.data().to_vec(),
+                        _ => continue,
+                    };
+                    for out in ecu.on_frame(&data) {
+                        let r = if fd {
+                            CanFdFrame::with_flags(id, &out, FdFlags::BRS)
+                                .map(|f| sock.write_frame(&f))
+                        } else {
+                            CanDataFrame::new(id, &out).map(|f| sock.write_frame(&f))
+                        };
+                        assert!(matches!(r, Some(Ok(()))), "ecu write");
+                        std::thread::sleep(Duration::from_micros(250));
+                    }
+                }
+            });
+            Self {
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for RawEcu {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    fn round_trip(fd: bool, format: AddressFormatDto, ta: u8, ra: Option<u8>) {
+        let ecu_ra = ra.unwrap_or(ta);
+        let ecu = IsoTpEcu::new(
+            Some(ecu_ra),
+            Some(ta),
+            fd,
+            Box::new(|req: &[u8]| {
+                let mut p = vec![0x62, req[1], req[2]];
+                p.extend((0..200u8).map(|i| i ^ 0x5A));
+                vec![p]
+            }),
+        );
+        let _ecu = RawEcu::start(ecu, fd);
+        let (port, probe) = SocketCanPort::open(IDS, fd);
+        let mut c = config(IDS, fd, false);
+        c.address_format = format;
+        c.target_address = Some(ta);
+        c.response_address = ra;
+        let s = UdsSession::open(port, c).expect("open");
+        let opts = UdsRequestOptionsDto {
+            timeout_ms: Some(3_000),
+            ..Default::default()
+        };
+        let r = s.request(0x22, &[0xF1, 0x90], &opts).expect("rdbi");
+        assert_eq!(r.raw.len(), 203);
+        assert_eq!(&r.raw[..3], &[0x62, 0xF1, 0x90]);
+        let sent = probe.sent();
+        assert_eq!(&sent[0].payload()[..5], &[ta, 0x03, 0x22, 0xF1, 0x90]);
+        assert_eq!(
+            &sent[1].payload()[..4],
+            &[ta, 0x30, 0x00, 0x00],
+            "FC with prefix"
+        );
+        assert!(sent.iter().all(|f| f.payload()[0] == ta));
+        s.close();
+    }
+
+    #[test]
+    fn extended_addressing_classic_round_trip_on_vcan0() {
+        let _g = serial();
+        if !vcan(false) {
+            return;
+        }
+        round_trip(false, AddressFormatDto::Extended, 0x10, Some(0xF1));
+    }
+
+    #[test]
+    fn mixed_addressing_fd_round_trip_on_vcan0() {
+        let _g = serial();
+        if !vcan(true) {
+            return;
+        }
+        round_trip(true, AddressFormatDto::Mixed, 0x55, None);
+    }
 }

@@ -19,9 +19,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::{config, serial, Ids, SocketCanPort, IFACE};
+use common::{config, serial, Ids, Probe, SocketCanPort, IFACE};
 use nexus_protocols::uds::client::{UdsSession, MAX_RESPONSE_PDU};
 use nexus_protocols::uds::dto::{ConversationEventKind, DiagErrorCode, UdsRequestOptionsDto};
+use nexus_protocols::uds::port::DiagTxReject;
 use socketcan::frame::FdFlags;
 use socketcan::{
     CanAnyFrame, CanDataFrame, CanFdFrame, CanFdSocket, CanFilter, EmbeddedFrame, Socket,
@@ -200,6 +201,14 @@ fn fc_frames(sent: &[nexus_core::RawCanFrame]) -> usize {
         .count()
 }
 
+/// Tester frames whose first byte (PCI) is exactly `pci` (e.g. 0x30 CTS, 0x32 OVFLW).
+fn frames_with_pci(sent: &[nexus_core::RawCanFrame], pci: u8) -> Vec<nexus_core::RawCanFrame> {
+    sent.iter()
+        .filter(|f| f.payload().first() == Some(&pci))
+        .copied()
+        .collect()
+}
+
 /// Runs `f` on a helper thread and waits at most `limit` (a hang must fail the test, not block it).
 fn bounded<T: Send + 'static>(
     limit: Duration,
@@ -228,11 +237,17 @@ fn answer_tester_present(data: &[u8], bus: &Bus, fd: bool) -> bool {
 
 // ─── HIGH-07.1: First Frame announcing a huge length ────────────────────────────────────────
 
-fn huge_escape_ff(ids: Ids, fd: bool) {
+/// Oversized FF scenario. `padding` is the session padding; `gate` (if any) is closed by the
+/// fake ECU right after it saw the request and before it sends the FF (gate closes mid-exchange).
+fn huge_escape_ff(ids: Ids, fd: bool, padding: Option<u8>, gate: Option<DiagTxReject>) {
     let fc_seen = Arc::new(AtomicUsize::new(0));
+    let ovflw_seen = Arc::new(AtomicUsize::new(0));
     let cfs_sent = Arc::new(AtomicUsize::new(0));
+    let probe_slot: Arc<std::sync::Mutex<Option<Probe>>> = Arc::default();
     let _ecu = {
-        let (fc_seen, cfs_sent) = (fc_seen.clone(), cfs_sent.clone());
+        let (fc_seen, ovflw_seen, cfs_sent) =
+            (fc_seen.clone(), ovflw_seen.clone(), cfs_sent.clone());
+        let probe_slot = probe_slot.clone();
         FakeEcu::start(
             ids,
             fd,
@@ -243,11 +258,23 @@ fn huge_escape_ff(ids: Ids, fd: bool) {
                 match data.first().map(|b| b >> 4) {
                     // Request SF `22 F1 90` → escape FF announcing 0xFFFF_FFF0 bytes.
                     Some(0) => {
+                        if let Some(g) = gate {
+                            if let Some(p) = probe_slot
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .as_ref()
+                            {
+                                p.set_gate(Some(g));
+                            }
+                        }
                         let mut ff = vec![0x10, 0x00, 0xFF, 0xFF, 0xFF, 0xF0, 0x62, 0xF1];
                         if fd {
                             ff.resize(64, 0x55);
                         }
                         bus.send(&ff);
+                    }
+                    Some(3) if data[0] == 0x32 => {
+                        ovflw_seen.fetch_add(1, Ordering::AcqRel);
                     }
                     // Tester accepted with FC.CTS → stream CFs as fast as possible for 1.5 s.
                     Some(3) if data[0] & 0x0F == 0 => {
@@ -271,7 +298,10 @@ fn huge_escape_ff(ids: Ids, fd: bool) {
 
     wait_bus_quiet(ids, Duration::from_millis(50));
     let (port, probe) = SocketCanPort::open(ids, fd);
-    let s = Arc::new(UdsSession::open(port, config(ids, fd, false)).expect("open"));
+    *probe_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(probe.clone());
+    let mut cfg = config(ids, fd, false);
+    cfg.padding = padding;
+    let s = Arc::new(UdsSession::open(port, cfg).expect("open"));
     let rss0 = vm_rss_kib();
     let s2 = s.clone();
     let (res, took) = bounded(Duration::from_secs(20), move || {
@@ -302,12 +332,48 @@ fn huge_escape_ff(ids: Ids, fd: bool) {
         0,
         "tester must not send FC.CTS for an oversized FF"
     );
-    assert_eq!(fc_frames(&probe.sent()), 0);
+    let sent = probe.sent();
+    assert!(frames_with_pci(&sent, 0x30).is_empty(), "no FC.CTS");
     let log = s.conversation_since(0, 100);
-    assert!(log
+    let detail = log
         .events
         .iter()
-        .any(|e| e.detail.as_deref() == Some("isotp_pdu_too_large")));
+        .filter_map(|e| e.detail.as_deref())
+        .find(|d| d.starts_with("isotp_pdu_too_large"))
+        .map(str::to_owned);
+    match gate {
+        None => {
+            // ISO 15765-2: exactly one FC.OVFLW `32 00 00 [pad]` on the physical request id.
+            let ovflw = frames_with_pci(&sent, 0x32);
+            assert_eq!(ovflw.len(), 1, "exactly one FC.OVFLW");
+            assert_eq!(fc_frames(&sent), 1, "no other FC");
+            let f = ovflw[0];
+            let want: Vec<u8> = match padding {
+                Some(p) => vec![0x32, 0x00, 0x00, p, p, p, p, p],
+                None => vec![0x32, 0x00, 0x00],
+            };
+            assert_eq!(f.payload(), &want[..]);
+            assert_eq!(f.arb_id, ids.req);
+            assert_eq!(f.is_fd(), fd);
+            let t0 = Instant::now();
+            while ovflw_seen.load(Ordering::Acquire) == 0 && t0.elapsed() < Duration::from_secs(1) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(ovflw_seen.load(Ordering::Acquire), 1, "ECU saw FC.OVFLW");
+            assert!(e.message.contains("FC.OVFLW sent"), "{e}");
+            assert_eq!(detail.as_deref(), Some("isotp_pdu_too_large;fc_ovflw_sent"));
+        }
+        Some(_) => {
+            assert_eq!(fc_frames(&sent), 0, "gate closed: nothing written");
+            assert_eq!(ovflw_seen.load(Ordering::Acquire), 0);
+            assert!(e.message.contains("FC.OVFLW not sent"), "{e}");
+            assert_eq!(
+                detail.as_deref(),
+                Some("isotp_pdu_too_large;fc_ovflw_blocked:listen_only")
+            );
+            probe.set_gate(None);
+        }
+    }
 
     // Session still usable.
     let r = s
@@ -318,21 +384,39 @@ fn huge_escape_ff(ids: Ids, fd: bool) {
 }
 
 #[test]
-fn high07_1_classic_escape_first_frame_with_4gib_length_is_refused_without_fc() {
+fn high07_1_classic_escape_first_frame_with_4gib_length_is_refused_with_fc_ovflw() {
     let _g = serial();
     if !vcan(false) {
         return;
     }
-    huge_escape_ff(CLASSIC, false);
+    huge_escape_ff(CLASSIC, false, Some(0xAA), None);
 }
 
 #[test]
-fn high07_1_fd_escape_first_frame_with_4gib_length_is_refused_without_fc() {
+fn high07_1_fd_escape_first_frame_with_4gib_length_is_refused_with_fc_ovflw() {
     let _g = serial();
     if !vcan(true) {
         return;
     }
-    huge_escape_ff(FD, true);
+    huge_escape_ff(FD, true, Some(0xAA), None);
+}
+
+#[test]
+fn high07_1_oversize_ff_without_padding_gets_dlc3_fc_ovflw() {
+    let _g = serial();
+    if !vcan(false) {
+        return;
+    }
+    huge_escape_ff(CLASSIC, false, None, None);
+}
+
+#[test]
+fn high07_1_oversize_ff_in_listen_only_writes_nothing_and_still_refuses() {
+    let _g = serial();
+    if !vcan(false) {
+        return;
+    }
+    huge_escape_ff(CLASSIC, false, Some(0xAA), Some(DiagTxReject::ListenOnly));
 }
 
 /// A legitimate multi-frame response of `len` bytes (classic FF up to 4095, escape FF above).
@@ -375,7 +459,7 @@ fn legit_long_response(ids: Ids, fd: bool, len: usize) {
         )
     };
     wait_bus_quiet(ids, Duration::from_millis(50));
-    let (port, _probe) = SocketCanPort::open(ids, fd);
+    let (port, probe) = SocketCanPort::open(ids, fd);
     let s = UdsSession::open(port, config(ids, fd, false)).expect("open");
     let opts = UdsRequestOptionsDto {
         timeout_ms: Some(10_000),
@@ -386,6 +470,9 @@ fn legit_long_response(ids: Ids, fd: bool, len: usize) {
         .expect("legit long response");
     assert_eq!(r.raw.len(), len);
     assert_eq!(r.raw, payload);
+    let sent = probe.sent();
+    assert_eq!(frames_with_pci(&sent, 0x30).len(), 1, "one FC.CTS (BS = 0)");
+    assert!(frames_with_pci(&sent, 0x32).is_empty(), "no FC.OVFLW");
     s.close();
 }
 
@@ -406,6 +493,15 @@ fn high07_1_fd_escape_first_frame_below_cap_still_reassembles() {
     }
     const { assert!(MAX_RESPONSE_PDU >= 8_000) };
     legit_long_response(FD, true, 8_000);
+}
+
+#[test]
+fn high07_1_fd_escape_first_frame_exactly_at_cap_gets_cts_and_reassembles() {
+    let _g = serial();
+    if !vcan(true) {
+        return;
+    }
+    legit_long_response(FD, true, MAX_RESPONSE_PDU);
 }
 
 // ─── HIGH-07.2: FC.WAIT forever ─────────────────────────────────────────────────────────────

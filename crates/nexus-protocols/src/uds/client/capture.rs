@@ -114,6 +114,9 @@ impl Drop for TxnTag<'_> {
 /// Fixed-capacity ISO-TP frame ring of one session.
 pub struct IsoTpCapture {
     ring: Mutex<Ring>,
+    /// Address bytes before the PCI in TX / RX frames (extended / mixed addressing).
+    tx_off: usize,
+    rx_off: usize,
 }
 
 impl Default for IsoTpCapture {
@@ -156,7 +159,16 @@ impl IsoTpCapture {
                 dropped: 0,
                 cur_tag: TAG_NONE,
             }),
+            tx_off: 0,
+            rx_off: 0,
         }
+    }
+
+    /// Classify frames after `tx` / `rx` address bytes (0 or 1 each).
+    pub fn with_address_offsets(mut self, tx: usize, rx: usize) -> Self {
+        self.tx_off = tx;
+        self.rx_off = rx;
+        self
     }
 
     /// Engine: a transaction starts (call before the first request frame is queued). Frames
@@ -257,7 +269,10 @@ impl IsoTpCapture {
                         IsoTpDirection::Rx
                     },
                     fd: p.frame.is_fd(),
-                    kind: classify_kind(&data),
+                    kind: classify_kind(
+                        data.get(if p.tx { self.tx_off } else { self.rx_off }..)
+                            .unwrap_or_default(),
+                    ),
                     data,
                     request_seq: (p.tag != TAG_NONE).then_some(p.tag),
                 }
@@ -281,6 +296,36 @@ mod tests {
         let key = CanIdKey::new_standard(0x7EA).expect("id");
         RawCanFrame::new_classical(0, key, &[0x21, i, 0, 0, 0, 0, 0, 0], u64::from(i) + 1)
             .expect("frame")
+    }
+
+    #[test]
+    fn kinds_after_address_byte() {
+        let c = IsoTpCapture::with_capacity(8).with_address_offsets(1, 1);
+        let key = CanIdKey::new_standard(0x6F1).unwrap_or(CanIdKey::Standard(0));
+        for (tx, data) in [
+            (true, vec![0x10, 0x02, 0x3E, 0x00]),
+            (false, vec![0xF1, 0x10, 0x14, 0x62, 0xF1, 0x90, 1, 2]),
+            (false, vec![0xF1, 0x21, 1, 2, 3, 4, 5, 6]),
+            (true, vec![0x10, 0x30, 0x00, 0x00]),
+        ] {
+            let f = RawCanFrame::new_classical(0, key, &data, 1).unwrap_or_default();
+            c.record(&f, tx);
+        }
+        let kinds: Vec<IsoTpFrameKind> = c.since(0, 10).frames.iter().map(|f| f.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                IsoTpFrameKind::Single,
+                IsoTpFrameKind::First,
+                IsoTpFrameKind::Consecutive,
+                IsoTpFrameKind::FlowControl
+            ]
+        );
+        assert_eq!(
+            c.since(0, 10).frames[0].data[0],
+            0x10,
+            "data keeps the address byte"
+        );
     }
 
     #[test]

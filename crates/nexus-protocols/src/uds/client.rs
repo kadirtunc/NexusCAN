@@ -32,21 +32,30 @@ pub use bridge::{ISOTP_MAX_WFT, MAX_RESPONSE_PDU};
 pub use capture::{classify_kind, IsoTpCapture, TxnTag, ISOTP_CAPTURE_CAPACITY};
 pub use conversation::{CONVERSATION_BYTE_BUDGET, CONVERSATION_CAPACITY};
 pub use engine::MAX_REQUEST_PDU;
-pub use format::{decode_did_record, format_dtc_code, response_matches};
+pub use format::{
+    decode_did_record, dtc_format_name, format_dtc_code, parse_dtc_count,
+    parse_dtc_ext_data_record, parse_dtc_list, parse_dtc_snapshot_identification,
+    parse_dtc_snapshot_record, parse_dtcs_by_status, parse_read_dtc_report, response_matches,
+};
 pub use nrc::nrc_name;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use automotive::can::Identifier;
 use automotive::transports::isotp::{IsoTPConfig, IsoTPConfigBuilder};
 use parking_lot::Mutex;
 
 use self::bridge::{Addressing, BridgeShared, PortMsg, CRATE_BUS, PORT_QUEUE_DEPTH};
-use self::engine::{err, keepalive_loop, Inner, ISOTP_TIMEOUT, TP_INTERVAL_RANGE_MS};
-use self::format::{negative_code, parse_dtcs_by_status};
+use self::engine::{
+    err, keepalive_loop, ExchangeOpts, Inner, BUSY_RETRY_DELAY_RANGE_MS,
+    DEFAULT_BUSY_RETRY_DELAY_MS, ISOTP_TIMEOUT, MAX_BUSY_RETRIES, MAX_EXCHANGE,
+    NRC_BUSY_REPEAT_REQUEST, TP_INTERVAL_RANGE_MS,
+};
+use self::format::negative_code;
+use super::addressing::{check_id_forms, resolve_address_bytes, AddressBytes};
 use super::dto::{
     ConversationPageDto, DiagError, DiagErrorCode, DiagOrigin, DiagSessionConfigDto,
     DiagSessionInfoDto, DidReadResultDto, DtcEntryDto, IsoTpFramePageDto, UdsAddressing,
@@ -90,11 +99,37 @@ fn identifier(id: u32, extended: bool, what: &str) -> Result<Identifier, DiagErr
     })
 }
 
+/// Validates the ISO 15765-2 address format of `cfg` (address bytes + id forms).
+pub fn session_address_bytes(cfg: &DiagSessionConfigDto) -> Result<AddressBytes, DiagError> {
+    let invalid = |m: String| err(DiagErrorCode::InvalidInput, m);
+    let bytes = resolve_address_bytes(cfg.address_format, cfg.target_address, cfg.response_address)
+        .map_err(invalid)?;
+    check_id_forms(
+        cfg.address_format,
+        cfg.is_extended_id,
+        &[
+            ("requestId", cfg.request_id),
+            ("responseId", cfg.response_id),
+        ],
+        cfg.functional_id,
+    )
+    .map_err(invalid)?;
+    Ok(bytes)
+}
+
 fn isotp_config(
     builder: IsoTPConfigBuilder,
     cfg: &DiagSessionConfigDto,
+    addr: AddressBytes,
 ) -> Result<IsoTPConfig, DiagError> {
-    let b = builder.bus(CRATE_BUS).fd(cfg.use_fd).timeout(ISOTP_TIMEOUT);
+    let mut b = builder.bus(CRATE_BUS).fd(cfg.use_fd).timeout(ISOTP_TIMEOUT);
+    // Functional requests use the same N_TA / N_AE byte as physical ones.
+    if let Some(tx) = addr.tx {
+        b = b.ext_address(tx);
+        if let Some(rx) = addr.rx {
+            b = b.rx_ext_address(rx);
+        }
+    }
     let b = match cfg.padding {
         Some(p) => b.padding(p),
         None => b.without_padding(),
@@ -136,13 +171,15 @@ impl UdsSession {
         let ext = config.is_extended_id;
         let req = identifier(config.request_id, ext, "requestId")?;
         let resp = identifier(config.response_id, ext, "responseId")?;
-        let phys_cfg = isotp_config(IsoTPConfig::builder(req).rx_id(resp), &config)?;
+        let addr = session_address_bytes(&config)?;
+        let phys_cfg = isotp_config(IsoTPConfig::builder(req).rx_id(resp), &config, addr)?;
         let func_cfg = match config.functional_id {
             Some(f) => {
                 let fid = identifier(f, ext, "functionalId")?;
                 Some(isotp_config(
                     IsoTPConfig::builder(fid).rx_id(resp),
                     &config,
+                    addr,
                 )?)
             }
             None => None,
@@ -154,6 +191,8 @@ impl UdsSession {
             functional_id: config.functional_id,
             extended: ext,
             fd: config.use_fd,
+            padding: config.padding,
+            addr,
         }));
         let (port_tx, port_rx) = crossbeam_channel::bounded::<PortMsg>(PORT_QUEUE_DEPTH);
 
@@ -256,6 +295,17 @@ impl UdsSession {
         let total = opts
             .timeout_ms
             .map(|ms| Duration::from_millis(u64::from(ms)));
+        let busy_max = match addressing {
+            UdsAddressing::Physical => opts.busy_retry_max.unwrap_or(0).min(MAX_BUSY_RETRIES),
+            // A functional retry would re-broadcast to every ECU.
+            UdsAddressing::Functional => 0,
+        };
+        let (lo, hi) = BUSY_RETRY_DELAY_RANGE_MS;
+        let busy_delay = Duration::from_millis(u64::from(
+            opts.busy_retry_delay_ms
+                .unwrap_or(DEFAULT_BUSY_RETRY_DELAY_MS)
+                .clamp(lo, hi),
+        ));
         let inner = self.inner.clone();
         self.run(async move {
             let queue_wait = total.unwrap_or_else(|| inner.timings().1);
@@ -270,9 +320,27 @@ impl UdsSession {
                         ),
                     )
                 })?;
-            let ex = inner
-                .exchange(&mut eng, &pdu, addressing, total, origin, false)
-                .await?;
+            // First attempt unchanged; 0x21 retries end within timeoutMs (if set) counted from
+            // the first send, and never beyond MAX_EXCHANGE.
+            let start = Instant::now();
+            let cap = start + total.unwrap_or(MAX_EXCHANGE).min(MAX_EXCHANGE);
+            let mut o = ExchangeOpts::new(total, origin);
+            let mut ex = inner.exchange(&mut eng, &pdu, addressing, o).await?;
+            o.cap = Some(cap);
+            let mut retries: u8 = 0;
+            while retries < busy_max && negative_code(&ex.raw) == Some(NRC_BUSY_REPEAT_REQUEST) {
+                let at = Instant::now() + busy_delay;
+                if at >= cap {
+                    break;
+                }
+                inner.busy_retry_wait(at).await;
+                retries += 1;
+                // New transmission: same gates / tap checks as the first attempt (a closed
+                // gate or tap fails here before any TX).
+                o.retry = Some(retries);
+                o.total = total.map(|_| cap.saturating_duration_since(Instant::now()));
+                ex = inner.exchange(&mut eng, &pdu, addressing, o).await?;
+            }
             let nrc = negative_code(&ex.raw);
             Ok(UdsResponseDto {
                 positive: nrc.is_none(),
@@ -282,6 +350,7 @@ impl UdsSession {
                 response_pending_count: ex.pending_count,
                 elapsed_us: ex.elapsed_us,
                 transaction_seq: ex.seq,
+                busy_retry_count: retries,
                 raw: ex.raw,
             })
         })

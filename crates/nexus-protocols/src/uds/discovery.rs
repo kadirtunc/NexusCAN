@@ -10,8 +10,12 @@
 
 use std::collections::BTreeMap;
 
+use super::addressing::{check_id_forms, max_sf_payload, resolve_address_bytes, AddressBytes};
 use super::client::nrc_name;
-use super::dto::{DiscoveredEcuDto, EcuDiscoveryResultDto};
+use super::dto::{
+    AddressFormatDto, DiscoveredEcuDto, EcuDiscoveryRequestDto, EcuDiscoveryResultDto, IdFilterDto,
+    RequestIdRuleDto,
+};
 
 /// Default functional request PDU when `requestPdu` is omitted: TesterPresent `3E 00`.
 pub const DEFAULT_DISCOVERY_PDU: [u8; 2] = [0x3E, 0x00];
@@ -19,14 +23,21 @@ pub const DEFAULT_DISCOVERY_PDU: [u8; 2] = [0x3E, 0x00];
 pub const MAX_CLASSIC_SF_PDU: usize = 7;
 /// Max UDS payload of a CAN-FD escape single frame (`00 len`, 64 - 2).
 pub const MAX_FD_SF_PDU: usize = 62;
+/// Max entries of `responseIdFilters`.
+pub const MAX_RESPONSE_FILTERS: usize = 32;
+/// Distinct responders listed per scan (≥ 128 ECUs on one bus). Further responders are counted
+/// in `droppedEcus` and flag `truncated`; memory stays bounded (one ≤ 62-byte PDU per entry).
+pub const MAX_DISCOVERED_ECUS: usize = 256;
+const _: () = assert!(MAX_DISCOVERED_ECUS >= 128);
 
 /// Services whose first data byte is a sub-function carrying the suppressPosRspMsgIndicationBit
 /// (ISO 14229-1; same set as the UDS client's suppression rule, superset of
-/// 0x10/0x11/0x27/0x28/0x31/0x3E/0x85/0x87).
+/// 0x10/0x11/0x27/0x28/0x31/0x3E/0x85/0x87). 0x84 SecuredDataTransmission has no sub-function.
+/// 0x83 AccessTimingParameter was withdrawn in ISO 14229-1:2020; kept for 2013-edition ECUs.
 fn sid_supports_suppression(sid: u8) -> bool {
     matches!(
         sid,
-        0x10 | 0x11 | 0x27 | 0x28 | 0x29 | 0x2C | 0x31 | 0x3E | 0x83 | 0x84 | 0x85 | 0x86 | 0x87
+        0x10 | 0x11 | 0x27 | 0x28 | 0x29 | 0x2C | 0x31 | 0x3E | 0x83 | 0x85 | 0x86 | 0x87
     )
 }
 
@@ -34,11 +45,17 @@ fn sid_supports_suppression(sid: u8) -> bool {
 /// single-frame only (classic 1..=7 bytes, CAN-FD 1..=62 bytes). A request with the
 /// suppressPosRspMsgIndicationBit set is rejected (healthy ECUs would stay silent).
 pub fn validate_request_pdu(pdu: &[u8], use_fd: bool) -> Result<(), String> {
-    let max = if use_fd {
-        MAX_FD_SF_PDU
-    } else {
-        MAX_CLASSIC_SF_PDU
-    };
+    validate_request_pdu_addressed(pdu, use_fd, None)
+}
+
+/// [`validate_request_pdu`] with an optional N_TA / N_AE byte before the PCI (one byte less
+/// single-frame room: classic 6, CAN-FD 61).
+pub fn validate_request_pdu_addressed(
+    pdu: &[u8],
+    use_fd: bool,
+    address: Option<u8>,
+) -> Result<(), String> {
+    let max = max_sf_payload(use_fd, usize::from(address.is_some()));
     if pdu.is_empty() || pdu.len() > max {
         return Err(format!(
             "requestPdu must be 1..={max} bytes: functional requests are ISO-TP single frames only ({} CAN, got {} bytes)",
@@ -61,8 +78,20 @@ pub fn validate_request_pdu(pdu: &[u8], use_fd: bool) -> Result<(), String> {
 /// With `padding` the frame is filled to 8 bytes (classic PCI) or to the next valid CAN-FD
 /// length (escape PCI); without padding the frame length is exactly PCI + PDU.
 pub fn build_single_frame(pdu: &[u8], padding: Option<u8>) -> Vec<u8> {
+    build_single_frame_addressed(pdu, padding, None)
+}
+
+/// [`build_single_frame`] with an optional N_TA / N_AE byte first: `[addr, PCI, pdu.., pad]`.
+/// Classic PCI up to 6 bytes with an address byte (7 without), CAN-FD escape above, as
+/// `automotive` encodes it.
+pub fn build_single_frame_addressed(
+    pdu: &[u8],
+    padding: Option<u8>,
+    address: Option<u8>,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
-    if pdu.len() <= MAX_CLASSIC_SF_PDU {
+    out.extend(address);
+    if pdu.len() <= max_sf_payload(false, usize::from(address.is_some())) {
         out.push(pdu.len() as u8);
     } else {
         out.push(0x00);
@@ -115,6 +144,172 @@ pub fn default_response_filter(extended: bool) -> (u32, u32) {
     } else {
         (0x7E8, 0x7F8)
     }
+}
+
+/// Physical request id for `response_id` under `rule` (`None` = not derivable).
+pub fn derive_request_id(rule: RequestIdRuleDto, response_id: u32, extended: bool) -> Option<u32> {
+    let full: u32 = if extended { 0x1FFF_FFFF } else { 0x7FF };
+    if response_id > full {
+        return None;
+    }
+    match rule {
+        RequestIdRuleDto::LegislatedMinus8 => {
+            (!extended && (0x7E8..=0x7EF).contains(&response_id)).then(|| response_id - 8)
+        }
+        RequestIdRuleDto::Offset { delta } => {
+            let r = i64::from(response_id) + i64::from(delta);
+            u32::try_from(r)
+                .ok()
+                .filter(|&r| r <= full && r != response_id)
+        }
+        RequestIdRuleDto::NormalFixedSwap => {
+            if !extended {
+                return None;
+            }
+            if let Some(r) = derive_physical_request_id(response_id, true) {
+                return Some(r);
+            }
+            // Mixed addressing 0x18CE_TA_SA → 0x18CE_SA_TA (priority 6, as for 0x18DA).
+            ((response_id & 0x1FFF_0000) == 0x18CE_0000)
+                .then_some(0x18CE_0000 | ((response_id & 0xFF) << 8) | ((response_id >> 8) & 0xFF))
+        }
+        RequestIdRuleDto::NoRequestId => None,
+    }
+}
+
+/// Default rule: `legislatedMinus8` (11-bit) / `normalFixedSwap` (29-bit), i.e. today's
+/// [`derive_physical_request_id`].
+pub fn default_request_id_rule(extended: bool) -> RequestIdRuleDto {
+    if extended {
+        RequestIdRuleDto::NormalFixedSwap
+    } else {
+        RequestIdRuleDto::LegislatedMinus8
+    }
+}
+
+/// Validated discovery parameters (pure part of `cmd_diag_discover_ecus`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoverySpec {
+    /// Effective response filters (1..=32); a frame is a candidate if it matches any.
+    pub filters: Vec<IdFilterDto>,
+    pub rule: RequestIdRuleDto,
+    /// `tx` = prefix of the functional request, `rx` = required first byte of responses.
+    pub addr: AddressBytes,
+}
+
+impl DiscoverySpec {
+    /// One filter that accepts a superset of [`Self::filters`] (for a tap with few filter
+    /// slots); [`DiscoveryCollector`] still applies the exact list.
+    pub fn covering_filter(&self) -> IdFilterDto {
+        covering_filter(&self.filters)
+    }
+}
+
+/// Smallest single `(id, mask)` accepting every id accepted by one of `filters`.
+pub fn covering_filter(filters: &[IdFilterDto]) -> IdFilterDto {
+    let Some(first) = filters.first() else {
+        return IdFilterDto { id: 0, mask: 0 };
+    };
+    let mut mask = first.mask;
+    for f in filters {
+        mask &= f.mask & !((f.id ^ first.id) & first.mask);
+    }
+    IdFilterDto {
+        id: first.id & mask,
+        mask,
+    }
+}
+
+fn id_filter_matches(f: IdFilterDto, id: u32) -> bool {
+    (id & f.mask) == f.id
+}
+
+/// Validates the discovery request's filters, request-id rule and addressing.
+///
+/// * `responseIdFilters`: 1..=32 entries, `id & !mask == 0`, mask != 0, ids / masks within the
+///   id width (11-bit ≤ 0x7FF). Exclusive with `responseId` / `responseMask`.
+/// * Legacy (`responseIdFilters` absent): `responseId` / `responseMask` exactly as before
+///   (defaults 0x7E8/0x7F8, 29-bit 0x18DAF100/0x1FFFFF00; 29-bit mixed 0x18CEF100).
+/// * `functionalId` must not match any filter.
+/// * Address format rules as for sessions (extended: both bytes; mixed: target byte, 29-bit
+///   ids of the 0x18CD functional form; normalFixed: 29-bit 0x18DB functional form).
+pub fn discovery_spec(req: &EcuDiscoveryRequestDto) -> Result<DiscoverySpec, String> {
+    let ext = req.is_extended_id;
+    let full: u32 = if ext { 0x1FFF_FFFF } else { 0x7FF };
+    let addr = resolve_address_bytes(req.address_format, req.target_address, req.response_address)?;
+    check_id_forms(req.address_format, ext, &[], Some(req.functional_id))?;
+
+    let filters = match &req.response_id_filters {
+        Some(list) => {
+            if req.response_id.is_some() || req.response_mask.is_some() {
+                return Err(
+                    "responseIdFilters replaces responseId / responseMask: set only one of them"
+                        .into(),
+                );
+            }
+            if list.is_empty() || list.len() > MAX_RESPONSE_FILTERS {
+                return Err(format!(
+                    "responseIdFilters must have 1..={MAX_RESPONSE_FILTERS} entries (got {})",
+                    list.len()
+                ));
+            }
+            for (i, f) in list.iter().enumerate() {
+                if f.mask == 0 || f.mask > full || f.id > full {
+                    return Err(format!(
+                        "responseIdFilters[{i}] 0x{:X}/0x{:X}: id and mask must be within 0x1..=0x{full:X}",
+                        f.id, f.mask
+                    ));
+                }
+                if f.id & !f.mask != 0 {
+                    return Err(format!(
+                        "responseIdFilters[{i}] id 0x{:X} has bits outside mask 0x{:X}",
+                        f.id, f.mask
+                    ));
+                }
+            }
+            list.clone()
+        }
+        None => {
+            let (def_id, def_mask) = if ext && req.address_format == AddressFormatDto::Mixed {
+                (0x18CE_F100, 0x1FFF_FF00)
+            } else {
+                default_response_filter(ext)
+            };
+            let (id, mask) = match (req.response_id, req.response_mask) {
+                (None, None) => (def_id, def_mask),
+                // An explicit id alone means exactly that id.
+                (Some(id), None) => (id, full),
+                (None, Some(m)) => (def_id, m),
+                (Some(id), Some(m)) => (id, m),
+            };
+            if id > full || mask == 0 || mask > full {
+                return Err(format!(
+                    "responseId 0x{id:X} / responseMask 0x{mask:X} must be within 0x1..=0x{full:X}"
+                ));
+            }
+            // Legacy semantics: `(arbId & mask) == (id & mask)`.
+            vec![IdFilterDto {
+                id: id & mask,
+                mask,
+            }]
+        }
+    };
+    if let Some(f) = filters
+        .iter()
+        .find(|f| id_filter_matches(**f, req.functional_id))
+    {
+        return Err(format!(
+            "functionalId 0x{:X} must not match the response filter 0x{:X}/0x{:X}",
+            req.functional_id, f.id, f.mask
+        ));
+    }
+    Ok(DiscoverySpec {
+        filters,
+        rule: req
+            .request_id_rule
+            .unwrap_or_else(|| default_request_id_rule(ext)),
+        addr,
+    })
 }
 
 /// ISO-TP PCI class of ONE CAN frame payload.
@@ -194,6 +389,8 @@ pub enum FrameVerdict {
     Response,
     /// `7F sid 78` responsePending.
     Pending,
+    /// Valid response from a responder beyond [`MAX_DISCOVERED_ECUS`] (counted, not listed).
+    Dropped,
 }
 
 const NRC_RESPONSE_PENDING: u8 = 0x78;
@@ -203,7 +400,8 @@ struct Slot {
     final_seen: bool,
 }
 
-/// Aggregates the responses of one functional discovery window (one entry per response id).
+/// Aggregates the responses of one functional discovery window (one entry per response id,
+/// at most [`MAX_DISCOVERED_ECUS`]).
 pub struct DiscoveryCollector {
     sid: u8,
     functional_id: u32,
@@ -211,6 +409,13 @@ pub struct DiscoveryCollector {
     tx_timestamp_us: u64,
     ecus: BTreeMap<u32, Slot>,
     ignored: u32,
+    /// Exact response filters (empty = every non-functional id, legacy [`Self::new`]).
+    filters: Vec<IdFilterDto>,
+    rule: RequestIdRuleDto,
+    /// Required first byte of responses (extended / mixed addressing).
+    rx_addr: Option<u8>,
+    truncated: bool,
+    dropped_ecus: u32,
 }
 
 impl DiscoveryCollector {
@@ -224,6 +429,28 @@ impl DiscoveryCollector {
             tx_timestamp_us,
             ecus: BTreeMap::new(),
             ignored: 0,
+            filters: Vec::new(),
+            rule: default_request_id_rule(extended),
+            rx_addr: None,
+            truncated: false,
+            dropped_ecus: 0,
+        }
+    }
+
+    /// Collector for a validated [`DiscoverySpec`]: exact filter membership, request-id rule
+    /// and response address byte.
+    pub fn with_spec(
+        sid: u8,
+        functional_id: u32,
+        extended: bool,
+        tx_timestamp_us: u64,
+        spec: &DiscoverySpec,
+    ) -> Self {
+        Self {
+            filters: spec.filters.clone(),
+            rule: spec.rule,
+            rx_addr: spec.addr.rx,
+            ..Self::new(sid, functional_id, extended, tx_timestamp_us)
         }
     }
 
@@ -250,10 +477,22 @@ impl DiscoveryCollector {
         if extended == self.extended && arb_id == self.functional_id {
             return FrameVerdict::FunctionalEcho;
         }
-        if extended != self.extended {
+        if extended != self.extended
+            || !(self.filters.is_empty()
+                || self.filters.iter().any(|f| id_filter_matches(*f, arb_id)))
+        {
             self.note_ignored();
             return FrameVerdict::Ignored;
         }
+        let rx = AddressBytes {
+            tx: None,
+            rx: self.rx_addr,
+        };
+        let Some(data) = rx.rx_pdu(data) else {
+            // Address byte of another tester / node.
+            self.note_ignored();
+            return FrameVerdict::Ignored;
+        };
         let pos_sid = self.sid.wrapping_add(0x40);
         let (pdu, multi) = match classify_pci(data) {
             PciClass::Single(p) => (p, false),
@@ -274,10 +513,16 @@ impl DiscoveryCollector {
         let is_pending = nrc == Some(NRC_RESPONSE_PENDING) && !multi;
 
         let tx_ts = self.tx_timestamp_us;
+        if self.ecus.len() >= MAX_DISCOVERED_ECUS && !self.ecus.contains_key(&arb_id) {
+            self.truncated = true;
+            self.dropped_ecus = self.dropped_ecus.saturating_add(1);
+            return FrameVerdict::Dropped;
+        }
+        let rule = self.rule;
         let slot = self.ecus.entry(arb_id).or_insert_with(|| Slot {
             dto: DiscoveredEcuDto {
                 response_id: arb_id,
-                request_id: derive_physical_request_id(arb_id, extended),
+                request_id: derive_request_id(rule, arb_id, extended),
                 is_extended_id: extended,
                 positive: false,
                 nrc: None,
@@ -326,6 +571,8 @@ impl DiscoveryCollector {
             tx_timestamp_us: self.tx_timestamp_us,
             ecus: self.ecus.into_values().map(|s| s.dto).collect(),
             ignored_frames: self.ignored,
+            truncated: self.truncated,
+            dropped_ecus: self.dropped_ecus,
         }
     }
 }
@@ -352,6 +599,50 @@ mod tests {
         // 0x22 / 0x19 have no suppression bit semantics
         assert!(validate_request_pdu(&[0x22, 0xF1, 0x90], false).is_ok());
         assert!(validate_request_pdu(&[0x19, 0x82, 0xFF], false).is_ok());
+    }
+
+    #[test]
+    fn secured_data_transmission_is_not_a_sub_function_service() {
+        // 0x84 has no sub-function: bit 7 of its first data byte is not a suppression bit.
+        assert!(!sid_supports_suppression(0x84));
+        assert!(validate_request_pdu(&[0x84, 0x80, 0x00, 0x01], false).is_ok());
+        assert!(validate_request_pdu(&[0x84, 0xFF], false).is_ok());
+        // 0x83 (ISO 14229-1:2013) keeps the sub-function rule.
+        assert!(validate_request_pdu(&[0x83, 0x81], false).is_err());
+        assert!(validate_request_pdu(&[0x83, 0x01], false).is_ok());
+    }
+
+    #[test]
+    fn addressed_single_frame_building() {
+        // Classic: [TA, 0x0N, pdu.., pad] up to 6 bytes.
+        assert_eq!(
+            build_single_frame_addressed(&[0x3E, 0x00], Some(0xAA), Some(0x10)),
+            vec![0x10, 0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA]
+        );
+        assert_eq!(
+            build_single_frame_addressed(&[0x3E, 0x00], None, Some(0x10)),
+            vec![0x10, 0x02, 0x3E, 0x00]
+        );
+        let f = build_single_frame_addressed(&[0x22; 6], Some(0xCC), Some(0x10));
+        assert_eq!(&f[..2], &[0x10, 0x06]);
+        assert_eq!(f.len(), 8);
+        // CAN-FD escape from 7 bytes: [TA, 00, len, pdu..] padded to a valid FD length.
+        let f = build_single_frame_addressed(&[0x22; 7], Some(0xCC), Some(0x10));
+        assert_eq!(&f[..3], &[0x10, 0x00, 0x07]);
+        assert_eq!(f.len(), 12);
+        let f = build_single_frame_addressed(&[0x22; 61], Some(0), Some(0x10));
+        assert_eq!(f.len(), 64);
+        assert_eq!(f[63], 0x22);
+        // Validation: one byte less room.
+        assert!(validate_request_pdu_addressed(&[0x22; 6], false, Some(0x10)).is_ok());
+        assert!(validate_request_pdu_addressed(&[0x22; 7], false, Some(0x10)).is_err());
+        assert!(validate_request_pdu_addressed(&[0x22; 61], true, Some(0x10)).is_ok());
+        assert!(validate_request_pdu_addressed(&[0x22; 62], true, Some(0x10)).is_err());
+        assert!(validate_request_pdu_addressed(&[0x3E, 0x80], false, Some(0x10)).is_err());
+        assert_eq!(
+            build_single_frame_addressed(&[0x3E, 0x00], Some(0xAA), None),
+            build_single_frame(&[0x3E, 0x00], Some(0xAA))
+        );
     }
 
     #[test]
@@ -619,5 +910,349 @@ mod tests {
         assert!(!r.ecus[1].multi_frame && r.ecus[1].positive);
         assert_eq!(r.ecus[1].raw, vec![0x41, 0x00, 0x98, 0x18, 0x80, 0x13]);
         assert_eq!(r.ignored_frames, 3);
+    }
+
+    fn base_req() -> EcuDiscoveryRequestDto {
+        EcuDiscoveryRequestDto {
+            bus_id: 0,
+            is_extended_id: false,
+            functional_id: 0x7DF,
+            request_pdu: None,
+            window_ms: None,
+            response_id: None,
+            response_mask: None,
+            padding: Some(0xAA),
+            use_fd: false,
+            identify: false,
+            response_id_filters: None,
+            request_id_rule: None,
+            address_format: AddressFormatDto::Normal,
+            target_address: None,
+            response_address: None,
+        }
+    }
+
+    fn sfv(pdu: &[u8]) -> Vec<u8> {
+        build_single_frame(pdu, Some(0xAA))
+    }
+
+    #[test]
+    fn forty_oem_ecus_with_offset_rule_are_all_found() {
+        let req = EcuDiscoveryRequestDto {
+            functional_id: 0x5FF,
+            response_id_filters: Some(vec![IdFilterDto {
+                id: 0x600,
+                mask: 0x7C0,
+            }]),
+            request_id_rule: Some(RequestIdRuleDto::Offset { delta: -0x40 }),
+            ..base_req()
+        };
+        let spec = discovery_spec(&req).expect("spec");
+        let mut c = DiscoveryCollector::with_spec(0x3E, 0x5FF, false, 100, &spec);
+        for id in 0x600..0x628u32 {
+            assert_eq!(
+                c.on_frame(id, false, 200, &sfv(&[0x7E, 0x00])),
+                FrameVerdict::Response
+            );
+        }
+        // Outside the filter (0x640) and the legislated range are not candidates.
+        assert_eq!(
+            c.on_frame(0x640, false, 200, &sfv(&[0x7E, 0x00])),
+            FrameVerdict::Ignored
+        );
+        assert_eq!(
+            c.on_frame(0x7E8, false, 200, &sfv(&[0x7E, 0x00])),
+            FrameVerdict::Ignored
+        );
+        let r = c.finish(vec![0x3E, 0x00], 300);
+        assert_eq!(r.ecus.len(), 40);
+        assert!(!r.truncated);
+        for (i, e) in r.ecus.iter().enumerate() {
+            let id = 0x600 + i as u32;
+            assert_eq!((e.response_id, e.request_id), (id, Some(id - 0x40)));
+        }
+    }
+
+    #[test]
+    fn legislated_defaults_are_unchanged() {
+        let spec = discovery_spec(&base_req()).expect("spec");
+        assert_eq!(
+            spec.filters,
+            vec![IdFilterDto {
+                id: 0x7E8,
+                mask: 0x7F8
+            }]
+        );
+        assert_eq!(spec.rule, RequestIdRuleDto::LegislatedMinus8);
+        assert_eq!(spec.addr, AddressBytes::default());
+        let ext = discovery_spec(&EcuDiscoveryRequestDto {
+            is_extended_id: true,
+            functional_id: 0x18DB_33F1,
+            ..base_req()
+        })
+        .expect("ext");
+        assert_eq!(
+            ext.filters,
+            vec![IdFilterDto {
+                id: 0x18DA_F100,
+                mask: 0x1FFF_FF00
+            }]
+        );
+        assert_eq!(ext.rule, RequestIdRuleDto::NormalFixedSwap);
+        // Legacy explicit id / mask forms.
+        let exact = discovery_spec(&EcuDiscoveryRequestDto {
+            response_id: Some(0x7EA),
+            ..base_req()
+        })
+        .expect("exact");
+        assert_eq!(
+            exact.filters,
+            vec![IdFilterDto {
+                id: 0x7EA,
+                mask: 0x7FF
+            }]
+        );
+        // Same results as the legacy collector, frame by frame.
+        let frames: Vec<(u32, Vec<u8>)> = vec![
+            (0x7E8, sfv(&[0x7E, 0x00])),
+            (0x7EF, sfv(&[0x7F, 0x3E, 0x11])),
+            (0x7E9, sfv(&[0x7F, 0x3E, 0x78])),
+            (0x7EA, vec![0x10, 0x14, 0x7E, 0x00, 1, 2, 3, 4]),
+            (0x7EB, sfv(&[0x62])),
+        ];
+        let mut a = DiscoveryCollector::new(0x3E, 0x7DF, false, 0);
+        let mut b = DiscoveryCollector::with_spec(0x3E, 0x7DF, false, 0, &spec);
+        for (id, d) in &frames {
+            assert_eq!(a.on_frame(*id, false, 5, d), b.on_frame(*id, false, 5, d));
+        }
+        assert_eq!(a.finish(vec![], 300), b.finish(vec![], 300));
+        for id in 0x7E8..=0x7EF {
+            assert_eq!(
+                derive_request_id(RequestIdRuleDto::LegislatedMinus8, id, false),
+                derive_physical_request_id(id, false)
+            );
+        }
+        for id in [0x18DA_F110, 0x18DA_F1FF, 0x18DB_33F1, 0x1CDA_F110] {
+            assert_eq!(
+                derive_request_id(RequestIdRuleDto::NormalFixedSwap, id, true),
+                derive_physical_request_id(id, true)
+            );
+        }
+    }
+
+    #[test]
+    fn request_id_rules() {
+        use RequestIdRuleDto::*;
+        assert_eq!(derive_request_id(LegislatedMinus8, 0x7E7, false), None);
+        assert_eq!(derive_request_id(LegislatedMinus8, 0x18DA_F110, true), None);
+        assert_eq!(
+            derive_request_id(Offset { delta: -0x40 }, 0x600, false),
+            Some(0x5C0)
+        );
+        assert_eq!(
+            derive_request_id(Offset { delta: 8 }, 0x7FA, false),
+            None,
+            "> 0x7FF"
+        );
+        assert_eq!(derive_request_id(Offset { delta: -1 }, 0, false), None);
+        assert_eq!(derive_request_id(Offset { delta: 0 }, 0x600, false), None);
+        assert_eq!(
+            derive_request_id(Offset { delta: -0x100 }, 0x18DA_F210, true),
+            Some(0x18DA_F110)
+        );
+        assert_eq!(
+            derive_request_id(NormalFixedSwap, 0x18CE_F155, true),
+            Some(0x18CE_55F1)
+        );
+        assert_eq!(derive_request_id(NormalFixedSwap, 0x7E8, false), None);
+        assert_eq!(derive_request_id(NoRequestId, 0x7E8, false), None);
+    }
+
+    #[test]
+    fn invalid_filters_are_rejected() {
+        let f = |id, mask| IdFilterDto { id, mask };
+        let bad = |filters: Vec<IdFilterDto>, ext: bool| {
+            discovery_spec(&EcuDiscoveryRequestDto {
+                is_extended_id: ext,
+                functional_id: if ext { 0x18DB_33F1 } else { 0x7DF },
+                response_id_filters: Some(filters),
+                ..base_req()
+            })
+            .is_err()
+        };
+        assert!(bad(vec![], false), "empty");
+        assert!(bad(vec![f(0x600, 0x7C0); 33], false), "> 32");
+        assert!(!bad(vec![f(0x600, 0x7C0); 32], false), "32 ok");
+        assert!(bad(vec![f(0x601, 0x7C0)], false), "id bit outside mask");
+        assert!(bad(vec![f(0x800, 0x800)], false), "11-bit id > 0x7FF");
+        assert!(bad(vec![f(0x600, 0xFC0)], false), "11-bit mask > 0x7FF");
+        assert!(bad(vec![f(0, 0)], false), "mask 0");
+        assert!(
+            bad(vec![f(0x7D8, 0x7F8)], false),
+            "matches functional 0x7DF"
+        );
+        assert!(!bad(vec![f(0x18DA_F100, 0x1FFF_FF00)], true));
+        assert!(bad(vec![f(0x2000_0000, 0x3FFF_FFFF)], true), "29-bit range");
+        // Exclusive with the legacy fields.
+        assert!(discovery_spec(&EcuDiscoveryRequestDto {
+            response_mask: Some(0x7F8),
+            response_id_filters: Some(vec![f(0x600, 0x7C0)]),
+            ..base_req()
+        })
+        .is_err());
+        // Legacy range checks kept.
+        assert!(discovery_spec(&EcuDiscoveryRequestDto {
+            response_mask: Some(0x800),
+            ..base_req()
+        })
+        .is_err());
+        // Addressing rules.
+        assert!(
+            discovery_spec(&EcuDiscoveryRequestDto {
+                address_format: AddressFormatDto::Extended,
+                target_address: Some(0x33),
+                ..base_req()
+            })
+            .is_err(),
+            "extended needs responseAddress"
+        );
+        assert!(
+            discovery_spec(&EcuDiscoveryRequestDto {
+                address_format: AddressFormatDto::NormalFixed,
+                is_extended_id: true,
+                functional_id: 0x18DA_33F1,
+                ..base_req()
+            })
+            .is_err(),
+            "normalFixed functional must be 0x18DB"
+        );
+    }
+
+    #[test]
+    fn cap_overflow_is_reported_and_128_ecus_fit() {
+        let req = EcuDiscoveryRequestDto {
+            functional_id: 0x7FF,
+            response_id_filters: Some(vec![IdFilterDto {
+                id: 0x000,
+                mask: 0x400,
+            }]),
+            request_id_rule: Some(RequestIdRuleDto::NoRequestId),
+            ..base_req()
+        };
+        let spec = discovery_spec(&req).expect("spec");
+        let mut c = DiscoveryCollector::with_spec(0x3E, 0x7FF, false, 0, &spec);
+        for id in 0..128u32 {
+            c.on_frame(id, false, 1, &sfv(&[0x7E, 0x00]));
+        }
+        let r128 = {
+            let mut c2 = DiscoveryCollector::with_spec(0x3E, 0x7FF, false, 0, &spec);
+            for id in 0..128u32 {
+                c2.on_frame(id, false, 1, &sfv(&[0x7E, 0x00]));
+            }
+            c2.finish(vec![], 300)
+        };
+        assert_eq!((r128.ecus.len(), r128.truncated), (128, false));
+        for id in 128..300u32 {
+            c.on_frame(id, false, 1, &sfv(&[0x7E, 0x00]));
+        }
+        // A listed responder still updates; a surplus one is dropped and counted.
+        assert_eq!(
+            c.on_frame(5, false, 2, &sfv(&[0x7E, 0x00])),
+            FrameVerdict::Response
+        );
+        assert_eq!(
+            c.on_frame(299, false, 2, &sfv(&[0x7E, 0x00])),
+            FrameVerdict::Dropped
+        );
+        let r = c.finish(vec![], 300);
+        assert_eq!(r.ecus.len(), MAX_DISCOVERED_ECUS);
+        assert!(r.truncated);
+        assert_eq!(r.dropped_ecus, (300 - MAX_DISCOVERED_ECUS) as u32 + 1);
+        assert!(r.ecus.iter().all(|e| e.request_id.is_none()));
+    }
+
+    #[test]
+    fn extended_addressing_discovery() {
+        let req = EcuDiscoveryRequestDto {
+            address_format: AddressFormatDto::Extended,
+            target_address: Some(0x33),
+            response_address: Some(0xF1),
+            ..base_req()
+        };
+        let spec = discovery_spec(&req).expect("spec");
+        assert_eq!(
+            spec.addr,
+            AddressBytes {
+                tx: Some(0x33),
+                rx: Some(0xF1)
+            }
+        );
+        assert_eq!(
+            build_single_frame_addressed(&DEFAULT_DISCOVERY_PDU, Some(0xAA), spec.addr.tx),
+            vec![0x33, 0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA]
+        );
+        let mut c = DiscoveryCollector::with_spec(0x3E, 0x7DF, false, 0, &spec);
+        let ok = [0xF1, 0x02, 0x7E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA];
+        let foreign = [0xF2, 0x02, 0x7E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA];
+        assert_eq!(c.on_frame(0x7E8, false, 1, &ok), FrameVerdict::Response);
+        assert_eq!(c.on_frame(0x7E9, false, 1, &foreign), FrameVerdict::Ignored);
+        assert_eq!(
+            c.on_frame(0x7E9, false, 1, &sfv(&[0x7E, 0x00])),
+            FrameVerdict::Ignored
+        );
+        let r = c.finish(vec![], 300);
+        assert_eq!(r.ecus.len(), 1);
+        assert_eq!(r.ecus[0].raw, vec![0x7E, 0x00]);
+        assert_eq!(r.ignored_frames, 2);
+        // 29-bit mixed: default filter 0x18CEF100, 0x18CE swap.
+        let m = discovery_spec(&EcuDiscoveryRequestDto {
+            is_extended_id: true,
+            functional_id: 0x18CD_33F1,
+            address_format: AddressFormatDto::Mixed,
+            target_address: Some(0x55),
+            ..base_req()
+        })
+        .expect("mixed");
+        assert_eq!(
+            m.filters,
+            vec![IdFilterDto {
+                id: 0x18CE_F100,
+                mask: 0x1FFF_FF00
+            }]
+        );
+        assert_eq!(m.addr.rx, Some(0x55));
+        assert_eq!(
+            derive_request_id(m.rule, 0x18CE_F110, true),
+            Some(0x18CE_10F1)
+        );
+    }
+
+    #[test]
+    fn covering_filter_is_a_superset() {
+        let fs = vec![
+            IdFilterDto {
+                id: 0x600,
+                mask: 0x7C0,
+            },
+            IdFilterDto {
+                id: 0x7E8,
+                mask: 0x7F8,
+            },
+        ];
+        let cover = covering_filter(&fs);
+        for id in 0..=0x7FFu32 {
+            if fs.iter().any(|f| id_filter_matches(*f, id)) {
+                assert!(id_filter_matches(cover, id), "{id:#X}");
+            }
+        }
+        assert_eq!(
+            cover,
+            IdFilterDto {
+                id: 0x600,
+                mask: 0x600
+            }
+        );
+        let one = covering_filter(&fs[..1]);
+        assert_eq!(one, fs[0]);
     }
 }

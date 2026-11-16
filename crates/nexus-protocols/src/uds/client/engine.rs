@@ -24,7 +24,11 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use super::bridge::{BridgeShared, PduMark, PortAdapter, PortMsg, ISOTP_MAX_WFT, MAX_RESPONSE_PDU};
+use crate::uds::addressing::{cf_payload, max_sf_payload};
+
+use super::bridge::{
+    BridgeShared, OvflwFc, PduMark, PortAdapter, PortMsg, ISOTP_MAX_WFT, MAX_RESPONSE_PDU,
+};
 use super::capture::TxnTag;
 use super::conversation::{Conversation, NewEvent};
 use super::format::{
@@ -52,7 +56,16 @@ pub const ISOTP_TIMEOUT: Duration = Duration::from_millis(1000);
 /// deadline is extended in these steps (ISO-TP N_Cr still bounds each gap).
 const RX_EXTENSION: Duration = Duration::from_millis(100);
 /// Absolute upper bound for one exchange (safety net only).
-const MAX_EXCHANGE: Duration = Duration::from_secs(600);
+pub(crate) const MAX_EXCHANGE: Duration = Duration::from_secs(600);
+/// Gate / close poll period while waiting for a 0x21 retry.
+const BUSY_POLL: Duration = Duration::from_millis(10);
+/// NRC 0x21 busyRepeatRequest.
+pub const NRC_BUSY_REPEAT_REQUEST: u8 = 0x21;
+/// Upper bound of `busyRetryMax`.
+pub const MAX_BUSY_RETRIES: u8 = 10;
+/// Default / allowed 0x21 retry delay (ms).
+pub const DEFAULT_BUSY_RETRY_DELAY_MS: u32 = 50;
+pub const BUSY_RETRY_DELAY_RANGE_MS: (u32, u32) = (10, 5_000);
 /// Largest request PDU accepted (`automotive` would segment up to 4 GiB over CAN-FD).
 pub const MAX_REQUEST_PDU: usize = 64 * 1024;
 /// Largest STmin an ECU can demand (0x7F); used to size the send deadline of long requests.
@@ -85,6 +98,20 @@ fn reject_message(r: DiagTxReject) -> &'static str {
         DiagTxReject::Closed => "diagnostic tap was closed",
         DiagTxReject::QueueFull => "tap TX queue is full",
         DiagTxReject::DriverError => "CAN driver reported a write error",
+    }
+}
+
+/// `(conversation detail, error message suffix)` for a refused oversized First Frame.
+fn oversize_fc_note(fc: OvflwFc) -> (String, String) {
+    match fc {
+        OvflwFc::Sent => (
+            "isotp_pdu_too_large;fc_ovflw_sent".into(),
+            "FC.OVFLW sent".into(),
+        ),
+        OvflwFc::Blocked(r) => (
+            format!("isotp_pdu_too_large;fc_ovflw_blocked:{}", reject_code(r).1),
+            format!("FC.OVFLW not sent: {}", reject_message(r)),
+        ),
     }
 }
 
@@ -167,6 +194,32 @@ struct Stack {
 #[derive(Default)]
 pub struct Engine {
     stack: Option<Stack>,
+}
+
+/// Per-exchange options (see [`Inner::exchange`]).
+#[derive(Debug, Clone, Copy)]
+pub struct ExchangeOpts {
+    /// Replaces the initial P2 wait and caps the exchange.
+    pub total: Option<Duration>,
+    pub origin: DiagOrigin,
+    /// Log `keepalive_sent` instead of `request` (origin forced to `keepalive`).
+    pub keepalive: bool,
+    /// 0x21 retry index for the request event.
+    pub retry: Option<u8>,
+    /// Absolute end of the whole (multi-attempt) request.
+    pub cap: Option<Instant>,
+}
+
+impl ExchangeOpts {
+    pub fn new(total: Option<Duration>, origin: DiagOrigin) -> Self {
+        Self {
+            total,
+            origin,
+            keepalive: false,
+            retry: None,
+            cap: None,
+        }
+    }
 }
 
 /// Result of one exchange.
@@ -287,12 +340,9 @@ impl Inner {
         (Duration::from_millis(p2), Duration::from_millis(p2s))
     }
 
+    /// Max single-frame UDS payload (one byte less with an N_TA / N_AE address byte).
     fn max_sf_len(&self) -> usize {
-        if self.config.use_fd {
-            62
-        } else {
-            7
-        }
+        max_sf_payload(self.config.use_fd, self.bridge.addressing.addr.tx_offset())
     }
 
     /// Total time allowed for sending one request: `max(P2*client, N_Bs × (N_WFTmax + 1))` plus the
@@ -300,8 +350,8 @@ impl Inner {
     fn send_budget(&self, len: usize) -> Duration {
         let (_, p2s) = self.timings();
         let base = p2s.max(ISOTP_TIMEOUT * (ISOTP_MAX_WFT + 1));
-        let cf_payload = if self.config.use_fd { 63 } else { 7 };
-        let cfs = len.saturating_sub(self.max_sf_len()).div_ceil(cf_payload);
+        let cf_len = cf_payload(self.config.use_fd, self.bridge.addressing.addr.tx_offset());
+        let cfs = len.saturating_sub(self.max_sf_len()).div_ceil(cf_len);
         base + MAX_STMIN * u32::try_from(cfs).unwrap_or(u32::MAX).min(100_000)
     }
 
@@ -542,6 +592,22 @@ impl Inner {
 
     // ─── request / response ─────────────────────────────────────────────────
 
+    /// Waits until `until` before a 0x21 retry, returning early when the session closes or
+    /// a TX gate (Listen-Only / Disarmed / Panic) closes: the following [`Self::exchange`]
+    /// then refuses the retry without any TX and logs it.
+    pub async fn busy_retry_wait(&self, until: Instant) {
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() || self.is_closed() {
+                return;
+            }
+            if self.port().is_none_or(|p| p.gate_check().is_err()) {
+                return;
+            }
+            tokio::time::sleep(left.min(BUSY_POLL)).await;
+        }
+    }
+
     /// One request/response exchange. Caller holds the request lock (`eng`).
     /// `keepalive` logs `keepalive_sent` instead of `request` and forces origin `keepalive`.
     pub async fn exchange(
@@ -549,10 +615,15 @@ impl Inner {
         eng: &mut Engine,
         req: &[u8],
         addressing: UdsAddressing,
-        total: Option<Duration>,
-        origin: DiagOrigin,
-        keepalive: bool,
+        o: ExchangeOpts,
     ) -> Result<Exchange, DiagError> {
+        let ExchangeOpts {
+            total,
+            origin,
+            keepalive,
+            retry,
+            cap,
+        } = o;
         let origin = if keepalive {
             DiagOrigin::Keepalive
         } else {
@@ -683,7 +754,8 @@ impl Inner {
             NewEvent::new(kind, addressing, req_ts)
                 .sid(Some(sid))
                 .bytes(req)
-                .origin(origin),
+                .origin(origin)
+                .retry(retry),
         );
         tag.bind(seq);
         let current = ReqInfo {
@@ -703,7 +775,7 @@ impl Inner {
         };
 
         let result = self
-            .await_response(&mut rx, &current, arm_seq, total, gap)
+            .await_response(&mut rx, &current, arm_seq, total, gap, cap)
             .await;
         // Final event (response / timeout / error) is logged: the last RX CF is already tagged.
         drop(tag);
@@ -719,29 +791,36 @@ impl Inner {
         arm_seq: u64,
         total: Option<Duration>,
         gap: Option<Duration>,
+        cap: Option<Instant>,
     ) -> Result<Exchange, DiagError> {
         let suppress = request_suppresses_positive(&req.bytes);
         let (p2c, p2sc) = self.timings();
         let sid = req.bytes.first().copied();
         let hard = req.at + total.unwrap_or(MAX_EXCHANGE).min(MAX_EXCHANGE);
-        let mut deadline = req.at + total.map_or(p2c, |t| t.min(MAX_EXCHANGE));
+        let hard = cap.map_or(hard, |c| hard.min(c));
+        let mut deadline = (req.at + total.map_or(p2c, |t| t.min(MAX_EXCHANGE))).min(hard);
         let mut pending: u32 = 0;
         loop {
             let item = tokio::select! {
                 r = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), rx.recv()) => r,
-                len = self.bridge.wait_oversize(arm_seq) => {
-                    // HIGH-07.1: the FF was dropped before `automotive` (no FC.CTS, nothing buffered).
+                refusal = self.bridge.wait_oversize(arm_seq) => {
+                    // HIGH-07.1: the FF was dropped before `automotive` (no FC.CTS, nothing
+                    // buffered); the pump answered FC.OVFLW unless a TX gate refused it.
                     let elapsed = us(req.at.elapsed());
+                    let (detail, fc_note) = oversize_fc_note(refusal.fc);
                     self.push(
                         NewEvent::new(ConversationEventKind::TransportError, req.addressing, req.ts.saturating_add(elapsed))
                             .sid(sid)
                             .request(Some(req.seq), Some(elapsed))
-                            .detail("isotp_pdu_too_large")
+                            .detail(detail)
                             .origin(req.origin),
                     );
                     return Err(err(
                         DiagErrorCode::IsotpError,
-                        format!("response too large: First Frame announces {len} bytes (limit {MAX_RESPONSE_PDU})"),
+                        format!(
+                            "response too large: First Frame announces {} bytes (limit {MAX_RESPONSE_PDU}); {fc_note}",
+                            refusal.len
+                        ),
                     ));
                 }
             };
@@ -1033,9 +1112,10 @@ pub async fn keepalive_loop(inner: Arc<Inner>, mut cfg: watch::Receiver<(bool, u
                 &mut eng,
                 &[0x3E, 0x80],
                 UdsAddressing::Physical,
-                None,
-                DiagOrigin::Keepalive,
-                true,
+                ExchangeOpts {
+                    keepalive: true,
+                    ..ExchangeOpts::new(None, DiagOrigin::Keepalive)
+                },
             )
             .await;
     }

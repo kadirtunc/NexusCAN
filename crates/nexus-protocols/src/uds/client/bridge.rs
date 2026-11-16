@@ -30,6 +30,7 @@ use nexus_core::{now_monotonic_us, CanIdKey, RawCanFrame};
 use parking_lot::Mutex;
 
 use super::capture::IsoTpCapture;
+use crate::uds::addressing::AddressBytes;
 use crate::uds::port::{DiagCanPort, DiagPortEvent, DiagTxReject};
 
 /// Pump → adapter queue depth. Overflow drops frames (counted) instead of growing unbounded
@@ -48,9 +49,15 @@ const MIN_WAIT: Duration = Duration::from_micros(200);
 /// Bus id used inside `automotive` (one port = one bus).
 pub const CRATE_BUS: u8 = 0;
 /// Largest ISO-TP response PDU the client reassembles (HIGH-07.1). A First Frame announcing more
-/// (e.g. the 32-bit escape `10 00 FF FF FF F0`) is refused before `automotive` sees it: no FC.CTS is
-/// sent and nothing is buffered. Classic CAN FFs are ≤ 4095 by encoding; this caps the escape form.
+/// (e.g. the 32-bit escape `10 00 FF FF FF F0`) is refused before `automotive` sees it: nothing is
+/// buffered and the pump answers with one FC.OVFLW (ISO 15765-2) instead of FC.CTS. Classic CAN
+/// FFs are ≤ 4095 by encoding; this caps the escape form.
 pub const MAX_RESPONSE_PDU: usize = 64 * 1024;
+/// Flow Control, FlowStatus = Overflow (`0x32`), BS = 0, STmin = 0 (normal addressing).
+const FC_OVFLW: [u8; 3] = [0x32, 0x00, 0x00];
+/// BRS for frames the bridge builds itself on CAN-FD; same value `automotive` uses for its FC
+/// (`IsoTPConfig::brs` unset → [`PortAdapter::default_brs`]).
+const FD_BRS: bool = true;
 /// Most Flow Control WAIT frames accepted while sending one request (sender-side N_WFTmax,
 /// HIGH-07.2). `automotive` restarts N_Bs on every WAIT and would otherwise wait forever.
 pub const ISOTP_MAX_WFT: u32 = 10;
@@ -58,10 +65,15 @@ pub const ISOTP_MAX_WFT: u32 = 10;
 /// (ISO-TP N_Cr is 1000 ms); keeps a stalled / refused FF from extending the response deadline.
 const TRACKER_STALE: Duration = Duration::from_millis(1100);
 
-/// Announced PDU length of a First Frame (`None` if `data` is not a well-formed FF).
-fn first_frame_len(data: &[u8]) -> Option<usize> {
+/// Announced PDU length of a First Frame (`None` if `payload` is not a well-formed FF).
+/// `off` = address bytes before the PCI (0 or 1); an FF always fills at least 8 CAN bytes.
+fn first_frame_len(payload: &[u8], off: usize) -> Option<usize> {
+    if payload.len() < 8 {
+        return None;
+    }
+    let data = payload.get(off..)?;
     let b0 = *data.first()?;
-    if b0 >> 4 != 1 || data.len() < 8 {
+    if b0 >> 4 != 1 {
         return None;
     }
     let short = (usize::from(b0 & 0x0F) << 8) | usize::from(*data.get(1)?);
@@ -82,6 +94,36 @@ pub enum PortMsg {
     Closed,
 }
 
+/// What the pump does with an observed event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Pass to `automotive`.
+    Forward,
+    /// Keep away from `automotive` (still in the ISO-TP Monitor capture).
+    Drop,
+    /// Oversized First Frame (announced length): answer FC.OVFLW, keep away from `automotive`.
+    RefuseOversize(usize),
+}
+
+/// Fate of the FC.OVFLW answering a refused oversized First Frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OvflwFc {
+    /// Queued on the port (`DiagCanPort::send` returned `Ok`).
+    Sent,
+    /// Refused by a TX gate / the port; not retried.
+    Blocked(DiagTxReject),
+}
+
+/// Most recent oversized First Frame refused while an exchange was open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OversizeRefusal {
+    /// Pump sequence of the First Frame.
+    pub seq: u64,
+    /// Announced PDU length.
+    pub len: usize,
+    pub fc: OvflwFc,
+}
+
 /// Static addressing used by the pump to classify frames.
 #[derive(Debug, Clone, Copy)]
 pub struct Addressing {
@@ -90,9 +132,14 @@ pub struct Addressing {
     pub functional_id: Option<u32>,
     pub extended: bool,
     pub fd: bool,
+    /// ISO-TP padding byte of the session (`None` = no padding), for frames built by the bridge.
+    pub padding: Option<u8>,
+    /// N_TA / N_AE byte before the PCI (extended / mixed addressing).
+    pub addr: AddressBytes,
 }
 
 impl Addressing {
+    /// Data frame on the response id (any address byte).
     fn is_response(&self, f: &RawCanFrame) -> bool {
         f.arb_id == self.response_id
             && f.is_extended() == self.extended
@@ -133,29 +180,41 @@ struct Partial {
 pub struct RxTracker {
     partial: Option<Partial>,
     marks: VecDeque<PduMark>,
+    /// Address bytes before the PCI (0 or 1); frames are pre-filtered on the address byte.
+    off: usize,
 }
 
 const MAX_MARKS: usize = 64;
 
 impl RxTracker {
+    pub fn with_offset(off: usize) -> Self {
+        Self {
+            off,
+            ..Self::default()
+        }
+    }
+
     pub fn feed(&mut self, f: &RawCanFrame, seq: u64, at: Instant) {
-        let data = f.payload();
-        let dlc = data.len();
+        let off = self.off;
+        let dlc = f.payload().len();
+        let Some(data) = f.payload().get(off..) else {
+            return;
+        };
         let Some(&b0) = data.first() else { return };
         match b0 >> 4 {
             0 => {
                 let len = if dlc <= 8 {
                     let len = usize::from(b0 & 0x0F);
-                    if len == 0 || len + 1 > dlc {
+                    if len == 0 || off + len + 1 > dlc {
                         return;
                     }
                     len
                 } else {
-                    if b0 & 0x0F != 0 || dlc < 2 {
+                    if b0 & 0x0F != 0 || data.len() < 2 {
                         return;
                     }
                     let len = usize::from(data[1]);
-                    if len == 0 || len + 2 > dlc {
+                    if len == 0 || off + len + 2 > dlc {
                         return;
                     }
                     len
@@ -175,7 +234,7 @@ impl RxTracker {
                 }
                 let short = (usize::from(b0 & 0x0F) << 8) | usize::from(data[1]);
                 let (total, hdr) = if short == 0 {
-                    if dlc < 6 {
+                    if data.len() < 6 {
                         return;
                     }
                     (
@@ -185,7 +244,7 @@ impl RxTracker {
                 } else {
                     (short, 2)
                 };
-                let received = dlc - hdr;
+                let received = dlc - off - hdr;
                 if received >= total {
                     return;
                 }
@@ -203,7 +262,7 @@ impl RxTracker {
                     self.partial = None;
                     return;
                 }
-                p.received += dlc.saturating_sub(1);
+                p.received += dlc.saturating_sub(off + 1);
                 p.next_sn = (p.next_sn + 1) & 0x0F;
                 p.last_at = at;
                 if p.received >= p.total {
@@ -287,8 +346,13 @@ pub struct BridgeShared {
     rx_open: AtomicBool,
     /// FC.WAIT frames received since [`Self::arm_tx`].
     fc_waits: AtomicU32,
-    /// Most recent oversized First Frame refused while an exchange was open: `(pump seq, length)`.
-    oversize: Mutex<Option<(u64, usize)>>,
+    /// Most recent oversized First Frame refused while an exchange was open.
+    oversize: Mutex<Option<OversizeRefusal>>,
+    /// FC.OVFLW queued on the port and not yet confirmed / rejected (its verdict is not
+    /// `automotive`'s: an unmatched rejection would stop the crate's worker).
+    ovflw_in_flight: Mutex<Option<RawCanFrame>>,
+    /// Announced length above which a First Frame is refused ([`MAX_RESPONSE_PDU`]).
+    max_response_pdu: usize,
     /// Wakes the engine for [`Self::wait_fc_limit`] / [`Self::wait_oversize`].
     alert: tokio::sync::Notify,
     /// First Frames refused because the announced length exceeds [`MAX_RESPONSE_PDU`].
@@ -302,15 +366,18 @@ impl BridgeShared {
         Self {
             addressing,
             seq: AtomicU64::new(0),
-            tracker: Mutex::new(RxTracker::default()),
+            tracker: Mutex::new(RxTracker::with_offset(addressing.addr.rx_offset())),
             tx_arm: Mutex::new(TxArm::default()),
             last_reject: Mutex::new(None),
             hal_closed: AtomicBool::new(false),
             dropped: AtomicU64::new(0),
-            capture: IsoTpCapture::default(),
+            capture: IsoTpCapture::default()
+                .with_address_offsets(addressing.addr.tx_offset(), addressing.addr.rx_offset()),
             rx_open: AtomicBool::new(false),
             fc_waits: AtomicU32::new(0),
             oversize: Mutex::new(None),
+            ovflw_in_flight: Mutex::new(None),
+            max_response_pdu: MAX_RESPONSE_PDU,
             alert: tokio::sync::Notify::new(),
             refused_oversize_ff: AtomicU64::new(0),
             dropped_idle_ff: AtomicU64::new(0),
@@ -339,13 +406,14 @@ impl BridgeShared {
         }
     }
 
-    /// Resolves with the announced length of an oversized First Frame refused after `after_seq`.
-    pub async fn wait_oversize(&self, after_seq: u64) -> usize {
+    /// Resolves with the oversized First Frame refused after `after_seq` (FC.OVFLW already
+    /// attempted).
+    pub async fn wait_oversize(&self, after_seq: u64) -> OversizeRefusal {
         loop {
             let notified = self.alert.notified();
-            if let Some((seq, len)) = *self.oversize.lock() {
-                if seq > after_seq {
-                    return len;
+            if let Some(r) = *self.oversize.lock() {
+                if r.seq > after_seq {
+                    return r;
                 }
             }
             notified.await;
@@ -396,26 +464,106 @@ impl BridgeShared {
         *self.last_reject.lock() = Some(r);
     }
 
+    /// Pump step after capture: observes `ev`, answers a refused oversized First Frame with
+    /// FC.OVFLW, and returns whether `ev` is forwarded to `automotive`.
+    fn process(&self, port: &dyn DiagCanPort, ev: &DiagPortEvent, seq: u64, at: Instant) -> bool {
+        match self.observe(ev, seq, at) {
+            Verdict::Forward => true,
+            Verdict::Drop => false,
+            Verdict::RefuseOversize(len) => {
+                self.refuse_oversize(port, seq, len);
+                false
+            }
+        }
+    }
+
+    /// FC.OVFLW on the physical request id (where `automotive` sends its FC), with the N_TA /
+    /// N_AE prefix if any, padded like the crate pads FC: 8 bytes with the padding byte, else
+    /// address + 3 bytes. Same length on CAN-FD (FD frame, BRS as `automotive`). `None` only
+    /// for an invalid id (rejected at session open).
+    fn ovflw_frame(&self, bus_id: u8) -> Option<RawCanFrame> {
+        let a = &self.addressing;
+        let key = if a.extended {
+            CanIdKey::new_extended(a.request_id)
+        } else {
+            u16::try_from(a.request_id)
+                .ok()
+                .and_then(CanIdKey::new_standard)
+        }?;
+        let mut buf = [0u8; 8];
+        let off = a.addr.tx_offset();
+        if let Some(ta) = a.addr.tx {
+            buf[0] = ta;
+        }
+        let end = off + FC_OVFLW.len();
+        buf[off..end].copy_from_slice(&FC_OVFLW);
+        let len = match a.padding {
+            Some(p) => {
+                buf[end..].fill(p);
+                buf.len()
+            }
+            None => end,
+        };
+        let ts = now_monotonic_us();
+        if a.fd {
+            RawCanFrame::new_fd(bus_id, key, &buf[..len], FD_BRS, ts).ok()
+        } else {
+            RawCanFrame::new_classical(bus_id, key, &buf[..len], ts).ok()
+        }
+    }
+
+    /// Sends one FC.OVFLW through the gated port (no retry, no blocking), then records the
+    /// refusal and wakes the engine. Nothing of the PDU is buffered.
+    fn refuse_oversize(&self, port: &dyn DiagCanPort, seq: u64, len: usize) {
+        let fc = match self.ovflw_frame(port.bus_id()) {
+            Some(frame) => match port.send(frame) {
+                Ok(()) => {
+                    *self.ovflw_in_flight.lock() = Some(frame);
+                    OvflwFc::Sent
+                }
+                Err(why) => OvflwFc::Blocked(why),
+            },
+            None => OvflwFc::Blocked(DiagTxReject::DriverError),
+        };
+        *self.oversize.lock() = Some(OversizeRefusal { seq, len, fc });
+        self.alert.notify_waiters();
+    }
+
+    /// `true` (and forgets it) when `f` is the FC.OVFLW in flight.
+    fn take_ovflw(&self, f: &RawCanFrame) -> bool {
+        let mut g = self.ovflw_in_flight.lock();
+        if g.as_ref().is_some_and(|o| same_frame(o, f)) {
+            *g = None;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Observes one port event in bus order and decides whether it is forwarded to `automotive`
-    /// (`false` = dropped before the ISO-TP stack; it is still in the ISO-TP Monitor capture).
-    fn observe(&self, ev: &DiagPortEvent, seq: u64, at: Instant) -> bool {
+    /// (anything but [`Verdict::Forward`] stays out of the ISO-TP stack; it is still in the
+    /// ISO-TP Monitor capture).
+    fn observe(&self, ev: &DiagPortEvent, seq: u64, at: Instant) -> Verdict {
         match ev {
             DiagPortEvent::Rx(f) => {
                 if self.addressing.is_response(f) && f.is_fd() == self.addressing.fd {
-                    let data = f.payload();
-                    if let Some(len) = first_frame_len(data) {
+                    let Some(data) = self.addressing.addr.rx_pdu(f.payload()) else {
+                        // Address byte of another node: never ours to reassemble.
+                        return Verdict::Drop;
+                    };
+                    if let Some(len) =
+                        first_frame_len(f.payload(), self.addressing.addr.rx_offset())
+                    {
                         if !self.rx_open.load(Ordering::Acquire) {
                             // Idle: not our transfer. Without the FF, `automotive` ignores the CFs too.
                             self.dropped_idle_ff.fetch_add(1, Ordering::Relaxed);
                             self.tracker.lock().reset_partial();
-                            return false;
+                            return Verdict::Drop;
                         }
-                        if len > MAX_RESPONSE_PDU {
+                        if len > self.max_response_pdu {
                             self.refused_oversize_ff.fetch_add(1, Ordering::Relaxed);
                             self.tracker.lock().reset_partial();
-                            *self.oversize.lock() = Some((seq, len));
-                            self.alert.notify_waiters();
-                            return false;
+                            return Verdict::RefuseOversize(len);
                         }
                     } else if data.first().is_some_and(|b| *b == 0x31) && self.tx_arm.lock().armed {
                         // FC.WAIT for the request being sent.
@@ -428,8 +576,14 @@ impl BridgeShared {
                 }
             }
             DiagPortEvent::TxConfirmed(f) => {
+                if self.take_ovflw(f) {
+                    return Verdict::Drop;
+                }
                 // Request frames (SF / FF / CF), not our own flow control (PCI 3).
-                let pci = f.payload().first().map(|b| b >> 4);
+                let pci = f
+                    .payload()
+                    .get(self.addressing.addr.tx_offset())
+                    .map(|b| b >> 4);
                 if self.addressing.is_own_tx(f) && matches!(pci, Some(0..=2)) {
                     let mut a = self.tx_arm.lock();
                     if a.armed {
@@ -441,9 +595,18 @@ impl BridgeShared {
                     }
                 }
             }
-            DiagPortEvent::TxRejected(_, why) => self.record_reject(*why),
+            DiagPortEvent::TxRejected(f, why) => {
+                if self.take_ovflw(f) {
+                    // Late gate verdict on the FC.OVFLW: not a request failure.
+                    if let Some(r) = self.oversize.lock().as_mut() {
+                        r.fc = OvflwFc::Blocked(*why);
+                    }
+                    return Verdict::Drop;
+                }
+                self.record_reject(*why);
+            }
         }
-        true
+        Verdict::Forward
     }
 }
 
@@ -477,7 +640,7 @@ pub fn pump_loop(
             }
             DiagPortEvent::TxRejected(..) => {}
         }
-        if !shared.observe(&ev, seq, Instant::now()) {
+        if !shared.process(port.as_ref(), &ev, seq, Instant::now()) {
             continue;
         }
         if tx.try_send(PortMsg::Event(ev)).is_err() {
@@ -666,7 +829,7 @@ impl CanAdapter for PortAdapter {
     }
 
     fn default_brs(&self) -> bool {
-        true
+        FD_BRS
     }
 }
 
@@ -735,6 +898,8 @@ mod tests {
             functional_id: None,
             extended: false,
             fd: false,
+            padding: Some(0xAA),
+            addr: AddressBytes::default(),
         }));
         let (tx, _rx) = crossbeam_channel::bounded(64);
         pump_loop(port, shared.clone(), tx, Arc::new(AtomicBool::new(false)));
@@ -756,60 +921,157 @@ mod tests {
     }
 
     fn shared() -> BridgeShared {
+        shared_with(false, Some(0xAA))
+    }
+
+    fn shared_with(fd: bool, padding: Option<u8>) -> BridgeShared {
         BridgeShared::new(Addressing {
             request_id: 0x7E2,
             response_id: 0x7EA,
-            functional_id: None,
+            functional_id: Some(0x7DF),
             extended: false,
-            fd: false,
+            fd,
+            padding,
+            addr: AddressBytes::default(),
         })
+    }
+
+    /// Port recording every accepted `send`; `gate` mimics the HAL TX gates.
+    #[derive(Default)]
+    struct RecPort {
+        fd: bool,
+        gate: Mutex<Option<DiagTxReject>>,
+        sent: Mutex<Vec<RawCanFrame>>,
+    }
+
+    impl DiagCanPort for RecPort {
+        fn bus_id(&self) -> u8 {
+            4
+        }
+        fn fd_enabled(&self) -> bool {
+            self.fd
+        }
+        fn gate_check(&self) -> Result<(), DiagTxReject> {
+            self.gate.lock().map_or(Ok(()), Err)
+        }
+        fn send(&self, frame: RawCanFrame) -> Result<(), DiagTxReject> {
+            self.gate_check()?;
+            self.sent.lock().push(frame);
+            Ok(())
+        }
+        fn recv_timeout(&self, _timeout: Duration) -> Option<DiagPortEvent> {
+            None
+        }
+        fn try_recv(&self) -> Option<DiagPortEvent> {
+            None
+        }
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
+    fn fd_rx(id: u32, data: &[u8]) -> RawCanFrame {
+        let key = CanIdKey::new_standard(id as u16).unwrap_or(CanIdKey::Standard(0));
+        RawCanFrame::new_fd(0, key, data, true, 1).unwrap_or_default()
+    }
+
+    /// Escape-form FF (`10 00 <u32 len>`) padded to `dlc`.
+    fn escape_ff(len: u32, dlc: usize) -> Vec<u8> {
+        let mut d = vec![0x10, 0x00];
+        d.extend(len.to_be_bytes());
+        d.extend([0x62, 0xF1]);
+        d.resize(dlc, 0x55);
+        d
+    }
+
+    fn sent_payloads(p: &RecPort) -> Vec<Vec<u8>> {
+        p.sent.lock().iter().map(|f| f.payload().to_vec()).collect()
+    }
+
+    fn has_cts(p: &RecPort) -> bool {
+        p.sent
+            .lock()
+            .iter()
+            .any(|f| f.payload().first() == Some(&0x30))
     }
 
     #[test]
     fn first_frame_len_parses_short_and_escape_forms() {
-        assert_eq!(first_frame_len(&[0x1F, 0xFF, 0, 0, 0, 0, 0, 0]), Some(4095));
         assert_eq!(
-            first_frame_len(&[0x10, 0x00, 0xFF, 0xFF, 0xFF, 0xF0, 0, 0]),
+            first_frame_len(&[0x1F, 0xFF, 0, 0, 0, 0, 0, 0], 0),
+            Some(4095)
+        );
+        assert_eq!(
+            first_frame_len(&[0x10, 0x00, 0xFF, 0xFF, 0xFF, 0xF0, 0, 0], 0),
             Some(0xFFFF_FFF0)
         );
-        assert_eq!(first_frame_len(&[0x10, 0x14, 0, 0, 0]), None, "short DLC");
-        assert_eq!(first_frame_len(&[0x21, 0, 0, 0, 0, 0, 0, 0]), None, "CF");
+        assert_eq!(
+            first_frame_len(&[0x10, 0x14, 0, 0, 0], 0),
+            None,
+            "short DLC"
+        );
+        assert_eq!(first_frame_len(&[0x21, 0, 0, 0, 0, 0, 0, 0], 0), None, "CF");
+        // Address byte first: the PCI is at index 1.
+        assert_eq!(
+            first_frame_len(&[0xF1, 0x10, 0x14, 0, 0, 0, 0, 0], 1),
+            Some(20)
+        );
+        assert_eq!(
+            first_frame_len(&[0xF1, 0x10, 0x00, 0x00, 0x01, 0x00, 0x01, 0], 1),
+            Some(0x1_0001)
+        );
+        assert_eq!(
+            first_frame_len(&[0xF1, 0x10, 0x14, 0, 0, 0, 0], 1),
+            None,
+            "DLC 7"
+        );
     }
 
     #[test]
     fn idle_first_frame_is_not_forwarded_to_isotp() {
         let s = shared();
         let ff = DiagPortEvent::Rx(rx(0x7EA, &[0x10, 0x14, 0x62, 0xF1, 0x90, 1, 2, 3], 1));
-        assert!(
-            !s.observe(&ff, 1, Instant::now()),
+        assert_eq!(
+            s.observe(&ff, 1, Instant::now()),
+            Verdict::Drop,
             "idle FF must be dropped (no FC.CTS)"
         );
         assert_eq!(s.dropped_idle_ff.load(Ordering::Relaxed), 1);
         let sf = DiagPortEvent::Rx(rx(0x7EA, &[0x03, 0x7F, 0x22, 0x31, 0, 0, 0, 0], 2));
-        assert!(
+        assert_eq!(
             s.observe(&sf, 2, Instant::now()),
+            Verdict::Forward,
             "SFs are still forwarded (logged as stale)"
         );
         s.open_rx();
-        assert!(
+        assert_eq!(
             s.observe(&ff, 3, Instant::now()),
+            Verdict::Forward,
             "FF during an exchange is forwarded"
         );
         s.close_rx();
-        assert!(!s.observe(&ff, 4, Instant::now()));
+        assert_eq!(s.observe(&ff, 4, Instant::now()), Verdict::Drop);
     }
 
     #[test]
     fn oversized_first_frame_is_refused_and_signalled() {
         let s = shared();
+        let port = RecPort::default();
         s.open_rx();
         let huge = DiagPortEvent::Rx(rx(
             0x7EA,
             &[0x10, 0x00, 0xFF, 0xFF, 0xFF, 0xF0, 0x62, 0xF1],
             1,
         ));
-        assert!(!s.observe(&huge, 7, Instant::now()));
-        assert_eq!(*s.oversize.lock(), Some((7, 0xFFFF_FFF0)));
+        assert!(!s.process(&port, &huge, 7, Instant::now()));
+        assert_eq!(
+            *s.oversize.lock(),
+            Some(OversizeRefusal {
+                seq: 7,
+                len: 0xFFFF_FFF0,
+                fc: OvflwFc::Sent
+            })
+        );
         assert!(
             !s.rx_in_progress_after(0),
             "a refused FF must not extend the response deadline"
@@ -821,7 +1083,7 @@ mod tests {
         let len = rt.block_on(async {
             tokio::time::timeout(Duration::from_millis(100), s.wait_oversize(6)).await
         });
-        assert_eq!(len.ok(), Some(0xFFFF_FFF0));
+        assert_eq!(len.ok().map(|r| r.len), Some(0xFFFF_FFF0));
         // An older refusal does not fail a newer exchange.
         let stale = rt.block_on(async {
             tokio::time::timeout(Duration::from_millis(20), s.wait_oversize(7)).await
@@ -833,9 +1095,277 @@ mod tests {
             2,
         ));
         assert!(
-            s.observe(&limit, 8, Instant::now()),
+            s.process(&port, &limit, 8, Instant::now()),
             "exactly MAX_RESPONSE_PDU is accepted"
         );
+        assert_eq!(
+            port.sent.lock().len(),
+            1,
+            "only the FC.OVFLW of the refusal"
+        );
+    }
+
+    #[test]
+    fn oversize_escape_ff_answers_one_padded_fc_ovflw_on_request_id() {
+        let s = shared();
+        let port = RecPort::default();
+        s.open_rx();
+        let ff = DiagPortEvent::Rx(rx(0x7EA, &escape_ff(0xFFFF_FFF0, 8), 1));
+        assert!(
+            !s.process(&port, &ff, 3, Instant::now()),
+            "FF never reaches automotive"
+        );
+        assert_eq!(
+            sent_payloads(&port),
+            vec![vec![0x32, 0x00, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]]
+        );
+        let f = port.sent.lock()[0];
+        assert_eq!(
+            f.arb_id, 0x7E2,
+            "physical request id, not functional / response"
+        );
+        assert!(!f.is_extended() && !f.is_fd());
+        assert_eq!(f.bus_id, 4);
+        assert!(!has_cts(&port));
+        assert_eq!(s.refused_oversize_ff.load(Ordering::Relaxed), 1);
+        assert!(s.tracker.lock().partial.is_none(), "nothing buffered");
+    }
+
+    #[test]
+    fn oversize_12bit_ff_answers_fc_ovflw() {
+        // A 12-bit FF is at most 4095 (< MAX_RESPONSE_PDU); lower the cap to reach this path.
+        let mut s = shared();
+        s.max_response_pdu = 100;
+        let port = RecPort::default();
+        s.open_rx();
+        let ff = DiagPortEvent::Rx(rx(0x7EA, &[0x10, 0x65, 0x62, 0xF1, 0x90, 1, 2, 3], 1));
+        assert!(!s.process(&port, &ff, 2, Instant::now()));
+        assert_eq!(
+            sent_payloads(&port),
+            vec![vec![0x32, 0x00, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]]
+        );
+        assert_eq!(s.oversize.lock().map(|r| r.len), Some(101));
+        let at_cap = DiagPortEvent::Rx(rx(0x7EA, &[0x10, 0x64, 0x62, 0xF1, 0x90, 1, 2, 3], 2));
+        assert!(s.process(&port, &at_cap, 3, Instant::now()));
+        assert_eq!(port.sent.lock().len(), 1);
+    }
+
+    #[test]
+    fn oversize_ff_without_padding_answers_dlc3_fc_ovflw() {
+        let s = shared_with(false, None);
+        let port = RecPort::default();
+        s.open_rx();
+        let ff = DiagPortEvent::Rx(rx(0x7EA, &escape_ff(0x0001_0001, 8), 1));
+        assert!(!s.process(&port, &ff, 1, Instant::now()));
+        assert_eq!(sent_payloads(&port), vec![vec![0x32, 0x00, 0x00]]);
+        assert_eq!(port.sent.lock()[0].dlc, 3);
+    }
+
+    #[test]
+    fn oversize_fd_ff_answers_short_fd_fc_ovflw() {
+        for (padding, want) in [
+            (
+                Some(0xCC),
+                vec![0x32, 0x00, 0x00, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC],
+            ),
+            (None, vec![0x32, 0x00, 0x00]),
+        ] {
+            let s = shared_with(true, padding);
+            let port = RecPort {
+                fd: true,
+                ..Default::default()
+            };
+            s.open_rx();
+            let ff = DiagPortEvent::Rx(fd_rx(0x7EA, &escape_ff(0xFFFF_FFF0, 64)));
+            assert!(!s.process(&port, &ff, 1, Instant::now()));
+            assert_eq!(sent_payloads(&port), vec![want]);
+            let f = port.sent.lock()[0];
+            assert!(f.is_fd() && f.is_brs(), "FD FC like automotive's (BRS)");
+            assert_eq!(f.arb_id, 0x7E2);
+        }
+    }
+
+    #[test]
+    fn oversize_ff_with_tx_gate_closed_sends_nothing_but_reports() {
+        for gate in [
+            DiagTxReject::ListenOnly,
+            DiagTxReject::Disarmed,
+            DiagTxReject::PanicLatched,
+        ] {
+            let s = shared();
+            let port = RecPort {
+                gate: Mutex::new(Some(gate)),
+                ..Default::default()
+            };
+            s.open_rx();
+            let ff = DiagPortEvent::Rx(rx(0x7EA, &escape_ff(0xFFFF_FFF0, 8), 1));
+            assert!(!s.process(&port, &ff, 5, Instant::now()));
+            assert!(port.sent.lock().is_empty(), "{gate:?}: no frame written");
+            assert_eq!(
+                *s.oversize.lock(),
+                Some(OversizeRefusal {
+                    seq: 5,
+                    len: 0xFFFF_FFF0,
+                    fc: OvflwFc::Blocked(gate)
+                })
+            );
+            assert_eq!(s.refused_oversize_ff.load(Ordering::Relaxed), 1);
+            assert_eq!(s.last_reject(), None, "not a request failure");
+            assert!(s.ovflw_in_flight.lock().is_none(), "no retry pending");
+        }
+    }
+
+    #[test]
+    fn late_verdict_on_fc_ovflw_is_kept_from_automotive() {
+        let s = shared();
+        let port = RecPort::default();
+        s.open_rx();
+        let ff = DiagPortEvent::Rx(rx(0x7EA, &escape_ff(0xFFFF_FFF0, 8), 1));
+        assert!(!s.process(&port, &ff, 1, Instant::now()));
+        let fc = port.sent.lock()[0];
+        // Bus-io re-check refuses it (e.g. Panic Stop raced the send).
+        let late = DiagPortEvent::TxRejected(fc, DiagTxReject::PanicLatched);
+        assert!(!s.process(&port, &late, 2, Instant::now()));
+        assert_eq!(s.last_reject(), None);
+        assert_eq!(
+            s.oversize.lock().map(|r| r.fc),
+            Some(OvflwFc::Blocked(DiagTxReject::PanicLatched))
+        );
+        // A confirmation of the next one is dropped too; automotive's own FCs still pass.
+        assert!(!s.process(&port, &ff, 3, Instant::now()));
+        let fc2 = port.sent.lock()[1];
+        assert!(!s.process(&port, &DiagPortEvent::TxConfirmed(fc2), 4, Instant::now()));
+        let cts = rx(0x7E2, &[0x30, 0, 0, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA], 5);
+        assert!(s.process(&port, &DiagPortEvent::TxConfirmed(cts), 5, Instant::now()));
+    }
+
+    fn shared_addr(fd: bool, padding: Option<u8>, tx: u8, rx: u8) -> BridgeShared {
+        BridgeShared::new(Addressing {
+            request_id: 0x6F1,
+            response_id: 0x6F9,
+            functional_id: None,
+            extended: false,
+            fd,
+            padding,
+            addr: AddressBytes {
+                tx: Some(tx),
+                rx: Some(rx),
+            },
+        })
+    }
+
+    #[test]
+    fn extended_addressing_fc_ovflw_carries_target_address() {
+        for (padding, want) in [
+            (
+                Some(0xAA),
+                vec![0x10, 0x32, 0x00, 0x00, 0xAA, 0xAA, 0xAA, 0xAA],
+            ),
+            (None, vec![0x10, 0x32, 0x00, 0x00]),
+        ] {
+            let s = shared_addr(false, padding, 0x10, 0xF1);
+            let port = RecPort::default();
+            s.open_rx();
+            let mut ff = vec![0xF1];
+            ff.extend(escape_ff(0xFFFF_FFF0, 7));
+            assert!(!s.process(
+                &port,
+                &DiagPortEvent::Rx(rx(0x6F9, &ff, 1)),
+                1,
+                Instant::now()
+            ));
+            assert_eq!(sent_payloads(&port), vec![want]);
+            assert_eq!(port.sent.lock()[0].arb_id, 0x6F1);
+        }
+        // CAN-FD: same short FC, FD frame.
+        let s = shared_addr(true, Some(0xCC), 0x55, 0x55);
+        let port = RecPort {
+            fd: true,
+            ..Default::default()
+        };
+        s.open_rx();
+        let mut ff = vec![0x55];
+        ff.extend(escape_ff(0xFFFF_FFF0, 63));
+        assert!(!s.process(
+            &port,
+            &DiagPortEvent::Rx(fd_rx(0x6F9, &ff)),
+            1,
+            Instant::now()
+        ));
+        assert_eq!(
+            sent_payloads(&port),
+            vec![vec![0x55, 0x32, 0x00, 0x00, 0xCC, 0xCC, 0xCC, 0xCC]]
+        );
+        assert!(port.sent.lock()[0].is_fd());
+    }
+
+    #[test]
+    fn foreign_address_byte_is_dropped_and_not_tracked() {
+        let s = shared_addr(false, Some(0xAA), 0x10, 0xF1);
+        let port = RecPort::default();
+        s.open_rx();
+        // FF for another tester (0xF2): not ours, no FC, no tracking, no oversize logic.
+        let other = rx(0x6F9, &[0xF2, 0x10, 0x14, 0x62, 0xF1, 0x90, 1, 2], 1);
+        assert!(!s.process(&port, &DiagPortEvent::Rx(other), 1, Instant::now()));
+        assert!(!s.rx_in_progress_after(0));
+        let huge = rx(0x6F9, &[0xF2, 0x10, 0x00, 0xFF, 0xFF, 0xFF, 0xF0, 0], 2);
+        assert!(!s.process(&port, &DiagPortEvent::Rx(huge), 2, Instant::now()));
+        assert!(port.sent.lock().is_empty());
+        assert!(s.oversize.lock().is_none());
+        // Our own address byte: forwarded and tracked.
+        let ours = rx(0x6F9, &[0xF1, 0x10, 0x14, 0x62, 0xF1, 0x90, 1, 2], 3);
+        assert!(s.process(&port, &DiagPortEvent::Rx(ours), 3, Instant::now()));
+        assert!(s.rx_in_progress_after(0));
+    }
+
+    #[test]
+    fn tracker_with_address_byte_classic_and_fd() {
+        let mut t = RxTracker::with_offset(1);
+        let now = Instant::now();
+        // SF [RA, 03, 62 F1 86] padded.
+        t.feed(
+            &rx(0x6F9, &[0xF1, 0x03, 0x62, 0xF1, 0x86, 0xAA, 0xAA, 0xAA], 1),
+            1,
+            now,
+        );
+        assert_eq!(t.take(3).map(|m| m.start_seq), Some(1));
+        // Length beyond DLC once the address byte is counted.
+        t.feed(&rx(0x6F9, &[0xF1, 0x03, 0x62, 0xF1], 1), 2, now);
+        assert!(t.take(3).is_none());
+        // 20-byte PDU: FF carries 5 bytes, CFs 6 each → FF + 3 CF.
+        t.feed(
+            &rx(0x6F9, &[0xF1, 0x10, 0x14, 0x62, 0xF1, 0x90, b'W', b'N'], 2),
+            3,
+            now,
+        );
+        t.feed(&rx(0x6F9, &[0xF1, 0x21, 1, 2, 3, 4, 5, 6], 3), 4, now);
+        t.feed(&rx(0x6F9, &[0xF1, 0x22, 1, 2, 3, 4, 5, 6], 4), 5, now);
+        assert_eq!(t.in_progress_since(), Some(3), "17 of 20 bytes");
+        t.feed(
+            &rx(0x6F9, &[0xF1, 0x23, 1, 2, 3, 0xAA, 0xAA, 0xAA], 5),
+            6,
+            now,
+        );
+        assert_eq!(t.take(20).map(|m| (m.start_seq, m.end_ts)), Some((3, 5)));
+        // CAN-FD escape SF: [RA, 00, len, ...].
+        let mut d = vec![0xF1, 0x00, 20, 0x62, 0xF1, 0x90];
+        d.resize(24, 0xAA);
+        t.feed(&fd_rx(0x6F9, &d), 9, now);
+        assert_eq!(t.take(20).map(|m| m.start_seq), Some(9));
+    }
+
+    #[test]
+    fn ff_at_max_response_pdu_is_forwarded_without_fc_ovflw() {
+        let s = shared();
+        let port = RecPort::default();
+        s.open_rx();
+        let ff = DiagPortEvent::Rx(rx(0x7EA, &escape_ff(MAX_RESPONSE_PDU as u32, 8), 1));
+        assert!(
+            s.process(&port, &ff, 1, Instant::now()),
+            "automotive answers FC.CTS"
+        );
+        assert!(port.sent.lock().is_empty());
+        assert!(s.oversize.lock().is_none());
     }
 
     #[test]

@@ -107,6 +107,9 @@ pub fn config(ids: Ids, fd: bool, functional: bool) -> DiagSessionConfigDto {
         use_fd: fd,
         padding: Some(0xAA),
         p2_margin_ms: 100,
+        address_format: Default::default(),
+        target_address: None,
+        response_address: None,
     }
 }
 

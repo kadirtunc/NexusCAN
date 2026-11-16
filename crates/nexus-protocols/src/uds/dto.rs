@@ -29,6 +29,32 @@ pub struct DiagSessionConfigDto {
     /// P2 client margin added on top of the ECU-reported P2 (ms). Default 100.
     #[serde(default = "default_p2_margin")]
     pub p2_margin_ms: u32,
+    /// ISO 15765-2 address format. Default `normal` (no address byte).
+    #[serde(default)]
+    pub address_format: AddressFormatDto,
+    /// First payload byte the tester SENDS: N_TA (`extended`) or N_AE (`mixed`).
+    /// Required for `extended` / `mixed`, ignored otherwise.
+    #[serde(default)]
+    pub target_address: Option<u8>,
+    /// First payload byte expected in ECU frames. `extended`: required (typically the tester
+    /// address, e.g. 0xF1). `mixed`: defaults to `target_address`. Ignored otherwise.
+    #[serde(default)]
+    pub response_address: Option<u8>,
+}
+
+/// ISO 15765-2 network address format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AddressFormatDto {
+    /// Plain CAN ids, no address byte.
+    #[default]
+    Normal,
+    /// 29-bit `0x18DA_TA_SA` (physical) / `0x18DB_TA_SA` (functional), no address byte.
+    NormalFixed,
+    /// One N_TA byte before the PCI (`target_address` out, `response_address` in).
+    Extended,
+    /// One N_AE byte before the PCI; 11-bit ids or 29-bit `0x18CE_TA_SA` / `0x18CD_TA_SA`.
+    Mixed,
 }
 
 fn default_padding() -> Option<u8> {
@@ -74,6 +100,14 @@ pub struct UdsRequestOptionsDto {
     /// Request origin tag; `None` → [`DiagOrigin::Other`].
     #[serde(default)]
     pub origin: Option<DiagOrigin>,
+    /// Retries after NRC 0x21 busyRepeatRequest (physical requests only). `None` / 0 = no
+    /// retry (default); clamped to 10. Each retry is a new transmission through the same
+    /// TX gates; it stops at once on Listen-Only / Disarmed / Panic / tap close.
+    #[serde(default)]
+    pub busy_retry_max: Option<u8>,
+    /// Delay before each 0x21 retry (ms). Default 50, clamped to 10..=5000.
+    #[serde(default)]
+    pub busy_retry_delay_ms: Option<u32>,
 }
 
 /// Result of one UDS request. A negative response (0x7F) is a SUCCESSFUL transport
@@ -93,8 +127,12 @@ pub struct UdsResponseDto {
     pub response_pending_count: u32,
     /// Request TX confirmation → final response, microseconds.
     pub elapsed_us: u64,
-    /// Conversation log sequence number of the request event.
+    /// Conversation log sequence number of the request event (of the last attempt when
+    /// 0x21 retries were made).
     pub transaction_seq: u64,
+    /// 0x21 busyRepeatRequest retries made (0 = answered on the first attempt).
+    #[serde(default)]
+    pub busy_retry_count: u8,
 }
 
 /// `cmd_diag_read_did` result (kept compatible with the existing HMI shape).
@@ -127,6 +165,90 @@ pub struct DtcEntryDto {
     /// Only from user-provided sources (license policy). Backend leaves `None`.
     #[serde(default)]
     pub description: Option<String>,
+}
+
+// ─── ReadDTCInformation (0x19) reports — pure parsers in `uds::client` ───────────
+
+/// `59 01|07|11|12 <availMask> <DTCFormatIdentifier> <count hi> <count lo>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DtcCountDto {
+    pub sub_function: u8,
+    pub availability_mask: u8,
+    pub format_identifier: u8,
+    /// `"ISO15031-6"`, `"ISO14229-1"`, `"SAE J1939-73"`, `"ISO11992-4"`,
+    /// `"SAE J2012-DA WWH-OBD"`; `None` for reserved values.
+    pub format_name: Option<String>,
+    pub count: u16,
+}
+
+/// `59 02|0A|0F|13|15 <availMask> (DTC3 status)*`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DtcListDto {
+    pub sub_function: u8,
+    pub availability_mask: u8,
+    pub dtcs: Vec<DtcEntryDto>,
+}
+
+/// One `(DTC3 recordNumber)` of `59 03` reportDTCSnapshotIdentification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DtcSnapshotIdDto {
+    /// 24-bit DTC number.
+    pub dtc: u32,
+    /// Display code, e.g. `"P0123-45"`.
+    pub code: String,
+    pub record_number: u8,
+}
+
+/// First snapshot record of `59 04`. DID data lengths are NOT in the response (they come from
+/// ODX / CDD), so only the first record header and first DID are decoded; `raw` holds this
+/// record AND every following record, uninterpreted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DtcSnapshotRecordDto {
+    pub record_number: u8,
+    pub number_of_identifiers: u8,
+    /// First DID of the record (`None` when `numberOfIdentifiers` is 0).
+    pub first_did: Option<u16>,
+    /// Data of that DID, only when unambiguous: one specific record was requested (not 0xFF)
+    /// and it holds exactly one DID. Otherwise `None` (see `raw`).
+    pub single_did_data: Option<Vec<u8>>,
+    /// Bytes from `recordNumber` to the end of the PDU.
+    pub raw: Vec<u8>,
+}
+
+/// `59 04 DTC3 status [records]` reportDTCSnapshotRecordByDTCNumber.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DtcSnapshotReportDto {
+    pub dtc: DtcEntryDto,
+    /// `None`: no snapshot stored for this DTC.
+    pub record: Option<DtcSnapshotRecordDto>,
+}
+
+/// `59 06 DTC3 status [recordNumber data…]` reportDTCExtDataRecordByDTCNumber. Record data
+/// lengths are ECU / ODX specific, so the records are returned undecoded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DtcExtDataReportDto {
+    pub dtc: DtcEntryDto,
+    /// recordNumber of the first record (`None`: no extended data stored).
+    pub first_record_number: Option<u8>,
+    /// Bytes after the status byte (record numbers included).
+    pub raw: Vec<u8>,
+}
+
+/// Any supported positive 0x19 response. JSON: `{"kind":"count", ...DtcCountDto}` etc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ReadDtcReportDto {
+    Count(DtcCountDto),
+    List(DtcListDto),
+    SnapshotIdentification { records: Vec<DtcSnapshotIdDto> },
+    SnapshotRecord(DtcSnapshotReportDto),
+    ExtData(DtcExtDataReportDto),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +288,10 @@ pub struct ConversationEventDto {
     /// Origin of the transaction (from the request; `keepalive` for TesterPresent events,
     /// `other` for session / unsolicited events).
     pub origin: DiagOrigin,
+    /// `request` events of a 0x21 busyRepeatRequest retry: 1..=10. `None` for first attempts
+    /// and every other event.
+    #[serde(default)]
+    pub retry_index: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +405,49 @@ pub struct EcuDiscoveryRequestDto {
     /// `true` → read DIDs F190 / F18C / F187 physically from every responder.
     #[serde(default)]
     pub identify: bool,
+    /// Response acceptance filters (1..=32). When set, replaces `responseId` / `responseMask`
+    /// (both must then be absent). `None` → legacy single filter (defaults unchanged).
+    #[serde(default)]
+    pub response_id_filters: Option<Vec<IdFilterDto>>,
+    /// How the physical request id is derived from a response id. `None` →
+    /// `legislatedMinus8` (11-bit) / `normalFixedSwap` (29-bit).
+    #[serde(default)]
+    pub request_id_rule: Option<RequestIdRuleDto>,
+    /// ISO 15765-2 address format of the functional request and the responses.
+    #[serde(default)]
+    pub address_format: AddressFormatDto,
+    /// Address byte of the functional request (`extended`: functional N_TA, `mixed`: N_AE).
+    #[serde(default)]
+    pub target_address: Option<u8>,
+    /// Address byte expected in responses (`extended`: tester address; `mixed`: defaults to
+    /// `targetAddress`).
+    #[serde(default)]
+    pub response_address: Option<u8>,
+}
+
+/// CAN id acceptance filter: `(arbId & mask) == id`. `id` must not have bits outside `mask`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdFilterDto {
+    pub id: u32,
+    pub mask: u32,
+}
+
+/// Physical request id of a discovered ECU, from its response id.
+/// JSON: `{"kind":"legislatedMinus8"}`, `{"kind":"offset","delta":-64}`,
+/// `{"kind":"normalFixedSwap"}`, `{"kind":"none"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RequestIdRuleDto {
+    /// 11-bit `0x7E8..=0x7EF` → `response - 8` (OBD / legislated range only).
+    LegislatedMinus8,
+    /// `response + delta` (must stay a valid id of the same width).
+    Offset { delta: i32 },
+    /// 29-bit `0x18DA_TA_SA` → `0x18DA_SA_TA` (also `0x18CE` for mixed addressing).
+    NormalFixedSwap,
+    /// Request id unknown: the ECU is listed, the physical session must be set manually.
+    #[serde(rename = "none")]
+    NoRequestId,
 }
 
 /// One responding ECU (one entry per response id).
@@ -321,6 +490,13 @@ pub struct EcuDiscoveryResultDto {
     pub ecus: Vec<DiscoveredEcuDto>,
     /// Frames that matched the filter but were unclassifiable / not a response to the request.
     pub ignored_frames: u32,
+    /// More distinct responders than [`crate::uds::discovery::MAX_DISCOVERED_ECUS`]: the
+    /// surplus is not listed (see `droppedEcus`).
+    #[serde(default)]
+    pub truncated: bool,
+    /// Responses from responders beyond the cap (frames, not distinct ids).
+    #[serde(default)]
+    pub dropped_ecus: u32,
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -405,6 +581,122 @@ mod tests {
     }
 
     #[test]
+    fn config_address_format_is_additive_and_round_trips() {
+        // Old JSON (no address fields) → today's behaviour: normal addressing, no address byte.
+        let old: DiagSessionConfigDto = serde_json::from_str(
+            r#"{"requestId":2016,"responseId":2024,"busId":0,"isExtendedId":false,"protocol":"uds",
+                "functionalId":2015,"useFd":false,"padding":170,"p2MarginMs":100}"#,
+        )
+        .unwrap();
+        assert_eq!(old.address_format, AddressFormatDto::Normal);
+        assert_eq!((old.target_address, old.response_address), (None, None));
+        let back: DiagSessionConfigDto =
+            serde_json::from_value(serde_json::to_value(&old).unwrap()).unwrap();
+        assert_eq!(back, old);
+
+        let ext = DiagSessionConfigDto {
+            address_format: AddressFormatDto::Extended,
+            target_address: Some(0x10),
+            response_address: Some(0xF1),
+            ..old.clone()
+        };
+        let v = serde_json::to_value(&ext).unwrap();
+        assert_eq!(v["addressFormat"], "extended");
+        assert_eq!(v["targetAddress"], 0x10);
+        assert_eq!(v["responseAddress"], 0xF1);
+        assert_eq!(
+            serde_json::from_value::<DiagSessionConfigDto>(v).unwrap(),
+            ext
+        );
+        for (f, s) in [
+            (AddressFormatDto::Normal, "normal"),
+            (AddressFormatDto::NormalFixed, "normalFixed"),
+            (AddressFormatDto::Extended, "extended"),
+            (AddressFormatDto::Mixed, "mixed"),
+        ] {
+            assert_eq!(serde_json::to_value(f).unwrap(), s);
+            assert_eq!(
+                serde_json::from_value::<AddressFormatDto>(s.into()).unwrap(),
+                f
+            );
+        }
+        assert!(serde_json::from_str::<AddressFormatDto>(r#""normal_fixed""#).is_err());
+    }
+
+    #[test]
+    fn discovery_ranges_are_additive_and_round_trip() {
+        // Old JSON → today's behaviour.
+        let old: EcuDiscoveryRequestDto = serde_json::from_str(
+            r#"{"busId":0,"isExtendedId":false,"functionalId":2015,"responseId":2024,"responseMask":2040}"#,
+        )
+        .unwrap();
+        assert_eq!(old.response_id_filters, None);
+        assert_eq!(old.request_id_rule, None);
+        assert_eq!(old.address_format, AddressFormatDto::Normal);
+        assert_eq!((old.target_address, old.response_address), (None, None));
+        let back: EcuDiscoveryRequestDto =
+            serde_json::from_value(serde_json::to_value(&old).unwrap()).unwrap();
+        assert_eq!(back, old);
+        let old_res: EcuDiscoveryResultDto = serde_json::from_str(
+            r#"{"requestBytes":[62,0],"functionalId":2015,"isExtendedId":false,"windowMs":300,
+                "txTimestampUs":1,"ecus":[],"ignoredFrames":0}"#,
+        )
+        .unwrap();
+        assert!(!old_res.truncated && old_res.dropped_ecus == 0);
+
+        let new = EcuDiscoveryRequestDto {
+            response_id: None,
+            response_mask: None,
+            response_id_filters: Some(vec![IdFilterDto {
+                id: 0x600,
+                mask: 0x7C0,
+            }]),
+            request_id_rule: Some(RequestIdRuleDto::Offset { delta: -0x40 }),
+            address_format: AddressFormatDto::Extended,
+            target_address: Some(0xFF),
+            response_address: Some(0xF1),
+            ..old
+        };
+        let v = serde_json::to_value(&new).unwrap();
+        assert_eq!(v["responseIdFilters"][0]["id"], 0x600);
+        assert_eq!(v["responseIdFilters"][0]["mask"], 0x7C0);
+        assert_eq!(v["requestIdRule"]["kind"], "offset");
+        assert_eq!(v["requestIdRule"]["delta"], -0x40);
+        assert_eq!(
+            serde_json::from_value::<EcuDiscoveryRequestDto>(v).unwrap(),
+            new
+        );
+        for (r, j) in [
+            (
+                RequestIdRuleDto::LegislatedMinus8,
+                r#"{"kind":"legislatedMinus8"}"#,
+            ),
+            (
+                RequestIdRuleDto::NormalFixedSwap,
+                r#"{"kind":"normalFixedSwap"}"#,
+            ),
+            (RequestIdRuleDto::NoRequestId, r#"{"kind":"none"}"#),
+            (
+                RequestIdRuleDto::Offset { delta: 8 },
+                r#"{"kind":"offset","delta":8}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&r).unwrap(), j);
+            assert_eq!(serde_json::from_str::<RequestIdRuleDto>(j).unwrap(), r);
+        }
+        let v = serde_json::to_value(EcuDiscoveryResultDto {
+            truncated: true,
+            dropped_ecus: 3,
+            ..old_res
+        })
+        .unwrap();
+        assert_eq!(
+            (v["truncated"].as_bool(), v["droppedEcus"].as_u64()),
+            (Some(true), Some(3))
+        );
+    }
+
+    #[test]
     fn discovery_request_defaults_and_casing() {
         let r: EcuDiscoveryRequestDto =
             serde_json::from_str(r#"{"busId":0,"isExtendedId":false,"functionalId":2015}"#)
@@ -429,6 +721,8 @@ mod tests {
             tx_timestamp_us: 1,
             ecus: vec![],
             ignored_frames: 0,
+            truncated: false,
+            dropped_ecus: 0,
         })
         .unwrap();
         for k in [
@@ -536,11 +830,48 @@ mod tests {
             nrc: None,
             detail: None,
             origin: DiagOrigin::Flow,
+            retry_index: Some(2),
         })
         .unwrap();
         assert_eq!(v["origin"], "flow");
+        assert_eq!(v["retryIndex"], 2);
         assert_eq!(v["requestSeq"], 2);
         assert_eq!(v["kind"], "response");
+    }
+
+    #[test]
+    fn busy_retry_fields_are_additive_and_round_trip() {
+        let old: UdsRequestOptionsDto =
+            serde_json::from_str(r#"{"addressing":"physical","timeoutMs":500,"origin":"console"}"#)
+                .unwrap();
+        assert_eq!((old.busy_retry_max, old.busy_retry_delay_ms), (None, None));
+        let new = UdsRequestOptionsDto {
+            busy_retry_max: Some(3),
+            busy_retry_delay_ms: Some(100),
+            ..old
+        };
+        let v = serde_json::to_value(&new).unwrap();
+        assert_eq!(
+            (v["busyRetryMax"].as_u64(), v["busyRetryDelayMs"].as_u64()),
+            (Some(3), Some(100))
+        );
+        assert_eq!(
+            serde_json::from_value::<UdsRequestOptionsDto>(v).unwrap(),
+            new
+        );
+        let r: UdsResponseDto = serde_json::from_str(
+            r#"{"raw":[126,0],"positive":true,"suppressed":false,"nrc":null,"nrcName":null,
+                "responsePendingCount":0,"elapsedUs":5,"transactionSeq":1}"#,
+        )
+        .unwrap();
+        assert_eq!(r.busy_retry_count, 0);
+        assert_eq!(serde_json::to_value(&r).unwrap()["busyRetryCount"], 0);
+        let e: ConversationEventDto = serde_json::from_str(
+            r#"{"seq":1,"timestampUs":2,"kind":"request","addressing":"physical","sid":34,"bytes":[34],
+                "requestSeq":null,"elapsedUs":null,"nrc":null,"detail":null,"origin":"other"}"#,
+        )
+        .unwrap();
+        assert_eq!(e.retry_index, None);
     }
 
     #[test]
