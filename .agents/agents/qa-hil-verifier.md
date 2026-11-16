@@ -6,7 +6,7 @@ description: >-
   vcan0/cangen/mock0 stres testlerini ve Tauri v2 derleme kapılarını denetler.
 mainAgent: true
 subagent: true
-model: "inherit"
+model: "claude-sonnet-4-6"
 skills:
   - skills/nexuscan-vcan-hil
   - skills/nexuscan-dbc-pipeline

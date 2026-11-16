@@ -6,7 +6,7 @@ description: >-
   sanal (virtualized) trace tablolarını, bit matrisini ve güvenli TX göndericisini geliştirir.
 mainAgent: true
 subagent: true
-model: "flash"
+model: "claude-sonnet-4-6"
 skills:
   - skills/tauri-v2
   - skills/tauri-ipc

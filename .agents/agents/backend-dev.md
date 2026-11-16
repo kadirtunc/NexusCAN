@@ -6,7 +6,7 @@ description: >-
   StateTable agregasyonunu ve Tauri v2 Channel IPC köprüsünü geliştirir.
 mainAgent: true
 subagent: true
-model: "inherit"
+model: "claude-sonnet-4-6"
 skills:
   - skills/nexuscan-hal-drivers
   - skills/nexuscan-dbc-pipeline

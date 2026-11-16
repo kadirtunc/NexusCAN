@@ -6,7 +6,7 @@ description: >-
   ağaçlarını ve SAE J1939, ISO-TP, UDS, CANopen, EV BMS/Şarj protokol çözücülerini geliştirir.
 mainAgent: true
 subagent: true
-model: "pro"
+model: "claude-opus-4-6"
 skills:
   - skills/nexuscan-dbc-pipeline
   - skills/nexuscan-ev-protocols

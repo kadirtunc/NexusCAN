@@ -6,7 +6,7 @@ description: >-
   protocol-specialist, backend-dev, frontend-dev ve qa-hil-verifier alt ajanlarına delege eder.
 mainAgent: true
 subagent: false
-model: "pro"
+model: "claude-opus-4-6"
 tools:
   - invoke_subagent
   - schedule
