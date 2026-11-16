@@ -8,10 +8,11 @@ use nexus_hal::pipeline::PipelineEngine;
 use nexus_hal::{
     dto::{
         BusHealthDto, ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto, DeviceDescriptorDto,
-        DriverProbeReportDto, LoadedTraceFileDto, PanicStopResultDto, PeriodicTxJobDto,
-        ProjectSummaryDto, ResetSessionResultDto, StartTraceReplayArgsDto, TelemetrySnapshotDto,
-        TraceFileSummaryDto, TraceReplayControlArgsDto, TraceReplayStatusDto, TraceStorageInfoDto,
-        TxTransmitResultDto,
+        DriverProbeReportDto, DtcReportResultDto, LoadedTraceFileDto, PanicStopResultDto,
+        PassiveDiscoverySnapshotDto, PeriodicTxJobDto, PhysicalSweepRequestDto,
+        PhysicalSweepResultDto, ProjectSummaryDto, ResetSessionResultDto, StartTraceReplayArgsDto,
+        TelemetrySnapshotDto, TraceFileSummaryDto, TraceReplayControlArgsDto, TraceReplayStatusDto,
+        TraceStorageInfoDto, TxTransmitResultDto,
     },
     error::HalError,
 };
@@ -650,4 +651,62 @@ pub async fn cmd_diag_get_isotp_frames(
         e.cmd_diag_get_isotp_frames(config, since_seq, max)
     })
     .await
+}
+
+/// ReadDTCInformation (0x19) with any supported reportType; `params` default empty.
+/// Returns the raw response plus the parsed report (`report = null` + `reportError` when the
+/// answer is negative or unparsable).
+#[tauri::command]
+pub async fn cmd_diag_read_dtc_report(
+    state: State<'_, AppState>,
+    config: DiagSessionConfigDto,
+    sub_function: u8,
+    params: Option<Vec<u8>>,
+    options: Option<UdsRequestOptionsDto>,
+) -> Result<DtcReportResultDto, String> {
+    run_diag(state, move |e| {
+        e.cmd_diag_read_dtc_report(config, sub_function, params.unwrap_or_default(), options)
+    })
+    .await
+}
+
+/// Passive (TX-free, Listen-Only safe) ECU discovery: starts watching `busId`. Idempotent.
+#[tauri::command]
+pub async fn cmd_diag_passive_discovery_start(
+    state: State<'_, AppState>,
+    bus_id: u8,
+) -> Result<PassiveDiscoverySnapshotDto, String> {
+    run_diag(state, move |e| e.cmd_diag_passive_discovery_start(bus_id)).await
+}
+
+/// Passive ECU discovery: current pairs (also after stop).
+#[tauri::command]
+pub async fn cmd_diag_passive_discovery_snapshot(
+    state: State<'_, AppState>,
+    bus_id: u8,
+) -> Result<PassiveDiscoverySnapshotDto, String> {
+    run_diag(state, move |e| {
+        e.cmd_diag_passive_discovery_snapshot(bus_id)
+    })
+    .await
+}
+
+/// Passive ECU discovery: stops the scan and returns the final snapshot.
+#[tauri::command]
+pub async fn cmd_diag_passive_discovery_stop(
+    state: State<'_, AppState>,
+    bus_id: u8,
+) -> Result<PassiveDiscoverySnapshotDto, String> {
+    run_diag(state, move |e| e.cmd_diag_passive_discovery_stop(bus_id)).await
+}
+
+/// Active physical sweep: one single-frame request per id, strictly sequential (`gapMs`).
+/// Armed, non-Listen-Only bus required; Panic Stop / disarm / disconnect abort it and return
+/// the partial result (`completed = false`, `abortCode`). Blocking (`ids x gapMs + tailMs`).
+#[tauri::command]
+pub async fn cmd_diag_physical_sweep(
+    state: State<'_, AppState>,
+    request: PhysicalSweepRequestDto,
+) -> Result<PhysicalSweepResultDto, String> {
+    run_diag(state, move |e| e.cmd_diag_physical_sweep(request)).await
 }

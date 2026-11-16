@@ -2,7 +2,7 @@
 # from `src/app_commands.rs`; every app command belongs to exactly one set (enforced by build.rs; the build fails otherwise).
 [[set]]
 identifier = "diagnostics"
-description = "UDS / ISO-TP diagnostics: sessions, raw UDS requests, DID / DTC reads, TesterPresent, conversation and ISO-TP monitor pages, ECU discovery, and ad-hoc seed/key computation."
+description = "UDS / ISO-TP diagnostics: sessions, raw UDS requests, DID / DTC reads, 0x19 DTC reports, TesterPresent, conversation and ISO-TP monitor pages, functional ECU discovery, passive (TX-free) ECU discovery, armed physical sweeps, and ad-hoc seed/key computation."
 permissions = [
   "allow-cmd-diag-open-session",
   "allow-cmd-diag-close-session",
@@ -14,5 +14,10 @@ permissions = [
   "allow-cmd-diag-get-conversation",
   "allow-cmd-diag-discover-ecus",
   "allow-cmd-diag-get-isotp-frames",
+  "allow-cmd-diag-read-dtc-report",
+  "allow-cmd-diag-passive-discovery-start",
+  "allow-cmd-diag-passive-discovery-snapshot",
+  "allow-cmd-diag-passive-discovery-stop",
+  "allow-cmd-diag-physical-sweep",
   "allow-cmd-seedkey-compute-adhoc",
 ]

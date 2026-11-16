@@ -55,4 +55,9 @@ pub const APP_COMMANDS: &[&str] = &[
     "cmd_diag_get_conversation",
     "cmd_diag_discover_ecus",
     "cmd_diag_get_isotp_frames",
+    "cmd_diag_read_dtc_report",
+    "cmd_diag_passive_discovery_start",
+    "cmd_diag_passive_discovery_snapshot",
+    "cmd_diag_passive_discovery_stop",
+    "cmd_diag_physical_sweep",
 ];
