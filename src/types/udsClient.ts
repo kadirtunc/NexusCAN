@@ -4,6 +4,11 @@
  * Full contract: `planning/contracts/uds-client-d003-v1.md`.
  */
 
+/** ISO 15765-2 address format (mirror of `AddressFormatDto`, camelCase on the wire). */
+export type AddressFormat = 'normal' | 'normalFixed' | 'extended' | 'mixed';
+
+export const ADDRESS_FORMATS: readonly AddressFormat[] = ['normal', 'normalFixed', 'extended', 'mixed'];
+
 /** Superset of the existing HMI `DiagSessionConfig` (extra fields optional). */
 export interface DiagSessionConfigDto {
   busId: number;
@@ -18,6 +23,12 @@ export interface DiagSessionConfigDto {
   padding?: number | null;
   /** Added to ECU-reported P2 (ms). Default 100. */
   p2MarginMs?: number;
+  /** Default 'normal'. */
+  addressFormat?: AddressFormat;
+  /** u8: N_TA (`extended`) / N_AE (`mixed`). */
+  targetAddress?: number | null;
+  /** u8: expected first byte of ECU frames (`extended` required, `mixed` defaults to target). */
+  responseAddress?: number | null;
 }
 
 export type UdsAddressing = 'physical' | 'functional';
@@ -33,6 +44,10 @@ export interface UdsRequestOptionsDto {
   addressing?: UdsAddressing | null;
   timeoutMs?: number | null;
   origin?: DiagOrigin | null;
+  /** 0x21 busyRepeatRequest retries, 0..10 (null/0 = off). */
+  busyRetryMax?: number | null;
+  /** Delay before each retry, 10..5000 ms (backend default 50). */
+  busyRetryDelayMs?: number | null;
 }
 
 /** A 0x7F negative response is a successful transport result with `positive = false`. */
@@ -46,6 +61,8 @@ export interface UdsResponseDto {
   responsePendingCount: number;
   elapsedUs: number;
   transactionSeq: number;
+  /** 0x21 retries made (0 = answered on the first attempt). Absent on an older backend. */
+  busyRetryCount?: number;
 }
 
 export interface DidReadResultDto {
@@ -90,6 +107,8 @@ export interface ConversationEventDto {
   nrc: number | null;
   detail: string | null;
   origin: DiagOrigin;
+  /** `request` events of a 0x21 retry: 1..=10. Null / absent for first attempts. */
+  retryIndex?: number | null;
 }
 
 export interface ConversationPageDto {
@@ -148,7 +167,26 @@ export interface EcuDiscoveryRequestDto {
   padding?: number | null;
   useFd?: boolean;
   identify?: boolean;
+  /** Replaces `responseId` / `responseMask` (mutually exclusive). 1..32 entries, `id & ~mask == 0`. */
+  responseIdFilters?: IdFilterDto[] | null;
+  /** How the physical request id is derived from a response id (null: backend default per id width). */
+  requestIdRule?: RequestIdRuleDto | null;
+  addressFormat?: AddressFormat;
+  targetAddress?: number | null;
+  responseAddress?: number | null;
 }
+
+/** CAN id acceptance filter: `(arbId & mask) == id`. */
+export interface IdFilterDto {
+  id: number;
+  mask: number;
+}
+
+export type RequestIdRuleDto =
+  | { kind: 'legislatedMinus8' }
+  | { kind: 'offset'; delta: number }
+  | { kind: 'normalFixedSwap' }
+  | { kind: 'none' };
 
 export interface DiscoveredEcuDto {
   responseId: number;
@@ -176,6 +214,135 @@ export interface EcuDiscoveryResultDto {
   txTimestampUs: number;
   ecus: DiscoveredEcuDto[];
   ignoredFrames: number;
+  /** More distinct responders than the backend cap (surplus not listed). Absent on an older backend. */
+  truncated?: boolean;
+  droppedEcus?: number;
+}
+
+// ─── ReadDTCInformation (0x19) report-type reader (`cmd_diag_read_dtc_report`) ──
+
+export interface DtcSnapshotIdDto {
+  dtc: number;
+  code: string;
+  recordNumber: number;
+}
+
+export interface DtcSnapshotRecordDto {
+  recordNumber: number;
+  numberOfIdentifiers: number;
+  firstDid: number | null;
+  singleDidData: number[] | null;
+  /** Bytes from `recordNumber` to the end of the PDU (DID lengths need ODX). */
+  raw: number[];
+}
+
+export type ReadDtcReportDto =
+  | {
+      kind: 'count';
+      subFunction: number;
+      availabilityMask: number;
+      formatIdentifier: number;
+      formatName: string | null;
+      count: number;
+    }
+  | { kind: 'list'; subFunction: number; availabilityMask: number; dtcs: DtcEntryDto[] }
+  | { kind: 'snapshotIdentification'; records: DtcSnapshotIdDto[] }
+  | { kind: 'snapshotRecord'; dtc: DtcEntryDto; record: DtcSnapshotRecordDto | null }
+  | { kind: 'extData'; dtc: DtcEntryDto; firstRecordNumber: number | null; raw: number[] };
+
+export interface DtcReportResultDto {
+  response: UdsResponseDto;
+  report: ReadDtcReportDto | null;
+  reportError: string | null;
+}
+
+// ─── Passive discovery (Listen-Only safe, transmits nothing) ───────────────
+
+export type PassiveConfidence = 'low' | 'medium' | 'high';
+
+export interface PassiveEcuPairDto {
+  busId: number;
+  requestId: number;
+  responseId: number;
+  isExtendedId: boolean;
+  evidenceCount: number;
+  firstSeenUs: number;
+  lastSeenUs: number;
+  sidsSeen: number[];
+  confidence: PassiveConfidence;
+  flowControlSeen: boolean;
+  functionalRequest: boolean;
+}
+
+export interface PassiveDiscoverySnapshotDto {
+  busId: number;
+  running: boolean;
+  stopReason: string | null;
+  startedAtUs: number;
+  framesAnalyzed: number;
+  framesDropped: number;
+  pairs: PassiveEcuPairDto[];
+  truncated: boolean;
+  droppedPairs: number;
+  maxPairs: number;
+  evictedRequests: number;
+}
+
+// ─── Physical sweep (ACTIVE: armed, non-Listen-Only bus; blocks until done) ──
+
+export interface IdRangeDto {
+  start: number;
+  end: number;
+}
+
+export interface PhysicalSweepRequestDto {
+  busId: number;
+  isExtendedId: boolean;
+  requestIds?: number[] | null;
+  requestIdRange?: IdRangeDto | null;
+  /** Default 3E 00. */
+  requestPdu?: number[] | null;
+  /** Default 20, 5..1000. */
+  gapMs?: number | null;
+  /** Default 200, 0..5000. */
+  tailMs?: number | null;
+  responseId?: number | null;
+  responseMask?: number | null;
+  responseIdFilters?: IdFilterDto[] | null;
+  requestIdRule?: RequestIdRuleDto | null;
+  /** Default 0xAA. */
+  padding?: number | null;
+  useFd: boolean;
+  addressFormat?: AddressFormat;
+  targetAddress?: number | null;
+  responseAddress?: number | null;
+}
+
+export interface SweepResponderDto {
+  responseId: number;
+  inFlightRequestId: number;
+  latencyUs: number;
+}
+
+export interface PhysicalSweepResultDto {
+  busId: number;
+  isExtendedId: boolean;
+  requestBytes: number[];
+  gapMs: number;
+  tailMs: number;
+  total: number;
+  sent: number;
+  lastRequestId: number | null;
+  completed: boolean;
+  /** e.g. 'panic_latched' | 'disarmed' | 'bus_not_connected'. */
+  abortCode: string | null;
+  abortReason: string | null;
+  txTimestampUs: number;
+  ecus: DiscoveredEcuDto[];
+  responders: SweepResponderDto[];
+  ignoredFrames: number;
+  truncated: boolean;
+  droppedEcus: number;
 }
 
 export type IsoTpFrameKind = 'single' | 'first' | 'consecutive' | 'flowControl' | 'unknown';
@@ -237,6 +404,19 @@ export interface DiagCommandMap {
     result: IsoTpFramePageDto;
   };
   cmd_diag_discover_ecus: { args: { request: EcuDiscoveryRequestDto }; result: EcuDiscoveryResultDto };
+  cmd_diag_read_dtc_report: {
+    args: {
+      config: DiagSessionConfigDto;
+      subFunction: number;
+      params: number[];
+      options?: UdsRequestOptionsDto | null;
+    };
+    result: DtcReportResultDto;
+  };
+  cmd_diag_passive_discovery_start: { args: { busId: number }; result: PassiveDiscoverySnapshotDto };
+  cmd_diag_passive_discovery_snapshot: { args: { busId: number }; result: PassiveDiscoverySnapshotDto };
+  cmd_diag_passive_discovery_stop: { args: { busId: number }; result: PassiveDiscoverySnapshotDto };
+  cmd_diag_physical_sweep: { args: { request: PhysicalSweepRequestDto }; result: PhysicalSweepResultDto };
 }
 
 const DIAG_ERROR_RE = /^\[diag:([a-z_0-9]+)\]\s*(.*)$/s;

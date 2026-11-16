@@ -11,7 +11,8 @@ import { t } from '../i18n';
 import { formatDiagError } from '../services/diagErrors';
 import { decodeDidValue } from '../services/udsDecode';
 import type { DiagSessionConfig, UdsSessionType } from '../types/diagnostics';
-import type { EcuDiscoveryRequestDto, EcuDiscoveryResultDto } from '../types/udsClient';
+import type { DiscoveredEcuDto, EcuDiscoveryRequestDto, EcuDiscoveryResultDto } from '../types/udsClient';
+import { ecusToResults } from '../components/diagnostics/passiveDiscovery';
 import {
   applyDidValues,
   deserializeNodes,
@@ -19,6 +20,7 @@ import {
   IDENT_DID_FIRST,
   IDENT_DID_LAST,
   mergeDiscovery,
+  type MergeOptions,
   nodeKey,
   relayout,
   serializeNodes,
@@ -267,6 +269,22 @@ export const ecuGraphStore = {
         demo: state.demo,
       },
     });
+  },
+
+  /**
+   * Adds ECUs found by something other than a functional scan (physical sweep, passive pairs) through the
+   * same `mergeDiscovery` path. Nodes are never removed or moved, unrelated nodes are not flagged unseen and
+   * the "last scan" summary is left alone. Returns how many NEW nodes were created.
+   */
+  addEcus(ecus: readonly DiscoveredEcuDto[], busId: number, options: MergeOptions = {}, nowMs: number = Date.now()): number {
+    ecuGraphStore.setScope(diagnosticsStore.getState().mockMode, busId);
+    const before = new Set(state.nodes.map((n) => n.key));
+    let nodes = state.nodes;
+    for (const result of ecusToResults(ecus)) {
+      nodes = mergeDiscovery(nodes, result, busId, nowMs, { markUnseen: false, ...options });
+    }
+    setNodes(nodes);
+    return nodes.filter((n) => !before.has(n.key)).length;
   },
 
   /**

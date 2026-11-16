@@ -16,6 +16,7 @@ import type {
 } from '../types/diagnostics';
 import { DID_CATALOG, PID_CATALOG } from '../types/diagnostics';
 import { decodeDidValue } from '../services/udsDecode';
+import { busyRetryFields, type BusyRetryOptions } from '../components/diagnostics/busyRetry';
 import { IsoTpReassembler, isoTpEntryFromDto } from '../services/isoTpDecode';
 import {
   normalizeConversationEvent,
@@ -33,6 +34,10 @@ import {
   type IsoTpFramePageDto,
   type EcuDiscoveryRequestDto,
   type EcuDiscoveryResultDto,
+  type DtcReportResultDto,
+  type PassiveDiscoverySnapshotDto,
+  type PhysicalSweepRequestDto,
+  type PhysicalSweepResultDto,
   type UdsAddressing,
   type UdsResponseDto,
 } from '../types/udsClient';
@@ -86,6 +91,17 @@ interface DiagnosticsState {
   discovering: boolean;
   /** Discovery errors are kept apart from `lastError`: a failed scan must never imply a lost UDS session. */
   discoveryError: DiagUiError | null;
+  /** Last passive-discovery snapshot (real mode only; the scan runs in the backend, survives Panic / disarm). */
+  passive: PassiveDiscoverySnapshotDto | null;
+  passiveBusy: boolean;
+  passiveError: DiagUiError | null;
+  /** Physical sweep (ACTIVE, blocking). A Panic aborts it in the backend, which returns the partial result. */
+  sweeping: boolean;
+  sweepResult: PhysicalSweepResultDto | null;
+  sweepError: DiagUiError | null;
+  /** Last ReadDTCInformation report (any reportType) with the sub-function it answers. */
+  dtcReport: { subFunction: number; result: DtcReportResultDto } | null;
+  dtcReportBusy: boolean;
 }
 
 const DEFAULT_CONFIG: DiagSessionConfig = {
@@ -125,6 +141,14 @@ const INITIAL_STATE: DiagnosticsState = {
   discovery: null,
   discovering: false,
   discoveryError: null,
+  passive: null,
+  passiveBusy: false,
+  passiveError: null,
+  sweeping: false,
+  sweepResult: null,
+  sweepError: null,
+  dtcReport: null,
+  dtcReportBusy: false,
 };
 
 const MOCK_STORED_DTCS: DtcEntryDto[] = [
@@ -148,6 +172,7 @@ const MOCK_STORED_DTCS: DtcEntryDto[] = [
   },
 ];
 
+let passiveSnapshotInFlight = false;
 let pollingIntervalId: ReturnType<typeof setInterval> | null = null;
 let pollingTickCount = 0;
 let mockSpeedAccum = 0;
@@ -387,6 +412,9 @@ function toDiagDto(c: DiagSessionConfig): DiagSessionConfigDto {
     useFd: c.useFd ?? false,
     padding: c.padding === undefined ? 0xaa : c.padding,
     p2MarginMs: c.p2MarginMs ?? 100,
+    addressFormat: c.addressFormat ?? 'normal',
+    targetAddress: c.targetAddress ?? null,
+    responseAddress: c.responseAddress ?? null,
   };
 }
 
@@ -984,6 +1012,112 @@ export const diagnosticsStore = {
     setState({ discovery: null, discoveryError: null });
   },
 
+  /**
+   * Passive discovery (TX-free, Listen-Only safe). Real mode only: never fabricated. Errors are kept in
+   * `passiveError`, apart from `lastError`: they never imply a lost UDS session.
+   */
+  async passiveStart(busId: number): Promise<void> {
+    if (currentState.mockMode || currentState.passiveBusy) return;
+    setState({ passiveBusy: true, passiveError: null });
+    try {
+      const passive = await diagInvoke('cmd_diag_passive_discovery_start', { busId });
+      setState({ passiveBusy: false, passive });
+    } catch (err) {
+      setState({ passiveBusy: false, passiveError: toDiagUiError(err) });
+    }
+  },
+
+  async passiveStop(busId: number): Promise<void> {
+    if (currentState.mockMode || currentState.passiveBusy) return;
+    setState({ passiveBusy: true, passiveError: null });
+    try {
+      const passive = await diagInvoke('cmd_diag_passive_discovery_stop', { busId });
+      setState({ passiveBusy: false, passive });
+    } catch (err) {
+      setState({ passiveBusy: false, passiveError: toDiagUiError(err) });
+    }
+  },
+
+  /** 1 Hz poll target. Never overlaps itself; silent on transient errors except the first (kept in state). */
+  async passiveSnapshot(busId: number): Promise<void> {
+    if (currentState.mockMode || passiveSnapshotInFlight) return;
+    passiveSnapshotInFlight = true;
+    try {
+      const passive = await diagInvoke('cmd_diag_passive_discovery_snapshot', { busId });
+      setState({ passive, passiveError: null });
+    } catch (err) {
+      setState({ passiveError: toDiagUiError(err) });
+    } finally {
+      passiveSnapshotInFlight = false;
+    }
+  },
+
+  clearPassive(): void {
+    setState({ passive: null, passiveError: null });
+  },
+
+  /**
+   * ACTIVE physical sweep: blocks until done. Real mode only. Not dropped by Panic Stop on purpose: the
+   * backend aborts and returns the partial result (`abortCode`), which the operator must see.
+   */
+  async runSweep(request: PhysicalSweepRequestDto): Promise<PhysicalSweepResultDto | null> {
+    if (currentState.mockMode || currentState.sweeping) return null;
+    setState({ sweeping: true, sweepError: null, sweepResult: null });
+    try {
+      const sweepResult = await diagInvoke('cmd_diag_physical_sweep', { request });
+      setState({ sweeping: false, sweepResult });
+      return sweepResult;
+    } catch (err) {
+      setState({ sweeping: false, sweepError: toDiagUiError(err) });
+      return null;
+    }
+  },
+
+  clearSweep(): void {
+    setState({ sweepResult: null, sweepError: null });
+  },
+
+  /**
+   * ReadDTCInformation (0x19) with any supported reportType on the open session (real mode only).
+   * Errors go through `handleCommandError` exactly like `scanDtcs` (Listen-Only / disarmed / panic drop the
+   * session state and show the localized banner).
+   */
+  async readDtcReport(
+    subFunction: number,
+    params: readonly number[],
+    retry: BusyRetryOptions | null = null,
+  ): Promise<DtcReportResultDto | null> {
+    if (!currentState.session.connected) {
+      setState({ lastError: NOT_CONNECTED });
+      return null;
+    }
+    if (currentState.mockMode || currentState.dtcReportBusy) return null;
+    setState({ dtcReportBusy: true, lastError: null });
+    const opGen = diagOpGen;
+    try {
+      const result = await diagInvoke('cmd_diag_read_dtc_report', {
+        config: currentDto(),
+        subFunction,
+        params: [...params],
+        options: { addressing: 'physical', timeoutMs: null, origin: 'dtc', ...busyRetryFields(retry) },
+      });
+      if (opGen !== diagOpGen) return null;
+      setState({ dtcReportBusy: false, dtcReport: { subFunction, result } });
+      touchResponse();
+      refreshSessionInfoSoon();
+      return result;
+    } catch (err) {
+      if (opGen !== diagOpGen) return null;
+      setState({ dtcReportBusy: false });
+      handleCommandError(err);
+      return null;
+    }
+  },
+
+  clearDtcReport(): void {
+    setState({ dtcReport: null });
+  },
+
   async scanDtcs(): Promise<void> {
     if (!currentState.session.connected) {
       setState({ lastError: NOT_CONNECTED });
@@ -1159,6 +1293,7 @@ export const diagnosticsStore = {
     data: readonly number[],
     addressing: UdsAddressing = 'physical',
     origin: DiagOrigin = 'console',
+    retry: BusyRetryOptions | null = null,
   ): Promise<UdsExchange | null> {
     if (!currentState.session.connected) {
       setState({ lastError: NOT_CONNECTED });
@@ -1204,7 +1339,7 @@ export const diagnosticsStore = {
         sid,
         subFunction: subFn,
         data: [...data],
-        options: { addressing, timeoutMs: null, origin },
+        options: { addressing, timeoutMs: null, origin, ...busyRetryFields(retry) },
       });
       const exchange: UdsExchange = { id: ++exchangeSeq, atMs: Date.now(), requestBytes, addressing, response, error: null };
       setState({ lastUds: exchange, lastError: null });
@@ -1335,6 +1470,7 @@ function stopDiagnosticsTx(): void {
   const patch: Partial<DiagnosticsState> = {};
   if (currentState.discovering) patch.discovering = false;
   if (currentState.isScanning) patch.isScanning = false;
+  if (currentState.dtcReportBusy) patch.dtcReportBusy = false;
   if (currentState.session.testerPresentActive) {
     patch.session = { ...currentState.session, testerPresentActive: false };
     if (!currentState.mockMode && currentState.session.connected) {

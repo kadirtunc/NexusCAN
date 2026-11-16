@@ -241,6 +241,20 @@ function nodeFromEcu(e: DiscoveredEcuDto, busId: number, nowMs: number, pos: Gra
   };
 }
 
+export interface MergeOptions {
+  /**
+   * `true` (default, functional discovery): known nodes of the same bus + addressing mode that did not
+   * answer get `lastScanSeen = false`. `false` (partial probes: physical sweep, passive pairs): a probe that
+   * covers only some ids says nothing about the others, so they are left untouched.
+   */
+  markUnseen?: boolean;
+  /**
+   * `true` for passive observations: the response content is not decoded, so a known node keeps its
+   * status / NRC / raw / identity and only gains `requestId` (when it had none) and a fresh `lastSeen`.
+   */
+  passive?: boolean;
+}
+
 /**
  * Merges one discovery result into the node list of `busId`.
  *  - unknown responders become new nodes at the next free radial slots (ordered by id);
@@ -254,12 +268,18 @@ export function mergeDiscovery(
   result: EcuDiscoveryResultDto,
   busId: number,
   nowMs: number,
+  options: MergeOptions = {},
 ): GraphNode[] {
+  const markUnseen = options.markUnseen !== false;
+  const passive = options.passive === true;
   const answered = new Map<string, DiscoveredEcuDto>();
   for (const e of result.ecus) answered.set(nodeKey(busId, e.isExtendedId, e.responseId), e);
 
   const next: GraphNode[] = nodes.map((n) => {
     const e = answered.get(n.key);
+    if (e && passive) {
+      return { ...n, requestId: n.requestId ?? e.requestId, lastSeenMs: nowMs, lastScanSeen: true };
+    }
     if (e) {
       return {
         ...n,
@@ -281,7 +301,7 @@ export function mergeDiscovery(
         },
       };
     }
-    if (n.busId === busId && n.isExtendedId === result.isExtendedId && n.lastScanSeen) {
+    if (markUnseen && n.busId === busId && n.isExtendedId === result.isExtendedId && n.lastScanSeen) {
       return { ...n, lastScanSeen: false };
     }
     return n;

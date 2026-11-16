@@ -1,4 +1,5 @@
 import type {
+  AddressFormat,
   DiagErrorCode,
   DtcEntryDto as BackendDtcEntryDto,
   UdsAddressing,
@@ -23,6 +24,10 @@ export interface DiagSessionConfig {
   padding?: number | null;
   /** Added to the ECU-reported P2 (ms); absent = backend default (100). */
   p2MarginMs?: number;
+  /** ISO 15765-2 address format; absent = 'normal'. */
+  addressFormat?: AddressFormat;
+  targetAddress?: number | null;
+  responseAddress?: number | null;
 }
 
 export interface DiagSessionState {
