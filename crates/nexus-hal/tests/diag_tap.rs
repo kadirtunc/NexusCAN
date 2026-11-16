@@ -360,6 +360,7 @@ fn diag_commands_respect_gate_and_manage_sessions() {
         addressing: None,
         timeout_ms: Some(50),
         origin: None,
+        ..Default::default()
     };
     let _ = engine.cmd_diag_send_uds(cfg2.clone(), 0x3E, Some(0x00), vec![], Some(opts));
     let before = engine

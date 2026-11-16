@@ -13,17 +13,17 @@
 //! copies `RawCanFrame`s into the tap queue. Async callers must use `spawn_blocking`.
 
 use super::diag_session::{check_id, invalid, reject_to_diag_error, tap_filters};
-use super::diag_tap::{HalDiagPort, DEFAULT_TAP_DEPTH};
+use super::diag_tap::{HalDiagPort, DEFAULT_TAP_DEPTH, MAX_TAP_FILTERS};
 use super::*;
 use nexus_core::{FLAG_RTR, FLAG_TX};
 use nexus_protocols::uds::client::UdsSession;
 use nexus_protocols::uds::discovery::{
-    build_single_frame, default_response_filter, validate_request_pdu, DiscoveryCollector,
-    DEFAULT_DISCOVERY_PDU,
+    build_single_frame_addressed, discovery_spec, validate_request_pdu_addressed,
+    DiscoveryCollector, DiscoverySpec, DEFAULT_DISCOVERY_PDU,
 };
 use nexus_protocols::uds::dto::{
-    DiagOrigin, DiagSessionConfigDto, DiscoveredEcuDto, EcuDiscoveryRequestDto,
-    EcuDiscoveryResultDto,
+    AddressFormatDto, DiagOrigin, DiagSessionConfigDto, DiscoveredEcuDto, EcuDiscoveryRequestDto,
+    EcuDiscoveryResultDto, IdFilterDto,
 };
 use nexus_protocols::uds::port::DiagCanPort;
 
@@ -32,20 +32,25 @@ pub const DEFAULT_DISCOVERY_WINDOW_MS: u32 = 300;
 pub const MIN_DISCOVERY_WINDOW_MS: u32 = 50;
 pub const MAX_DISCOVERY_WINDOW_MS: u32 = 5_000;
 /// Upper bound for the TX verdict of the functional request (ISO-TP N_As analogue).
-const TX_CONFIRM_TIMEOUT: Duration = Duration::from_millis(1_000);
+pub(super) const TX_CONFIRM_TIMEOUT: Duration = Duration::from_millis(1_000);
+/// Tap depth when the response filters are widened to one covering filter: the tap may then
+/// see much more traffic than the responses (the collector applies the exact list).
+pub(super) const WIDE_TAP_DEPTH: usize = 16_384;
 /// P2 client margin of the temporary identify sessions.
 const IDENTIFY_P2_MARGIN_MS: u32 = 100;
 /// Identification DIDs: VIN, ECU serial number, spare part number.
 const DID_VIN: u16 = 0xF190;
 const DID_SERIAL: u16 = 0xF18C;
 const DID_PART: u16 = 0xF187;
+/// `identifyError` of every ECU found with `addressFormat = extended`.
+pub const IDENTIFY_EXTENDED_SKIPPED: &str =
+    "identify skipped: target address unknown under extended addressing (the ECU's N_TA cannot be derived from its response; open a physical session with its targetAddress)";
 
 /// Validated request parameters.
 struct Plan {
     pdu: Vec<u8>,
     window_ms: u32,
-    resp_id: u32,
-    resp_mask: u32,
+    spec: DiscoverySpec,
 }
 
 fn plan(req: &EcuDiscoveryRequestDto) -> Result<Plan, DiagError> {
@@ -57,62 +62,97 @@ fn plan(req: &EcuDiscoveryRequestDto) -> Result<Plan, DiagError> {
             "windowMs must be within {MIN_DISCOVERY_WINDOW_MS}..={MAX_DISCOVERY_WINDOW_MS}"
         )));
     }
+    // Filters (legacy responseId/responseMask or responseIdFilters), request-id rule and
+    // address format; legacy requests yield exactly the old single filter.
+    let spec = discovery_spec(req).map_err(invalid)?;
     let pdu = req
         .request_pdu
         .clone()
         .unwrap_or_else(|| DEFAULT_DISCOVERY_PDU.to_vec());
-    validate_request_pdu(&pdu, req.use_fd).map_err(invalid)?;
-
-    let full = if ext { 0x1FFF_FFFF } else { 0x7FF };
-    let (def_id, def_mask) = default_response_filter(ext);
-    let (resp_id, resp_mask) = match (req.response_id, req.response_mask) {
-        (None, None) => (def_id, def_mask),
-        // An explicit id alone means exactly that id.
-        (Some(id), None) => (id, full),
-        (None, Some(m)) => (def_id, m),
-        (Some(id), Some(m)) => (id, m),
-    };
-    check_id("responseId", resp_id, ext)?;
-    if resp_mask == 0 || resp_mask > full {
-        return Err(invalid(format!(
-            "responseMask 0x{resp_mask:X} must be within 0x1..=0x{full:X}"
-        )));
-    }
-    if (req.functional_id & resp_mask) == (resp_id & resp_mask) {
-        return Err(invalid(format!(
-            "functionalId 0x{:X} must not match the response filter 0x{resp_id:X}/0x{resp_mask:X}",
-            req.functional_id
-        )));
-    }
+    validate_request_pdu_addressed(&pdu, req.use_fd, spec.addr.tx).map_err(invalid)?;
     Ok(Plan {
         pdu,
         window_ms,
-        resp_id,
-        resp_mask,
+        spec,
     })
 }
 
-fn request_frame(req: &EcuDiscoveryRequestDto, pdu: &[u8]) -> Result<RawCanFrame, DiagError> {
-    let key = if req.is_extended_id {
-        CanIdKey::new_extended(req.functional_id)
-    } else {
-        u16::try_from(req.functional_id)
-            .ok()
-            .and_then(CanIdKey::new_standard)
-    }
-    .ok_or_else(|| {
-        invalid(format!(
-            "functionalId 0x{:X} is not a valid CAN id",
-            req.functional_id
-        ))
-    })?;
-    let payload = build_single_frame(pdu, req.padding);
-    let built = if req.use_fd {
-        RawCanFrame::new_fd(req.bus_id, key, &payload, false, 0)
-    } else {
-        RawCanFrame::new_classical(req.bus_id, key, &payload, 0)
+/// Tap acceptance filters for `response_filters` plus the exact `extra` ids (functional /
+/// request ids whose traffic must be seen). The exact list is used when it fits into
+/// [`MAX_TAP_FILTERS`]; otherwise the responses share ONE covering superset filter and the
+/// collector applies the exact list. Returns `(filters, count, widened)`.
+pub(super) fn response_tap_filters(
+    response_filters: &[IdFilterDto],
+    extra: &[u32],
+    extended: bool,
+) -> ([DiagTapFilter; MAX_TAP_FILTERS], usize, bool) {
+    let ext = Some(extended);
+    let full = if extended { 0x1FFF_FFFF } else { 0x7FF };
+    let mk = |f: IdFilterDto| DiagTapFilter {
+        id: f.id,
+        mask: f.mask,
+        extended: ext,
     };
-    built.map_err(|e| invalid(format!("cannot build the functional request frame: {e}")))
+    let mut out = [mk(IdFilterDto { id: 0, mask: full }); MAX_TAP_FILTERS];
+    let room = MAX_TAP_FILTERS - extra.len().min(MAX_TAP_FILTERS - 1);
+    let mut n = 0;
+    let widened = response_filters.len() > room;
+    if widened {
+        out[0] = mk(nexus_protocols::uds::discovery::covering_filter(
+            response_filters,
+        ));
+        n = 1;
+    } else {
+        for f in response_filters {
+            out[n] = mk(*f);
+            n += 1;
+        }
+    }
+    for id in extra.iter().take(MAX_TAP_FILTERS - n) {
+        out[n] = mk(IdFilterDto {
+            id: *id,
+            mask: full,
+        });
+        n += 1;
+    }
+    (out, n, widened)
+}
+
+fn request_frame(
+    req: &EcuDiscoveryRequestDto,
+    pdu: &[u8],
+    addr_tx: Option<u8>,
+) -> Result<RawCanFrame, DiagError> {
+    single_frame(
+        req.bus_id,
+        req.functional_id,
+        req.is_extended_id,
+        req.use_fd,
+        &build_single_frame_addressed(pdu, req.padding, addr_tx),
+    )
+    .map_err(|e| invalid(format!("cannot build the functional request frame: {e}")))
+}
+
+/// One classic / CAN-FD frame carrying `payload` on `id`.
+pub(super) fn single_frame(
+    bus_id: u8,
+    id: u32,
+    extended: bool,
+    use_fd: bool,
+    payload: &[u8],
+) -> Result<RawCanFrame, String> {
+    let key = if extended {
+        CanIdKey::new_extended(id)
+    } else {
+        u16::try_from(id).ok().and_then(CanIdKey::new_standard)
+    }
+    .ok_or_else(|| format!("0x{id:X} is not a valid CAN id"))?;
+    let built = if use_fd {
+        RawCanFrame::new_fd(bus_id, key, payload, false, 0)
+    } else {
+        RawCanFrame::new_classical(bus_id, key, payload, 0)
+    };
+    built.map_err(|e| e.to_string())
 }
 
 fn tap_closed_error(bus_id: u8) -> DiagError {
@@ -139,28 +179,18 @@ impl PipelineEngine {
                 req.bus_id
             )));
         }
-        let frame = request_frame(&req, &plan.pdu)?;
+        let frame = request_frame(&req, &plan.pdu, plan.spec.addr.tx)?;
 
         let mut result = {
-            let ext = Some(req.is_extended_id);
-            let filters = [
-                DiagTapFilter {
-                    id: plan.resp_id,
-                    mask: plan.resp_mask,
-                    extended: ext,
-                },
-                DiagTapFilter {
-                    id: req.functional_id,
-                    mask: if req.is_extended_id {
-                        0x1FFF_FFFF
-                    } else {
-                        0x7FF
-                    },
-                    extended: ext,
-                },
-            ];
+            let (filters, n, widened) =
+                response_tap_filters(&plan.spec.filters, &[req.functional_id], req.is_extended_id);
+            let depth = if widened {
+                WIDE_TAP_DEPTH
+            } else {
+                DEFAULT_TAP_DEPTH
+            };
             // Gate (not connected / Listen-Only / disarmed / Panic latched) is enforced here.
-            let port = self.open_diag_tap(req.bus_id, &filters, DEFAULT_TAP_DEPTH)?;
+            let port = self.open_diag_tap(req.bus_id, &filters[..n], depth)?;
             let r = Self::run_discovery_window(&port, &req, &plan, frame);
             // The tap is closed on every path (Drop unregisters it) BEFORE identify opens
             // physical sessions.
@@ -217,8 +247,13 @@ impl PipelineEngine {
         };
 
         // 2. Fixed window: never stop at the first answer (all ECUs must be collected).
-        let mut collector =
-            DiscoveryCollector::new(plan.pdu[0], req.functional_id, req.is_extended_id, tx_ts);
+        let mut collector = DiscoveryCollector::with_spec(
+            plan.pdu[0],
+            req.functional_id,
+            req.is_extended_id,
+            tx_ts,
+            &plan.spec,
+        );
         for _ in 0..pre_tx_ignored {
             collector.note_ignored();
         }
@@ -250,6 +285,11 @@ impl PipelineEngine {
     /// (a second client there would answer with a second Flow Control); otherwise a temporary
     /// session is opened and closed again without being registered in the session map.
     fn identify_ecu(&self, req: &EcuDiscoveryRequestDto, ecu: &mut DiscoveredEcuDto) {
+        if req.address_format == AddressFormatDto::Extended {
+            // Never guess the ECU's N_TA: the functional target byte is not its physical one.
+            ecu.identify_error = Some(IDENTIFY_EXTENDED_SKIPPED.to_string());
+            return;
+        }
         let Some(request_id) = ecu.request_id else {
             ecu.identify_error = Some(format!(
                 "no physical request id can be derived from response id 0x{:X}",
@@ -257,26 +297,26 @@ impl PipelineEngine {
             ));
             return;
         };
-        let existing = self.diag_sessions.valid_for_addressing(
-            req.bus_id,
+        // Mixed: N_AE is the same for every ECU of the network (taken from the request);
+        // normal / normalFixed: no address byte.
+        let cfg = DiagSessionConfigDto {
+            bus_id: req.bus_id,
             request_id,
-            ecu.response_id,
-            req.is_extended_id,
-        );
+            response_id: ecu.response_id,
+            is_extended_id: req.is_extended_id,
+            protocol: Some("uds".into()),
+            functional_id: None,
+            use_fd: req.use_fd,
+            padding: req.padding,
+            p2_margin_ms: IDENTIFY_P2_MARGIN_MS,
+            address_format: req.address_format,
+            target_address: req.target_address,
+            response_address: req.response_address,
+        };
+        let existing = self.diag_sessions.valid_for_addressing(&cfg);
         let (session, temporary) = match existing {
             Some(s) => (s, false),
             None => {
-                let cfg = DiagSessionConfigDto {
-                    bus_id: req.bus_id,
-                    request_id,
-                    response_id: ecu.response_id,
-                    is_extended_id: req.is_extended_id,
-                    protocol: Some("uds".into()),
-                    functional_id: None,
-                    use_fd: req.use_fd,
-                    padding: req.padding,
-                    p2_margin_ms: IDENTIFY_P2_MARGIN_MS,
-                };
                 let opened = (|| {
                     let (filters, n) = tap_filters(&cfg);
                     let port = self.open_diag_tap(cfg.bus_id, &filters[..n], DEFAULT_TAP_DEPTH)?;
@@ -339,12 +379,24 @@ mod tests {
         let p = plan(&req()).expect("plan");
         assert_eq!(p.pdu, vec![0x3E, 0x00]);
         assert_eq!(p.window_ms, 300);
-        assert_eq!((p.resp_id, p.resp_mask), (0x7E8, 0x7F8));
+        assert_eq!(
+            p.spec.filters,
+            vec![IdFilterDto {
+                id: 0x7E8,
+                mask: 0x7F8
+            }]
+        );
         let mut r = req();
         r.is_extended_id = true;
         r.functional_id = 0x18DB_33F1;
         let p = plan(&r).expect("plan ext");
-        assert_eq!((p.resp_id, p.resp_mask), (0x18DA_F100, 0x1FFF_FF00));
+        assert_eq!(
+            p.spec.filters,
+            vec![IdFilterDto {
+                id: 0x18DA_F100,
+                mask: 0x1FFF_FF00
+            }]
+        );
     }
 
     #[test]
@@ -385,13 +437,13 @@ mod tests {
         );
         let mut r = req();
         r.response_id = Some(0x7EA);
-        assert_eq!(plan(&r).map(|p| p.resp_mask).ok(), Some(0x7FF));
+        assert_eq!(plan(&r).map(|p| p.spec.filters[0].mask).ok(), Some(0x7FF));
     }
 
     #[test]
     fn request_frame_padding_and_fd() {
         let mut r = req();
-        let f = request_frame(&r, &[0x3E, 0x00]).expect("frame");
+        let f = request_frame(&r, &[0x3E, 0x00], None).expect("frame");
         assert_eq!(
             f.payload(),
             &[0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]
@@ -399,16 +451,108 @@ mod tests {
         assert_eq!(f.arb_id, 0x7DE);
         assert!(!f.is_extended() && f.flags & nexus_core::FLAG_FD == 0);
         r.padding = None;
-        let f = request_frame(&r, &[0x3E, 0x00]).expect("frame");
+        let f = request_frame(&r, &[0x3E, 0x00], None).expect("frame");
         assert_eq!(f.payload(), &[0x02, 0x3E, 0x00]);
         r.use_fd = true;
         r.is_extended_id = true;
         r.functional_id = 0x18DB_33F1;
         r.padding = Some(0xCC);
-        let f = request_frame(&r, &[0x22; 10]).expect("fd frame");
+        let f = request_frame(&r, &[0x22; 10], None).expect("fd frame");
         assert!(f.is_extended() && f.flags & nexus_core::FLAG_FD != 0);
         assert_eq!(&f.payload()[..2], &[0x00, 0x0A]);
         assert_eq!(f.payload().len(), 12);
+    }
+
+    #[test]
+    fn legacy_request_keeps_old_tap_filters_and_frame() {
+        // Old construction: [response id/mask, exact functional id], DEFAULT_TAP_DEPTH.
+        let p = plan(&req()).expect("plan");
+        let (f, n, widened) = response_tap_filters(&p.spec.filters, &[0x7DE], false);
+        assert_eq!((n, widened), (2, false));
+        assert_eq!(
+            f[0],
+            DiagTapFilter {
+                id: 0x7E8,
+                mask: 0x7F8,
+                extended: Some(false)
+            }
+        );
+        assert_eq!(
+            f[1],
+            DiagTapFilter {
+                id: 0x7DE,
+                mask: 0x7FF,
+                extended: Some(false)
+            }
+        );
+        let mut r = req();
+        r.response_id = Some(0x7EA);
+        r.response_mask = Some(0x7FB);
+        let p = plan(&r).expect("plan");
+        let (f, n, _) = response_tap_filters(&p.spec.filters, &[0x7DE], false);
+        assert_eq!(n, 2);
+        // (arb & mask) == (id & mask): same acceptance as the old unmasked id.
+        assert_eq!((f[0].id & f[0].mask, f[0].mask), (0x7EA & 0x7FB, 0x7FB));
+        assert_eq!(
+            request_frame(&req(), &p.pdu, p.spec.addr.tx)
+                .expect("frame")
+                .payload(),
+            &[0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]
+        );
+    }
+
+    #[test]
+    fn many_filters_are_widened_to_one_covering_filter() {
+        let mut r = req();
+        r.functional_id = 0x5DF;
+        r.response_id_filters = Some(
+            [0x5A8, 0x5B8, 0x648, 0x658]
+                .into_iter()
+                .map(|id| IdFilterDto { id, mask: 0x7FF })
+                .collect(),
+        );
+        r.request_id_rule = Some(nexus_protocols::uds::dto::RequestIdRuleDto::Offset { delta: -8 });
+        let p = plan(&r).expect("plan");
+        let (f, n, widened) = response_tap_filters(&p.spec.filters, &[0x5DF], false);
+        assert!(widened);
+        assert_eq!(n, 2, "covering filter + functional id");
+        for id in [0x5A8u32, 0x5B8, 0x648, 0x658] {
+            assert_eq!(id & f[0].mask, f[0].id & f[0].mask, "{id:#X} covered");
+        }
+        assert_eq!(f[1].id, 0x5DF);
+        // Three filters still fit next to the functional id: exact list, no widening.
+        let (f, n, widened) = response_tap_filters(&p.spec.filters[..3], &[0x5DF], false);
+        assert_eq!((n, widened), (4, false));
+        assert_eq!(f[2].id, 0x648);
+    }
+
+    #[test]
+    fn addressed_request_frame_and_pdu_room() {
+        let mut r = req();
+        r.address_format = AddressFormatDto::Extended;
+        r.target_address = Some(0x33);
+        r.response_address = Some(0xF1);
+        let p = plan(&r).expect("plan");
+        assert_eq!(p.spec.addr.tx, Some(0x33));
+        let f = request_frame(&r, &p.pdu, p.spec.addr.tx).expect("frame");
+        assert_eq!(
+            f.payload(),
+            &[0x33, 0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA]
+        );
+        // One byte less single-frame room with an address byte.
+        r.request_pdu = Some(vec![0x22; 7]);
+        assert_eq!(
+            plan(&r).err().map(|e| e.code),
+            Some(DiagErrorCode::InvalidInput)
+        );
+        r.request_pdu = Some(vec![0x22; 6]);
+        assert!(plan(&r).is_ok());
+        // Extended addressing needs both bytes.
+        r.response_address = None;
+        assert_eq!(
+            plan(&r).err().map(|e| e.code),
+            Some(DiagErrorCode::InvalidInput)
+        );
     }
 
     #[test]

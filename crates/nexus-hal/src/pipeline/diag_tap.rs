@@ -16,6 +16,10 @@
 //!   tap of the affected bus (`is_closed() == true`); queued sends are rejected with
 //!   [`DiagTxReject::Closed`].
 //!
+//! * **Passive (RX-only) taps:** [`PassiveTap`] has NO TX path at all (no TX sender, no gate);
+//!   it only receives copies of bus traffic. Because it cannot transmit, Panic Stop / disarm do
+//!   not close it (they close every TX-capable tap); disconnect and mode change still do.
+//!
 //! Control messages (add/remove tap) are cold path; the `Sender`s they carry are allocated by
 //! the requesting (command) thread, never by the bus-io thread.
 
@@ -61,6 +65,8 @@ pub(crate) struct TapShared {
     closed: AtomicBool,
     /// RX events dropped because the tap queue was full.
     rx_dropped: AtomicU64,
+    /// RX-only tap ([`PassiveTap`]): survives Panic Stop / disarm (it cannot transmit).
+    passive: bool,
 }
 
 impl TapShared {
@@ -134,11 +140,15 @@ impl DiagBusShared {
         )
     }
 
-    /// Closes every open tap of this bus. Returns how many were open.
+    /// Closes every open TX-capable tap of this bus (passive RX-only taps are kept: they cannot
+    /// transmit). Returns how many were open.
     pub(crate) fn close_all(&self) -> usize {
         let guard = self.slots.lock();
         let mut n = 0;
         for (_, shared) in guard.iter().flatten() {
+            if shared.passive {
+                continue;
+            }
             if !shared.closed.swap(true, Ordering::AcqRel) {
                 n += 1;
             }
@@ -156,6 +166,24 @@ impl DiagBusShared {
         filters: &[DiagTapFilter],
         depth: usize,
     ) -> Result<RegisteredTap, TapRegisterError> {
+        self.register_inner(filters, depth, false)
+    }
+
+    /// Registers an RX-only tap (see [`PassiveTap`]).
+    pub(crate) fn register_passive(
+        self: &Arc<Self>,
+        filters: &[DiagTapFilter],
+        depth: usize,
+    ) -> Result<RegisteredTap, TapRegisterError> {
+        self.register_inner(filters, depth, true)
+    }
+
+    fn register_inner(
+        self: &Arc<Self>,
+        filters: &[DiagTapFilter],
+        depth: usize,
+        passive: bool,
+    ) -> Result<RegisteredTap, TapRegisterError> {
         if filters.is_empty() || filters.len() > MAX_TAP_FILTERS {
             return Err(TapRegisterError::BadFilters);
         }
@@ -164,10 +192,15 @@ impl DiagBusShared {
             *dst = Some(*src);
         }
         let depth = depth.clamp(MIN_TAP_DEPTH, MAX_TAP_DEPTH);
-        let shared = Arc::new(TapShared::default());
+        let shared = Arc::new(TapShared {
+            passive,
+            ..TapShared::default()
+        });
         let gen = self.next_gen.fetch_add(1, Ordering::Relaxed).max(1);
         let (events_tx, events_rx) = bounded::<DiagPortEvent>(depth);
-        let (verdicts_tx, verdicts_rx) = bounded::<DiagPortEvent>(TAP_VERDICT_DEPTH);
+        // A passive tap never sends, so it never gets verdicts.
+        let (verdicts_tx, verdicts_rx) =
+            bounded::<DiagPortEvent>(if passive { 1 } else { TAP_VERDICT_DEPTH });
 
         let slot = {
             let mut guard = self.slots.lock();
@@ -437,6 +470,81 @@ impl Drop for HalDiagPort {
         // Bus-io thread may already be gone: ignore errors. `try_send` so a stalled bus-io
         // thread can never block the dropping (command) thread; a missed Remove is harmless
         // because the bus-io side also drops slots whose receiver disconnected.
+        let _ = self.registry.ctl_tx.try_send(TapCtl::Remove {
+            slot: self.slot,
+            gen: self.gen,
+        });
+    }
+}
+
+/// The tap was closed (bus disconnected, mode change, engine shutdown).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TapClosed;
+
+/// RX-only diag tap: a filtered copy of the bus traffic and NOTHING else. It holds no TX
+/// sender and no gate references, so code holding it cannot transmit (Listen-Only safe by
+/// construction). Dropping it unregisters the tap.
+pub struct PassiveTap {
+    slot: u8,
+    gen: u32,
+    shared: Arc<TapShared>,
+    events: Receiver<DiagPortEvent>,
+    _verdicts: Receiver<DiagPortEvent>,
+    registry: Arc<DiagBusShared>,
+}
+
+impl PassiveTap {
+    pub(crate) fn new(reg: RegisteredTap, registry: Arc<DiagBusShared>) -> Self {
+        Self {
+            slot: reg.slot,
+            gen: reg.gen,
+            shared: reg.shared,
+            events: reg.events,
+            _verdicts: reg.verdicts,
+            registry,
+        }
+    }
+
+    /// Liveness / overflow counters.
+    pub fn status(&self) -> DiagTapStatus {
+        DiagTapStatus(Arc::clone(&self.shared))
+    }
+
+    /// Next received frame within `timeout` (`Ok(None)` on timeout).
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Option<RawCanFrame>, TapClosed> {
+        match self.events.recv_timeout(timeout) {
+            Ok(DiagPortEvent::Rx(f)) => Ok(Some(f)),
+            Ok(_) => Ok(None),
+            Err(RecvTimeoutError::Timeout) => {
+                if self.shared.is_closed() && self.events.is_empty() {
+                    Err(TapClosed)
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                self.shared.close();
+                Err(TapClosed)
+            }
+        }
+    }
+
+    /// Next already-queued frame, if any (non-blocking).
+    pub fn try_recv(&self) -> Option<RawCanFrame> {
+        loop {
+            match self.events.try_recv() {
+                Ok(DiagPortEvent::Rx(f)) => return Some(f),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+    }
+}
+
+impl Drop for PassiveTap {
+    fn drop(&mut self) {
+        self.shared.close();
+        self.registry.release(self.slot, self.gen);
         let _ = self.registry.ctl_tx.try_send(TapCtl::Remove {
             slot: self.slot,
             gen: self.gen,

@@ -25,9 +25,11 @@ pub use drivers::slcan_drv::{
 pub use drivers::socketcan_drv::{SocketCanChannel, SocketCanDriver};
 pub use dto::{
     AdapterCapabilitiesDto, BusHealthDto, ChannelConfigDto, ChronologicalFrameDto,
-    DeviceDescriptorDto, DriverFamilyStatusDto, DriverProbeReportDto, FrameTelemetryDto,
-    LiveSignalDto, PanicStopResultDto, PeriodicTxJobDto, ProjectSummaryDto, ResetSessionResultDto,
-    SerialPortInfoDto, TelemetrySnapshotDto, TxTransmitResultDto,
+    DeviceDescriptorDto, DriverFamilyStatusDto, DriverProbeReportDto, DtcReportResultDto,
+    FrameTelemetryDto, IdRangeDto, LiveSignalDto, PanicStopResultDto, PassiveConfidenceDto,
+    PassiveDiscoverySnapshotDto, PassiveEcuPairDto, PeriodicTxJobDto, PhysicalSweepRequestDto,
+    PhysicalSweepResultDto, ProjectSummaryDto, ResetSessionResultDto, SerialPortInfoDto,
+    SweepResponderDto, TelemetrySnapshotDto, TxTransmitResultDto,
 };
 pub use error::{AdapterError, HalError, HW_LISTEN_ONLY_UNAVAILABLE_PREFIX};
 pub use pipeline::{

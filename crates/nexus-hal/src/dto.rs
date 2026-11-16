@@ -491,3 +491,186 @@ pub struct TraceReplayControlArgsDto {
     #[serde(default, alias = "direction_filter")]
     pub direction_filter: Option<String>,
 }
+
+// ─── Diagnostics: HAL-owned DTOs (0x19 reports, passive discovery, physical sweep) ─────
+// The UDS session / discovery contracts live in `nexus_protocols::uds::dto`; these wrap them
+// for HAL commands. All camelCase, control plane only (one value per user action / poll).
+
+/// `cmd_diag_read_dtc_report` result: the raw UDS response plus the parsed 0x19 report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DtcReportResultDto {
+    /// The ECU's answer (negative responses are results, not errors).
+    pub response: nexus_protocols::uds::dto::UdsResponseDto,
+    /// Parsed report; `None` when the response is negative, empty or unparsable.
+    pub report: Option<nexus_protocols::uds::dto::ReadDtcReportDto>,
+    /// Why `report` is `None` (`None` whenever `report` is present).
+    pub report_error: Option<String>,
+}
+
+/// Evidence level of a passively observed tester ↔ ECU pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PassiveConfidenceDto {
+    /// 1..=2 request → response matches.
+    Low,
+    /// 3..=9 matches.
+    Medium,
+    /// 10+ matches, or an ISO-TP Flow Control answered a First Frame between the two ids.
+    High,
+}
+
+/// One diagnostic `(request id, response id)` pair observed on the bus (no TX involved).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PassiveEcuPairDto {
+    pub bus_id: u8,
+    /// Tester → ECU id (may be a functional id such as 0x7DF / 0x18DB33F1).
+    pub request_id: u32,
+    /// ECU → tester id.
+    pub response_id: u32,
+    pub is_extended_id: bool,
+    /// Matched transactions (one per request and responder) plus Flow Control matches.
+    pub evidence_count: u32,
+    /// HAL timestamps (µs, monotonic) of the first / last evidence.
+    pub first_seen_us: u64,
+    pub last_seen_us: u64,
+    /// Request SIDs seen on this pair, ascending.
+    pub sids_seen: Vec<u8>,
+    pub confidence: PassiveConfidenceDto,
+    /// An FC on one id answered an FF on the other.
+    pub flow_control_seen: bool,
+    /// `requestId` is a functional id (11-bit 0x7DF, 29-bit 0x18DB_xx_xx): open a physical
+    /// session with the ECU's physical request id instead.
+    pub functional_request: bool,
+}
+
+/// State of the passive (Listen-Only safe, TX-free) ECU discovery of one bus.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PassiveDiscoverySnapshotDto {
+    pub bus_id: u8,
+    pub running: bool,
+    /// Why the scan ended (`None` while running or never started).
+    pub stop_reason: Option<String>,
+    /// HAL timestamp (µs) of the start; 0 = never started.
+    pub started_at_us: u64,
+    /// Frames fed to the analyzer.
+    pub frames_analyzed: u64,
+    /// Frames lost because the analyzer queue was full (bus faster than the analyzer).
+    pub frames_dropped: u64,
+    /// Sorted by `(requestId, responseId)`.
+    pub pairs: Vec<PassiveEcuPairDto>,
+    /// The pair table is full (`maxPairs`): new pairs are counted in `droppedPairs`.
+    pub truncated: bool,
+    pub dropped_pairs: u32,
+    pub max_pairs: u32,
+    /// Outstanding requests evicted before their response window ended (pending table full).
+    pub evicted_requests: u64,
+}
+
+/// Inclusive CAN id range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdRangeDto {
+    pub start: u32,
+    pub end: u32,
+}
+
+fn default_sweep_padding() -> Option<u8> {
+    Some(0xAA)
+}
+
+/// `cmd_diag_physical_sweep` request: one single-frame request per physical id, strictly
+/// sequential (one request in flight, `gapMs` between transmissions). Active bus required.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhysicalSweepRequestDto {
+    pub bus_id: u8,
+    pub is_extended_id: bool,
+    /// Explicit physical request ids (1..=256, no duplicates). Exactly one of `requestIds` /
+    /// `requestIdRange` must be set.
+    #[serde(default)]
+    pub request_ids: Option<Vec<u32>>,
+    /// Inclusive id range (1..=256 ids).
+    #[serde(default)]
+    pub request_id_range: Option<IdRangeDto>,
+    /// UDS PDU sent to every id (single frame). Default `[0x3E, 0x00]`.
+    #[serde(default)]
+    pub request_pdu: Option<Vec<u8>>,
+    /// Gap between two transmissions (ms). Default 20, clamped to 5..=1000.
+    #[serde(default)]
+    pub gap_ms: Option<u32>,
+    /// Collection time after the last request (ms). Default 200, clamped to 0..=5000.
+    #[serde(default)]
+    pub tail_ms: Option<u32>,
+    /// Response filters, same rules as `cmd_diag_discover_ecus` (`responseIdFilters` replaces
+    /// `responseId` / `responseMask`; defaults 0x7E8/0x7F8, 29-bit 0x18DAF100/0x1FFFFF00).
+    #[serde(default)]
+    pub response_id: Option<u32>,
+    #[serde(default)]
+    pub response_mask: Option<u32>,
+    #[serde(default)]
+    pub response_id_filters: Option<Vec<nexus_protocols::uds::dto::IdFilterDto>>,
+    /// Request id derivation for the listed ECUs (same DTO as discovery).
+    #[serde(default)]
+    pub request_id_rule: Option<nexus_protocols::uds::dto::RequestIdRuleDto>,
+    #[serde(default = "default_sweep_padding")]
+    pub padding: Option<u8>,
+    #[serde(default)]
+    pub use_fd: bool,
+    /// `normal` (default), `normalFixed` or `mixed` (N_AE = `targetAddress`). `extended` is
+    /// refused: a per-ECU N_TA sweep is not supported yet.
+    #[serde(default)]
+    pub address_format: nexus_protocols::uds::dto::AddressFormatDto,
+    #[serde(default)]
+    pub target_address: Option<u8>,
+    #[serde(default)]
+    pub response_address: Option<u8>,
+}
+
+/// Which swept request was in flight when a responder answered for the first time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SweepResponderDto {
+    pub response_id: u32,
+    /// Last swept id whose TX confirmation precedes the first answer of `responseId` (HAL
+    /// timestamps; exact when the ECU answers within `gapMs`).
+    pub in_flight_request_id: u32,
+    /// TX confirmation of that request → first answer (µs).
+    pub latency_us: u64,
+}
+
+/// `cmd_diag_physical_sweep` result (also the partial result of an aborted sweep).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhysicalSweepResultDto {
+    pub bus_id: u8,
+    pub is_extended_id: bool,
+    /// UDS PDU sent to every id (without PCI).
+    pub request_bytes: Vec<u8>,
+    /// Effective (clamped) gap / tail.
+    pub gap_ms: u32,
+    pub tail_ms: u32,
+    /// Ids to sweep / requests confirmed on the bus.
+    pub total: u32,
+    pub sent: u32,
+    /// Last id confirmed on the bus (`None` = nothing sent).
+    pub last_request_id: Option<u32>,
+    /// Every id was sent and the tail window elapsed.
+    pub completed: bool,
+    /// Why the sweep stopped early (`panic_latched`, `disarmed`, `listen_only`,
+    /// `bus_not_connected`, `session_closed`, ...). `None` when `completed`.
+    pub abort_code: Option<nexus_protocols::uds::dto::DiagErrorCode>,
+    pub abort_reason: Option<String>,
+    /// HAL timestamp of the first request's TX confirmation (0 = nothing sent).
+    pub tx_timestamp_us: u64,
+    /// One entry per response id (same DTO as discovery; `firstResponseUs` is relative to
+    /// `txTimestampUs`, identify fields are always empty).
+    pub ecus: Vec<nexus_protocols::uds::dto::DiscoveredEcuDto>,
+    /// Sorted by `responseId`.
+    pub responders: Vec<SweepResponderDto>,
+    pub ignored_frames: u32,
+    pub truncated: bool,
+    pub dropped_ecus: u32,
+}

@@ -1,9 +1,10 @@
 //! D-003 diag session manager: `PipelineEngine::open_diag_tap` + `cmd_diag_*` commands.
 //!
 //! One [`UdsSession`] per [`DiagSessionConfigDto`] key = the WHOLE config except `protocol`
-//! (`busId, requestId, responseId, isExtendedId, functionalId, useFd, padding, p2MarginMs`;
-//! team-lead clarification of contract §2). Opening a session whose addressing
-//! `(busId, requestId, responseId, isExtendedId)` matches an existing session with different
+//! (`busId, requestId, responseId, isExtendedId, functionalId, useFd, padding, p2MarginMs`,
+//! `addressFormat` + effective `targetAddress` / `responseAddress`; team-lead clarification of
+//! contract §2). Opening a session whose addressing
+//! `(busId, requestId, responseId, isExtendedId, response address byte)` matches an existing session with different
 //! settings CLOSES the old one first: two clients on the same ids would both answer with
 //! Flow Control frames. Every command that
 //! talks to an ECU auto-opens its session when missing or invalidated (closed tap) — this
@@ -17,10 +18,10 @@
 
 use super::diag_tap::{DiagTapStatus, HalDiagPort, MAX_TAP_FILTERS};
 use super::*;
-use nexus_protocols::uds::client::UdsSession;
+use nexus_protocols::uds::client::{session_address_bytes, UdsSession};
 use nexus_protocols::uds::dto::{
-    ConversationPageDto, DiagOrigin, DiagSessionConfigDto, DiagSessionInfoDto, DidReadResultDto,
-    DtcEntryDto, IsoTpFramePageDto, UdsRequestOptionsDto, UdsResponseDto,
+    AddressFormatDto, ConversationPageDto, DiagOrigin, DiagSessionConfigDto, DiagSessionInfoDto,
+    DidReadResultDto, DtcEntryDto, IsoTpFramePageDto, UdsRequestOptionsDto, UdsResponseDto,
 };
 use std::collections::HashMap;
 
@@ -40,25 +41,67 @@ const MAX_CLASSICAL_ISOTP_PDU: usize = 4_095;
 const MAX_FD_ISOTP_PDU: usize = 65_535;
 
 /// Session map key: whole config except the informational `protocol` field.
-type DiagKey = (u8, u32, u32, bool, Option<u32>, bool, Option<u8>, u32);
-
-fn diag_key(c: &DiagSessionConfigDto) -> DiagKey {
-    (
-        c.bus_id,
-        c.request_id,
-        c.response_id,
-        c.is_extended_id,
-        c.functional_id,
-        c.use_fd,
-        c.padding,
-        c.p2_margin_ms,
-    )
+///
+/// The ISO 15765-2 address fields are part of it in their EFFECTIVE form: `targetAddress` /
+/// `responseAddress` are ignored for `normal` / `normalFixed` (no address byte), and a `mixed`
+/// response byte defaults to the target byte, so configs that put the same bytes on the wire
+/// share one key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DiagKey {
+    bus_id: u8,
+    request_id: u32,
+    response_id: u32,
+    is_extended_id: bool,
+    functional_id: Option<u32>,
+    use_fd: bool,
+    padding: Option<u8>,
+    p2_margin_ms: u32,
+    address_format: AddressFormatDto,
+    /// Effective N_TA / N_AE byte the tester sends.
+    tx_addr: Option<u8>,
+    /// Effective first byte required in ECU frames.
+    rx_addr: Option<u8>,
 }
 
-/// Physical addressing of a key: sessions sharing it must not coexist.
+/// Effective `(tx, rx)` address bytes of `c` (`None` = no address byte / not resolvable;
+/// an unresolvable config is rejected by [`validate_config`] before it is keyed).
+fn effective_address_bytes(c: &DiagSessionConfigDto) -> (Option<u8>, Option<u8>) {
+    match c.address_format {
+        AddressFormatDto::Normal | AddressFormatDto::NormalFixed => (None, None),
+        AddressFormatDto::Extended => (c.target_address, c.response_address),
+        AddressFormatDto::Mixed => (c.target_address, c.response_address.or(c.target_address)),
+    }
+}
+
+fn diag_key(c: &DiagSessionConfigDto) -> DiagKey {
+    let (tx_addr, rx_addr) = effective_address_bytes(c);
+    DiagKey {
+        bus_id: c.bus_id,
+        request_id: c.request_id,
+        response_id: c.response_id,
+        is_extended_id: c.is_extended_id,
+        functional_id: c.functional_id,
+        use_fd: c.use_fd,
+        padding: c.padding,
+        p2_margin_ms: c.p2_margin_ms,
+        address_format: c.address_format,
+        tx_addr,
+        rx_addr,
+    }
+}
+
+/// Physical addressing of a key: sessions sharing it must not coexist (both would accept the
+/// same ECU frames and answer with Flow Control). The response address byte is part of it:
+/// under extended / mixed addressing, frames with another first byte are not ours.
 #[inline]
-fn addressing_of(k: &DiagKey) -> (u8, u32, u32, bool) {
-    (k.0, k.1, k.2, k.3)
+fn addressing_of(k: &DiagKey) -> (u8, u32, u32, bool, Option<u8>) {
+    (
+        k.bus_id,
+        k.request_id,
+        k.response_id,
+        k.is_extended_id,
+        k.rx_addr,
+    )
 }
 
 struct DiagEntry {
@@ -77,17 +120,14 @@ impl DiagEntry {
 pub(crate) struct DiagSessionMap(Mutex<HashMap<DiagKey, DiagEntry>>);
 
 impl DiagSessionMap {
-    /// A VALID (open tap) session on the physical addressing `(bus, request, response, ext)`,
-    /// whatever its other settings. Used by ECU discovery's identify step so it never opens a
+    /// A VALID (open tap) session on the physical addressing of `config`
+    /// (`(bus, request, response, ext, response address byte)`), whatever its other settings. Used by ECU discovery's identify step so it never opens a
     /// second client (double Flow Control) next to a user session on the same ids.
     pub(super) fn valid_for_addressing(
         &self,
-        bus_id: u8,
-        request_id: u32,
-        response_id: u32,
-        extended: bool,
+        config: &DiagSessionConfigDto,
     ) -> Option<Arc<UdsSession>> {
-        let want = (bus_id, request_id, response_id, extended);
+        let want = addressing_of(&diag_key(config));
         self.0
             .lock()
             .iter()
@@ -168,6 +208,8 @@ fn validate_config(c: &DiagSessionConfigDto) -> Result<(), DiagError> {
     if c.p2_margin_ms > 60_000 {
         return Err(invalid("p2MarginMs must be <= 60000"));
     }
+    // Address format rules (address bytes present, 29-bit id forms).
+    session_address_bytes(c)?;
     Ok(())
 }
 
@@ -336,6 +378,14 @@ impl PipelineEngine {
             old.session.close();
         }
         result
+    }
+
+    /// [`Self::diag_session`] for sibling command modules (0x19 reports, sweeps).
+    pub(super) fn diag_session_for(
+        &self,
+        config: &DiagSessionConfigDto,
+    ) -> Result<Arc<UdsSession>, DiagError> {
+        self.diag_session(config)
     }
 
     /// Existing entry (valid or invalidated) without opening anything.
@@ -567,6 +617,88 @@ mod tests {
         let mut c = cfg();
         c.p2_margin_ms = 250;
         assert_ne!(diag_key(&a), diag_key(&c));
+    }
+
+    #[test]
+    fn key_includes_address_format_and_effective_address_bytes() {
+        let normal = cfg();
+        let ext = |ta: u8, rx: u8| DiagSessionConfigDto {
+            address_format: AddressFormatDto::Extended,
+            target_address: Some(ta),
+            response_address: Some(rx),
+            ..cfg()
+        };
+        // Sessions differing ONLY in the address fields no longer collide.
+        assert_ne!(diag_key(&normal), diag_key(&ext(0x10, 0xF1)));
+        assert_ne!(diag_key(&ext(0x10, 0xF1)), diag_key(&ext(0x11, 0xF1)));
+        assert_ne!(diag_key(&ext(0x10, 0xF1)), diag_key(&ext(0x10, 0xF2)));
+        let mixed = DiagSessionConfigDto {
+            address_format: AddressFormatDto::Mixed,
+            target_address: Some(0x55),
+            ..cfg()
+        };
+        assert_ne!(diag_key(&normal), diag_key(&mixed));
+        // Mixed: the response byte defaults to the target byte (same wire behaviour, same key).
+        let mixed_explicit = DiagSessionConfigDto {
+            response_address: Some(0x55),
+            ..mixed.clone()
+        };
+        assert_eq!(diag_key(&mixed), diag_key(&mixed_explicit));
+        // Normal: address bytes are ignored on the wire, so they do not split the key.
+        let normal_noise = DiagSessionConfigDto {
+            target_address: Some(0x10),
+            response_address: Some(0xF1),
+            ..cfg()
+        };
+        assert_eq!(diag_key(&normal), diag_key(&normal_noise));
+
+        // Physical addressing: same CAN ids + same response byte conflict (both would take the
+        // ECU frames), another response byte does not.
+        assert_eq!(
+            addressing_of(&diag_key(&ext(0x10, 0xF1))),
+            addressing_of(&diag_key(&ext(0x11, 0xF1)))
+        );
+        assert_ne!(
+            addressing_of(&diag_key(&ext(0x10, 0xF1))),
+            addressing_of(&diag_key(&ext(0x10, 0xF2)))
+        );
+        assert_ne!(
+            addressing_of(&diag_key(&normal)),
+            addressing_of(&diag_key(&ext(0x10, 0xF1)))
+        );
+        let fixed = |f| DiagSessionConfigDto {
+            is_extended_id: true,
+            request_id: 0x18DA_10F1,
+            response_id: 0x18DA_F110,
+            address_format: f,
+            ..cfg()
+        };
+        assert_ne!(
+            diag_key(&fixed(AddressFormatDto::Normal)),
+            diag_key(&fixed(AddressFormatDto::NormalFixed))
+        );
+        assert_eq!(
+            addressing_of(&diag_key(&fixed(AddressFormatDto::Normal))),
+            addressing_of(&diag_key(&fixed(AddressFormatDto::NormalFixed))),
+            "same bytes on the wire"
+        );
+    }
+
+    #[test]
+    fn config_validation_checks_address_format() {
+        let mut c = cfg();
+        c.address_format = AddressFormatDto::Extended;
+        c.target_address = Some(0x10);
+        assert_eq!(
+            validate_config(&c).unwrap_err().code,
+            DiagErrorCode::InvalidInput,
+            "extended needs responseAddress"
+        );
+        c.response_address = Some(0xF1);
+        assert!(validate_config(&c).is_ok());
+        let mut c = cfg();
+        c.address_format = AddressFormatDto::NormalFixed;
+        assert!(validate_config(&c).is_err(), "normalFixed needs 29-bit ids");
     }
 
     #[test]

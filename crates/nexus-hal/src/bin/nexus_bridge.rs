@@ -30,8 +30,8 @@ use axum::{
 };
 use nexus_hal::{
     dto::{
-        ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto, StartTraceReplayArgsDto,
-        TraceReplayControlArgsDto,
+        ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto, PhysicalSweepRequestDto,
+        StartTraceReplayArgsDto, TraceReplayControlArgsDto,
     },
     pipeline::PipelineEngine,
 };
@@ -576,6 +576,31 @@ struct DiagConversationArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct DiagReadDtcReportArgs {
+    config: DiagSessionConfigDto,
+    #[serde(alias = "sub_function")]
+    sub_function: u8,
+    #[serde(default)]
+    params: Vec<u8>,
+    #[serde(default)]
+    options: Option<UdsRequestOptionsDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagBusArgs {
+    #[serde(alias = "bus_id")]
+    bus_id: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagPhysicalSweepArgs {
+    request: PhysicalSweepRequestDto,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DiagDiscoverEcusArgs {
     request: EcuDiscoveryRequestDto,
 }
@@ -696,6 +721,35 @@ async fn handle_diag_invoke(
             let a = args!(DiagDiscoverEcusArgs);
             run_diag(engine, move |e| e.cmd_diag_discover_ecus(a.request)).await
         }
+        "cmd_diag_passive_discovery_start" => {
+            let a = args!(DiagBusArgs);
+            run_diag(engine, move |e| {
+                e.cmd_diag_passive_discovery_start(a.bus_id)
+            })
+            .await
+        }
+        "cmd_diag_passive_discovery_snapshot" => {
+            let a = args!(DiagBusArgs);
+            run_diag(engine, move |e| {
+                e.cmd_diag_passive_discovery_snapshot(a.bus_id)
+            })
+            .await
+        }
+        "cmd_diag_passive_discovery_stop" => {
+            let a = args!(DiagBusArgs);
+            run_diag(engine, move |e| e.cmd_diag_passive_discovery_stop(a.bus_id)).await
+        }
+        "cmd_diag_physical_sweep" => {
+            let a = args!(DiagPhysicalSweepArgs);
+            run_diag(engine, move |e| e.cmd_diag_physical_sweep(a.request)).await
+        }
+        "cmd_diag_read_dtc_report" => {
+            let a = args!(DiagReadDtcReportArgs);
+            run_diag(engine, move |e| {
+                e.cmd_diag_read_dtc_report(a.config, a.sub_function, a.params, a.options)
+            })
+            .await
+        }
         _ => return None,
     };
     Some(resp)
@@ -723,6 +777,20 @@ fn build_router(engine: Arc<PipelineEngine>, security: Arc<BridgeSecurity>) -> R
         .with_state(state)
 }
 
+/// Binds `bind_addr`, then writes `token` to `token_path`. A failed bind leaves the token file
+/// untouched (it belongs to the bridge that holds the port).
+async fn bind_then_write_token(
+    bind_addr: SocketAddr,
+    token_path: &FsPath,
+    token: &str,
+) -> Result<tokio::net::TcpListener, String> {
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .map_err(|e| format!("cannot bind {bind_addr}: {e} (token file left unchanged)"))?;
+    write_token_file(token_path, token)?;
+    Ok(listener)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind_addr: SocketAddr = std::env::var("NEXUS_BRIDGE_ADDR")
@@ -737,14 +805,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let token = resolve_token(std::env::var("NEXUS_BRIDGE_TOKEN").ok())?;
     let token_path = token_file_path()?;
-    write_token_file(&token_path, &token)?;
+    // Bind BEFORE publishing the token: a second instance on a busy port must not overwrite
+    // the running bridge's token file (its UI session would get 401).
+    let listener = bind_then_write_token(bind_addr, &token_path, &token).await?;
     let extra_origins = std::env::var("NEXUS_BRIDGE_ALLOWED_ORIGINS").unwrap_or_default();
     let security = Arc::new(BridgeSecurity::new(token, &extra_origins, bind_addr));
 
     let engine = Arc::new(PipelineEngine::new());
     let app = build_router(Arc::clone(&engine), Arc::clone(&security));
 
-    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     println!("NexusCAN Bridge listening on http://{bind_addr} (WS: ws://{bind_addr}/ws/telemetry)");
     println!("Bridge auth token written to {}", token_path.display());
     println!("Allowed origins: {}", security.allowed_origins.join(", "));
@@ -1370,6 +1439,31 @@ mod tests {
 
     // ─── WP-1 end-to-end over a real socket (raw HTTP / WebSocket) ──────────
 
+    #[tokio::test]
+    async fn busy_port_leaves_running_bridges_token_file_unchanged() {
+        let dir = std::env::temp_dir().join(format!("nexuscan-bindtest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("bridge.token");
+        // "Running bridge": holds the port and published its token.
+        let first = bind_then_write_token("127.0.0.1:0".parse().unwrap(), &path, "running-token")
+            .await
+            .expect("first instance");
+        let busy = first.local_addr().expect("addr");
+        // Second instance on the same port: bind fails, token file untouched.
+        let err = bind_then_write_token(busy, &path, "intruder-token")
+            .await
+            .unwrap_err();
+        assert!(err.contains("token file left unchanged"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "running-token");
+        drop(first);
+        // A free port publishes the new token.
+        let _ok = bind_then_write_token("127.0.0.1:0".parse().unwrap(), &path, "next-token")
+            .await
+            .expect("free port");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "next-token");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     async fn spawn_server() -> SocketAddr {
         let engine = Arc::new(PipelineEngine::new());
         let app = build_router(engine, test_security());
@@ -1828,6 +1922,83 @@ mod tests {
             &engine,
             "cmd_diag_discover_ecus",
             r#"{"request":{"busId":0,"isExtendedId":false,"functionalId":2014,"requestPdu":[62,128]}}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("[diag:invalid_input] "));
+
+        // 0x19 report: same gate and wire format; bad reportType / params → invalid_input.
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_read_dtc_report",
+            &format!(r#"{{"config":{cfg},"subFunction":2,"params":[255]}}"#),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().starts_with("[diag:disarmed] "));
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_read_dtc_report",
+            &format!(r#"{{"config":{cfg},"subFunction":5}}"#),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("[diag:invalid_input] "));
+
+        // Passive discovery: works on the connected (disarmed) bus, never sends.
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_passive_discovery_start",
+            r#"{"busId":0}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["running"], true);
+        assert_eq!(v["maxPairs"], 512);
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_passive_discovery_snapshot",
+            r#"{"busId":0}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(v["pairs"].is_array());
+        let (st, v) =
+            call_invoke(&engine, "cmd_diag_passive_discovery_stop", r#"{"busId":0}"#).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["running"], false);
+        assert_eq!(v["stopReason"], "stopped by user");
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_passive_discovery_start",
+            r#"{"busId":9}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("[diag:bus_not_connected] "));
+
+        // Physical sweep: `{ request: {...} }`, refused up front on a disarmed bus.
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_physical_sweep",
+            r#"{"request":{"busId":0,"isExtendedId":false,"requestIdRange":{"start":1536,"end":1539},"responseIdFilters":[{"id":1600,"mask":1984}]}}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().starts_with("[diag:disarmed] "));
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_diag_physical_sweep",
+            r#"{"request":{"busId":0,"isExtendedId":false}}"#,
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);

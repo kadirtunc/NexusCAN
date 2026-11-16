@@ -4,7 +4,10 @@
 
 pub mod blf;
 pub mod diag_discovery;
+pub mod diag_dtc;
+pub mod diag_passive;
 pub mod diag_session;
+pub mod diag_sweep;
 pub mod diag_tap;
 pub mod replay;
 pub mod state_table;
@@ -212,6 +215,10 @@ pub struct PipelineEngine {
     scheduler_join: Mutex<Option<JoinHandle<()>>>,
     /// D-003 diag session manager (`cmd_diag_*`), see [`diag_session`].
     diag_sessions: diag_session::DiagSessionMap,
+    /// Passive (TX-free) ECU discovery scans by bus, see [`diag_passive`].
+    diag_passive: diag_passive::PassiveScanMap,
+    /// Buses with a physical sweep in progress, see [`diag_sweep`].
+    diag_sweeps: diag_sweep::SweepGuardSet,
 }
 
 impl Default for PipelineEngine {
@@ -338,6 +345,8 @@ impl PipelineEngine {
             aggregator_join: Mutex::new(Some(aggregator_handle)),
             scheduler_join: Mutex::new(Some(scheduler_handle)),
             diag_sessions: diag_session::DiagSessionMap::default(),
+            diag_passive: diag_passive::PassiveScanMap::default(),
+            diag_sweeps: diag_sweep::SweepGuardSet::default(),
         }
     }
 
@@ -1796,8 +1805,9 @@ impl PipelineEngine {
 
 impl Drop for PipelineEngine {
     fn drop(&mut self) {
-        // Stop UDS sessions (keepalive threads) before their buses go away.
+        // Stop UDS sessions (keepalive threads) and passive scans before their buses go away.
         self.diag_sessions.clear();
+        self.diag_passive.stop_all();
         self.engine_stop.store(true, Ordering::Release);
         self.replay.shutdown();
         {
