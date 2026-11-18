@@ -42,13 +42,26 @@ pub fn run() {
             // The main window is declared with `"create": false` and built only after
             // `AppState` is managed, so no IPC call can observe a missing state.
             for window_config in app.config().app.windows.clone() {
-                WebviewWindowBuilder::from_config(app.handle(), &window_config)?.build()?;
+                let is_main = window_config.label == "main";
+                let win =
+                    WebviewWindowBuilder::from_config(app.handle(), &window_config)?.build()?;
+                if is_main {
+                    let app_handle = app.handle().clone();
+                    win.on_window_event(move |event| {
+                        if matches!(event, tauri::WindowEvent::Destroyed) {
+                            if let Some(dbg_win) = app_handle.get_webview_window("debug-console") {
+                                let _ = dbg_win.close();
+                            }
+                        }
+                    });
+                }
             }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::cmd_list_devices,
             commands::cmd_probe_drivers,
+            commands::cmd_subscribe_hardware_changes,
             commands::cmd_connect_bus,
             commands::cmd_disconnect_bus,
             commands::cmd_disconnect_all_buses,
@@ -59,6 +72,7 @@ pub fn run() {
             commands::cmd_reset_session,
             commands::cmd_seedkey_capabilities,
             commands::cmd_seedkey_compute_adhoc,
+            commands::cmd_seedkey_probe_library,
             commands::cmd_load_preset_databases,
             commands::cmd_get_preset_database_files,
             commands::cmd_parse_database_schema,
@@ -95,10 +109,27 @@ pub fn run() {
             commands::cmd_diag_discover_ecus,
             commands::cmd_diag_get_isotp_frames,
             commands::cmd_diag_read_dtc_report,
+            commands::cmd_flash_load_image,
+            commands::cmd_flash_release_image,
+            commands::cmd_flash_download,
+            commands::cmd_flash_cancel,
             commands::cmd_diag_passive_discovery_start,
             commands::cmd_diag_passive_discovery_snapshot,
             commands::cmd_diag_passive_discovery_stop,
             commands::cmd_diag_physical_sweep,
+            commands::cmd_subscribe_debug_events,
+            commands::cmd_append_debug_event,
+            commands::cmd_clear_debug_events,
+            commands::cmd_export_debug_events,
+            commands::cmd_set_debug_window_open,
+            commands::cmd_flowlib_list,
+            commands::cmd_flowlib_revisions,
+            commands::cmd_flowlib_load,
+            commands::cmd_flowlib_save,
+            commands::cmd_flowlib_delete,
+            commands::cmd_run_append,
+            commands::cmd_run_query,
+            commands::cmd_run_latest,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexusCAN Tauri application");

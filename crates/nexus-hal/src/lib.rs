@@ -4,19 +4,41 @@
 //! Linux native `SocketCAN` (`can*`, `vcan*`, `slcan*`), cross-OS synthetic multi-mux `mock0`,
 //! and lock-free 60Hz `StateTable` Telemetry Pipeline for NexusCAN.
 
-#![forbid(unsafe_code)]
+// `deny` (not `forbid`) so that `drivers::pcan_drv` alone can opt in to the runtime FFI it
+// needs for PEAK PCAN-Basic (`#![allow(unsafe_code)]` there). Every other module stays safe.
+#![deny(unsafe_code)]
 
+pub mod debug_log;
 pub mod drivers;
 pub mod dto;
 pub mod error;
+pub mod error_frame;
+pub mod flowlib;
 pub mod pipeline;
 pub mod registry;
+pub mod runstore;
 pub mod seedkey;
 pub mod storage;
 pub mod traits;
 
+pub use debug_log::{DebugEventHub, BURST_COALESCE_WINDOW_MS, DEBUG_RING_CAPACITY};
+
+pub use drivers::gs_usb_drv::{
+    compute_gs_usb_bittiming, decode_gs_host_frame, encode_gs_host_frame, resolve_gs_usb_candidate,
+    usb_device_location_info, GsBtCapabilities, GsDecodedPacket, GsDeviceConfig, GsUsbBitTiming,
+    GsUsbChannel, GsUsbDriver, GsUsbTargetCandidate, CANDLELIGHT_USB_IDS, GS_MAX_WIRE_FRAME_LEN,
+    GS_USB_ECHO_ID_RX, STM32_DFU_USB_ID,
+};
 pub use drivers::mock_drv::{MockCanChannel, MockCanDriver, MOCK0_DEVICE_ID, MOCK1_DEVICE_ID};
-pub use drivers::probe::{probe_all_drivers, GsUsbDriver, KvaserDriver, PcanDriver};
+pub use drivers::pcan_drv::{
+    open_pcan_channel, pcan_btr0btr1_for_bitrate, pcan_channel_handle_from_name,
+    pcan_channel_name_from_handle, pcan_enumerate_attached, pcan_fd_timing, PcanAttachedChannel,
+    PcanChannel, PcanFdTiming,
+};
+pub use drivers::probe::{
+    inspect_pe_dll_file, parse_pe_machine_type, probe_all_drivers, probe_host_environment,
+    scan_usb_can_devices, KvaserDriver, PcanDriver, PeArchitecture, VectorXlDriver,
+};
 pub use drivers::slcan_drv::{
     discover_serial_ports, encode_slcan_frame, parse_slcan_line, slcan_bitrate_command,
     slcan_init_sequence, SlcanChannel, SlcanDriver, MAX_SLCAN_ASCII_LEN,
@@ -24,14 +46,21 @@ pub use drivers::slcan_drv::{
 #[cfg(target_os = "linux")]
 pub use drivers::socketcan_drv::{SocketCanChannel, SocketCanDriver};
 pub use dto::{
-    AdapterCapabilitiesDto, BusHealthDto, ChannelConfigDto, ChronologicalFrameDto,
-    DeviceDescriptorDto, DriverFamilyStatusDto, DriverProbeReportDto, DtcReportResultDto,
-    FrameTelemetryDto, IdRangeDto, LiveSignalDto, PanicStopResultDto, PassiveConfidenceDto,
+    AdapterCapabilitiesDto, AppendDebugEventInputDto, BusHealthDto, ChannelConfigDto,
+    ChronologicalFrameDto, DebugEventBatchDto, DebugEventDto, DebugWindowStateDto,
+    DetectedChannelDetailDto, DeviceDescriptorDto, DriverFamilyStatusDto, DriverProbeReportDto,
+    DtcReportResultDto, FrameTelemetryDto, HardwareWatchEventDto, HostEnvironmentDto, IdRangeDto,
+    LiveSignalDto, OsSetupStepDto, PanicStopResultDto, PassiveConfidenceDto,
     PassiveDiscoverySnapshotDto, PassiveEcuPairDto, PeriodicTxJobDto, PhysicalSweepRequestDto,
     PhysicalSweepResultDto, ProjectSummaryDto, ResetSessionResultDto, SerialPortInfoDto,
-    SweepResponderDto, TelemetrySnapshotDto, TxTransmitResultDto,
+    SweepResponderDto, TelemetrySnapshotDto, TxTransmitResultDto, UsbCanDeviceDto,
 };
 pub use error::{AdapterError, HalError, HW_LISTEN_ONLY_UNAVAILABLE_PREFIX};
+pub use error_frame::{
+    decode_can_error_summary, extract_bus_health_from_error_frame, CAN_ERR_ACK, CAN_ERR_BUSERROR,
+    CAN_ERR_BUSOFF, CAN_ERR_CNT, CAN_ERR_CRTL, CAN_ERR_LOSTARB, CAN_ERR_PROT, CAN_ERR_RESTARTED,
+    CAN_ERR_TRX, CAN_ERR_TX_TIMEOUT,
+};
 pub use pipeline::{
     sanitize_project_stem,
     state_table::{
@@ -821,11 +850,15 @@ mod tests {
         assert_eq!(snap_reset.fps_tx, 0.0);
 
         // 2. Dual-bus simultaneous mock0 (Bus 0) + mock1 (Bus 1), DB clear, and bulk disconnect
-        let tmp_projects = std::env::temp_dir().join(format!(
-            "nexuscan-hal-wave2-projects-{}",
-            std::process::id()
+        // Isolated parent: `logs/` (and lazily `flowlib/` / `runs/`) are siblings of
+        // `projects/`, never directly under the shared temp dir.
+        let tmp_root = std::env::temp_dir().join(format!(
+            "nexuscan-hal-wave2-{}-{}",
+            std::process::id(),
+            nexus_core::now_monotonic_us()
         ));
-        let _ = std::fs::remove_dir_all(&tmp_projects);
+        let tmp_projects = tmp_root.join("projects");
+        let _ = std::fs::remove_dir_all(&tmp_root);
 
         let engine = PipelineEngine::with_projects_dir(
             DriverRegistry::with_builtin_drivers(),
@@ -933,7 +966,7 @@ mod tests {
             1
         );
 
-        let _ = std::fs::remove_dir_all(&tmp_projects);
+        let _ = std::fs::remove_dir_all(&tmp_root);
     }
 
     #[test]
@@ -1015,7 +1048,7 @@ mod tests {
         // 3. Cross-OS Driver Probe Report & helpful missing-driver diagnostics
         let engine = PipelineEngine::new();
         let report = engine.cmd_probe_drivers();
-        assert_eq!(report.families.len(), 6);
+        assert_eq!(report.families.len(), 7);
 
         let mock_fam = report
             .families
@@ -1221,5 +1254,469 @@ mod tests {
                 engine.cmd_disconnect_bus(2).expect("disconnect vcan0");
             }
         }
+    }
+
+    #[test]
+    fn gs_usb_bittiming_solver_48mhz_80mhz_160mhz_nominal_and_canfd() {
+        // 1. 48 MHz STM32F042 / STM32F072 (CANable 1.0 / candleLight bxCAN: tseg1 1..=16, tseg2 1..=8, sjw 1..=4, brp 1..=1024)
+        for &rate in &[125_000u32, 250_000, 500_000, 1_000_000] {
+            let bt = compute_gs_usb_bittiming(48_000_000, rate, 1, 16, 1, 8, 4, 1, 1024, 1, 875)
+                .unwrap_or_else(|e| panic!("48MHz {rate} bps failed: {e}"));
+            assert_eq!(bt.actual_bitrate, rate, "48MHz exact bitrate at {rate}");
+            assert_eq!(
+                bt.sample_point_permille, 875,
+                "48MHz exact 87.5% sample point at {rate}"
+            );
+            let tseg1 = bt.prop_seg + bt.phase_seg1;
+            assert!((1..=16).contains(&tseg1));
+            assert!((1..=8).contains(&bt.phase_seg2));
+            assert!((1..=4).contains(&bt.sjw));
+            assert_eq!(48_000_000 / (bt.brp * (1 + tseg1 + bt.phase_seg2)), rate);
+            assert_eq!(bt.to_le_bytes().len(), 20);
+        }
+
+        // 2. 80 MHz & 160 MHz STM32G431 (CANable 2.0 / candleLight FD FDCAN)
+        //    Nominal: tseg1 1..=256, tseg2 1..=128, sjw 1..=128, brp 1..=512 (87.5% SP)
+        //    Data FD: dtseg1 1..=32, dtseg2 1..=16, dsjw 1..=16, dbrp 1..=32 (75.0% SP)
+        for &fclk in &[80_000_000u32, 160_000_000] {
+            for &nom_rate in &[125_000u32, 250_000, 500_000, 1_000_000] {
+                let bt =
+                    compute_gs_usb_bittiming(fclk, nom_rate, 1, 256, 1, 128, 128, 1, 512, 1, 875)
+                        .unwrap_or_else(|e| panic!("{fclk}Hz nominal {nom_rate} failed: {e}"));
+                assert_eq!(bt.actual_bitrate, nom_rate);
+                assert_eq!(bt.sample_point_permille, 875);
+                let tseg1 = bt.prop_seg + bt.phase_seg1;
+                assert!((1..=256).contains(&tseg1));
+                assert!((1..=128).contains(&bt.phase_seg2));
+            }
+
+            for &fd_rate in &[2_000_000u32, 5_000_000] {
+                let dbt = compute_gs_usb_bittiming(fclk, fd_rate, 1, 32, 1, 16, 16, 1, 32, 1, 750)
+                    .unwrap_or_else(|e| panic!("{fclk}Hz FD data {fd_rate} failed: {e}"));
+                assert_eq!(dbt.actual_bitrate, fd_rate);
+                assert_eq!(dbt.sample_point_permille, 750);
+                let dtseg1 = dbt.prop_seg + dbt.phase_seg1;
+                assert!((1..=32).contains(&dtseg1));
+                assert!((1..=16).contains(&dbt.phase_seg2));
+                assert!((1..=16).contains(&dbt.sjw));
+            }
+        }
+    }
+
+    #[test]
+    fn gs_host_frame_classical_and_canfd_64b_brs_esi_rtr_roundtrip() {
+        assert_eq!(core::mem::size_of::<RawCanFrame>(), 80);
+
+        let mut wire = [0u8; GS_MAX_WIRE_FRAME_LEN];
+
+        // 1. Classical 11-bit frame + TX echo vs RX marker (`0xFFFF_FFFF`) + 24-byte HW timestamp
+        let std_tx = RawCanFrame::new_classical(
+            1,
+            CanIdKey::Standard(0x123),
+            &[0x11, 0x22, 0x33, 0x44, 0x55],
+            999,
+        )
+        .expect("std classical");
+        let n_tx = encode_gs_host_frame(&std_tx, 0, 7, &mut wire).expect("encode std");
+        assert_eq!(n_tx, 20);
+
+        // When echo_id != 0xFFFF_FFFF, decoder classifies as TxEcho so self-echoes never duplicate RX!
+        let echo_evt =
+            decode_gs_host_frame(&wire[..n_tx], 1, false, 5_000).expect("decode tx echo");
+        assert_eq!(
+            echo_evt,
+            GsDecodedPacket::TxEcho {
+                channel: 0,
+                echo_id: 7
+            }
+        );
+
+        // Stamp RX echo_id = 0xFFFF_FFFF + 4-byte hardware timestamp (24 bytes total)
+        let mut rx_wire_24 = [0u8; 24];
+        rx_wire_24[..20].copy_from_slice(&wire[..20]);
+        rx_wire_24[0..4].copy_from_slice(&GS_USB_ECHO_ID_RX.to_le_bytes());
+        rx_wire_24[20..24].copy_from_slice(&123_456_789u32.to_le_bytes());
+
+        let GsDecodedPacket::RxFrame {
+            channel,
+            frame: rx_std,
+            overflow,
+            raw_hw_ts_us,
+        } = decode_gs_host_frame(&rx_wire_24, 3, true, 5_000).expect("decode classical rx")
+        else {
+            panic!("expected RxFrame");
+        };
+        assert_eq!(channel, 0);
+        assert!(!overflow);
+        assert_eq!(raw_hw_ts_us, Some(123_456_789));
+        assert_eq!(rx_std.bus_id, 3);
+        assert_eq!(rx_std.arb_id, 0x123);
+        assert!(!rx_std.is_extended());
+        assert!(!rx_std.is_fd());
+        assert!(rx_std.has_hw_timestamp());
+        assert_eq!(rx_std.timestamp_us, 123_456_789);
+        assert_eq!(rx_std.payload(), &[0x11, 0x22, 0x33, 0x44, 0x55]);
+
+        // 2. Extended 29-bit RTR frame roundtrip
+        let rtr_tx =
+            RawCanFrame::new_rtr(0, CanIdKey::Extended(0x18EA_00F9), 8, 2_000).expect("ext rtr");
+        let n_rtr =
+            encode_gs_host_frame(&rtr_tx, 1, GS_USB_ECHO_ID_RX, &mut wire).expect("encode rtr");
+        assert_eq!(n_rtr, 20);
+        let GsDecodedPacket::RxFrame {
+            channel: ch_rtr,
+            frame: rx_rtr,
+            ..
+        } = decode_gs_host_frame(&wire[..n_rtr], 0, false, 7_777).expect("decode rtr")
+        else {
+            panic!("expected RTR RxFrame");
+        };
+        assert_eq!(ch_rtr, 1);
+        assert!(rx_rtr.is_extended());
+        assert!(rx_rtr.is_rtr());
+        assert!(!rx_rtr.is_fd());
+        assert_eq!(rx_rtr.arb_id, 0x18EA_00F9);
+        assert_eq!(rx_rtr.dlc, 8);
+        assert_eq!(rx_rtr.timestamp_us, 7_777);
+
+        // 3. 64-byte Extended CAN-FD + BRS + ESI + 80-byte HW timestamp roundtrip
+        let mut fd_payload = [0u8; 64];
+        for (i, b) in fd_payload.iter_mut().enumerate() {
+            *b = (i as u8) ^ 0xA5;
+        }
+        let fd_tx = RawCanFrame::new_fd(
+            2,
+            CanIdKey::Extended(0x18DA_F110),
+            &fd_payload,
+            true,
+            10_000,
+        )
+        .expect("64B CAN-FD")
+        .with_flags(nexus_core::FLAG_ESI);
+
+        let n_fd =
+            encode_gs_host_frame(&fd_tx, 0, GS_USB_ECHO_ID_RX, &mut wire).expect("encode 64B fd");
+        assert_eq!(n_fd, 76);
+        assert_eq!(wire[8], 15, "64-byte CAN-FD must encode as DLC nibble 15");
+
+        let mut fd_wire_80 = [0u8; 80];
+        fd_wire_80[..76].copy_from_slice(&wire[..76]);
+        fd_wire_80[76..80].copy_from_slice(&987_654_321u32.to_le_bytes());
+
+        let GsDecodedPacket::RxFrame { frame: rx_fd, .. } =
+            decode_gs_host_frame(&fd_wire_80, 2, true, 1).expect("decode 64B fd")
+        else {
+            panic!("expected 64B FD RxFrame");
+        };
+        assert!(rx_fd.is_extended());
+        assert!(rx_fd.is_fd());
+        assert!(rx_fd.is_brs());
+        assert!(rx_fd.is_esi());
+        assert!(rx_fd.has_hw_timestamp());
+        assert_eq!(rx_fd.timestamp_us, 987_654_321);
+        assert_eq!(rx_fd.arb_id, 0x18DA_F110);
+        assert_eq!(rx_fd.dlc, 64);
+        assert_eq!(rx_fd.payload(), &fd_payload);
+    }
+
+    #[test]
+    fn pe_header_architecture_inspector_x64_arm64_x86_and_invalid() {
+        fn build_synthetic_pe(machine: u16) -> [u8; 256] {
+            let mut buf = [0u8; 256];
+            buf[0] = b'M';
+            buf[1] = b'Z';
+            let pe_off: u32 = 0x80;
+            buf[0x3C..0x40].copy_from_slice(&pe_off.to_le_bytes());
+            buf[0x80..0x84].copy_from_slice(b"PE\0\0");
+            buf[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
+            buf
+        }
+
+        let pe_x64 = build_synthetic_pe(0x8664);
+        assert_eq!(parse_pe_machine_type(&pe_x64), Ok(PeArchitecture::X86_64));
+
+        let pe_arm64 = build_synthetic_pe(0xAA64);
+        assert_eq!(parse_pe_machine_type(&pe_arm64), Ok(PeArchitecture::Arm64));
+
+        let pe_x86 = build_synthetic_pe(0x014C);
+        assert_eq!(parse_pe_machine_type(&pe_x86), Ok(PeArchitecture::I386));
+        assert_eq!(PeArchitecture::I386.label(), "32-bit (x86, PE 0x014C)");
+
+        // Invalid / truncated inputs must never panic (`#![forbid(unsafe_code)]`)
+        assert!(parse_pe_machine_type(&[]).is_err());
+        assert!(parse_pe_machine_type(&[b'M', b'Z', 0, 1]).is_err());
+        let mut elf_bytes = [0u8; 128];
+        elf_bytes[..4].copy_from_slice(b"\x7FELF");
+        assert!(parse_pe_machine_type(&elf_bytes).is_err());
+
+        let mut bad_offset = build_synthetic_pe(0x8664);
+        bad_offset[0x3C..0x40].copy_from_slice(&4096u32.to_le_bytes());
+        assert!(parse_pe_machine_type(&bad_offset).is_err());
+    }
+
+    #[test]
+    fn cross_os_probe_report_all_7_families_host_env_and_vector_xl() {
+        let report = probe_all_drivers();
+        assert_eq!(report.families.len(), 7);
+        assert!(!report.host_env.os.is_empty());
+        assert!(!report.host_env.arch.is_empty());
+        assert!(!report.host_env.native_stacks.is_empty());
+        assert!(!report.host_env.os_notes.is_empty());
+
+        let expected_ids = [
+            "socketcan",
+            "gs_usb",
+            "slcan",
+            "pcan",
+            "kvaser",
+            "vector_xl",
+            "mock",
+        ];
+        for fam_id in expected_ids {
+            let fam = report
+                .families
+                .iter()
+                .find(|f| f.family_id == fam_id)
+                .unwrap_or_else(|| panic!("missing driver family '{fam_id}'"));
+            assert!(
+                !fam.os_source_locations.is_empty(),
+                "family '{fam_id}' must provide non-empty os_source_locations"
+            );
+            assert!(
+                !fam.setup_steps.is_empty(),
+                "family '{fam_id}' must provide non-empty setup_steps"
+            );
+        }
+
+        // Verify CANDLELIGHT_USB_IDS & STM32_DFU_USB_ID coverage
+        assert_eq!(CANDLELIGHT_USB_IDS.len(), 5);
+        assert_eq!(STM32_DFU_USB_ID, (0x0483, 0xDF11));
+
+        // Verify VectorXlDriver is registered in DriverRegistry & open_by_device_id
+        let engine = PipelineEngine::new();
+        let vec_fam = report
+            .families
+            .iter()
+            .find(|f| f.family_id == "vector_xl")
+            .expect("vector_xl family");
+        if !vec_fam.installed {
+            let err = engine
+                .cmd_connect_bus("vector_xl:0".to_string(), ChannelConfigDto::default())
+                .expect_err("uninstalled/unsupported Vector XL must fail cleanly");
+            assert!(
+                err.to_string().contains("Vector XL"),
+                "unexpected Vector XL error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn hardware_watcher_lazy_start_sub_25ms_shutdown_and_error_trace_roundtrip() {
+        let engine = PipelineEngine::new();
+        let _rx = engine.subscribe_hardware_changes();
+        let initial = engine.snapshot_hardware_state("initial");
+        assert_eq!(initial.reason, "initial");
+        assert!(initial.timestamp_ms > 0);
+        assert!(initial
+            .devices
+            .iter()
+            .any(|d| d.device_id == MOCK0_DEVICE_ID));
+        assert_eq!(initial.report.families.len(), 7);
+
+        // Verify error frames survive candump `.log`, Vector `.asc`, PCAN `.trc`, `.csv`, and `.blf`!
+        let candump_err = "(1700000000.100000) can0 2000000C#0020881900008800\n\
+                           (1700000000.105000) can0 00C#1122334455667788\n";
+        let loaded_log = engine
+            .cmd_parse_trace_content(
+                "bus_err.log".to_string(),
+                Some(candump_err.to_string()),
+                None,
+            )
+            .expect("parse candump log with CAN_ERR_FLAG");
+        assert_eq!(loaded_log.frames.len(), 2);
+        assert!(loaded_log.frames[0].is_error);
+        assert_eq!(loaded_log.frames[0].arb_id, 0x00C);
+        assert_eq!(loaded_log.frames[0].message_key, "ERR:0x0000000C");
+        assert!(loaded_log.frames[0]
+            .error_summary
+            .as_deref()
+            .unwrap_or("")
+            .contains("@ACK-Slot"));
+        assert!(!loaded_log.frames[1].is_error);
+        assert_eq!(loaded_log.frames[1].message_key, "STD:0x00C");
+
+        // Roundtrip through Vector `.blf` (`BLF_OBJ_CAN_ERROR_EXT = 73`)
+        let blf_b64 = engine
+            .cmd_export_trace_blf("bus_err.blf".to_string(), loaded_log.frames.clone())
+            .expect("encode BLF with error frame");
+        let loaded_blf = engine
+            .cmd_parse_trace_content("bus_err.blf".to_string(), None, Some(blf_b64))
+            .expect("decode BLF with error frame");
+        assert_eq!(loaded_blf.frames.len(), 2);
+        assert!(loaded_blf.frames[0].is_error);
+        assert_eq!(loaded_blf.frames[0].arb_id, 0x00C);
+        assert_eq!(loaded_blf.frames[0].message_key, "ERR:0x0000000C");
+        assert!(loaded_blf.frames[0]
+            .error_summary
+            .as_deref()
+            .unwrap_or("")
+            .contains("TEC=136 REC=0"));
+        assert!(!loaded_blf.frames[1].is_error);
+        assert_eq!(loaded_blf.frames[1].message_key, "STD:0x00C");
+
+        // Verify clean < 25ms shutdown even with OS USB hotplug + topology watcher active!
+        thread::sleep(Duration::from_millis(10));
+        let t_drop = Instant::now();
+        drop(_rx);
+        drop(engine);
+        assert!(
+            t_drop.elapsed() < Duration::from_millis(25),
+            "PipelineEngine drop with active hardware watchers exceeded 25ms: {:?}",
+            t_drop.elapsed()
+        );
+    }
+
+    #[test]
+    fn pipeline_engine_debug_audit_console_emits_conn_netdb_safety_tx_and_bus_err() {
+        let engine = PipelineEngine::new();
+        let mut rx = engine.subscribe_debug_events();
+
+        // 1. Initial snapshot contains `engine.started`
+        let snap0 = engine.snapshot_debug_events();
+        assert_eq!(snap0.kind, "snapshot");
+        assert!(snap0
+            .events
+            .iter()
+            .any(|e| e.category == "CONN" && e.action == "engine.started"));
+
+        // 2. NETDB preset load
+        let schema = engine.cmd_load_preset_databases().expect("load presets");
+
+        // 3. CONN failure + CONN success
+        let _ = engine.cmd_connect_bus(
+            "nonexistent:dev99".to_string(),
+            ChannelConfigDto {
+                bus_id: 0,
+                ..ChannelConfigDto::default()
+            },
+        );
+        engine
+            .cmd_connect_bus(
+                MOCK0_DEVICE_ID.to_string(),
+                ChannelConfigDto {
+                    bus_id: 0,
+                    listen_only: false,
+                    mock_fps_preset: Some(1_000),
+                    ..ChannelConfigDto::default()
+                },
+            )
+            .expect("connect mock0");
+
+        // 4. SAFETY arm + TX periodic cycle with out-of-range signal clamp
+        engine.cmd_arm_active_bus(0, true).expect("arm bus 0");
+        let rpm_sig = schema
+            .signals
+            .iter()
+            .find(|s| s.name == "MotorSpeedRpm")
+            .expect("MotorSpeedRpm signal");
+        let tx_res = engine
+            .cmd_transmit_signal_frame(
+                0,
+                0x101,
+                false,
+                vec![(rpm_sig.signal_id, 999_999.0)],
+                Some(25),
+                Some("OverspeedClampTest".to_string()),
+            )
+            .expect("transmit signal frame");
+        assert!(tx_res.job_id.is_some());
+        assert!(!tx_res.clamped_signals.is_empty());
+
+        // 5. Inject a CAN Error Frame via trace replay -> verify TRACE + coalesced BUS_ERR
+        let err_frame = ChronologicalFrameDto {
+            timestamp_us: 1_000,
+            bus_id: 0,
+            message_key: "ERR:0x0000000C".to_string(),
+            arb_id: 0x00C,
+            is_extended: false,
+            is_fd: false,
+            is_brs: false,
+            is_tx: false,
+            is_error: true,
+            error_summary: None,
+            dlc: 8,
+            raw_bytes: vec![0x00, 0x20, 0x01, 0x19, 0x00, 0x00, 0x88, 0x00],
+        };
+        engine
+            .cmd_start_trace_replay(crate::dto::StartTraceReplayArgsDto {
+                source_name: "ErrAuditTest.trc".to_string(),
+                frames: Some(vec![err_frame]),
+                ..crate::dto::StartTraceReplayArgsDto::default()
+            })
+            .expect("start replay with error frame");
+        thread::sleep(Duration::from_millis(35));
+        let _ = engine.flush_snapshot_now().expect("flush snapshot");
+
+        // 6. SAFETY Panic Stop + UI append + Window state tear-off / redock
+        let panic_res = engine.cmd_panic_stop_tx();
+        assert_eq!(panic_res.stopped_periodic_jobs, 1);
+        assert_eq!(panic_res.disarmed_buses, 1);
+
+        let ui_evt = engine.cmd_append_debug_event(AppendDebugEventInputDto {
+            severity: "info".to_string(),
+            category: "WORKBENCH".to_string(),
+            source: Some("ui".to_string()),
+            bus_id: None,
+            action: "ui.layout_switched".to_string(),
+            title: "Switched workspace tab to Diagnostics".to_string(),
+            details: None,
+        });
+        assert_eq!(ui_evt.source, "ui");
+
+        let ws_open = engine.set_debug_window_state(true, true, false);
+        assert!(ws_open.detached_open && ws_open.always_on_top);
+        let ws_redock = engine.set_debug_window_state(false, false, true);
+        assert!(!ws_redock.detached_open && ws_redock.re_dock_requested);
+
+        // Broadcast stream delivered live batches
+        assert!(rx.try_recv().is_ok());
+
+        let snap = engine.snapshot_debug_events();
+        let has_action = |cat: &str, act: &str| {
+            snap.events
+                .iter()
+                .any(|e| e.category == cat && e.action == act)
+        };
+        assert!(has_action("NETDB", "netdb.preset_loaded"));
+        assert!(has_action("CONN", "bus.connect_failed"));
+        assert!(has_action("CONN", "bus.connected"));
+        assert!(has_action("SAFETY", "safety.tx_armed"));
+        assert!(has_action("TX", "tx.signals_clamped"));
+        assert!(has_action("TX", "tx.cycle.started"));
+        assert!(has_action("TRACE", "trace.replay_started"));
+        assert!(has_action("BUS_ERR", "bus.error_frames"));
+        assert!(has_action("SAFETY", "safety.panic_stop"));
+        assert!(has_action("WORKBENCH", "ui.layout_switched"));
+
+        // Verify all 3 export formats
+        let jsonl = engine
+            .cmd_export_debug_events("jsonl".to_string())
+            .expect("export jsonl");
+        let log_txt = engine
+            .cmd_export_debug_events("log".to_string())
+            .expect("export log");
+        let csv_txt = engine
+            .cmd_export_debug_events("csv".to_string())
+            .expect("export csv");
+        assert!(jsonl.contains("\"safety.panic_stop\""));
+        assert!(log_txt.contains("[SAFETY   ]") && log_txt.contains("PANIC STOP engaged"));
+        assert!(
+            csv_txt.starts_with("seq,timestamp_iso,timestamp_ms,")
+                && csv_txt.contains("tx.signals_clamped")
+        );
+
+        engine.cmd_clear_debug_events();
+        assert_eq!(engine.snapshot_debug_events().total_buffered, 0);
+        engine.cmd_disconnect_all_buses();
     }
 }

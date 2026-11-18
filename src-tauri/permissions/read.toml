@@ -6,6 +6,7 @@ description = "Read-only state: device list / driver probe, schema and preset ca
 permissions = [
   "allow-cmd-list-devices",
   "allow-cmd-probe-drivers",
+  "allow-cmd-subscribe-hardware-changes",
   "allow-cmd-get-current-schema",
   "allow-cmd-get-preset-database-files",
   "allow-cmd-list-periodic-tx",
@@ -13,4 +14,6 @@ permissions = [
   "allow-cmd-list-traces",
   "allow-cmd-seedkey-capabilities",
   "allow-cmd-subscribe-telemetry",
+  "allow-cmd-subscribe-debug-events",
+  "allow-cmd-export-debug-events",
 ]

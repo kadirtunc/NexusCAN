@@ -15,14 +15,16 @@
 //!   in the allowlist (403). CORS is allowlist-only.
 //! * `/ws/telemetry`: Host/Origin checked at upgrade; the first client message must be
 //!   `{"type":"auth","token":"<token>"}` within 3 s, else the socket is closed with code 4401.
+//! * Native seed/key providers (`library`, `external_process`) run only for loopback TCP peers
+//!   AND `NEXUS_BRIDGE_ALLOW_NATIVE_SEEDKEY=1`; otherwise `[seedkey:native_not_allowed]`.
 
 use axum::{
     body::Bytes,
     extract::{
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
-        FromRef, Path, Request, State,
+        ConnectInfo, DefaultBodyLimit, FromRef, Path, Request, State,
     },
-    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    http::{header, Extensions, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -30,15 +32,20 @@ use axum::{
 };
 use nexus_hal::{
     dto::{
-        ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto, PhysicalSweepRequestDto,
-        StartTraceReplayArgsDto, TraceReplayControlArgsDto,
+        AppendDebugEventInputDto, ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto,
+        PhysicalSweepRequestDto, StartTraceReplayArgsDto, TraceReplayControlArgsDto,
     },
+    flowlib::FlowLibError,
+    pipeline::diag_flash::{flash_error_to_ipc, resolve_download_config, FlashLoadFormat},
     pipeline::PipelineEngine,
+    runstore::{RunQueryFilterDto, RunRecordV1, RunStoreError},
+    seedkey::SeedKeyPolicy,
 };
 use nexus_protocols::uds::dto::{
     DiagError, DiagErrorCode, DiagOrigin, DiagSessionConfigDto, EcuDiscoveryRequestDto,
     UdsRequestOptionsDto,
 };
+use nexus_protocols::uds::flash::{FirmwareError, FlashError, FlashErrorKind, FlashPhase};
 use nexus_protocols::uds::security::{KeyProviderSpecDto, SeedKeyError};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -480,6 +487,55 @@ struct SaveProjectArgs {
     project_json: String,
 }
 
+// ─── Diagnostics Workspace (diag-workspace-v1 §9 / §10) args: FlowLibCommandMap /
+// RunStoreCommandMap in src/types/flowLibrary.ts / src/types/runRecord.ts.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowLibListArgs {
+    include_deleted: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowLibIdArgs {
+    id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowLibLoadArgs {
+    id: String,
+    #[serde(default)]
+    revision: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowLibSaveArgs {
+    file_json: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunAppendArgs {
+    record: RunRecordV1,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunQueryArgs {
+    project_id: String,
+    filter: RunQueryFilterDto,
+    limit: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunProjectArgs {
+    project_id: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectStemArgs {
@@ -511,6 +567,22 @@ struct ExportTraceBlfArgs {
     #[serde(default, alias = "file_name")]
     file_name: String,
     frames: Vec<ChronologicalFrameDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportDebugEventsArgs {
+    format: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetDebugWindowOpenArgs {
+    open: bool,
+    #[serde(default, alias = "always_on_top")]
+    always_on_top: Option<bool>,
+    #[serde(default)]
+    redock: Option<bool>,
 }
 
 // ─── D-003 `cmd_diag_*` arguments (mirror of `DiagCommandMap` in src/types/udsClient.ts) ───
@@ -612,6 +684,125 @@ struct SeedKeyComputeAdhocArgs {
     level: u8,
     #[serde(alias = "seed_hex")]
     seed_hex: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SeedKeyProbeLibraryArgs {
+    path: String,
+}
+
+/// Body limit of `/api/invoke/{cmd}`: a 64 MiB firmware image as base64 plus JSON overhead.
+const INVOKE_BODY_LIMIT: usize = 96 * 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlashLoadImageArgs {
+    file_name: String,
+    format: FlashLoadFormat,
+    base_address: u32,
+    data_base64: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlashImageIdArgs {
+    image_id: String,
+}
+
+/// `cmd_flash_download` over the bridge: no `onProgress` (a browser cannot pass a Tauri
+/// Channel); any such field is ignored and only the final report is returned.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlashDownloadArgs {
+    config: DiagSessionConfigDto,
+    image_id: String,
+    #[serde(default)]
+    download: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlashCancelArgs {
+    config: DiagSessionConfigDto,
+}
+
+/// Flash error without a transfer position (argument / worker failures).
+fn flash_err(kind: FlashErrorKind, message: String) -> FlashError {
+    FlashError {
+        kind,
+        phase: FlashPhase::RequestDownload,
+        segment_index: None,
+        address: None,
+        offset: None,
+        block_counter: None,
+        last_nrc: None,
+        last_nrc_name: None,
+        diag_code: None,
+        bytes_done: 0,
+        segments_completed: 0,
+        message,
+    }
+}
+
+fn flash_bad_args(cmd: &str, e: serde_json::Error) -> Response {
+    bad_request(flash_error_to_ipc(&flash_err(
+        FlashErrorKind::InvalidConfig,
+        format!("invalid arguments for {cmd}: {e}"),
+    )))
+}
+
+/// Contract §4: native seed/key providers only for loopback peers AND
+/// `NEXUS_BRIDGE_ALLOW_NATIVE_SEEDKEY=1`. An unknown peer (no `ConnectInfo`) is refused.
+fn seedkey_policy(extensions: &Extensions) -> SeedKeyPolicy {
+    let loopback = extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|ConnectInfo(addr)| addr.ip().is_loopback());
+    SeedKeyPolicy::bridge(loopback)
+}
+
+fn seedkey_bad_args(cmd: &str, e: serde_json::Error) -> Response {
+    bad_request(
+        SeedKeyError::InvalidInput(format!("invalid arguments for {cmd}: {e}")).to_ipc_string(),
+    )
+}
+
+/// Flow library commands: blocking pool, errors `"[flowlib:<code>] msg"` via `bad_request`.
+async fn run_flowlib<T, F>(engine: Arc<PipelineEngine>, f: F) -> Response
+where
+    T: serde::Serialize + Send + 'static,
+    F: FnOnce(&PipelineEngine) -> Result<T, FlowLibError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(move || f(&engine)).await {
+        Ok(Ok(v)) => ok_json(v),
+        Ok(Err(e)) => bad_request(e.to_ipc_string()),
+        Err(e) => bad_request(
+            FlowLibError::Io(format!("flow library worker failed: {e}")).to_ipc_string(),
+        ),
+    }
+}
+
+/// Run store commands: blocking pool, errors `"[runstore:<code>] msg"` via `bad_request`.
+async fn run_runstore<T, F>(engine: Arc<PipelineEngine>, f: F) -> Response
+where
+    T: serde::Serialize + Send + 'static,
+    F: FnOnce(&PipelineEngine) -> Result<T, RunStoreError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(move || f(&engine)).await {
+        Ok(Ok(v)) => ok_json(v),
+        Ok(Err(e)) => bad_request(e.to_ipc_string()),
+        Err(e) => {
+            bad_request(RunStoreError::Io(format!("run store worker failed: {e}")).to_ipc_string())
+        }
+    }
+}
+
+fn flowlib_bad_args(cmd: &str, e: serde_json::Error) -> Response {
+    bad_request(FlowLibError::Invalid(format!("invalid arguments for {cmd}: {e}")).to_ipc_string())
+}
+
+fn runstore_bad_args(cmd: &str, e: serde_json::Error) -> Response {
+    bad_request(RunStoreError::Invalid(format!("invalid arguments for {cmd}: {e}")).to_ipc_string())
 }
 
 fn diag_bad_args(cmd: &str, e: serde_json::Error) -> Response {
@@ -763,8 +954,17 @@ fn build_router(engine: Arc<PipelineEngine>, security: Arc<BridgeSecurity>) -> R
     // Layer order (outermost last): host/origin guard -> CORS -> token guard -> routes.
     Router::new()
         .route("/api/health", get(handle_health))
+        .route("/api/hardware/probe", get(handle_hardware_probe))
+        .route("/api/debug/snapshot", get(handle_debug_snapshot))
         .route("/ws/telemetry", get(handle_ws_upgrade))
-        .route("/api/invoke/{cmd}", post(handle_invoke))
+        .route("/ws/hardware", get(handle_hw_ws_upgrade))
+        .route("/ws/debug", get(handle_debug_ws_upgrade))
+        // Flash images arrive base64-encoded (≤ 64 MiB decoded ≈ 85.4 MiB of base64); axum's
+        // default 2 MB body limit would reject them. Auth / Host guards run before the body.
+        .route(
+            "/api/invoke/{cmd}",
+            post(handle_invoke).layer(DefaultBodyLimit::max(INVOKE_BODY_LIMIT)),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             api_token_guard,
@@ -818,11 +1018,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Bridge auth token written to {}", token_path.display());
     println!("Allowed origins: {}", security.allowed_origins.join(", "));
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    // ConnectInfo: the seed/key native-provider policy needs the TCP peer address.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await?;
 
     Ok(())
 }
@@ -834,10 +1038,33 @@ async fn handle_health() -> Json<Value> {
     }))
 }
 
+async fn handle_hardware_probe(State(engine): State<Arc<PipelineEngine>>) -> Response {
+    ok_json(engine.snapshot_hardware_state("initial"))
+}
+
+async fn handle_debug_snapshot(State(engine): State<Arc<PipelineEngine>>) -> Response {
+    ok_json(engine.snapshot_debug_events())
+}
+
 async fn handle_ws_upgrade(ws: WebSocketUpgrade, State(state): State<BridgeState>) -> Response {
     ws.max_message_size(WS_MAX_CLIENT_MESSAGE)
         .max_frame_size(WS_MAX_CLIENT_MESSAGE)
         .on_upgrade(move |socket| ws_authenticate_then_stream(socket, state))
+}
+
+async fn handle_hw_ws_upgrade(ws: WebSocketUpgrade, State(state): State<BridgeState>) -> Response {
+    ws.max_message_size(WS_MAX_CLIENT_MESSAGE)
+        .max_frame_size(WS_MAX_CLIENT_MESSAGE)
+        .on_upgrade(move |socket| ws_authenticate_then_stream_hardware(socket, state))
+}
+
+async fn handle_debug_ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<BridgeState>,
+) -> Response {
+    ws.max_message_size(WS_MAX_CLIENT_MESSAGE)
+        .max_frame_size(WS_MAX_CLIENT_MESSAGE)
+        .on_upgrade(move |socket| ws_authenticate_then_stream_debug(socket, state))
 }
 
 /// `true` if `msg` is `{"type":"auth","token":"<token>"}` with the right token.
@@ -869,6 +1096,125 @@ async fn ws_authenticate_then_stream(mut socket: WebSocket, state: BridgeState) 
         return;
     }
     stream_telemetry_ws(socket, state.engine).await;
+}
+
+async fn ws_authenticate_then_stream_hardware(mut socket: WebSocket, state: BridgeState) {
+    let authed = match tokio::time::timeout(WS_AUTH_TIMEOUT, socket.recv()).await {
+        Ok(Some(Ok(msg))) => ws_auth_message_ok(&msg, &state.security),
+        _ => false,
+    };
+    if !authed {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: WS_CLOSE_UNAUTHORIZED,
+                reason: "unauthorized".into(),
+            })))
+            .await;
+        return;
+    }
+    stream_hardware_ws(socket, state.engine).await;
+}
+
+async fn ws_authenticate_then_stream_debug(mut socket: WebSocket, state: BridgeState) {
+    let authed = match tokio::time::timeout(WS_AUTH_TIMEOUT, socket.recv()).await {
+        Ok(Some(Ok(msg))) => ws_auth_message_ok(&msg, &state.security),
+        _ => false,
+    };
+    if !authed {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: WS_CLOSE_UNAUTHORIZED,
+                reason: "unauthorized".into(),
+            })))
+            .await;
+        return;
+    }
+    stream_debug_ws(socket, state.engine).await;
+}
+
+async fn stream_debug_ws(mut socket: WebSocket, engine: Arc<PipelineEngine>) {
+    let mut rx = engine.subscribe_debug_events();
+    let initial = engine.snapshot_debug_events();
+    if let Ok(json_str) = serde_json::to_string(&initial) {
+        if socket.send(Message::Text(json_str.into())).await.is_err() {
+            return;
+        }
+    }
+
+    loop {
+        tokio::select! {
+            batch_res = rx.recv() => {
+                match batch_res {
+                    Ok(batch) => {
+                        if let Ok(json_str) = serde_json::to_string(&batch) {
+                            if socket.send(Message::Text(json_str.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => {
+                        let snap = engine.snapshot_debug_events();
+                        if let Ok(json_str) = serde_json::to_string(&snap) {
+                            if socket.send(Message::Text(json_str.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+            client_msg = socket.recv() => {
+                match client_msg {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+async fn stream_hardware_ws(mut socket: WebSocket, engine: Arc<PipelineEngine>) {
+    let mut rx = engine.subscribe_hardware_changes();
+    let initial = engine.snapshot_hardware_state("initial");
+    if let Ok(json_str) = serde_json::to_string(&initial) {
+        if socket.send(Message::Text(json_str.into())).await.is_err() {
+            return;
+        }
+    }
+
+    loop {
+        tokio::select! {
+            evt_res = rx.recv() => {
+                match evt_res {
+                    Ok(evt) => {
+                        if let Ok(json_str) = serde_json::to_string(&evt) {
+                            if socket.send(Message::Text(json_str.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
+            }
+            client_msg = socket.recv() => {
+                match client_msg {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 async fn stream_telemetry_ws(mut socket: WebSocket, engine: Arc<PipelineEngine>) {
@@ -930,6 +1276,7 @@ fn ok_json<T: serde::Serialize>(val: T) -> Response {
 async fn handle_invoke(
     Path(cmd): Path<String>,
     State(engine): State<Arc<PipelineEngine>>,
+    extensions: Extensions,
     body: Bytes,
 ) -> Response {
     let payload: Value = if body.is_empty() {
@@ -950,6 +1297,11 @@ async fn handle_invoke(
     match cmd.as_str() {
         "cmd_list_devices" => ok_json(engine.cmd_list_devices()),
         "cmd_probe_drivers" => ok_json(engine.cmd_probe_drivers()),
+        "cmd_subscribe_hardware_changes" => ok_json(json!({
+            "subscribed": true,
+            "wsPath": "/ws/hardware",
+            "initial": engine.snapshot_hardware_state("initial")
+        })),
         "cmd_connect_bus" => {
             let args: ConnectBusArgs = match serde_json::from_value(payload) {
                 Ok(a) => a,
@@ -1011,14 +1363,42 @@ async fn handle_invoke(
                 Err(e) => bad_request(format!("reset session worker failed: {e}")),
             }
         }
-        "cmd_seedkey_capabilities" => ok_json(engine.cmd_seedkey_capabilities()),
+        "cmd_seedkey_capabilities" => {
+            let policy = seedkey_policy(&extensions);
+            let eng = Arc::clone(&engine);
+            match tokio::task::spawn_blocking(move || eng.cmd_seedkey_capabilities(policy)).await {
+                Ok(caps) => ok_json(caps),
+                Err(e) => bad_request(
+                    SeedKeyError::Script(format!("seed/key worker failed: {e}")).to_ipc_string(),
+                ),
+            }
+        }
         "cmd_seedkey_compute_adhoc" => {
             let args: SeedKeyComputeAdhocArgs = match serde_json::from_value(payload) {
                 Ok(a) => a,
+                Err(e) => return seedkey_bad_args("cmd_seedkey_compute_adhoc", e),
+            };
+            let policy = seedkey_policy(&extensions);
+            let eng = Arc::clone(&engine);
+            match tokio::task::spawn_blocking(move || {
+                eng.cmd_seedkey_compute_adhoc(policy, &args.provider, args.level, &args.seed_hex)
+            })
+            .await
+            {
+                Ok(Ok(res)) => ok_json(res),
+                Ok(Err(e)) => bad_request(e.to_ipc_string()),
+                Err(e) => bad_request(
+                    SeedKeyError::Script(format!("seed/key worker failed: {e}")).to_ipc_string(),
+                ),
+            }
+        }
+        "cmd_flash_load_image" => {
+            let args: FlashLoadImageArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
                 Err(e) => {
                     return bad_request(
-                        SeedKeyError::InvalidInput(format!(
-                            "invalid arguments for cmd_seedkey_compute_adhoc: {e}"
+                        FirmwareError::InvalidArgument(format!(
+                            "invalid arguments for cmd_flash_load_image: {e}"
                         ))
                         .to_ipc_string(),
                     )
@@ -1026,7 +1406,75 @@ async fn handle_invoke(
             };
             let eng = Arc::clone(&engine);
             match tokio::task::spawn_blocking(move || {
-                eng.cmd_seedkey_compute_adhoc(&args.provider, args.level, &args.seed_hex)
+                eng.cmd_flash_load_image(
+                    args.file_name,
+                    args.format,
+                    args.base_address,
+                    &args.data_base64,
+                )
+            })
+            .await
+            {
+                Ok(Ok(res)) => ok_json(res),
+                Ok(Err(e)) => bad_request(e.to_ipc_string()),
+                Err(e) => bad_request(
+                    FirmwareError::InvalidArgument(format!("firmware worker failed: {e}"))
+                        .to_ipc_string(),
+                ),
+            }
+        }
+        "cmd_flash_release_image" => {
+            let args: FlashImageIdArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => return flash_bad_args("cmd_flash_release_image", e),
+            };
+            engine.cmd_flash_release_image(&args.image_id);
+            ok_json(Value::Null)
+        }
+        "cmd_flash_download" => {
+            let args: FlashDownloadArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => return flash_bad_args("cmd_flash_download", e),
+            };
+            let download = match resolve_download_config(
+                args.download.unwrap_or_default(),
+                args.config.use_fd,
+            ) {
+                Ok(d) => d,
+                Err(e) => return bad_request(flash_error_to_ipc(&e)),
+            };
+            let eng = Arc::clone(&engine);
+            // Bridge: final report only (progress is a Tauri Channel feature).
+            match tokio::task::spawn_blocking(move || {
+                eng.cmd_flash_download(args.config, &args.image_id, download, &mut |_| {})
+            })
+            .await
+            {
+                Ok(Ok(res)) => ok_json(res),
+                Ok(Err(e)) => bad_request(flash_error_to_ipc(&e)),
+                Err(e) => bad_request(flash_error_to_ipc(&flash_err(
+                    FlashErrorKind::Transport,
+                    format!("flash worker failed: {e}"),
+                ))),
+            }
+        }
+        "cmd_flash_cancel" => {
+            let args: FlashCancelArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => return flash_bad_args("cmd_flash_cancel", e),
+            };
+            engine.cmd_flash_cancel(&args.config);
+            ok_json(Value::Null)
+        }
+        "cmd_seedkey_probe_library" => {
+            let args: SeedKeyProbeLibraryArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => return seedkey_bad_args("cmd_seedkey_probe_library", e),
+            };
+            let policy = seedkey_policy(&extensions);
+            let eng = Arc::clone(&engine);
+            match tokio::task::spawn_blocking(move || {
+                eng.cmd_seedkey_probe_library(policy, &args.path)
             })
             .await
             {
@@ -1159,6 +1607,65 @@ async fn handle_invoke(
             }
         }
         "cmd_list_periodic_tx" => ok_json(engine.cmd_list_periodic_tx()),
+        "cmd_flowlib_list" => {
+            let args: FlowLibListArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => return flowlib_bad_args("cmd_flowlib_list", e),
+            };
+            run_flowlib(engine, move |e| e.cmd_flowlib_list(args.include_deleted)).await
+        }
+        "cmd_flowlib_revisions" => {
+            let args: FlowLibIdArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => return flowlib_bad_args("cmd_flowlib_revisions", e),
+            };
+            run_flowlib(engine, move |e| e.cmd_flowlib_revisions(&args.id)).await
+        }
+        "cmd_flowlib_load" => {
+            let args: FlowLibLoadArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => return flowlib_bad_args("cmd_flowlib_load", e),
+            };
+            run_flowlib(engine, move |e| e.cmd_flowlib_load(&args.id, args.revision)).await
+        }
+        "cmd_flowlib_save" => {
+            let args: FlowLibSaveArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => return flowlib_bad_args("cmd_flowlib_save", e),
+            };
+            run_flowlib(engine, move |e| e.cmd_flowlib_save(&args.file_json)).await
+        }
+        "cmd_flowlib_delete" => {
+            let args: FlowLibIdArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => return flowlib_bad_args("cmd_flowlib_delete", e),
+            };
+            run_flowlib(engine, move |e| e.cmd_flowlib_delete(&args.id)).await
+        }
+        "cmd_run_append" => {
+            let args: RunAppendArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => return runstore_bad_args("cmd_run_append", e),
+            };
+            run_runstore(engine, move |e| e.cmd_run_append(&args.record)).await
+        }
+        "cmd_run_query" => {
+            let args: RunQueryArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => return runstore_bad_args("cmd_run_query", e),
+            };
+            run_runstore(engine, move |e| {
+                e.cmd_run_query(&args.project_id, &args.filter, args.limit)
+            })
+            .await
+        }
+        "cmd_run_latest" => {
+            let args: RunProjectArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => return runstore_bad_args("cmd_run_latest", e),
+            };
+            run_runstore(engine, move |e| e.cmd_run_latest(&args.project_id)).await
+        }
         "cmd_list_projects" => match engine.cmd_list_projects() {
             Ok(list) => ok_json(list),
             Err(e) => bad_request(e.to_string()),
@@ -1295,6 +1802,57 @@ async fn handle_invoke(
                 Ok(status) => ok_json(status),
                 Err(e) => bad_request(e.to_string()),
             }
+        }
+        "cmd_subscribe_debug_events" => ok_json(json!({
+            "subscribed": true,
+            "wsPath": "/ws/debug",
+            "initial": engine.snapshot_debug_events()
+        })),
+        "cmd_append_debug_event" => {
+            let raw_input = payload.get("input").cloned().unwrap_or(payload);
+            let input: AppendDebugEventInputDto = match serde_json::from_value(raw_input) {
+                Ok(i) => i,
+                Err(e) => {
+                    return bad_request(format!(
+                        "Invalid arguments for cmd_append_debug_event: {e}"
+                    ))
+                }
+            };
+            ok_json(engine.cmd_append_debug_event(input))
+        }
+        "cmd_clear_debug_events" => {
+            engine.cmd_clear_debug_events();
+            ok_json(Value::Null)
+        }
+        "cmd_export_debug_events" => {
+            let args: ExportDebugEventsArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => {
+                    return bad_request(format!(
+                        "Invalid arguments for cmd_export_debug_events: {e}"
+                    ))
+                }
+            };
+            match engine.cmd_export_debug_events(args.format) {
+                Ok(out) => ok_json(out),
+                Err(e) => bad_request(e.to_string()),
+            }
+        }
+        "cmd_set_debug_window_open" => {
+            let args: SetDebugWindowOpenArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => {
+                    return bad_request(format!(
+                        "Invalid arguments for cmd_set_debug_window_open: {e}"
+                    ))
+                }
+            };
+            let ws = engine.set_debug_window_state(
+                args.open,
+                args.always_on_top.unwrap_or(false),
+                args.redock.unwrap_or(false),
+            );
+            ok_json(ws)
         }
         unknown => bad_request(format!("Unknown NexusCAN IPC command: '{unknown}'")),
     }
@@ -1785,6 +2343,10 @@ mod tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(v["nativeProvidersAllowed"], false);
         assert_eq!(v["scriptAvailable"], true);
+        assert_eq!(
+            v["nativeKindsAvailable"],
+            json!(["library", "external_process"])
+        );
 
         let body = json!({
             "provider": {
@@ -1805,13 +2367,37 @@ mod tests {
             "level": 1,
             "seedHex": "11223344"
         });
+        // Unknown peer (no ConnectInfo) => native providers refused by policy.
         let (st, v) = call_invoke(&engine, "cmd_seedkey_compute_adhoc", &body.to_string()).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
         assert!(
             v["error"]
                 .as_str()
                 .unwrap()
-                .starts_with("[seedkey:unsupported] "),
+                .starts_with("[seedkey:native_not_allowed] "),
+            "{v}"
+        );
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_seedkey_probe_library",
+            r#"{"path":"/tmp/keygen.so"}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("[seedkey:native_not_allowed] "),
+            "{v}"
+        );
+        let (st, v) = call_invoke(&engine, "cmd_seedkey_probe_library", "{}").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("[seedkey:invalid_input] "),
             "{v}"
         );
 
@@ -1826,6 +2412,66 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_flash_routes_load_download_cancel_release() {
+        let engine = Arc::new(PipelineEngine::new());
+        // 4 bytes of raw binary, base64.
+        let body = json!({
+            "fileName": "app.bin", "format": "binary", "baseAddress": 0x0800_0000u32,
+            "dataBase64": "AQIDBA=="
+        });
+        let (st, v) = call_invoke(&engine, "cmd_flash_load_image", &body.to_string()).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["fileName"], "app.bin");
+        assert_eq!(v["format"], "binary");
+        assert_eq!(v["summary"]["totalBytes"], 4);
+        let image_id = v["imageId"].as_str().unwrap().to_string();
+
+        let body =
+            json!({"fileName": "x", "format": "auto", "baseAddress": 0, "dataBase64": "AQIDBA=="});
+        let (st, v) = call_invoke(&engine, "cmd_flash_load_image", &body.to_string()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"].as_str().unwrap().starts_with("[firmware] "),
+            "{v}"
+        );
+
+        // No onProgress (browser) and no bus: the session gate fails -> `[flash] {json}`.
+        let config =
+            json!({"busId": 0, "requestId": 0x7E0, "responseId": 0x7E8, "isExtendedId": false});
+        let body = json!({"config": config, "imageId": image_id});
+        let (st, v) = call_invoke(&engine, "cmd_flash_download", &body.to_string()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let wire = v["error"].as_str().unwrap();
+        let err: Value = serde_json::from_str(wire.strip_prefix("[flash] ").expect(wire)).unwrap();
+        assert_eq!(err["kind"], "transport");
+        assert!(err["diagCode"].is_string(), "{err}");
+
+        let (st, _) = call_invoke(
+            &engine,
+            "cmd_flash_cancel",
+            &json!({"config": config}).to_string(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call_invoke(
+            &engine,
+            "cmd_flash_release_image",
+            &json!({"imageId": image_id}).to_string(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, v) = call_invoke(&engine, "cmd_flash_download", &body.to_string()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .starts_with(r#"[flash] {"kind":"invalidImage""#),
+            "{v}"
+        );
+    }
+
     async fn call_invoke(
         engine: &Arc<PipelineEngine>,
         cmd: &str,
@@ -1834,6 +2480,7 @@ mod tests {
         let resp = handle_invoke(
             Path(cmd.to_string()),
             State(Arc::clone(engine)),
+            Extensions::new(),
             Bytes::from(body_str.to_string()),
         )
         .await;
@@ -2034,14 +2681,239 @@ mod tests {
         assert!(v.is_null());
     }
 
+    fn workspace_engine(tag: &str) -> (Arc<PipelineEngine>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "nexuscan-bridge-{tag}-{}-{}",
+            std::process::id(),
+            nexus_core::now_monotonic_us()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let engine = Arc::new(PipelineEngine::with_data_root(
+            DriverRegistry::with_builtin_drivers(),
+            nexus_hal::storage::DataRoot::under(&root),
+        ));
+        (engine, root)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_flowlib_commands_and_error_wire_format() {
+        let (engine, root) = workspace_engine("flowlib");
+        let file = |rev: u32| {
+            json!({
+                "schemaVersion": 1,
+                "kind": "nexuscan.flow",
+                "flow": {
+                    "id": "read_vin", "revision": rev, "name": "Read VIN", "description": "",
+                    "createdAt": "2026-11-18T10:00:00Z", "updatedAt": "2026-11-18T10:00:00Z",
+                    "author": null, "origin": "user", "aiReviewed": false, "tags": [],
+                    "blocks": [], "connections": []
+                },
+                "contentHash": "ab".repeat(32)
+            })
+            .to_string()
+        };
+        let save = |rev: u32| json!({ "fileJson": file(rev) }).to_string();
+
+        let (st, v) = call_invoke(&engine, "cmd_flowlib_save", &save(1)).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["id"], "read_vin");
+        assert_eq!(v["latestRevision"], 1);
+        assert_eq!(v["deleted"], false);
+
+        let (st, v) = call_invoke(&engine, "cmd_flowlib_save", &save(1)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("[flowlib:conflict] "),
+            "{v}"
+        );
+
+        let (st, v) = call_invoke(&engine, "cmd_flowlib_list", r#"{"includeDeleted":false}"#).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(v.as_array().unwrap().len(), 1);
+
+        let (st, v) = call_invoke(&engine, "cmd_flowlib_revisions", r#"{"id":"read_vin"}"#).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(v[0]["revision"], 1);
+        assert_eq!(v[0]["contentHash"], "ab".repeat(32));
+
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_flowlib_load",
+            r#"{"id":"read_vin","revision":null}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(v.as_str().unwrap(), file(1));
+
+        let (st, v) = call_invoke(&engine, "cmd_flowlib_delete", r#"{"id":"read_vin"}"#).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(v.is_null());
+        let (_, v) = call_invoke(&engine, "cmd_flowlib_list", r#"{"includeDeleted":false}"#).await;
+        assert_eq!(v.as_array().unwrap().len(), 0);
+        let (st, _) = call_invoke(
+            &engine,
+            "cmd_flowlib_load",
+            r#"{"id":"read_vin","revision":1}"#,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "pinned revision of a deleted flow still loads"
+        );
+
+        for (cmd, body, code) in [
+            (
+                "cmd_flowlib_load",
+                r#"{"id":"../x","revision":null}"#,
+                "invalid",
+            ),
+            ("cmd_flowlib_delete", r#"{"id":"missing"}"#, "not_found"),
+            ("cmd_flowlib_list", "{}", "invalid"),
+            ("cmd_flowlib_save", r#"{"fileJson":"{}"}"#, "invalid"),
+        ] {
+            let (st, v) = call_invoke(&engine, cmd, body).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{cmd}");
+            assert!(
+                v["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("[flowlib:{code}] ")),
+                "{cmd}: {v}"
+            );
+        }
+        assert!(root.join("flowlib/read_vin/r1.json").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_runstore_commands_and_error_wire_format() {
+        let (engine, root) = workspace_engine("runstore");
+        let project = "3f2b8c1e-7d4a-4e9b-9c0d-112233445566";
+        let rec = |run_id: &str, started: &str, parent: Value| {
+            json!({
+                "schemaVersion": 1, "runId": run_id, "parentRunId": parent, "queueId": null,
+                "projectId": project, "vehicleId": null, "ecuId": "ecu-1", "ecuName": "BMS",
+                "ecuSnapshotHash": null, "flowId": "read_vin", "flowRevision": 1,
+                "flowContentHash": "ab".repeat(32), "flowName": "Read VIN",
+                "params": { "did": "F190", "retries": 3, "verbose": false, "x": null },
+                "files": [{ "key": "fw", "name": "app.hex", "size": 10, "crc32": "0A1B2C3D" }],
+                "startedAt": started, "endedAt": started, "durationMs": 5,
+                "outcome": "ok", "outputName": null, "outputs": {}, "nrc": null,
+                "errorMessage": null, "logExcerpt": ["TX 22 F1 90"], "operator": null,
+                "deviceId": "dev-1", "appVersion": "0.1.0"
+            })
+        };
+        for (id, ts, parent) in [
+            ("r1", "2026-10-31T10:00:00Z", Value::Null),
+            ("r2", "2026-11-01T10:00:00Z", Value::Null),
+            ("c1", "2026-11-01T10:00:01Z", json!("r2")),
+        ] {
+            let body = json!({ "record": rec(id, ts, parent) }).to_string();
+            let (st, v) = call_invoke(&engine, "cmd_run_append", &body).await;
+            assert_eq!(st, StatusCode::OK, "{v}");
+            assert!(v.is_null());
+        }
+
+        let body = json!({ "projectId": project, "filter": {}, "limit": 10 }).to_string();
+        let (st, v) = call_invoke(&engine, "cmd_run_query", &body).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let ids: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["runId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["c1", "r2", "r1"]);
+        // Exact wire round trip (durationMs stays the integer 5).
+        assert_eq!(v[2], rec("r1", "2026-10-31T10:00:00Z", Value::Null));
+        assert!(v[2]["durationMs"].is_u64());
+
+        let body = json!({ "projectId": project, "filter": { "topLevelOnly": true, "ecuId": null }, "limit": 1 }).to_string();
+        let (_, v) = call_invoke(&engine, "cmd_run_query", &body).await;
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v[0]["runId"], "r2");
+
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_run_latest",
+            &json!({ "projectId": project }).to_string(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v[0]["runId"], "r2");
+
+        let bad_ts = json!({ "record": rec("r9", "2026-11-01 10:00:00", Value::Null) }).to_string();
+        for (cmd, body, code) in [
+            (
+                "cmd_run_query",
+                json!({ "projectId": project, "filter": {}, "limit": 0 }).to_string(),
+                "invalid",
+            ),
+            (
+                "cmd_run_query",
+                json!({ "projectId": project, "filter": {}, "limit": -1 }).to_string(),
+                "invalid",
+            ),
+            (
+                "cmd_run_query",
+                json!({ "projectId": project, "filter": {}, "limit": 5001 }).to_string(),
+                "invalid",
+            ),
+            (
+                "cmd_run_latest",
+                json!({ "projectId": "../etc" }).to_string(),
+                "invalid",
+            ),
+            ("cmd_run_append", bad_ts, "invalid"),
+            ("cmd_run_append", "{}".to_string(), "invalid"),
+        ] {
+            let (st, v) = call_invoke(&engine, cmd, &body).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{cmd}");
+            assert!(
+                v["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("[runstore:{code}] ")),
+                "{cmd}: {v}"
+            );
+        }
+        let mut big = rec("big", "2026-11-01T10:00:00Z", Value::Null);
+        big["errorMessage"] = json!("x".repeat(300 * 1024));
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_run_append",
+            &json!({ "record": big }).to_string(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("[runstore:too_large] "),
+            "{v}"
+        );
+        assert!(root.join(format!("runs/{project}/2026-11.jsonl")).is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn bridge_http_endpoints_and_400_error_contract() {
-        let tmp_projects =
-            std::env::temp_dir().join(format!("nexuscan-bridge-projects-{}", std::process::id()));
-        let tmp_traces =
-            std::env::temp_dir().join(format!("nexuscan-bridge-traces-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp_projects);
-        let _ = std::fs::remove_dir_all(&tmp_traces);
+        // Isolated parent: `logs/` (and lazily `flowlib/` / `runs/`) are siblings of
+        // `projects/`, never directly under the shared temp dir.
+        let tmp_root = std::env::temp_dir().join(format!(
+            "nexuscan-bridge-http-{}-{}",
+            std::process::id(),
+            nexus_core::now_monotonic_us()
+        ));
+        let tmp_projects = tmp_root.join("projects");
+        let tmp_traces = tmp_root.join("traces");
+        let _ = std::fs::remove_dir_all(&tmp_root);
 
         let engine = Arc::new(PipelineEngine::with_storage_dirs(
             DriverRegistry::with_builtin_drivers(),
@@ -2064,16 +2936,19 @@ mod tests {
         assert!(dev_arr.iter().any(|d| d["deviceId"] == "mock:mock1"
             && d["displayName"] == "mock1 — Virtual Auxiliary / Charger Bus"));
 
-        // 2b. cmd_probe_drivers returns all 6 driver families
+        // 2b. cmd_probe_drivers returns all 7 driver families + hostEnv
         let (st_probe, probe_val) = call_invoke(&engine, "cmd_probe_drivers", "").await;
         assert_eq!(st_probe, StatusCode::OK);
         let fams = probe_val["families"].as_array().expect("families array");
-        assert_eq!(fams.len(), 6);
+        assert_eq!(fams.len(), 7);
+        assert!(probe_val["hostEnv"]["os"].as_str().is_some());
         assert!(fams
             .iter()
             .any(|f| f["familyId"] == "slcan" && f["installed"] == true));
+        assert!(fams.iter().any(|f| f["familyId"] == "gs_usb"));
         assert!(fams.iter().any(|f| f["familyId"] == "pcan"));
         assert!(fams.iter().any(|f| f["familyId"] == "kvaser"));
+        assert!(fams.iter().any(|f| f["familyId"] == "vector_xl"));
 
         // 3. cmd_connect_bus in Listen-Only mode + verify 400 {"error": ...} on arming Listen-Only
         let (st_conn, bus_dto) = call_invoke(
@@ -2373,7 +3248,6 @@ mod tests {
         .await;
         assert_eq!(st_t_del, StatusCode::OK);
 
-        let _ = std::fs::remove_dir_all(&tmp_projects);
-        let _ = std::fs::remove_dir_all(&tmp_traces);
+        let _ = std::fs::remove_dir_all(&tmp_root);
     }
 }

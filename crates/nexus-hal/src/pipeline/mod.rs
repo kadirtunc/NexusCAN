@@ -5,21 +5,26 @@
 pub mod blf;
 pub mod diag_discovery;
 pub mod diag_dtc;
+pub mod diag_flash;
 pub mod diag_passive;
 pub mod diag_session;
 pub mod diag_sweep;
 pub mod diag_tap;
+pub mod diag_workspace;
 pub mod replay;
 pub mod state_table;
 pub mod tx_scheduler;
 
+use crate::debug_log::DebugEventHub;
+use crate::drivers::gs_usb_drv::usb_device_location_info;
 use crate::drivers::probe::probe_all_drivers;
 use crate::dto::{
-    BusHealthDto, ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto, DeviceDescriptorDto,
-    DriverProbeReportDto, LoadedTraceFileDto, PanicStopResultDto, PeriodicTxJobDto,
-    ProjectSummaryDto, ResetSessionResultDto, StartTraceReplayArgsDto, TelemetrySnapshotDto,
-    TraceFileSummaryDto, TraceReplayControlArgsDto, TraceReplayStatusDto, TraceStorageInfoDto,
-    TxTransmitResultDto,
+    AppendDebugEventInputDto, BusHealthDto, ChannelConfigDto, ChronologicalFrameDto,
+    DbFileInputDto, DebugEventBatchDto, DebugEventDto, DebugWindowStateDto, DeviceDescriptorDto,
+    DriverProbeReportDto, HardwareWatchEventDto, LoadedTraceFileDto, PanicStopResultDto,
+    PeriodicTxJobDto, ProjectSummaryDto, ResetSessionResultDto, StartTraceReplayArgsDto,
+    TelemetrySnapshotDto, TraceFileSummaryDto, TraceReplayControlArgsDto, TraceReplayStatusDto,
+    TraceStorageInfoDto, TxTransmitResultDto,
 };
 use crate::error::{AdapterError, HalError};
 use crate::registry::DriverRegistry;
@@ -30,8 +35,9 @@ use crate::storage::{
 use crate::traits::{BusState, CanChannel, DeviceDescriptor, ListenOnlyEnforcement};
 use base64::engine::general_purpose::{STANDARD as BASE64_STD, STANDARD_NO_PAD as BASE64_NO_PAD};
 use base64::Engine as _;
-use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use crossbeam_channel::{bounded, select, Receiver, Sender, TrySendError};
 use diag_tap::{DiagBusShared, GateRefs, TapCtl, TapRegisterError, TapTable, TxOrigin};
+use futures_lite::StreamExt as _;
 use nexus_core::{now_monotonic_us, BusId, CanIdKey, RawCanFrame};
 use nexus_netdb::{
     merge_databases, CompiledDatabase, DatabaseInfoDto, DatabaseSchemaDto, DbError, FormatRegistry,
@@ -190,13 +196,42 @@ struct LoadedDatabaseState {
     schema: DatabaseSchemaDto,
 }
 
+/// Zero-`unsafe` async `Waker` shutdown latch allowing `nusb::watch_devices()` to exit in `< 1 ms`.
+struct HwWatchShutdown {
+    stopped: AtomicBool,
+    waker: Mutex<Option<std::task::Waker>>,
+}
+
+impl HwWatchShutdown {
+    fn new() -> Self {
+        Self {
+            stopped: AtomicBool::new(false),
+            waker: Mutex::new(None),
+        }
+    }
+
+    fn signal(&self) {
+        self.stopped.store(true, Ordering::Release);
+        if let Some(w) = self.waker.lock().take() {
+            w.wake();
+        }
+    }
+
+    #[inline]
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+}
+
 /// Core NexusCAN multi-bus pipeline engine shared by both `src-tauri` and `nexus_bridge`.
 pub struct PipelineEngine {
-    registry: DriverRegistry,
+    registry: Arc<DriverRegistry>,
     /// WP-8: persistent `projects/` + `traces/` locations (see [`crate::storage`]).
     data_root: DataRoot,
     /// WP-8: frame-count cache so `cmd_list_traces` never parses file bodies.
     trace_stats: TraceStatsCache,
+    /// Structured system audit & multi-window debug console ring buffer.
+    pub(crate) debug_hub: Arc<DebugEventHub>,
     buses: Arc<Mutex<BTreeMap<BusId, ConnectedBusHandle>>>,
     db_state: RwLock<Option<LoadedDatabaseState>>,
     bus_db_states: RwLock<BTreeMap<BusId, Option<LoadedDatabaseState>>>,
@@ -211,6 +246,13 @@ pub struct PipelineEngine {
     engine_stop: Arc<AtomicBool>,
     snapshot_bcast_tx: broadcast::Sender<TelemetrySnapshotDto>,
     latest_snapshot: Arc<RwLock<Option<TelemetrySnapshotDto>>>,
+    hw_bcast_tx: broadcast::Sender<HardwareWatchEventDto>,
+    hw_watcher_started: AtomicBool,
+    hw_watch_shutdown: Arc<HwWatchShutdown>,
+    hw_stop_tx: Sender<()>,
+    hw_stop_rx: Receiver<()>,
+    hw_hotplug_join: Mutex<Option<JoinHandle<()>>>,
+    hw_topology_join: Mutex<Option<JoinHandle<()>>>,
     aggregator_join: Mutex<Option<JoinHandle<()>>>,
     scheduler_join: Mutex<Option<JoinHandle<()>>>,
     /// D-003 diag session manager (`cmd_diag_*`), see [`diag_session`].
@@ -219,6 +261,14 @@ pub struct PipelineEngine {
     diag_passive: diag_passive::PassiveScanMap,
     /// Buses with a physical sweep in progress, see [`diag_sweep`].
     diag_sweeps: diag_sweep::SweepGuardSet,
+    /// Parsed firmware images by `imageId`, see [`diag_flash`].
+    flash_images: diag_flash::FlashImageCache,
+    /// Cancel flags of running flash downloads by session key, see [`diag_flash`].
+    flash_runs: diag_flash::FlashRunMap,
+    /// Diagnostics Workspace flow library (`<data_root>/flowlib`), see [`diag_workspace`].
+    flowlib: crate::flowlib::FlowLibrary,
+    /// Append-only run store (`<data_root>/runs`), see [`diag_workspace`].
+    runstore: crate::runstore::RunStore,
 }
 
 impl Default for PipelineEngine {
@@ -263,6 +313,8 @@ impl PipelineEngine {
         let (frame_tx, frame_rx) = bounded::<RawCanFrame>(FRAME_RING_CAPACITY);
         let (ctrl_tx, ctrl_rx) = bounded::<AggregatorControl>(64);
         let (snapshot_bcast_tx, _) = broadcast::channel::<TelemetrySnapshotDto>(128);
+        let (hw_bcast_tx, _) = broadcast::channel::<HardwareWatchEventDto>(32);
+        let (hw_stop_tx, hw_stop_rx) = bounded::<()>(1);
 
         let buses: Arc<Mutex<BTreeMap<BusId, ConnectedBusHandle>>> =
             Arc::new(Mutex::new(BTreeMap::new()));
@@ -272,6 +324,26 @@ impl PipelineEngine {
         let tx_epoch = Arc::new(AtomicU64::new(0));
         let engine_stop = Arc::new(AtomicBool::new(false));
         let latest_snapshot = Arc::new(RwLock::new(None));
+
+        let logs_dir_opt = if cfg!(any(test, feature = "test-hooks")) {
+            None
+        } else {
+            Some(data_root.logs_dir())
+        };
+        let debug_hub = Arc::new(DebugEventHub::with_logs_dir(logs_dir_opt));
+        debug_hub.record(
+            "info",
+            "CONN",
+            "backend",
+            None,
+            "engine.started",
+            "NexusCAN Telemetry Pipeline Engine initialized",
+            Some(format!(
+                "os={}, arch={}, ringCap=5000",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )),
+        );
 
         let replay = Arc::new(ReplayController::spawn(
             frame_tx.clone(),
@@ -288,6 +360,7 @@ impl PipelineEngine {
         let agg_replay = Arc::clone(&replay);
         let agg_bcast = snapshot_bcast_tx.clone();
         let agg_latest = Arc::clone(&latest_snapshot);
+        let agg_debug = Arc::clone(&debug_hub);
 
         let aggregator_handle = thread::Builder::new()
             .name("nexus-aggregator-60hz".to_string())
@@ -302,6 +375,7 @@ impl PipelineEngine {
                     agg_replay,
                     agg_bcast,
                     agg_latest,
+                    agg_debug,
                 );
             })
             .expect("failed to spawn nexus-aggregator-60hz thread");
@@ -311,6 +385,7 @@ impl PipelineEngine {
         let sched_epoch = Arc::clone(&tx_epoch);
         let sched_buses = Arc::clone(&buses);
         let sched_table = Arc::clone(&tx_scheduler);
+        let sched_debug = Arc::clone(&debug_hub);
 
         let scheduler_handle = thread::Builder::new()
             .name("nexus-tx-scheduler".to_string())
@@ -321,14 +396,15 @@ impl PipelineEngine {
                     sched_epoch,
                     sched_buses,
                     sched_table,
+                    sched_debug,
                 );
             })
             .expect("failed to spawn nexus-tx-scheduler thread");
 
         Self {
-            registry,
-            data_root,
+            registry: Arc::new(registry),
             trace_stats: TraceStatsCache::default(),
+            debug_hub,
             buses,
             db_state: RwLock::new(None),
             bus_db_states: RwLock::new(BTreeMap::new()),
@@ -342,17 +418,141 @@ impl PipelineEngine {
             engine_stop,
             snapshot_bcast_tx,
             latest_snapshot,
+            hw_bcast_tx,
+            hw_watcher_started: AtomicBool::new(false),
+            hw_watch_shutdown: Arc::new(HwWatchShutdown::new()),
+            hw_stop_tx,
+            hw_stop_rx,
+            hw_hotplug_join: Mutex::new(None),
+            hw_topology_join: Mutex::new(None),
             aggregator_join: Mutex::new(Some(aggregator_handle)),
             scheduler_join: Mutex::new(Some(scheduler_handle)),
             diag_sessions: diag_session::DiagSessionMap::default(),
             diag_passive: diag_passive::PassiveScanMap::default(),
             diag_sweeps: diag_sweep::SweepGuardSet::default(),
+            flash_images: diag_flash::FlashImageCache::default(),
+            flash_runs: diag_flash::FlashRunMap::default(),
+            flowlib: crate::flowlib::FlowLibrary::new(data_root.flowlib_dir()),
+            runstore: crate::runstore::RunStore::new(data_root.runs_dir()),
+            data_root,
         }
     }
 
     /// Subscribes to the 60Hz [`TelemetrySnapshotDto`] broadcast stream.
     pub fn subscribe(&self) -> broadcast::Receiver<TelemetrySnapshotDto> {
         self.snapshot_bcast_tx.subscribe()
+    }
+
+    /// Returns a reference to the shared [`DebugEventHub`].
+    pub fn debug_hub(&self) -> &Arc<DebugEventHub> {
+        &self.debug_hub
+    }
+
+    /// Subscribes to structured [`DebugEventBatchDto`] updates (`"append"`, `"cleared"`, `"windowState"`).
+    pub fn subscribe_debug_events(&self) -> broadcast::Receiver<DebugEventBatchDto> {
+        self.debug_hub.subscribe()
+    }
+
+    /// Captures a `"snapshot"` batch of all buffered debug/audit events + current window state.
+    pub fn snapshot_debug_events(&self) -> DebugEventBatchDto {
+        self.debug_hub.snapshot_batch()
+    }
+
+    /// Appends a structured event from the UI or an external caller (`cmd_append_debug_event`).
+    pub fn cmd_append_debug_event(&self, input: AppendDebugEventInputDto) -> DebugEventDto {
+        self.debug_hub.append_input(input)
+    }
+
+    /// Clears all buffered events in `DebugEventHub` (`cmd_clear_debug_events`).
+    pub fn cmd_clear_debug_events(&self) {
+        self.debug_hub.clear();
+    }
+
+    /// Exports all buffered debug events as `"jsonl"`, `"log"`, or `"csv"` (`cmd_export_debug_events`).
+    pub fn cmd_export_debug_events(&self, format: String) -> Result<String, HalError> {
+        self.debug_hub.export_formatted(&format)
+    }
+
+    /// Synchronizes tear-off window state across `"main"` and `"debug-console"` (`cmd_set_debug_window_open`).
+    pub fn set_debug_window_state(
+        &self,
+        detached_open: bool,
+        always_on_top: bool,
+        re_dock_requested: bool,
+    ) -> DebugWindowStateDto {
+        self.debug_hub
+            .set_window_state(detached_open, always_on_top, re_dock_requested)
+    }
+
+    /// Captures a point-in-time cross-OS hardware discovery + driver probe snapshot (`HardwareWatchEventDto`).
+    pub fn snapshot_hardware_state(&self, reason: &str) -> HardwareWatchEventDto {
+        self.reap_dead_buses();
+        build_hardware_watch_event(&self.registry, reason)
+    }
+
+    /// Subscribes to OS-level USB hotplug (`nusb::watch_devices()`) and periodic (`2,500 ms`)
+    /// topology change events, lazy-starting the two background watcher threads on first call.
+    pub fn subscribe_hardware_changes(&self) -> broadcast::Receiver<HardwareWatchEventDto> {
+        let rx = self.hw_bcast_tx.subscribe();
+        self.ensure_hardware_watchers_started();
+        rx
+    }
+
+    fn ensure_hardware_watchers_started(&self) {
+        if self.engine_stop.load(Ordering::Acquire) {
+            return;
+        }
+        if self
+            .hw_watcher_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let (pulse_tx, pulse_rx) = bounded::<()>(1);
+        let hotplug_epoch = Arc::new(AtomicU64::new(0));
+
+        // Thread A — OS Native USB Hotplug Event Listener (`nusb::watch_devices()`)
+        let hp_stop = Arc::clone(&self.engine_stop);
+        let hp_shutdown = Arc::clone(&self.hw_watch_shutdown);
+        let hp_epoch = Arc::clone(&hotplug_epoch);
+        if let Ok(handle_a) = thread::Builder::new()
+            .name("nexus-usb-hotplug".to_string())
+            .spawn(move || {
+                run_usb_hotplug_listener(hp_stop, hp_shutdown, hp_epoch, pulse_tx);
+            })
+        {
+            *self.hw_hotplug_join.lock() = Some(handle_a);
+        }
+
+        // Thread B — Debounced Hotplug Emitter + Lightweight Topology Fingerprint Poll (2,500 ms)
+        let topo_stop = Arc::clone(&self.engine_stop);
+        let topo_stop_rx = self.hw_stop_rx.clone();
+        let topo_registry = Arc::clone(&self.registry);
+        let topo_buses = Arc::clone(&self.buses);
+        let topo_sched = Arc::clone(&self.tx_scheduler);
+        let topo_bcast = self.hw_bcast_tx.clone();
+        let topo_epoch = Arc::clone(&hotplug_epoch);
+        let topo_debug = Arc::clone(&self.debug_hub);
+        if let Ok(handle_b) = thread::Builder::new()
+            .name("nexus-hw-topology".to_string())
+            .spawn(move || {
+                run_hardware_topology_watcher(
+                    topo_stop,
+                    topo_stop_rx,
+                    pulse_rx,
+                    topo_epoch,
+                    topo_registry,
+                    topo_buses,
+                    topo_sched,
+                    topo_bcast,
+                    topo_debug,
+                );
+            })
+        {
+            *self.hw_topology_join.lock() = Some(handle_b);
+        }
     }
 
     /// Returns the most recently emitted [`TelemetrySnapshotDto`], if any.
@@ -530,7 +730,15 @@ impl PipelineEngine {
 
     /// 1. `cmd_list_devices` -> Discovers all available hardware and virtual CAN channels.
     pub fn cmd_list_devices(&self) -> Vec<DeviceDescriptorDto> {
+        self.reap_dead_buses();
         self.registry.discover_all()
+    }
+
+    /// Reaps any `ConnectedBusHandle` whose channel has transitioned to [`BusState::Disconnected`]
+    /// (e.g. physical USB hot-unplug), disarming TX, stopping periodic jobs, closing diag taps,
+    /// and joining its I/O thread outside locks so OS handles are released immediately.
+    pub fn reap_dead_buses(&self) -> usize {
+        reap_dead_bus_handles(&self.buses, &self.tx_scheduler, &self.debug_hub)
     }
 
     /// 2. `cmd_connect_bus` -> Opens a CAN / CAN-FD channel and starts its zero-alloc reader thread.
@@ -543,25 +751,84 @@ impl PipelineEngine {
     pub fn cmd_connect_bus(
         &self,
         device_id: String,
-        config: ChannelConfigDto,
+        mut config: ChannelConfigDto,
     ) -> Result<BusHealthDto, HalError> {
         let bus_id = config.bus_id;
-        {
-            let guard = self.buses.lock();
-            if guard.contains_key(&bus_id) {
-                return Err(HalError::BusAlreadyConnected(bus_id));
+        // Reap any unplugged / dead handle before checking `contains_key(&bus_id)` so hot-replugging
+        // an adapter never hits a zombie `BusAlreadyConnected` error!
+        self.reap_dead_buses();
+
+        let result = (|| -> Result<(BusHealthDto, String, ChannelConfigDto), HalError> {
+            {
+                let guard = self.buses.lock();
+                if guard.contains_key(&bus_id) {
+                    return Err(HalError::BusAlreadyConnected(bus_id));
+                }
+            }
+
+            let (descriptor, channel) = self
+                .registry
+                .open_by_device_id(&device_id, &config)
+                .map_err(HalError::from_channel_open)?;
+            let driver_id = descriptor.driver_id.clone();
+            if descriptor.driver_id == "gs_usb" && config.adapter_channel.is_some() {
+                config.adapter_channel = Some(descriptor.channel_name.clone());
+            }
+            let cfg_snap = config.clone();
+            let handle =
+                self.spawn_connected_bus_handle(bus_id, descriptor, config, channel, false)?;
+
+            let dto = handle.to_health_dto();
+            self.buses.lock().insert(bus_id, handle);
+            Ok((dto, driver_id, cfg_snap))
+        })();
+
+        match result {
+            Ok((dto, driver_id, cfg_snap)) => {
+                let bitrate_desc = if cfg_snap.enable_fd {
+                    format!(
+                        "{} / {} bps (CAN-FD)",
+                        cfg_snap.bitrate, cfg_snap.data_bitrate
+                    )
+                } else {
+                    format!("{} bps (Classical CAN)", cfg_snap.bitrate)
+                };
+                self.debug_hub.record(
+                    "success",
+                    "CONN",
+                    "backend",
+                    Some(bus_id),
+                    "bus.connected",
+                    format!(
+                        "Connected Bus {} to {} ({})",
+                        u16::from(bus_id) + 1,
+                        dto.device_id,
+                        dto.channel_name
+                    ),
+                    Some(format!(
+                        "driver={driver_id}, bitrate={bitrate_desc}, listenOnly={}, enforcement={}",
+                        dto.listen_only,
+                        dto.listen_only_enforcement.as_deref().unwrap_or("none")
+                    )),
+                );
+                Ok(dto)
+            }
+            Err(err) => {
+                self.debug_hub.record(
+                    "error",
+                    "CONN",
+                    "backend",
+                    Some(bus_id),
+                    "bus.connect_failed",
+                    format!(
+                        "Failed to connect Bus {} to {device_id}",
+                        u16::from(bus_id) + 1
+                    ),
+                    Some(err.to_string()),
+                );
+                Err(err)
             }
         }
-
-        let (descriptor, channel) = self
-            .registry
-            .open_by_device_id(&device_id, &config)
-            .map_err(HalError::from_channel_open)?;
-        let handle = self.spawn_connected_bus_handle(bus_id, descriptor, config, channel, false)?;
-
-        let dto = handle.to_health_dto();
-        self.buses.lock().insert(bus_id, handle);
-        Ok(dto)
     }
 
     /// 3. `cmd_disconnect_bus` -> Stops periodic TX on `bus_id` and cleanly closes the channel (`< 25ms`).
@@ -574,46 +841,114 @@ impl PipelineEngine {
             .remove(&bus_id)
             .ok_or(HalError::BusNotConnected(bus_id))?;
 
+        let dev_id = handle.descriptor.device_id.clone();
+        let chan_name = handle.descriptor.channel_name.clone();
         handle.shutdown();
         let _ = self.ctrl_tx.try_send(AggregatorControl::ClearBus(bus_id));
+
+        self.debug_hub.record(
+            "info",
+            "CONN",
+            "backend",
+            Some(bus_id),
+            "bus.disconnected",
+            format!("Disconnected Bus {} ({dev_id})", u16::from(bus_id) + 1),
+            Some(format!("channel={chan_name}")),
+        );
         Ok(())
     }
 
     /// 4. `cmd_arm_active_bus` -> Arms or disarms active TX on `bus_id`, enforcing `Listen-Only` lock.
     pub fn cmd_arm_active_bus(&self, bus_id: u8, armed: bool) -> Result<BusHealthDto, HalError> {
-        let guard = self.buses.lock();
-        let bus = guard
-            .get(&bus_id)
-            .ok_or(HalError::BusNotConnected(bus_id))?;
-
-        if armed {
-            if bus.listen_only {
-                return Err(HalError::SafetyLock(
-                    "Cannot arm TX while channel is opened in Listen-Only mode; reconnect with Listen-Only unchecked"
-                        .to_string(),
-                ));
-            }
-            // WP-4: arming never clears the Panic latch (`cmd_clear_panic_latch` does).
-            if self.tx_panic_latched.load(Ordering::SeqCst) {
-                return Err(panic_latched_error());
-            }
-            bus.tx_armed.store(true, Ordering::SeqCst);
-        } else {
-            // SeqCst store, then the write barrier (see `cmd_panic_stop_tx`).
-            bus.tx_armed.store(false, Ordering::SeqCst);
-            bus.diag.close_all();
-            let barrier = bus.disarm_barrier();
-            drop(guard);
-            self.tx_scheduler.lock().remove_jobs_for_bus(bus_id);
-            self.quiesce_bus_after_disarm(bus_id, barrier)?;
-            let guard2 = self.buses.lock();
-            let bus2 = guard2
+        let res = (|| -> Result<BusHealthDto, HalError> {
+            let guard = self.buses.lock();
+            let bus = guard
                 .get(&bus_id)
                 .ok_or(HalError::BusNotConnected(bus_id))?;
-            return Ok(bus2.to_health_dto());
-        }
 
-        Ok(bus.to_health_dto())
+            if armed {
+                if bus.listen_only {
+                    return Err(HalError::SafetyLock(
+                        "Cannot arm TX while channel is opened in Listen-Only mode; reconnect with Listen-Only unchecked"
+                            .to_string(),
+                    ));
+                }
+                // WP-4: arming never clears the Panic latch (`cmd_clear_panic_latch` does).
+                if self.tx_panic_latched.load(Ordering::SeqCst) {
+                    return Err(panic_latched_error());
+                }
+                bus.tx_armed.store(true, Ordering::SeqCst);
+            } else {
+                // SeqCst store, then the write barrier (see `cmd_panic_stop_tx`).
+                bus.tx_armed.store(false, Ordering::SeqCst);
+                bus.diag.close_all();
+                let barrier = bus.disarm_barrier();
+                drop(guard);
+                self.tx_scheduler.lock().remove_jobs_for_bus(bus_id);
+                self.quiesce_bus_after_disarm(bus_id, barrier)?;
+                let guard2 = self.buses.lock();
+                let bus2 = guard2
+                    .get(&bus_id)
+                    .ok_or(HalError::BusNotConnected(bus_id))?;
+                return Ok(bus2.to_health_dto());
+            }
+
+            Ok(bus.to_health_dto())
+        })();
+
+        match &res {
+            Ok(dto) => {
+                if dto.tx_armed {
+                    self.debug_hub.record(
+                        "safety",
+                        "SAFETY",
+                        "backend",
+                        Some(bus_id),
+                        "safety.tx_armed",
+                        format!(
+                            "Active TX armed on Bus {} ({})",
+                            u16::from(bus_id) + 1,
+                            dto.device_id
+                        ),
+                        Some(format!("channel={}, listenOnly=false", dto.channel_name)),
+                    );
+                } else {
+                    self.debug_hub.record(
+                        "safety",
+                        "SAFETY",
+                        "backend",
+                        Some(bus_id),
+                        "safety.tx_disarmed",
+                        format!(
+                            "Active TX disarmed on Bus {} ({})",
+                            u16::from(bus_id) + 1,
+                            dto.device_id
+                        ),
+                        Some("periodicJobsCleared=true, diagTapsClosed=true".to_string()),
+                    );
+                }
+            }
+            Err(err) => {
+                self.debug_hub.record(
+                    "warn",
+                    "SAFETY",
+                    "backend",
+                    Some(bus_id),
+                    if armed {
+                        "safety.tx_arm_rejected"
+                    } else {
+                        "safety.tx_disarm_warning"
+                    },
+                    format!(
+                        "TX {} blocked on Bus {}",
+                        if armed { "arm" } else { "disarm" },
+                        u16::from(bus_id) + 1
+                    ),
+                    Some(err.to_string()),
+                );
+            }
+        }
+        res
     }
 
     /// Atomically transitions an ALREADY-CONNECTED `bus_id` between `Listen-Only` and `Active TX`
@@ -632,83 +967,127 @@ impl PipelineEngine {
         listen_only: bool,
         arm_tx: bool,
     ) -> Result<BusHealthDto, HalError> {
-        let target_armed = arm_tx && !listen_only;
-        // A Panic Stop / reset that lands while the channel is reopened bumps the epoch.
-        let epoch_at_start = self.tx_epoch.load(Ordering::SeqCst);
+        let res = (|| -> Result<BusHealthDto, HalError> {
+            let target_armed = arm_tx && !listen_only;
+            // A Panic Stop / reset that lands while the channel is reopened bumps the epoch.
+            let epoch_at_start = self.tx_epoch.load(Ordering::SeqCst);
 
-        {
-            let guard = self.buses.lock();
-            let bus = guard
-                .get(&bus_id)
-                .ok_or(HalError::BusNotConnected(bus_id))?;
-            if target_armed && self.tx_panic_latched.load(Ordering::SeqCst) {
-                return Err(panic_latched_error());
-            }
-            if bus.listen_only == listen_only {
-                bus.tx_armed.store(target_armed, Ordering::SeqCst);
-                if target_armed {
-                    return Ok(bus.to_health_dto());
-                }
-                bus.diag.close_all();
-                let barrier = bus.disarm_barrier();
-                drop(guard);
-                self.tx_scheduler.lock().remove_jobs_for_bus(bus_id);
-                self.quiesce_bus_after_disarm(bus_id, barrier)?;
-                let guard2 = self.buses.lock();
-                let bus2 = guard2
+            {
+                let guard = self.buses.lock();
+                let bus = guard
                     .get(&bus_id)
                     .ok_or(HalError::BusNotConnected(bus_id))?;
-                return Ok(bus2.to_health_dto());
+                if target_armed && self.tx_panic_latched.load(Ordering::SeqCst) {
+                    return Err(panic_latched_error());
+                }
+                if bus.listen_only == listen_only {
+                    bus.tx_armed.store(target_armed, Ordering::SeqCst);
+                    if target_armed {
+                        return Ok(bus.to_health_dto());
+                    }
+                    bus.diag.close_all();
+                    let barrier = bus.disarm_barrier();
+                    drop(guard);
+                    self.tx_scheduler.lock().remove_jobs_for_bus(bus_id);
+                    self.quiesce_bus_after_disarm(bus_id, barrier)?;
+                    let guard2 = self.buses.lock();
+                    let bus2 = guard2
+                        .get(&bus_id)
+                        .ok_or(HalError::BusNotConnected(bus_id))?;
+                    return Ok(bus2.to_health_dto());
+                }
+            }
+
+            // Mode change (`listen_only` toggled): stop periodic TX jobs for this bus first.
+            self.tx_scheduler.lock().remove_jobs_for_bus(bus_id);
+
+            let mut old_handle = self
+                .buses
+                .lock()
+                .remove(&bus_id)
+                .ok_or(HalError::BusNotConnected(bus_id))?;
+
+            let exact_device_id = old_handle.descriptor.device_id.clone();
+            let mut updated_config = old_handle.config.clone();
+            updated_config.bus_id = bus_id;
+            updated_config.listen_only = listen_only;
+
+            // Cleanly close the existing handle WITHOUT sending AggregatorControl::ClearBus(bus_id)
+            // so captured RX frames on this bus remain visible in StateTable!
+            old_handle.shutdown();
+
+            let (descriptor, channel) = self
+                .registry
+                .open_by_device_id(&exact_device_id, &updated_config)
+                .map_err(HalError::from_channel_open)?;
+
+            // WP-4: a Panic Stop may have landed while the channel was reopened; never come back
+            // armed in that case (the bus is reconnected disarmed instead).
+            let target_armed = target_armed && !self.tx_panic_latched.load(Ordering::SeqCst);
+
+            let new_handle = self.spawn_connected_bus_handle(
+                bus_id,
+                descriptor,
+                updated_config,
+                channel,
+                target_armed,
+            )?;
+            // The new bus is not in `buses` yet, so a Panic Stop / reset racing the reopen could
+            // not disarm it. Re-check under the buses lock (Panic bumps the epoch BEFORE it takes
+            // that lock): either we see the bump here, or Panic sees the inserted bus. Nobody can
+            // enqueue TX before the insert (its `tx_sender` is not published yet).
+            let mut guard = self.buses.lock();
+            if self.tx_epoch.load(Ordering::SeqCst) != epoch_at_start
+                || self.tx_panic_latched.load(Ordering::SeqCst)
+            {
+                new_handle.tx_armed.store(false, Ordering::SeqCst);
+            }
+            let dto = new_handle.to_health_dto();
+            guard.insert(bus_id, new_handle);
+            Ok(dto)
+        })();
+
+        match &res {
+            Ok(dto) => {
+                let mode_label = if dto.listen_only {
+                    "Listen-Only (Passive)"
+                } else {
+                    "Active CAN"
+                };
+                self.debug_hub.record(
+                    "safety",
+                    "SAFETY",
+                    "backend",
+                    Some(bus_id),
+                    "safety.mode_changed",
+                    format!(
+                        "Bus {} mode switched to {mode_label}",
+                        u16::from(bus_id) + 1
+                    ),
+                    Some(format!(
+                        "device={}, txArmed={}, enforcement={}",
+                        dto.device_id,
+                        dto.tx_armed,
+                        dto.listen_only_enforcement.as_deref().unwrap_or("none")
+                    )),
+                );
+            }
+            Err(err) => {
+                self.debug_hub.record(
+                    "error",
+                    "SAFETY",
+                    "backend",
+                    Some(bus_id),
+                    "safety.mode_change_failed",
+                    format!(
+                        "Failed to switch Bus {} mode (listenOnly={listen_only})",
+                        u16::from(bus_id) + 1
+                    ),
+                    Some(err.to_string()),
+                );
             }
         }
-
-        // Mode change (`listen_only` toggled): stop periodic TX jobs for this bus first.
-        self.tx_scheduler.lock().remove_jobs_for_bus(bus_id);
-
-        let mut old_handle = self
-            .buses
-            .lock()
-            .remove(&bus_id)
-            .ok_or(HalError::BusNotConnected(bus_id))?;
-
-        let exact_device_id = old_handle.descriptor.device_id.clone();
-        let mut updated_config = old_handle.config.clone();
-        updated_config.bus_id = bus_id;
-        updated_config.listen_only = listen_only;
-
-        // Cleanly close the existing handle WITHOUT sending AggregatorControl::ClearBus(bus_id)
-        // so captured RX frames on this bus remain visible in StateTable!
-        old_handle.shutdown();
-
-        let (descriptor, channel) = self
-            .registry
-            .open_by_device_id(&exact_device_id, &updated_config)
-            .map_err(HalError::from_channel_open)?;
-
-        // WP-4: a Panic Stop may have landed while the channel was reopened; never come back
-        // armed in that case (the bus is reconnected disarmed instead).
-        let target_armed = target_armed && !self.tx_panic_latched.load(Ordering::SeqCst);
-
-        let new_handle = self.spawn_connected_bus_handle(
-            bus_id,
-            descriptor,
-            updated_config,
-            channel,
-            target_armed,
-        )?;
-        // The new bus is not in `buses` yet, so a Panic Stop / reset racing the reopen could
-        // not disarm it. Re-check under the buses lock (Panic bumps the epoch BEFORE it takes
-        // that lock): either we see the bump here, or Panic sees the inserted bus. Nobody can
-        // enqueue TX before the insert (its `tx_sender` is not published yet).
-        let mut guard = self.buses.lock();
-        if self.tx_epoch.load(Ordering::SeqCst) != epoch_at_start
-            || self.tx_panic_latched.load(Ordering::SeqCst)
-        {
-            new_handle.tx_armed.store(false, Ordering::SeqCst);
-        }
-        let dto = new_handle.to_health_dto();
-        guard.insert(bus_id, new_handle);
-        Ok(dto)
+        res
     }
 
     /// 5. `cmd_panic_stop_tx` -> Emergency stop: cancels all periodic TX jobs, disarms replay hardware TX, and disarms every bus.
@@ -732,6 +1111,11 @@ impl PipelineEngine {
         // Order matters (WP-4): epoch + latch BEFORE the scheduler is cleared.
         self.tx_epoch.fetch_add(1, Ordering::SeqCst);
         self.tx_panic_latched.store(true, Ordering::SeqCst);
+        // Cancel running flash downloads BEFORE the taps close, so they end as `cancelled`
+        // (not as a transport failure) and never send another block.
+        let cancelled_flash_downloads = self
+            .flash_runs
+            .cancel_all(diag_flash::CancelReason::PanicStop);
         self.replay.disarm_hardware_tx();
         let stopped_periodic_jobs = self.tx_scheduler.lock().clear_all();
 
@@ -756,6 +1140,31 @@ impl PipelineEngine {
             report_quiesce_timeout("panic stop", &in_flight_timeout_buses);
         }
 
+        let details = if in_flight_timeout_buses.is_empty() {
+            format!(
+                "stoppedPeriodicJobs={stopped_periodic_jobs}, disarmedBuses={disarmed_buses}, cancelledFlashDownloads={cancelled_flash_downloads}, panicLatch=true"
+            )
+        } else {
+            format!(
+                "stoppedPeriodicJobs={stopped_periodic_jobs}, disarmedBuses={disarmed_buses}, cancelledFlashDownloads={cancelled_flash_downloads}, inFlightTimeoutBuses={in_flight_timeout_buses:?}"
+            )
+        };
+        self.debug_hub.record(
+            if in_flight_timeout_buses.is_empty() {
+                "safety"
+            } else {
+                "error"
+            },
+            "SAFETY",
+            "backend",
+            None,
+            "safety.panic_stop",
+            format!(
+                "PANIC STOP engaged — stopped {stopped_periodic_jobs} job(s), disarmed {disarmed_buses} bus(es)"
+            ),
+            Some(details),
+        );
+
         PanicStopResultDto {
             stopped_periodic_jobs,
             disarmed_buses,
@@ -768,6 +1177,15 @@ impl PipelineEngine {
     /// disarmed; the operator must explicitly Arm Active Bus again.
     pub fn cmd_clear_panic_latch(&self) {
         self.tx_panic_latched.store(false, Ordering::SeqCst);
+        self.debug_hub.record(
+            "safety",
+            "SAFETY",
+            "backend",
+            None,
+            "safety.panic_cleared",
+            "Panic Stop latch cleared — buses remain safely disarmed",
+            None,
+        );
     }
 
     /// `true` while the Panic Stop latch is engaged.
@@ -783,6 +1201,8 @@ impl PipelineEngine {
         // Invalidate anything already queued towards a bus-io thread.
         self.tx_epoch.fetch_add(1, Ordering::SeqCst);
         self.replay.disarm_hardware_tx();
+        self.flash_runs
+            .cancel_all(diag_flash::CancelReason::SessionReset);
         self.diag_sessions.clear();
 
         let mut disarmed_buses = 0usize;
@@ -807,6 +1227,20 @@ impl PipelineEngine {
         let disconnected_buses = self.cmd_disconnect_all_buses();
         self.tx_panic_latched.store(false, Ordering::SeqCst);
 
+        self.debug_hub.record(
+            "safety",
+            "SAFETY",
+            "backend",
+            None,
+            "safety.session_reset",
+            format!(
+                "Session reset completed — disconnected {disconnected_buses} bus(es), stopped {stopped_periodic_jobs} job(s)"
+            ),
+            Some(format!(
+                "disarmedBuses={disarmed_buses}, inFlightTimeoutBuses={in_flight_timeout_buses:?}"
+            )),
+        );
+
         ResetSessionResultDto {
             stopped_periodic_jobs,
             disarmed_buses,
@@ -815,17 +1249,23 @@ impl PipelineEngine {
         }
     }
 
-    /// WP-2: `cmd_seedkey_capabilities` (native seed/key providers are never allowed in v0.1).
+    /// WP-2: `cmd_seedkey_capabilities`. `policy` is per caller (desktop: native allowed;
+    /// bridge: loopback + env switch). Reports which native kinds exist and whether the
+    /// 32/64-bit `library` helpers were found. Touches the file system: call it off the
+    /// async runtime.
     pub fn cmd_seedkey_capabilities(
         &self,
+        policy: crate::seedkey::SeedKeyPolicy,
     ) -> nexus_protocols::uds::security::SeedKeyCapabilitiesDto {
-        crate::seedkey::capabilities()
+        crate::seedkey::capabilities(policy)
     }
 
-    /// WP-2: `cmd_seedkey_compute_adhoc` (portable providers only). BLOCKING: call it from
-    /// `spawn_blocking` (Tauri) / a blocking task (bridge).
+    /// WP-2: `cmd_seedkey_compute_adhoc`. Portable kinds always; native kinds (`library` via
+    /// the isolated helper process, `external_process`) only when `policy` allows them.
+    /// BLOCKING: call it from `spawn_blocking` (Tauri) / a blocking task (bridge).
     pub fn cmd_seedkey_compute_adhoc(
         &self,
+        policy: crate::seedkey::SeedKeyPolicy,
         provider: &nexus_protocols::uds::security::KeyProviderSpecDto,
         level: u8,
         seed_hex: &str,
@@ -833,7 +1273,52 @@ impl PipelineEngine {
         nexus_protocols::uds::security::ComputeKeyResultDto,
         nexus_protocols::uds::security::SeedKeyError,
     > {
-        crate::seedkey::compute_adhoc(provider, level, seed_hex)
+        let res = crate::seedkey::compute_adhoc(policy, provider, level, seed_hex);
+        match &res {
+            Ok(out) => {
+                // Never the key bytes: length, provider kind and timing only.
+                self.debug_hub.record(
+                    "info",
+                    "DIAG",
+                    "protocol",
+                    None,
+                    "diag.seedkey",
+                    format!("Computed UDS 0x27 Seed/Key for security level 0x{level:02X}"),
+                    Some(format!(
+                        "provider={}, keyHexLen={}, elapsedUs={}",
+                        out.provider_kind,
+                        out.key_hex.len(),
+                        out.elapsed_us
+                    )),
+                );
+            }
+            Err(err) => {
+                self.debug_hub.record(
+                    "warn",
+                    "DIAG",
+                    "protocol",
+                    None,
+                    "diag.seedkey_failed",
+                    format!("UDS 0x27 Seed/Key computation failed (level 0x{level:02X})"),
+                    Some(err.to_string()),
+                );
+            }
+        }
+        res
+    }
+
+    /// Contract `cmd_seedkey_probe_library`: library header (format / arch) parsed in-process
+    /// without loading it; exports detected by the isolated helper. Native policy applies.
+    /// BLOCKING (starts a helper process): call it from a blocking worker.
+    pub fn cmd_seedkey_probe_library(
+        &self,
+        policy: crate::seedkey::SeedKeyPolicy,
+        path: &str,
+    ) -> Result<
+        nexus_protocols::uds::security::SeedKeyLibraryInfoDto,
+        nexus_protocols::uds::security::SeedKeyError,
+    > {
+        crate::seedkey::probe_library(policy, path)
     }
 
     /// 6. `cmd_load_preset_databases` -> Parses & merges `scripts/sample_vehicle.dbc` + `scripts/sample_bms.kcd`.
@@ -876,6 +1361,18 @@ impl PipelineEngine {
         let _ = self
             .ctrl_tx
             .send(AggregatorControl::SetDatabase(Some(compiled)));
+
+        self.debug_hub.record(
+            "success",
+            "NETDB",
+            "backend",
+            None,
+            "netdb.preset_loaded",
+            format!("Loaded preset database ({message_count} messages, {signal_count} signals)"),
+            Some(format!(
+                "files={PRESET_VEHICLE_DBC_NAME} + {PRESET_BMS_KCD_NAME}"
+            )),
+        );
 
         Ok(schema)
     }
@@ -958,6 +1455,18 @@ impl PipelineEngine {
             .ctrl_tx
             .send(AggregatorControl::SetDatabase(Some(compiled)));
 
+        self.debug_hub.record(
+            "success",
+            "NETDB",
+            "backend",
+            None,
+            "netdb.loaded",
+            format!(
+                "Loaded database '{file_name}' ({message_count} messages, {signal_count} signals)"
+            ),
+            Some(format!("append={append_to_existing}")),
+        );
+
         Ok(schema)
     }
 
@@ -1029,6 +1538,18 @@ impl PipelineEngine {
             let _ = self
                 .ctrl_tx
                 .send(AggregatorControl::SetBusDatabase(bus_id, None));
+            self.debug_hub.record(
+                "info",
+                "NETDB",
+                "backend",
+                Some(bus_id),
+                "netdb.bus_unbound",
+                format!(
+                    "Cleared database binding on Bus {} (Raw Hex mode)",
+                    u16::from(bus_id) + 1
+                ),
+                None,
+            );
             return Ok(None);
         }
         if files.len() > MAX_DB_FILES_PER_CALL {
@@ -1113,6 +1634,12 @@ impl PipelineEngine {
         let compiled = Arc::new(CompiledDatabase::compile(target_raw.clone())?);
         let schema = compiled.to_schema_dto(info);
 
+        let bound_names = files
+            .iter()
+            .map(|f| f.file_name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+
         self.bus_db_states.write().insert(
             bus_id,
             Some(LoadedDatabaseState {
@@ -1124,6 +1651,20 @@ impl PipelineEngine {
         let _ = self
             .ctrl_tx
             .send(AggregatorControl::SetBusDatabase(bus_id, Some(compiled)));
+
+        self.debug_hub.record(
+            "success",
+            "NETDB",
+            "backend",
+            Some(bus_id),
+            "netdb.bus_bound",
+            format!(
+                "Bound {} database file(s) to Bus {} ({message_count} messages, {signal_count} signals)",
+                files.len(),
+                u16::from(bus_id) + 1
+            ),
+            Some(format!("files=[{bound_names}]")),
+        );
 
         Ok(Some(schema))
     }
@@ -1237,6 +1778,58 @@ impl PipelineEngine {
             _ => None,
         };
 
+        if !clamped_signals.is_empty() {
+            self.debug_hub.record(
+                "warn",
+                "TX",
+                "backend",
+                Some(bus_id),
+                "tx.signals_clamped",
+                format!(
+                    "Clamped {} out-of-range signal value(s) on {} (Bus {})",
+                    clamped_signals.len(),
+                    can_id.schema_key(),
+                    u16::from(bus_id) + 1
+                ),
+                Some(format!("signalIds={clamped_signals:?}")),
+            );
+        }
+
+        let hex_preview = format_hex_bytes_preview(&encoded_bytes);
+        if let Some(jid) = job_id {
+            self.debug_hub.record(
+                "info",
+                "TX",
+                "backend",
+                Some(bus_id),
+                "tx.cycle.started",
+                format!(
+                    "Started periodic signal TX job #{jid} on {} ({} ms)",
+                    can_id.schema_key(),
+                    periodic_ms.unwrap_or(0)
+                ),
+                Some(format!(
+                    "arbId=0x{arb_id:X}, dlc={encoded_dlc}, data=[{hex_preview}]"
+                )),
+            );
+        } else {
+            self.debug_hub.record(
+                "info",
+                "TX",
+                "backend",
+                Some(bus_id),
+                "tx.single_shot",
+                format!(
+                    "Transmitted signal frame {} on Bus {}",
+                    can_id.schema_key(),
+                    u16::from(bus_id) + 1
+                ),
+                Some(format!(
+                    "arbId=0x{arb_id:X}, dlc={encoded_dlc}, data=[{hex_preview}]"
+                )),
+            );
+        }
+
         Ok(TxTransmitResultDto {
             job_id,
             encoded_dlc,
@@ -1247,7 +1840,19 @@ impl PipelineEngine {
 
     /// 11. `cmd_stop_periodic_tx` -> Stops an active periodic TX job by `job_id`.
     pub fn cmd_stop_periodic_tx(&self, job_id: u64) -> Result<(), HalError> {
-        self.tx_scheduler.lock().stop_job(job_id)
+        let res = self.tx_scheduler.lock().stop_job(job_id);
+        if res.is_ok() {
+            self.debug_hub.record(
+                "info",
+                "TX",
+                "backend",
+                None,
+                "tx.cycle.stopped",
+                format!("Stopped periodic TX job #{job_id}"),
+                None,
+            );
+        }
+        res
     }
 
     /// 12. `cmd_list_periodic_tx` -> Lists all active periodic TX jobs.
@@ -1378,6 +1983,41 @@ impl PipelineEngine {
             _ => None,
         };
 
+        let hex_preview = format_hex_bytes_preview(&encoded_bytes);
+        if let Some(jid) = job_id {
+            self.debug_hub.record(
+                "info",
+                "TX",
+                "backend",
+                Some(bus_id),
+                "tx.cycle.started",
+                format!(
+                    "Started periodic raw TX job #{jid} on {} ({} ms)",
+                    can_id.schema_key(),
+                    periodic_ms.unwrap_or(0)
+                ),
+                Some(format!(
+                    "arbId=0x{arb_id:X}, fd={use_fd}, brs={is_brs}, dlc={encoded_dlc}, data=[{hex_preview}]"
+                )),
+            );
+        } else {
+            self.debug_hub.record(
+                "info",
+                "TX",
+                "backend",
+                Some(bus_id),
+                "tx.single_shot",
+                format!(
+                    "Transmitted raw frame {} on Bus {}",
+                    can_id.schema_key(),
+                    u16::from(bus_id) + 1
+                ),
+                Some(format!(
+                    "arbId=0x{arb_id:X}, fd={use_fd}, brs={is_brs}, dlc={encoded_dlc}, data=[{hex_preview}]"
+                )),
+            );
+        }
+
         Ok(TxTransmitResultDto {
             job_id,
             encoded_dlc,
@@ -1389,6 +2029,7 @@ impl PipelineEngine {
     /// 14. `cmd_probe_drivers` -> Probes OS kernel modules, vendor SDK libraries (`PCAN`, `Kvaser`, `gs_usb`, `SocketCAN`),
     ///     and attached COM / `/dev/ttyUSB*` / `/dev/ttyACM*` serial ports for SLCAN.
     pub fn cmd_probe_drivers(&self) -> DriverProbeReportDto {
+        self.reap_dead_buses();
         probe_all_drivers()
     }
 
@@ -1398,6 +2039,15 @@ impl PipelineEngine {
         self.bus_db_states.write().clear();
         let _ = self.ctrl_tx.send(AggregatorControl::SetDatabase(None));
         let _ = self.ctrl_tx.send(AggregatorControl::ClearAllBusDatabases);
+        self.debug_hub.record(
+            "info",
+            "NETDB",
+            "backend",
+            None,
+            "netdb.cleared",
+            "Cleared all loaded signal databases",
+            None,
+        );
         Ok(())
     }
 
@@ -1410,6 +2060,17 @@ impl PipelineEngine {
         for (bus_id, mut handle) in removed {
             handle.shutdown();
             let _ = self.ctrl_tx.send(AggregatorControl::ClearBus(bus_id));
+        }
+        if count > 0 {
+            self.debug_hub.record(
+                "info",
+                "CONN",
+                "backend",
+                None,
+                "bus.disconnected_all",
+                format!("Disconnected {count} active CAN channel(s)"),
+                None,
+            );
         }
         count
     }
@@ -1570,12 +2231,22 @@ impl PipelineEngine {
 
         crate::storage::write_regular_file_atomic(&target_path, project_json.as_bytes())?;
 
-        Ok(ProjectSummaryDto {
-            file_stem: safe_stem,
-            name,
+        let summary = ProjectSummaryDto {
+            file_stem: safe_stem.clone(),
+            name: name.clone(),
             updated_at,
             size_bytes: project_json.len() as u64,
-        })
+        };
+        self.debug_hub.record(
+            "success",
+            "WORKBENCH",
+            "backend",
+            None,
+            "workbench.project_saved",
+            format!("Saved project '{name}' ({safe_stem}.nexusproj.json)"),
+            Some(format!("sizeBytes={}", summary.size_bytes)),
+        );
+        Ok(summary)
     }
 
     /// 19. `cmd_load_project` -> Reads `<projects>/<safe_stem>.nexusproj.json` (regular file,
@@ -1588,9 +2259,19 @@ impl PipelineEngine {
             )));
         }
         let raw = crate::storage::read_regular_file(&target_path, MAX_PROJECT_FILE_BYTES)?;
-        String::from_utf8(raw).map_err(|_| {
+        let json = String::from_utf8(raw).map_err(|_| {
             HalError::InvalidInput(format!("Project '{safe_stem}' is not valid UTF-8"))
-        })
+        })?;
+        self.debug_hub.record(
+            "info",
+            "WORKBENCH",
+            "backend",
+            None,
+            "workbench.project_loaded",
+            format!("Loaded project '{safe_stem}.nexusproj.json'"),
+            Some(format!("sizeBytes={}", json.len())),
+        );
+        Ok(json)
     }
 
     /// 20. `cmd_delete_project` -> Deletes `<projects>/<safe_stem>.nexusproj.json` (symlinks refused).
@@ -1601,7 +2282,17 @@ impl PipelineEngine {
                 "Project '{safe_stem}' does not exist in projects directory"
             )));
         }
-        crate::storage::remove_regular_file(&target_path)
+        crate::storage::remove_regular_file(&target_path)?;
+        self.debug_hub.record(
+            "info",
+            "WORKBENCH",
+            "backend",
+            None,
+            "workbench.project_deleted",
+            format!("Deleted project '{safe_stem}.nexusproj.json'"),
+            None,
+        );
+        Ok(())
     }
 
     /// 21. `cmd_reset_telemetry` -> Resets `StateTable` (`Receive` rows, `Trace` ring, and RX/TX counters)
@@ -1610,6 +2301,15 @@ impl PipelineEngine {
         self.ctrl_tx
             .send(AggregatorControl::ResetAll)
             .map_err(|_| HalError::InvalidInput("Aggregator thread stopped".to_string()))?;
+        self.debug_hub.record(
+            "info",
+            "WORKBENCH",
+            "backend",
+            None,
+            "workbench.telemetry_reset",
+            "Reset telemetry counters, Receive rows, and Trace ring",
+            None,
+        );
         Ok(())
     }
 
@@ -1629,7 +2329,7 @@ impl PipelineEngine {
     ) -> Result<TraceFileSummaryDto, HalError> {
         check_trace_content_sizes(content.as_deref(), content_base64.as_deref())?;
         let traces_dir = self.data_root.traces_dir();
-        if let Some(b64) = content_base64.as_deref().filter(|s| !s.trim().is_empty()) {
+        let res = if let Some(b64) = content_base64.as_deref().filter(|s| !s.trim().is_empty()) {
             let raw_bytes = decode_base64_trace_bytes(b64)?;
             save_trace_file_bytes_cached(
                 traces_dir,
@@ -1648,16 +2348,52 @@ impl PipelineEngine {
             Err(HalError::InvalidInput(
                 "Trace kaydında oynatılacak çerçeve bulunamadı".to_string(),
             ))
+        };
+        if let Ok(summary) = &res {
+            self.debug_hub.record(
+                "success",
+                "TRACE",
+                "backend",
+                None,
+                "trace.saved",
+                format!(
+                    "Saved trace '{}' ({} frames)",
+                    summary.file_name, summary.frame_count
+                ),
+                Some(format!(
+                    "format={}, sizeBytes={}, durationUs={}",
+                    summary.format, summary.size_bytes, summary.duration_us
+                )),
+            );
         }
+        res
     }
 
     /// 24. `cmd_load_trace_file` -> Loads and parses `./traces/<safe_name>` into `LoadedTraceFileDto`.
     pub fn cmd_load_trace_file(&self, file_name: String) -> Result<LoadedTraceFileDto, HalError> {
-        load_trace_file_cached(
+        let res = load_trace_file_cached(
             self.data_root.traces_dir(),
             &file_name,
             Some(&self.trace_stats),
-        )
+        );
+        if let Ok(loaded) = &res {
+            self.debug_hub.record(
+                "info",
+                "TRACE",
+                "backend",
+                None,
+                "trace.loaded",
+                format!(
+                    "Loaded trace '{}' ({} frames)",
+                    loaded.summary.file_name, loaded.summary.frame_count
+                ),
+                Some(format!(
+                    "format={}, durationUs={}",
+                    loaded.summary.format, loaded.summary.duration_us
+                )),
+            );
+        }
+        res
     }
 
     /// 25. `cmd_delete_trace_file` -> Deletes `./traces/<safe_name>`.
@@ -1666,6 +2402,15 @@ impl PipelineEngine {
         if res.is_ok() {
             if let Ok(safe) = sanitize_trace_filename(&file_name) {
                 self.trace_stats.forget(&safe);
+                self.debug_hub.record(
+                    "info",
+                    "TRACE",
+                    "backend",
+                    None,
+                    "trace.deleted",
+                    format!("Deleted trace file '{safe}'"),
+                    None,
+                );
             }
         }
         res
@@ -1768,7 +2513,30 @@ impl PipelineEngine {
             args.source_name.trim().to_string()
         };
 
-        self.replay.start_compiled(source_name, entries, &args)
+        let entry_count = entries.len();
+        let res = self.replay.start_compiled(source_name, entries, &args);
+        if let Ok(st) = &res {
+            self.debug_hub.record(
+                if st.transmit_to_hardware {
+                    "safety"
+                } else {
+                    "info"
+                },
+                "TRACE",
+                "backend",
+                st.bus_override,
+                "trace.replay_started",
+                format!(
+                    "Started trace replay '{}' ({entry_count} frames @ {:.2}x)",
+                    st.source_name, st.speed_factor
+                ),
+                Some(format!(
+                    "loop={}, transmitToHardware={}, filterMode={}",
+                    st.loop_playback, st.transmit_to_hardware, st.filter_mode
+                )),
+            );
+        }
+        res
     }
 
     /// 28. `cmd_control_trace_replay` -> Controls active playback (`pause`, `resume`, `stop`, `seek`, `configure`).
@@ -1776,14 +2544,35 @@ impl PipelineEngine {
         &self,
         args: TraceReplayControlArgsDto,
     ) -> Result<TraceReplayStatusDto, HalError> {
-        self.replay.control(args)
+        let action = args.action.clone();
+        let res = self.replay.control(args);
+        if let Ok(st) = &res {
+            let act_key = format!("trace.replay_{action}");
+            self.debug_hub.record(
+                "info",
+                "TRACE",
+                "backend",
+                st.bus_override,
+                &act_key,
+                format!("Trace replay action '{action}' -> state '{}'", st.state),
+                Some(format!(
+                    "source={}, index={}/{}, speed={:.2}x, hwTx={}",
+                    st.source_name,
+                    st.current_index,
+                    st.total_frames,
+                    st.speed_factor,
+                    st.transmit_to_hardware
+                )),
+            );
+        }
+        res
     }
 
     /// 29. `cmd_export_trace_blf` -> Encodes `ChronologicalFrameDto` records into a zlib-compressed
     ///     standard Vector `.blf` binary file and returns Base64-encoded bytes.
     pub fn cmd_export_trace_blf(
         &self,
-        _file_name: String,
+        file_name: String,
         frames: Vec<ChronologicalFrameDto>,
     ) -> Result<String, HalError> {
         check_frame_count("BLF export", frames.len())?;
@@ -1798,8 +2587,19 @@ impl PipelineEngine {
                 "Trace kaydında oynatılacak çerçeve bulunamadı".to_string(),
             ));
         }
+        let frame_count = entries.len();
         let blf_bytes = blf::encode_blf_bytes(&entries)?;
-        Ok(BASE64_STD.encode(&blf_bytes))
+        let encoded = BASE64_STD.encode(&blf_bytes);
+        self.debug_hub.record(
+            "success",
+            "TRACE",
+            "backend",
+            None,
+            "trace.exported_blf",
+            format!("Exported Vector BLF '{file_name}' ({frame_count} frames)"),
+            Some(format!("compressedBytes={}", blf_bytes.len())),
+        );
+        Ok(encoded)
     }
 }
 
@@ -1809,6 +2609,8 @@ impl Drop for PipelineEngine {
         self.diag_sessions.clear();
         self.diag_passive.stop_all();
         self.engine_stop.store(true, Ordering::Release);
+        self.hw_watch_shutdown.signal();
+        let _ = self.hw_stop_tx.try_send(());
         self.replay.shutdown();
         {
             let mut buses = self.buses.lock();
@@ -1816,6 +2618,12 @@ impl Drop for PipelineEngine {
                 bus.shutdown();
             }
             buses.clear();
+        }
+        if let Some(handle) = self.hw_hotplug_join.lock().take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.hw_topology_join.lock().take() {
+            let _ = handle.join();
         }
         if let Some(handle) = self.scheduler_join.lock().take() {
             let _ = handle.join();
@@ -1966,7 +2774,7 @@ fn run_bus_io_loop(
 
     let gate = GateRefs {
         listen_only,
-        tx_armed,
+        tx_armed: Arc::clone(&tx_armed),
         panic_latched: tx_panic_latched,
         tx_epoch,
     };
@@ -2083,7 +2891,10 @@ fn run_bus_io_loop(
                     }
                 }
             }
-            Err(AdapterError::ChannelClosed) => break,
+            Err(AdapterError::ChannelClosed) => {
+                tx_armed.store(false, Ordering::SeqCst);
+                break;
+            }
             Err(_) => {
                 rx_errors.fetch_add(1, Ordering::Relaxed);
             }
@@ -2096,9 +2907,14 @@ fn run_bus_io_loop(
             bus_state.store(h.state.to_u8(), Ordering::Release);
             tx_errors.store(h.tx_error_count, Ordering::Relaxed);
             rx_errors.store(h.rx_error_count, Ordering::Relaxed);
+            if h.state == BusState::Disconnected {
+                tx_armed.store(false, Ordering::SeqCst);
+                break;
+            }
         }
     }
 
+    tx_armed.store(false, Ordering::SeqCst);
     // Close all diag taps and reject their queued sends with `Closed` before the channel goes.
     taps.shutdown(&tx_rx, &diag_ctl_rx);
     let _ = channel.close();
@@ -2116,10 +2932,15 @@ fn run_aggregator_loop(
     replay: Arc<ReplayController>,
     snapshot_bcast_tx: broadcast::Sender<TelemetrySnapshotDto>,
     latest_snapshot: Arc<RwLock<Option<TelemetrySnapshotDto>>>,
+    debug_hub: Arc<DebugEventHub>,
 ) {
     let mut state_table = StateTable::new();
     let tick_duration = Duration::from_micros(SNAPSHOT_INTERVAL_US);
     let mut next_tick = Instant::now() + tick_duration;
+    let mut health_tick = 0u32;
+    let mut prev_bus_states: BTreeMap<BusId, BusState> = BTreeMap::new();
+    let mut prev_total_err = 0u64;
+    let mut prev_dropped = 0u64;
 
     while !engine_stop.load(Ordering::Acquire) {
         // 1. Apply pending control commands
@@ -2130,11 +2951,16 @@ fn run_aggregator_loop(
                     state_table.set_bus_database(bus_id, db_opt);
                 }
                 AggregatorControl::ClearAllBusDatabases => state_table.clear_all_bus_databases(),
-                AggregatorControl::ClearBus(bus_id) => state_table.clear_bus(bus_id),
+                AggregatorControl::ClearBus(bus_id) => {
+                    state_table.clear_bus(bus_id);
+                    prev_bus_states.remove(&bus_id);
+                }
                 AggregatorControl::ResetAll => {
                     while frame_rx.try_recv().is_ok() {}
                     state_table.reset_all();
                     dropped_frames.store(0, Ordering::Relaxed);
+                    prev_total_err = 0;
+                    prev_dropped = 0;
                     let _ = emit_snapshot_now(
                         &mut state_table,
                         &buses,
@@ -2149,6 +2975,15 @@ fn run_aggregator_loop(
                     while let Ok(f) = frame_rx.try_recv() {
                         state_table.ingest_frame(&f);
                     }
+                    check_bus_err_health(
+                        &state_table,
+                        &buses,
+                        &dropped_frames,
+                        &debug_hub,
+                        &mut prev_bus_states,
+                        &mut prev_total_err,
+                        &mut prev_dropped,
+                    );
                     let snap = emit_snapshot_now(
                         &mut state_table,
                         &buses,
@@ -2182,6 +3017,19 @@ fn run_aggregator_loop(
                 state_table.ingest_frame(&frame);
             }
 
+            health_tick = health_tick.wrapping_add(1);
+            if health_tick.is_multiple_of(30) {
+                check_bus_err_health(
+                    &state_table,
+                    &buses,
+                    &dropped_frames,
+                    &debug_hub,
+                    &mut prev_bus_states,
+                    &mut prev_total_err,
+                    &mut prev_dropped,
+                );
+            }
+
             let _ = emit_snapshot_now(
                 &mut state_table,
                 &buses,
@@ -2202,6 +3050,143 @@ fn run_aggregator_loop(
                 state_table.ingest_frame(&frame);
             }
         }
+    }
+}
+
+/// Coalesced ~500 ms (30-tick) controller state, CAN error frame, and ring-drop monitor.
+/// Zero cost on the per-frame `ingest_frame` hot path.
+fn check_bus_err_health(
+    state_table: &StateTable,
+    buses: &Mutex<BTreeMap<BusId, ConnectedBusHandle>>,
+    dropped_frames: &AtomicU64,
+    debug_hub: &DebugEventHub,
+    prev_bus_states: &mut BTreeMap<BusId, BusState>,
+    prev_total_err: &mut u64,
+    prev_dropped: &mut u64,
+) {
+    // 1. Check per-bus ISO 11898-1 controller error state transitions (`Active` <-> `Warning` / `Passive` / `BusOff`)
+    {
+        let guard = buses.lock();
+        prev_bus_states.retain(|id, _| guard.contains_key(id));
+        for (&bus_id, bus) in guard.iter() {
+            let cur_state = BusState::from_u8(bus.bus_state.load(Ordering::Acquire));
+            if cur_state == BusState::Disconnected {
+                continue;
+            }
+            let prev_opt = prev_bus_states.insert(bus_id, cur_state);
+            match prev_opt {
+                None => {
+                    if matches!(
+                        cur_state,
+                        BusState::Warning | BusState::Passive | BusState::BusOff
+                    ) {
+                        let tec = bus.tx_errors.load(Ordering::Relaxed);
+                        let rec = bus.rx_errors.load(Ordering::Relaxed);
+                        let sev = match cur_state {
+                            BusState::BusOff | BusState::Passive => "error",
+                            _ => "warn",
+                        };
+                        debug_hub.record(
+                            sev,
+                            "BUS_ERR",
+                            "backend",
+                            Some(bus_id),
+                            "bus.state_changed",
+                            format!(
+                                "Bus {} controller in '{}' state",
+                                u16::from(bus_id) + 1,
+                                cur_state.as_str()
+                            ),
+                            Some(format!(
+                                "device={}, TEC={tec}, REC={rec}",
+                                bus.descriptor.device_id
+                            )),
+                        );
+                    }
+                }
+                Some(prev_state) if prev_state != cur_state => {
+                    let tec = bus.tx_errors.load(Ordering::Relaxed);
+                    let rec = bus.rx_errors.load(Ordering::Relaxed);
+                    let sev = match cur_state {
+                        BusState::BusOff | BusState::Passive => "error",
+                        BusState::Warning => "warn",
+                        BusState::Active => "success",
+                        BusState::Disconnected => "info",
+                    };
+                    debug_hub.record(
+                        sev,
+                        "BUS_ERR",
+                        "backend",
+                        Some(bus_id),
+                        "bus.state_changed",
+                        format!(
+                            "Bus {} controller transitioned '{}' -> '{}'",
+                            u16::from(bus_id) + 1,
+                            prev_state.as_str(),
+                            cur_state.as_str()
+                        ),
+                        Some(format!(
+                            "device={}, TEC={tec}, REC={rec}",
+                            bus.descriptor.device_id
+                        )),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // 2. Check coalesced CAN error frames accumulated in `StateTable`
+    let cur_err = state_table.total_frames_err();
+    if cur_err > *prev_total_err {
+        let delta = cur_err - *prev_total_err;
+        *prev_total_err = cur_err;
+        if let Some((err_bus, err_mask, summary)) = state_table.latest_error_summary_hint() {
+            debug_hub.record(
+                "error",
+                "BUS_ERR",
+                "backend",
+                Some(err_bus),
+                "bus.error_frames",
+                format!(
+                    "Captured +{delta} CAN Error Frame(s) on Bus {} ({summary})",
+                    u16::from(err_bus) + 1
+                ),
+                Some(format!(
+                    "totalErrFrames={cur_err}, errMask=0x{err_mask:03X}"
+                )),
+            );
+        } else {
+            debug_hub.record(
+                "error",
+                "BUS_ERR",
+                "backend",
+                None,
+                "bus.error_frames",
+                format!("Captured +{delta} CAN Error Frame(s)"),
+                Some(format!("totalErrFrames={cur_err}")),
+            );
+        }
+    } else if cur_err < *prev_total_err {
+        *prev_total_err = cur_err;
+    }
+
+    // 3. Check lock-free ring buffer drops
+    let cur_dropped = dropped_frames.load(Ordering::Relaxed);
+    if cur_dropped > *prev_dropped {
+        let delta = cur_dropped - *prev_dropped;
+        *prev_dropped = cur_dropped;
+        debug_hub.record(
+            "warn",
+            "BUS_ERR",
+            "backend",
+            None,
+            "bus.dropped_frames",
+            format!("Ring buffer backpressure dropped +{delta} frame(s)"),
+            Some(format!("totalDroppedFrames={cur_dropped}")),
+        );
+    } else if cur_dropped < *prev_dropped {
+        *prev_dropped = cur_dropped;
     }
 }
 
@@ -2237,14 +3222,80 @@ fn emit_snapshot_now(
     snapshot
 }
 
+fn reap_dead_bus_handles(
+    buses: &Mutex<BTreeMap<BusId, ConnectedBusHandle>>,
+    tx_scheduler: &Mutex<TxScheduler>,
+    debug_hub: &DebugEventHub,
+) -> usize {
+    let dead_handles: Vec<(BusId, ConnectedBusHandle)> = {
+        let mut guard = buses.lock();
+        if guard.values().all(ConnectedBusHandle::is_connected) {
+            return 0;
+        }
+        let dead_ids: Vec<BusId> = guard
+            .iter()
+            .filter_map(|(&id, h)| (!h.is_connected()).then_some(id))
+            .collect();
+        let mut extracted = Vec::with_capacity(dead_ids.len());
+        for id in dead_ids {
+            if let Some(h) = guard.remove(&id) {
+                h.tx_armed.store(false, Ordering::SeqCst);
+                h.diag.close_all();
+                extracted.push((id, h));
+            }
+        }
+        extracted
+    };
+
+    if dead_handles.is_empty() {
+        return 0;
+    }
+
+    {
+        let mut sched = tx_scheduler.lock();
+        for &(bus_id, _) in &dead_handles {
+            sched.remove_jobs_for_bus(bus_id);
+        }
+    }
+
+    let count = dead_handles.len();
+    for (bus_id, mut handle) in dead_handles {
+        let dev_id = handle.descriptor.device_id.clone();
+        let chan_name = handle.descriptor.channel_name.clone();
+        handle.shutdown();
+        debug_hub.record(
+            "warn",
+            "CONN",
+            "os",
+            Some(bus_id),
+            "bus.hot_unplugged",
+            format!(
+                "Physical adapter lost on Bus {} ({dev_id}) — channel reaped & disarmed",
+                u16::from(bus_id) + 1
+            ),
+            Some(format!(
+                "channel={chan_name}, periodicJobsStopped=true, txArmed=false"
+            )),
+        );
+    }
+    count
+}
+
 fn run_tx_scheduler_loop(
     engine_stop: Arc<AtomicBool>,
     tx_panic_latched: Arc<AtomicBool>,
     tx_epoch: Arc<AtomicU64>,
     buses: Arc<Mutex<BTreeMap<BusId, ConnectedBusHandle>>>,
     tx_scheduler: Arc<Mutex<TxScheduler>>,
+    debug_hub: Arc<DebugEventHub>,
 ) {
+    let mut reap_tick = 0u32;
     while !engine_stop.load(Ordering::Acquire) {
+        reap_tick = reap_tick.wrapping_add(1);
+        if (reap_tick & 0x1F) == 0 {
+            let _ = reap_dead_bus_handles(&buses, &tx_scheduler, &debug_hub);
+        }
+
         // Epoch captured BEFORE the due frames are collected: frames of a job that a Panic
         // Stop removed in between are rejected by the bus-io gate even after a re-arm.
         let epoch = tx_epoch.load(Ordering::Acquire);
@@ -2286,6 +3337,24 @@ fn run_tx_scheduler_loop(
 
         thread::sleep(Duration::from_millis(1));
     }
+}
+
+pub(crate) fn format_hex_bytes_preview(bytes: &[u8]) -> String {
+    const MAX_PREVIEW: usize = 16;
+    let shown = bytes.len().min(MAX_PREVIEW);
+    let mut out = String::with_capacity(shown * 3 + 8);
+    for (idx, b) in bytes[..shown].iter().enumerate() {
+        if idx > 0 {
+            out.push(' ');
+        }
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{b:02X}");
+    }
+    if bytes.len() > MAX_PREVIEW {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, " … ({} B)", bytes.len());
+    }
+    out
 }
 
 fn decode_base64_db_bytes(content_base64: &str) -> Result<Vec<u8>, HalError> {
@@ -2978,4 +4047,431 @@ mod tx_write_barrier_tests {
         assert!(stuck.is_empty() && stuck.capacity() == 0);
         assert!(t0.elapsed() < Duration::from_millis(5));
     }
+
+    struct UnpluggableTestChannel {
+        inner: Box<dyn CanChannel>,
+        unplugged: Arc<AtomicBool>,
+    }
+
+    impl CanChannel for UnpluggableTestChannel {
+        fn descriptor(&self) -> &DeviceDescriptor {
+            self.inner.descriptor()
+        }
+        fn capabilities(&self) -> &AdapterCapabilities {
+            self.inner.capabilities()
+        }
+        fn close(&mut self) -> Result<(), AdapterError> {
+            self.inner.close()
+        }
+        fn recv_batch(
+            &mut self,
+            out_batch: &mut [RawCanFrame],
+            timeout_ms: u32,
+        ) -> Result<usize, AdapterError> {
+            if self.unplugged.load(Ordering::Acquire) {
+                return Err(AdapterError::ChannelClosed);
+            }
+            self.inner.recv_batch(out_batch, timeout_ms)
+        }
+        fn send_frame(&mut self, frame: &RawCanFrame) -> Result<(), AdapterError> {
+            if self.unplugged.load(Ordering::Acquire) {
+                return Err(AdapterError::ChannelClosed);
+            }
+            self.inner.send_frame(frame)
+        }
+        fn set_filters(&mut self, filters: &[CanFilter]) -> Result<(), AdapterError> {
+            self.inner.set_filters(filters)
+        }
+        fn health(&self) -> BusHealthSnapshot {
+            if self.unplugged.load(Ordering::Acquire) {
+                return BusHealthSnapshot {
+                    state: BusState::Disconnected,
+                    tx_error_count: 0,
+                    rx_error_count: 0,
+                };
+            }
+            self.inner.health()
+        }
+    }
+
+    #[test]
+    fn hot_unplug_dead_bus_is_reaped_and_reconnects_without_already_connected_error() {
+        let engine = PipelineEngine::new();
+
+        // 1. Connect Bus 0 (unpluggable adapter) AND Bus 1 (live adapter) simultaneously
+        let cfg0 = ChannelConfigDto {
+            bus_id: 0,
+            listen_only: false,
+            ..ChannelConfigDto::default()
+        };
+        let (desc0, inner0) = engine
+            .registry
+            .open_by_device_id(MOCK0_DEVICE_ID, &cfg0)
+            .expect("open mock0");
+        let unplugged_flag = Arc::new(AtomicBool::new(false));
+        let unpluggable = UnpluggableTestChannel {
+            inner: inner0,
+            unplugged: Arc::clone(&unplugged_flag),
+        };
+        let handle0 = engine
+            .spawn_connected_bus_handle(0, desc0, cfg0.clone(), Box::new(unpluggable), true)
+            .expect("spawn bus 0");
+        engine.buses.lock().insert(0, handle0);
+
+        let cfg1 = ChannelConfigDto {
+            bus_id: 1,
+            listen_only: true,
+            ..ChannelConfigDto::default()
+        };
+        let h1 = engine
+            .cmd_connect_bus("mock:mock1".to_string(), cfg1)
+            .expect("connect bus 1");
+        assert!(h1.connected);
+
+        // Register a periodic TX job on armed Bus 0 before unplugging
+        let tx_res = engine
+            .cmd_transmit_raw_frame(
+                0,
+                0x123,
+                false,
+                false,
+                false,
+                vec![0xAA, 0x55],
+                Some(20),
+                Some("Heartbeat".to_string()),
+            )
+            .expect("start periodic job on bus 0");
+        assert!(tx_res.job_id.is_some());
+        assert_eq!(engine.cmd_list_periodic_tx().len(), 1);
+
+        // 2. Simulate physical USB unplug on Bus 0 while Bus 1 remains connected!
+        unplugged_flag.store(true, Ordering::Release);
+
+        // Wait briefly for `run_bus_io_loop` to observe `Err(AdapterError::ChannelClosed)`
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
+            let still_marked_connected = engine
+                .buses
+                .lock()
+                .get(&0)
+                .is_some_and(ConnectedBusHandle::is_connected);
+            if !still_marked_connected {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        // 3. Reconnect Bus 0 immediately (simulating hot-replug + clicking Connect) ->
+        //    MUST reap any dead handle, cancel the orphaned periodic TX job, keep Bus 1 alive,
+        //    and succeed WITHOUT `BusAlreadyConnected(0)`!
+        let reconnected = engine
+            .cmd_connect_bus(MOCK0_DEVICE_ID.to_string(), cfg0)
+            .expect("hot-replug cmd_connect_bus on bus 0 must NOT fail with BusAlreadyConnected");
+        assert!(reconnected.connected);
+        assert!(
+            !reconnected.tx_armed,
+            "reconnected bus must always start safely disarmed"
+        );
+        assert!(
+            engine.cmd_list_periodic_tx().is_empty(),
+            "periodic TX jobs from unplugged session must be purged"
+        );
+        assert!(
+            engine
+                .buses
+                .lock()
+                .get(&1)
+                .is_some_and(ConnectedBusHandle::is_connected),
+            "surviving Bus 1 must remain connected untouched"
+        );
+
+        engine.cmd_disconnect_all_buses();
+    }
+}
+
+// =============================================================================
+// OS-LEVEL USB HOTPLUG (`nusb::watch_devices()`) + TOPOLOGY MONITOR
+// =============================================================================
+
+const HOTPLUG_DEBOUNCE_MS: u64 = 200;
+const HOTPLUG_FOLLOWUP_MS: u64 = 600;
+const TOPOLOGY_POLL_MS: u64 = 2_500;
+
+fn build_hardware_watch_event(registry: &DriverRegistry, reason: &str) -> HardwareWatchEventDto {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let devices = registry.discover_all();
+    let report = probe_all_drivers();
+    HardwareWatchEventDto {
+        reason: reason.to_string(),
+        timestamp_ms,
+        devices,
+        report,
+    }
+}
+
+fn run_usb_hotplug_listener(
+    engine_stop: Arc<AtomicBool>,
+    shutdown: Arc<HwWatchShutdown>,
+    hotplug_epoch: Arc<AtomicU64>,
+    pulse_tx: Sender<()>,
+) {
+    let Ok(mut watch) = nusb::watch_devices() else {
+        return;
+    };
+
+    while !engine_stop.load(Ordering::Acquire) && !shutdown.is_stopped() {
+        let next_evt = futures_lite::future::block_on(futures_lite::future::or(
+            async { watch.next().await },
+            std::future::poll_fn(|cx| {
+                if shutdown.is_stopped() || engine_stop.load(Ordering::Acquire) {
+                    std::task::Poll::Ready(None)
+                } else {
+                    *shutdown.waker.lock() = Some(cx.waker().clone());
+                    if shutdown.is_stopped() || engine_stop.load(Ordering::Acquire) {
+                        std::task::Poll::Ready(None)
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                }
+            }),
+        ));
+
+        let Some(evt) = next_evt else {
+            break;
+        };
+
+        match evt {
+            nusb::hotplug::HotplugEvent::Connected(_)
+            | nusb::hotplug::HotplugEvent::Disconnected(_) => {
+                hotplug_epoch.fetch_add(1, Ordering::AcqRel);
+                let _ = pulse_tx.try_send(());
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_hardware_topology_watcher(
+    engine_stop: Arc<AtomicBool>,
+    stop_rx: Receiver<()>,
+    pulse_rx: Receiver<()>,
+    hotplug_epoch: Arc<AtomicU64>,
+    registry: Arc<DriverRegistry>,
+    buses: Arc<Mutex<BTreeMap<BusId, ConnectedBusHandle>>>,
+    tx_scheduler: Arc<Mutex<TxScheduler>>,
+    hw_bcast_tx: broadcast::Sender<HardwareWatchEventDto>,
+    debug_hub: Arc<DebugEventHub>,
+) {
+    let mut last_fingerprint = compute_lightweight_topology_fingerprint();
+    let mut debounce_deadline: Option<Instant> = None;
+    let mut followup_deadline: Option<(Instant, u64)> = None;
+    let mut next_poll_deadline = Instant::now() + Duration::from_millis(TOPOLOGY_POLL_MS);
+    let mut pulse_alive = true;
+
+    while !engine_stop.load(Ordering::Acquire) {
+        let now = Instant::now();
+
+        // 1. Fire 200ms debounced USB hotplug snapshot
+        if let Some(dl) = debounce_deadline {
+            if now >= dl {
+                debounce_deadline = None;
+                let _ = reap_dead_bus_handles(&buses, &tx_scheduler, &debug_hub);
+                let epoch_at_emit = hotplug_epoch.load(Ordering::Acquire);
+                let evt = build_hardware_watch_event(&registry, "usb_hotplug");
+                debug_hub.record(
+                    "info",
+                    "CONN",
+                    "os",
+                    None,
+                    "hw.usb_hotplug",
+                    format!(
+                        "OS USB hotplug change detected ({} CAN channel(s) discovered)",
+                        evt.devices.len()
+                    ),
+                    None,
+                );
+                last_fingerprint = compute_lightweight_topology_fingerprint();
+                let _ = hw_bcast_tx.send(evt);
+                followup_deadline = Some((
+                    Instant::now() + Duration::from_millis(HOTPLUG_FOLLOWUP_MS),
+                    epoch_at_emit,
+                ));
+                continue;
+            }
+        }
+
+        // 2. Fire +600ms delayed follow-up (catches Windows WCID/WinUSB or USB-CDC COMx creation)
+        if let Some((fu_dl, expected_epoch)) = followup_deadline {
+            if now >= fu_dl {
+                followup_deadline = None;
+                if debounce_deadline.is_none()
+                    && hotplug_epoch.load(Ordering::Acquire) == expected_epoch
+                {
+                    let _ = reap_dead_bus_handles(&buses, &tx_scheduler, &debug_hub);
+                    let evt = build_hardware_watch_event(&registry, "usb_hotplug");
+                    last_fingerprint = compute_lightweight_topology_fingerprint();
+                    let _ = hw_bcast_tx.send(evt);
+                }
+                continue;
+            }
+        }
+
+        // 3. Fire 2,500ms lightweight non-invasive topology poll when fingerprint changes
+        if now >= next_poll_deadline {
+            next_poll_deadline = now + Duration::from_millis(TOPOLOGY_POLL_MS);
+            if debounce_deadline.is_none() {
+                let fp = compute_lightweight_topology_fingerprint();
+                if fp != last_fingerprint {
+                    let _ = reap_dead_bus_handles(&buses, &tx_scheduler, &debug_hub);
+                    last_fingerprint = fp;
+                    let evt = build_hardware_watch_event(&registry, "topology_poll");
+                    debug_hub.record(
+                        "info",
+                        "CONN",
+                        "os",
+                        None,
+                        "hw.topology_poll",
+                        format!(
+                            "Hardware topology delta detected ({} CAN channel(s) visible)",
+                            evt.devices.len()
+                        ),
+                        None,
+                    );
+                    let _ = hw_bcast_tx.send(evt);
+                }
+            }
+            continue;
+        }
+
+        // 4. Compute sleep window until earliest pending deadline
+        let mut earliest = next_poll_deadline;
+        if let Some(dl) = debounce_deadline {
+            if dl < earliest {
+                earliest = dl;
+            }
+        }
+        if let Some((fu_dl, _)) = followup_deadline {
+            if fu_dl < earliest {
+                earliest = fu_dl;
+            }
+        }
+        let wait = earliest.saturating_duration_since(Instant::now());
+
+        if pulse_alive {
+            select! {
+                recv(stop_rx) -> _ => break,
+                recv(pulse_rx) -> msg => {
+                    match msg {
+                        Ok(()) => {
+                            while pulse_rx.try_recv().is_ok() {}
+                            debounce_deadline = Some(Instant::now() + Duration::from_millis(HOTPLUG_DEBOUNCE_MS));
+                            followup_deadline = None;
+                        }
+                        Err(_) => {
+                            pulse_alive = false;
+                        }
+                    }
+                }
+                default(wait) => {}
+            }
+        } else if stop_rx.recv_timeout(wait).is_ok() {
+            break;
+        }
+    }
+}
+
+/// Computes a deterministic, zero-device-open fingerprint of `(serial ports + Linux SocketCAN netdevs + USB topology)`.
+fn compute_lightweight_topology_fingerprint() -> String {
+    let mut out = String::with_capacity(512);
+
+    // 1. Host Serial / USB-CDC ports (no port opened)
+    if let Ok(mut ports) = serialport::available_ports() {
+        ports.sort_by(|a, b| a.port_name.cmp(&b.port_name));
+        for p in ports {
+            match p.port_type {
+                serialport::SerialPortType::UsbPort(u) => {
+                    out.push_str(&format!(
+                        "SER:{}:{:04X}:{:04X}:{}\n",
+                        p.port_name,
+                        u.vid,
+                        u.pid,
+                        u.serial_number.as_deref().unwrap_or("")
+                    ));
+                }
+                other => {
+                    out.push_str(&format!("SER:{}:{other:?}\n", p.port_name));
+                }
+            }
+        }
+    }
+
+    // 2. Linux SocketCAN `/sys/class/net` interfaces & link states (`ARPHRD_CAN = 280`, no socket opened)
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(entries) = fs::read_dir("/sys/class/net") {
+            let mut net_rows: Vec<(String, String, String)> = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let iface_type = fs::read_to_string(path.join("type")).unwrap_or_default();
+                if iface_type.trim() == "280" {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let operstate = fs::read_to_string(path.join("operstate"))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    let mtu = fs::read_to_string(path.join("mtu"))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    net_rows.push((name, operstate, mtu));
+                }
+            }
+            net_rows.sort_by(|a, b| a.0.cmp(&b.0));
+            for (name, state, mtu) in net_rows {
+                out.push_str(&format!("NET:{name}:{state}:{mtu}\n"));
+            }
+        }
+    }
+
+    // 3. Host USB topology (`nusb::list_devices()`, zero `dev.open()` handle opens!)
+    if let Ok(iter) = nusb::list_devices() {
+        let mut usb_rows: Vec<(String, String)> = Vec::new();
+        for dev in iter {
+            let (sort_key, _) = usb_device_location_info(&dev);
+            #[cfg(target_os = "windows")]
+            let drv = dev.driver().unwrap_or("").to_ascii_lowercase();
+            #[cfg(target_os = "linux")]
+            let drv = {
+                let sysfs = dev.sysfs_path();
+                let if0_drv = PathBuf::from(format!("{}:1.0/driver", sysfs.display()));
+                fs::read_link(&if0_drv)
+                    .or_else(|_| fs::read_link(sysfs.join("driver")))
+                    .ok()
+                    .and_then(|p| {
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                    })
+                    .unwrap_or_default()
+            };
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            let drv = String::new();
+
+            let line = format!(
+                "USB:{sort_key}:{:04X}:{:04X}:{}:{}:{drv}\n",
+                dev.vendor_id(),
+                dev.product_id(),
+                dev.bus_number(),
+                dev.device_address(),
+            );
+            usb_rows.push((sort_key, line));
+        }
+        usb_rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, line) in usb_rows {
+            out.push_str(&line);
+        }
+    }
+
+    out
 }

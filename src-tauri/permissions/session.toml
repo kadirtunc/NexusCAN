@@ -16,4 +16,7 @@ permissions = [
   "allow-cmd-reset-telemetry",
   "allow-cmd-start-trace-replay",
   "allow-cmd-control-trace-replay",
+  "allow-cmd-append-debug-event",
+  "allow-cmd-clear-debug-events",
+  "allow-cmd-set-debug-window-open",
 ]

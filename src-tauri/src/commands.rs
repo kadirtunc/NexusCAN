@@ -4,15 +4,22 @@
 //! over `tauri::ipc::Channel<TelemetrySnapshotDto>`.
 
 use crate::pipeline::AppState;
+use nexus_hal::flowlib::{FlowLibEntryDto, FlowLibError, FlowLibRevisionDto};
+use nexus_hal::pipeline::diag_flash::{
+    flash_error_to_ipc, resolve_download_config, FlashImageHandleDto, FlashLoadFormat,
+};
 use nexus_hal::pipeline::PipelineEngine;
+use nexus_hal::runstore::{RunQueryFilterDto, RunRecordV1, RunStoreError};
+use nexus_hal::seedkey::SeedKeyPolicy;
 use nexus_hal::{
     dto::{
-        BusHealthDto, ChannelConfigDto, ChronologicalFrameDto, DbFileInputDto, DeviceDescriptorDto,
-        DriverProbeReportDto, DtcReportResultDto, LoadedTraceFileDto, PanicStopResultDto,
-        PassiveDiscoverySnapshotDto, PeriodicTxJobDto, PhysicalSweepRequestDto,
-        PhysicalSweepResultDto, ProjectSummaryDto, ResetSessionResultDto, StartTraceReplayArgsDto,
-        TelemetrySnapshotDto, TraceFileSummaryDto, TraceReplayControlArgsDto, TraceReplayStatusDto,
-        TraceStorageInfoDto, TxTransmitResultDto,
+        AppendDebugEventInputDto, BusHealthDto, ChannelConfigDto, ChronologicalFrameDto,
+        DbFileInputDto, DebugEventBatchDto, DebugEventDto, DebugWindowStateDto,
+        DeviceDescriptorDto, DriverProbeReportDto, DtcReportResultDto, HardwareWatchEventDto,
+        LoadedTraceFileDto, PanicStopResultDto, PassiveDiscoverySnapshotDto, PeriodicTxJobDto,
+        PhysicalSweepRequestDto, PhysicalSweepResultDto, ProjectSummaryDto, ResetSessionResultDto,
+        StartTraceReplayArgsDto, TelemetrySnapshotDto, TraceFileSummaryDto,
+        TraceReplayControlArgsDto, TraceReplayStatusDto, TraceStorageInfoDto, TxTransmitResultDto,
     },
     error::HalError,
 };
@@ -22,12 +29,16 @@ use nexus_protocols::uds::dto::{
     DiagSessionInfoDto, DidReadResultDto, DtcEntryDto, EcuDiscoveryRequestDto,
     EcuDiscoveryResultDto, IsoTpFramePageDto, UdsRequestOptionsDto, UdsResponseDto,
 };
+use nexus_protocols::uds::flash::{
+    FirmwareError, FlashError, FlashErrorKind, FlashPhase, FlashProgressDto, FlashReportDto,
+};
 use nexus_protocols::uds::security::{
     ComputeKeyResultDto, KeyProviderSpecDto, SeedKeyCapabilitiesDto, SeedKeyError,
+    SeedKeyLibraryInfoDto,
 };
 use serde::Serialize;
 use std::sync::Arc;
-use tauri::{ipc::Channel, State};
+use tauri::{ipc::Channel, Manager, State};
 use thiserror::Error;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -90,6 +101,39 @@ pub async fn cmd_probe_drivers(
         Ok(e.cmd_probe_drivers())
     })
     .await
+}
+
+#[tauri::command]
+pub async fn cmd_subscribe_hardware_changes(
+    state: State<'_, AppState>,
+    on_event: Channel<HardwareWatchEventDto>,
+) -> Result<(), AppError> {
+    let engine = Arc::clone(&state.engine);
+    let (mut rx, initial) = tauri::async_runtime::spawn_blocking(move || {
+        let rx = engine.subscribe_hardware_changes();
+        let initial = engine.snapshot_hardware_state("initial");
+        (rx, initial)
+    })
+    .await
+    .map_err(|e| AppError::Ipc(format!("cmd_subscribe_hardware_changes worker failed: {e}")))?;
+
+    let _ = on_event.send(initial);
+
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(evt) => {
+                    if on_event.send(evt).is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -178,20 +222,27 @@ pub async fn cmd_reset_session(
 // ─── WP-2 seed/key (contract planning/contracts/seedkey-v1.md) ──────────────
 // Errors are `"[seedkey:<code>] <message>"` strings (`SeedKeyError::to_ipc_string`).
 
+/// Desktop webview: native providers are allowed (contract §4). Reports which native kinds
+/// exist and whether the 32/64-bit `library` helper binaries were found.
 #[tauri::command]
 pub async fn cmd_seedkey_capabilities(
     state: State<'_, AppState>,
 ) -> Result<SeedKeyCapabilitiesDto, String> {
     let engine = Arc::clone(&state.engine);
-    tauri::async_runtime::spawn_blocking(move || engine.cmd_seedkey_capabilities())
-        .await
-        .map_err(|join_err| {
-            SeedKeyError::Script(format!("seed/key worker failed: {join_err}")).to_ipc_string()
-        })
+    tauri::async_runtime::spawn_blocking(move || {
+        engine.cmd_seedkey_capabilities(SeedKeyPolicy::desktop())
+    })
+    .await
+    .map_err(|join_err| {
+        SeedKeyError::Script(format!("seed/key worker failed: {join_err}")).to_ipc_string()
+    })
 }
 
-/// Computes a key with an unsaved provider (`builtin` / `table` / `script`). Native kinds are
-/// refused in v0.1. Runs on the blocking pool (Rhai scripts run up to their timeout).
+/// Computes a key with an unsaved provider. Portable kinds (`builtin` / `table` / `script`)
+/// run in-process; native kinds run out-of-process: `library` in the isolated
+/// `nexus-seedkey-host32/64` helper (vendor DLLs are never loaded into the app),
+/// `external_process` as a shell-less child. `http` answers `[seedkey:unsupported]`.
+/// Runs on the blocking pool (providers run up to their timeout).
 #[tauri::command]
 pub async fn cmd_seedkey_compute_adhoc(
     state: State<'_, AppState>,
@@ -201,7 +252,27 @@ pub async fn cmd_seedkey_compute_adhoc(
 ) -> Result<ComputeKeyResultDto, String> {
     let engine = Arc::clone(&state.engine);
     match tauri::async_runtime::spawn_blocking(move || {
-        engine.cmd_seedkey_compute_adhoc(&provider, level, &seed_hex)
+        engine.cmd_seedkey_compute_adhoc(SeedKeyPolicy::desktop(), &provider, level, &seed_hex)
+    })
+    .await
+    {
+        Ok(res) => res.map_err(|e| e.to_ipc_string()),
+        Err(join_err) => {
+            Err(SeedKeyError::Script(format!("seed/key worker failed: {join_err}")).to_ipc_string())
+        }
+    }
+}
+
+/// Inspects a seed/key library: header (format / arch) parsed without loading it, exports
+/// detected in the isolated helper process. Blocking pool.
+#[tauri::command]
+pub async fn cmd_seedkey_probe_library(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<SeedKeyLibraryInfoDto, String> {
+    let engine = Arc::clone(&state.engine);
+    match tauri::async_runtime::spawn_blocking(move || {
+        engine.cmd_seedkey_probe_library(SeedKeyPolicy::desktop(), &path)
     })
     .await
     {
@@ -670,6 +741,96 @@ pub async fn cmd_diag_read_dtc_report(
     .await
 }
 
+// ─── ECU flash (nexus_protocols::uds::flash over the diag session path) ──────
+// Load / release errors: `"[firmware] <message>"` (`FirmwareError::to_ipc_string`).
+// Download errors: `"[flash] " + JSON(FlashError)` (`flash_error_to_ipc`).
+
+/// Decodes (base64, ≤ 64 MiB), parses and caches a firmware file; returns its `imageId`.
+/// `format`: `"auto" | "intelHex" | "srec" | "binary"` (`baseAddress` used for binary only).
+#[tauri::command]
+pub async fn cmd_flash_load_image(
+    state: State<'_, AppState>,
+    file_name: String,
+    format: FlashLoadFormat,
+    base_address: u32,
+    data_base64: String,
+) -> Result<FlashImageHandleDto, String> {
+    let engine = Arc::clone(&state.engine);
+    match tauri::async_runtime::spawn_blocking(move || {
+        engine.cmd_flash_load_image(file_name, format, base_address, &data_base64)
+    })
+    .await
+    {
+        Ok(res) => res.map_err(|e| e.to_ipc_string()),
+        Err(join_err) => Err(FirmwareError::InvalidArgument(format!(
+            "firmware worker failed: {join_err}"
+        ))
+        .to_ipc_string()),
+    }
+}
+
+/// Drops a cached firmware image. Idempotent.
+#[tauri::command]
+pub async fn cmd_flash_release_image(
+    state: State<'_, AppState>,
+    image_id: String,
+) -> Result<(), String> {
+    state.engine.cmd_flash_release_image(&image_id);
+    Ok(())
+}
+
+/// Downloads a cached image (0x34 → 0x36* → 0x37 per segment) through the diag session of
+/// `config` (auto-open; connected + armed + not Listen-Only + no Panic latch required).
+/// Progress on `on_progress` at ≤ 60 Hz (first event, phase changes and `done` always).
+/// One download per session at a time. Runs on the blocking pool for the whole transfer.
+#[tauri::command]
+pub async fn cmd_flash_download(
+    state: State<'_, AppState>,
+    config: DiagSessionConfigDto,
+    image_id: String,
+    download: Option<serde_json::Value>,
+    on_progress: Channel<FlashProgressDto>,
+) -> Result<FlashReportDto, String> {
+    // Raw JSON: an absent `maxBlockLenCap` defaults to 65535 on CAN-FD sessions, else 4095.
+    let download = resolve_download_config(download.unwrap_or_default(), config.use_fd)
+        .map_err(|e| flash_error_to_ipc(&e))?;
+    let engine = Arc::clone(&state.engine);
+    match tauri::async_runtime::spawn_blocking(move || {
+        engine.cmd_flash_download(config, &image_id, download, &mut |p| {
+            // A closed webview channel must not abort the transfer.
+            let _ = on_progress.send(p);
+        })
+    })
+    .await
+    {
+        Ok(res) => res.map_err(|e| flash_error_to_ipc(&e)),
+        Err(join_err) => Err(flash_error_to_ipc(&FlashError {
+            kind: FlashErrorKind::Transport,
+            phase: FlashPhase::RequestDownload,
+            segment_index: None,
+            address: None,
+            offset: None,
+            block_counter: None,
+            last_nrc: None,
+            last_nrc_name: None,
+            diag_code: Some(DiagErrorCode::Internal),
+            bytes_done: 0,
+            segments_completed: 0,
+            message: format!("flash worker failed: {join_err}"),
+        })),
+    }
+}
+
+/// Requests cancellation of the download running on `config`'s session (no-op when none).
+#[tauri::command]
+pub async fn cmd_flash_cancel(
+    state: State<'_, AppState>,
+    config: DiagSessionConfigDto,
+) -> Result<(), String> {
+    state.engine.cmd_flash_cancel(&config);
+    Ok(())
+}
+
 /// Passive (TX-free, Listen-Only safe) ECU discovery: starts watching `busId`. Idempotent.
 #[tauri::command]
 pub async fn cmd_diag_passive_discovery_start(
@@ -709,4 +870,235 @@ pub async fn cmd_diag_physical_sweep(
     request: PhysicalSweepRequestDto,
 ) -> Result<PhysicalSweepResultDto, String> {
     run_diag(state, move |e| e.cmd_diag_physical_sweep(request)).await
+}
+
+// ─── Global & Multi-Window Tear-Off Debug & System Audit Console ────────────
+
+#[tauri::command]
+pub async fn cmd_subscribe_debug_events(
+    state: State<'_, AppState>,
+    on_batch: Channel<DebugEventBatchDto>,
+) -> Result<(), AppError> {
+    let engine = Arc::clone(&state.engine);
+    let engine_for_lag = Arc::clone(&state.engine);
+    let (mut rx, initial) = tauri::async_runtime::spawn_blocking(move || {
+        let rx = engine.subscribe_debug_events();
+        let initial = engine.snapshot_debug_events();
+        (rx, initial)
+    })
+    .await
+    .map_err(|e| AppError::Ipc(format!("cmd_subscribe_debug_events worker failed: {e}")))?;
+
+    let _ = on_batch.send(initial);
+
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(batch) => {
+                    if on_batch.send(batch).is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => {
+                    let snap = engine_for_lag.snapshot_debug_events();
+                    if on_batch.send(snap).is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cmd_append_debug_event(
+    state: State<'_, AppState>,
+    input: AppendDebugEventInputDto,
+) -> Result<DebugEventDto, AppError> {
+    run_blocking(state, "cmd_append_debug_event", move |e| {
+        Ok(e.cmd_append_debug_event(input))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_clear_debug_events(state: State<'_, AppState>) -> Result<(), AppError> {
+    run_blocking(state, "cmd_clear_debug_events", move |e| {
+        e.cmd_clear_debug_events();
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_export_debug_events(
+    state: State<'_, AppState>,
+    format: String,
+) -> Result<String, AppError> {
+    run_blocking(state, "cmd_export_debug_events", move |e| {
+        e.cmd_export_debug_events(format)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_set_debug_window_open(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    open: bool,
+    always_on_top: Option<bool>,
+    redock: Option<bool>,
+) -> Result<DebugWindowStateDto, AppError> {
+    if open {
+        if let Some(win) = app.get_webview_window("debug-console") {
+            if let Some(aot) = always_on_top {
+                let _ = win.set_always_on_top(aot);
+            }
+            let effective_aot = always_on_top
+                .unwrap_or_else(|| state.engine.debug_hub().window_state().always_on_top);
+            let _ = win.show();
+            let _ = win.set_focus();
+            return Ok(state
+                .engine
+                .set_debug_window_state(true, effective_aot, false));
+        }
+
+        let aot = always_on_top.unwrap_or(false);
+        let win = tauri::WebviewWindowBuilder::new(
+            &app,
+            "debug-console",
+            tauri::WebviewUrl::App("index.html?window=debug-console".into()),
+        )
+        .title("NexusCAN — Debug & System Audit Console")
+        .inner_size(1140.0, 640.0)
+        .min_inner_size(720.0, 360.0)
+        .resizable(true)
+        .always_on_top(aot)
+        .build()
+        .map_err(|e| AppError::Ipc(e.to_string()))?;
+
+        let hub = Arc::clone(state.engine.debug_hub());
+        win.on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                let _ = hub.notify_external_window_destroyed();
+            }
+        });
+
+        Ok(state.engine.set_debug_window_state(true, aot, false))
+    } else {
+        let ws = state
+            .engine
+            .set_debug_window_state(false, false, redock.unwrap_or(false));
+        if let Some(win) = app.get_webview_window("debug-console") {
+            let _ = win.close();
+        }
+        Ok(ws)
+    }
+}
+
+// ─── Diagnostics Workspace: flow library + run store (diag-workspace-v1 §9 / §10) ───
+// Same names/arguments as `nexus_bridge`, `FlowLibCommandMap` (src/types/flowLibrary.ts) and
+// `RunStoreCommandMap` (src/types/runRecord.ts). File I/O → blocking pool. Errors are
+// `"[flowlib:<code>] <message>"` / `"[runstore:<code>] <message>"` strings
+// (`FlowLibError::to_ipc_string` / `RunStoreError::to_ipc_string`), parsed by
+// `parseFlowLibError` / `parseRunStoreError` in the HMI.
+
+async fn run_flowlib<T, F>(state: State<'_, AppState>, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&PipelineEngine) -> Result<T, FlowLibError> + Send + 'static,
+{
+    let engine = Arc::clone(&state.engine);
+    match tauri::async_runtime::spawn_blocking(move || f(&engine)).await {
+        Ok(res) => res.map_err(|e| e.to_ipc_string()),
+        Err(join_err) => {
+            Err(FlowLibError::Io(format!("flow library worker failed: {join_err}")).to_ipc_string())
+        }
+    }
+}
+
+async fn run_runstore<T, F>(state: State<'_, AppState>, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&PipelineEngine) -> Result<T, RunStoreError> + Send + 'static,
+{
+    let engine = Arc::clone(&state.engine);
+    match tauri::async_runtime::spawn_blocking(move || f(&engine)).await {
+        Ok(res) => res.map_err(|e| e.to_ipc_string()),
+        Err(join_err) => {
+            Err(RunStoreError::Io(format!("run store worker failed: {join_err}")).to_ipc_string())
+        }
+    }
+}
+
+/// Library entries (soft-deleted ones only with `includeDeleted`).
+#[tauri::command]
+pub async fn cmd_flowlib_list(
+    state: State<'_, AppState>,
+    include_deleted: bool,
+) -> Result<Vec<FlowLibEntryDto>, String> {
+    run_flowlib(state, move |e| e.cmd_flowlib_list(include_deleted)).await
+}
+
+/// All revisions of one id, ascending.
+#[tauri::command]
+pub async fn cmd_flowlib_revisions(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<FlowLibRevisionDto>, String> {
+    run_flowlib(state, move |e| e.cmd_flowlib_revisions(&id)).await
+}
+
+/// Raw `.nxflow.json` of a revision (`revision: null` = latest).
+#[tauri::command]
+pub async fn cmd_flowlib_load(
+    state: State<'_, AppState>,
+    id: String,
+    revision: Option<u32>,
+) -> Result<String, String> {
+    run_flowlib(state, move |e| e.cmd_flowlib_load(&id, revision)).await
+}
+
+/// Saves a new immutable revision (`flow.revision` must be latest + 1).
+#[tauri::command]
+pub async fn cmd_flowlib_save(
+    state: State<'_, AppState>,
+    file_json: String,
+) -> Result<FlowLibEntryDto, String> {
+    run_flowlib(state, move |e| e.cmd_flowlib_save(&file_json)).await
+}
+
+/// Soft delete; revisions stay loadable for pinned references.
+#[tauri::command]
+pub async fn cmd_flowlib_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    run_flowlib(state, move |e| e.cmd_flowlib_delete(&id)).await
+}
+
+/// Appends one immutable run record (append + flush + fsync).
+#[tauri::command]
+pub async fn cmd_run_append(state: State<'_, AppState>, record: RunRecordV1) -> Result<(), String> {
+    run_runstore(state, move |e| e.cmd_run_append(&record)).await
+}
+
+/// Filtered run records, newest first (`limit` 1..=5000).
+#[tauri::command]
+pub async fn cmd_run_query(
+    state: State<'_, AppState>,
+    project_id: String,
+    filter: RunQueryFilterDto,
+    limit: i64,
+) -> Result<Vec<RunRecordV1>, String> {
+    run_runstore(state, move |e| e.cmd_run_query(&project_id, &filter, limit)).await
+}
+
+/// Latest top-level record per (ecuId, flowId), newest first.
+#[tauri::command]
+pub async fn cmd_run_latest(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<RunRecordV1>, String> {
+    run_runstore(state, move |e| e.cmd_run_latest(&project_id)).await
 }

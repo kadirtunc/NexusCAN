@@ -57,23 +57,44 @@ pub const MAX_LISTED_ENTRIES: usize = 4096;
 pub struct DataRoot {
     projects_dir: PathBuf,
     traces_dir: PathBuf,
+    logs_dir: PathBuf,
+    /// Diagnostics Workspace flow library (`flowlib/`, diag-workspace-v1 §9).
+    flowlib_dir: PathBuf,
+    /// Append-only run store (`runs/`, diag-workspace-v1 §10).
+    runs_dir: PathBuf,
 }
 
 impl DataRoot {
-    /// `<root>/projects` + `<root>/traces`.
+    /// `<root>/projects` + `<root>/traces` + `<root>/logs` + `<root>/flowlib` + `<root>/runs`.
     pub fn under(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref();
         Self {
             projects_dir: root.join("projects"),
             traces_dir: root.join("traces"),
+            logs_dir: root.join("logs"),
+            flowlib_dir: root.join("flowlib"),
+            runs_dir: root.join("runs"),
         }
     }
 
-    /// Explicit, independent projects and traces directories.
+    /// Explicit, independent projects and traces directories (with sibling `logs/`,
+    /// `flowlib/` and `runs/` directories next to `projects_dir`).
     pub fn from_dirs(projects_dir: impl Into<PathBuf>, traces_dir: impl Into<PathBuf>) -> Self {
+        let projects_dir = projects_dir.into();
+        let sibling = |name: &str| {
+            projects_dir
+                .parent()
+                .map_or_else(|| PathBuf::from(name), |p| p.join(name))
+        };
+        let logs_dir = sibling("logs");
+        let flowlib_dir = sibling("flowlib");
+        let runs_dir = sibling("runs");
         Self {
-            projects_dir: projects_dir.into(),
+            projects_dir,
             traces_dir: traces_dir.into(),
+            logs_dir,
+            flowlib_dir,
+            runs_dir,
         }
     }
 
@@ -114,10 +135,29 @@ impl DataRoot {
         &self.traces_dir
     }
 
-    /// Creates both directories (mode `0700` on Unix for newly created directories).
+    pub fn logs_dir(&self) -> PathBuf {
+        self.logs_dir.clone()
+    }
+
+    /// Flow library root (`<id>/r<revision>.json` + `index.json`).
+    pub fn flowlib_dir(&self) -> &Path {
+        &self.flowlib_dir
+    }
+
+    /// Run store root (`<projectId>/<YYYY-MM>.jsonl`).
+    pub fn runs_dir(&self) -> &Path {
+        &self.runs_dir
+    }
+
+    /// Creates `projects/`, `traces/`, and `logs/` (mode `0700` on Unix for newly created directories).
+    ///
+    /// `flowlib/` and `runs/` are NOT created here: [`crate::flowlib::FlowLibrary`] and
+    /// [`crate::runstore::RunStore`] create them lazily (same mode) on first use, so engines that
+    /// never touch the Diagnostics Workspace (tests, CLI) leave no empty directories behind.
     pub fn ensure_dirs(&self) -> io::Result<()> {
         create_private_dir_all(&self.projects_dir)?;
-        create_private_dir_all(&self.traces_dir)
+        create_private_dir_all(&self.traces_dir)?;
+        create_private_dir_all(&self.logs_dir)
     }
 }
 
@@ -432,6 +472,12 @@ mod tests {
         let root = DataRoot::from_env_value(Some(OsString::from("/opt/nexus-data"))).unwrap();
         assert_eq!(root.projects_dir(), Path::new("/opt/nexus-data/projects"));
         assert_eq!(root.traces_dir(), Path::new("/opt/nexus-data/traces"));
+        assert_eq!(root.logs_dir(), PathBuf::from("/opt/nexus-data/logs"));
+        assert_eq!(root.flowlib_dir(), Path::new("/opt/nexus-data/flowlib"));
+        assert_eq!(root.runs_dir(), Path::new("/opt/nexus-data/runs"));
+        let split = DataRoot::from_dirs("/d/projects", "/elsewhere/traces");
+        assert_eq!(split.flowlib_dir(), Path::new("/d/flowlib"));
+        assert_eq!(split.runs_dir(), Path::new("/d/runs"));
         assert_eq!(root, DataRoot::under("/opt/nexus-data"));
     }
 
@@ -442,6 +488,9 @@ mod tests {
         root.ensure_dirs().unwrap();
         assert!(root.projects_dir().is_dir());
         assert!(root.traces_dir().is_dir());
+        assert!(root.logs_dir().is_dir());
+        assert!(!root.flowlib_dir().exists(), "flowlib/ is created lazily");
+        assert!(!root.runs_dir().exists(), "runs/ is created lazily");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

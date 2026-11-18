@@ -2,12 +2,14 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Least-privilege capability for the primary NexusCAN analyzer window. WP-8 / HIGH-03: app commands are ACL-checked (AppManifest in build.rs); each set below is defined in src-tauri/permissions/*.toml. No core:* plugin permissions: the HMI only uses invoke + Channel (channel data fetch is exempt from the ACL).",
-  "windows": ["main"],
+  "windows": ["main", "debug-console"],
   "permissions": [
     "read",
     "session",
     "files",
     "tx",
-    "diagnostics"
+    "diagnostics",
+    "flash",
+    "workspace"
   ]
 }
