@@ -965,6 +965,18 @@ impl PipelineEngine {
         };
         let snap = scan.snapshot(bus_id);
         map.insert(bus_id, scan);
+        self.debug_hub.record(
+            "info",
+            "DIAG",
+            "protocol",
+            Some(bus_id),
+            "diag.passive_started",
+            format!(
+                "Started passive ECU discovery on Bus {}",
+                u16::from(bus_id) + 1
+            ),
+            None,
+        );
         Ok(snap)
     }
 
@@ -991,8 +1003,25 @@ impl PipelineEngine {
         let mut map = self.diag_passive.0.lock();
         Ok(match map.get_mut(&bus_id) {
             Some(s) => {
+                let was_running = s.shared.running.load(Ordering::Acquire);
                 s.stop("stopped by user");
-                s.snapshot(bus_id)
+                let snap = s.snapshot(bus_id);
+                if was_running {
+                    self.debug_hub.record(
+                        "info",
+                        "DIAG",
+                        "protocol",
+                        Some(bus_id),
+                        "diag.passive_stopped",
+                        format!(
+                            "Stopped passive ECU discovery on Bus {} ({} pair(s) identified)",
+                            u16::from(bus_id) + 1,
+                            snap.pairs.len()
+                        ),
+                        Some(format!("framesAnalyzed={}", snap.frames_analyzed)),
+                    );
+                }
+                snap
             }
             None => idle_snapshot(bus_id),
         })

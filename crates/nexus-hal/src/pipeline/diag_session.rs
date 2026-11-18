@@ -47,7 +47,7 @@ const MAX_FD_ISOTP_PDU: usize = 65_535;
 /// response byte defaults to the target byte, so configs that put the same bytes on the wire
 /// share one key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct DiagKey {
+pub(super) struct DiagKey {
     bus_id: u8,
     request_id: u32,
     response_id: u32,
@@ -73,7 +73,7 @@ fn effective_address_bytes(c: &DiagSessionConfigDto) -> (Option<u8>, Option<u8>)
     }
 }
 
-fn diag_key(c: &DiagSessionConfigDto) -> DiagKey {
+pub(super) fn diag_key(c: &DiagSessionConfigDto) -> DiagKey {
     let (tx_addr, rx_addr) = effective_address_bytes(c);
     DiagKey {
         bus_id: c.bus_id,
@@ -193,7 +193,7 @@ pub(super) fn check_id(name: &str, id: u32, extended: bool) -> Result<(), DiagEr
     Ok(())
 }
 
-fn validate_config(c: &DiagSessionConfigDto) -> Result<(), DiagError> {
+pub(super) fn validate_config(c: &DiagSessionConfigDto) -> Result<(), DiagError> {
     check_id("requestId", c.request_id, c.is_extended_id)?;
     check_id("responseId", c.response_id, c.is_extended_id)?;
     if c.request_id == c.response_id {
@@ -412,18 +412,65 @@ impl PipelineEngine {
         &self,
         config: DiagSessionConfigDto,
     ) -> Result<DiagSessionInfoDto, DiagError> {
-        let session = self.diag_session(&config)?;
-        Ok(Self::info_of(&session, true))
+        let bus_id = config.bus_id;
+        let req_id = config.request_id;
+        let resp_id = config.response_id;
+        let session = self.diag_session(&config).inspect_err(|err| {
+            self.debug_hub.record(
+                "warn",
+                "DIAG",
+                "protocol",
+                Some(bus_id),
+                "diag.session_open_failed",
+                format!(
+                    "Failed to open UDS session 0x{req_id:X}->0x{resp_id:X} on Bus {}",
+                    u16::from(bus_id) + 1
+                ),
+                Some(err.message.clone()),
+            );
+        })?;
+        let info = Self::info_of(&session, true);
+        self.debug_hub.record(
+            "info",
+            "DIAG",
+            "protocol",
+            Some(bus_id),
+            "diag.session_opened",
+            format!(
+                "Opened UDS session 0x{req_id:X}->0x{resp_id:X} on Bus {}",
+                u16::from(bus_id) + 1
+            ),
+            Some(format!(
+                "fd={}, ext={}",
+                config.use_fd, config.is_extended_id
+            )),
+        );
+        Ok(info)
     }
 
     /// `cmd_diag_close_session` → stops keepalive and closes the tap. Idempotent.
     pub fn cmd_diag_close_session(&self, config: DiagSessionConfigDto) -> Result<(), DiagError> {
+        let bus_id = config.bus_id;
+        let req_id = config.request_id;
+        let resp_id = config.response_id;
         let entry = self.diag_sessions.0.lock().remove(&diag_key(&config));
         if let Some(e) = entry {
             // Closing the tap first makes a request still in flight on another thread fail
             // fast; `close(&self)` is idempotent and stops keepalive.
             e.tap.close();
             e.session.close();
+            self.debug_hub.record(
+                "info",
+                "DIAG",
+                "protocol",
+                Some(bus_id),
+                "diag.session_closed",
+                format!(
+                    "Closed UDS session 0x{req_id:X}->0x{resp_id:X} on Bus {}",
+                    u16::from(bus_id) + 1
+                ),
+                None,
+            );
         }
         Ok(())
     }
@@ -465,9 +512,58 @@ impl PipelineEngine {
                 payload.len() + 1
             )));
         }
+        let bus_id = config.bus_id;
+        let req_id = config.request_id;
         let opts = options.unwrap_or_default();
         let session = self.diag_session(&config)?;
-        session.request(sid, &payload, &opts)
+        let res = session.request(sid, &payload, &opts);
+        match &res {
+            Ok(resp) => {
+                if resp.positive {
+                    self.debug_hub.record(
+                        "success",
+                        "DIAG",
+                        "protocol",
+                        Some(bus_id),
+                        "diag.uds_response",
+                        format!("UDS SID 0x{sid:02X} positive response from 0x{req_id:X}"),
+                        Some(format!(
+                            "rxBytes={}, elapsedUs={}, pdu=[{}]",
+                            resp.raw.len(),
+                            resp.elapsed_us,
+                            super::format_hex_bytes_preview(&resp.raw)
+                        )),
+                    );
+                } else {
+                    let nrc_desc = match (resp.nrc, resp.nrc_name.as_deref()) {
+                        (Some(nrc), Some(name)) => format!("NRC 0x{nrc:02X} ({name})"),
+                        (Some(nrc), None) => format!("NRC 0x{nrc:02X}"),
+                        _ => "negative response".to_string(),
+                    };
+                    self.debug_hub.record(
+                        "warn",
+                        "DIAG",
+                        "protocol",
+                        Some(bus_id),
+                        "diag.uds_nrc",
+                        format!("UDS SID 0x{sid:02X} rejected on 0x{req_id:X}: {nrc_desc}"),
+                        Some(format!("elapsedUs={}", resp.elapsed_us)),
+                    );
+                }
+            }
+            Err(err) => {
+                self.debug_hub.record(
+                    "error",
+                    "DIAG",
+                    "protocol",
+                    Some(bus_id),
+                    "diag.uds_failed",
+                    format!("UDS SID 0x{sid:02X} failed on 0x{req_id:X}"),
+                    Some(err.message.clone()),
+                );
+            }
+        }
+        res
     }
 
     /// `cmd_diag_read_did` → 0x22 for one DID (data record only). `origin` tags the
@@ -478,8 +574,40 @@ impl PipelineEngine {
         did: u16,
         origin: Option<DiagOrigin>,
     ) -> Result<DidReadResultDto, DiagError> {
-        self.diag_session(&config)?
-            .read_did_with(did, origin.unwrap_or(DiagOrigin::Did))
+        let bus_id = config.bus_id;
+        let req_id = config.request_id;
+        let res = self
+            .diag_session(&config)?
+            .read_did_with(did, origin.unwrap_or(DiagOrigin::Did));
+        match &res {
+            Ok(out) => {
+                self.debug_hub.record(
+                    "success",
+                    "DIAG",
+                    "protocol",
+                    Some(bus_id),
+                    "diag.read_did",
+                    format!("Read UDS DID 0x{did:04X} from 0x{req_id:X}"),
+                    Some(format!(
+                        "bytes={}, data=[{}]",
+                        out.raw.len(),
+                        super::format_hex_bytes_preview(&out.raw)
+                    )),
+                );
+            }
+            Err(err) => {
+                self.debug_hub.record(
+                    "warn",
+                    "DIAG",
+                    "protocol",
+                    Some(bus_id),
+                    "diag.read_did_failed",
+                    format!("Read UDS DID 0x{did:04X} failed on 0x{req_id:X}"),
+                    Some(err.message.clone()),
+                );
+            }
+        }
+        res
     }
 
     /// `cmd_diag_read_stored_dtcs` → 0x19 0x02 (default `statusMask` 0xFF). `origin` tags the
@@ -490,10 +618,40 @@ impl PipelineEngine {
         status_mask: Option<u8>,
         origin: Option<DiagOrigin>,
     ) -> Result<Vec<DtcEntryDto>, DiagError> {
-        self.diag_session(&config)?.read_dtcs_by_status_with(
-            status_mask.unwrap_or(DEFAULT_DTC_STATUS_MASK),
-            origin.unwrap_or(DiagOrigin::Dtc),
-        )
+        let bus_id = config.bus_id;
+        let req_id = config.request_id;
+        let mask = status_mask.unwrap_or(DEFAULT_DTC_STATUS_MASK);
+        let res = self
+            .diag_session(&config)?
+            .read_dtcs_by_status_with(mask, origin.unwrap_or(DiagOrigin::Dtc));
+        match &res {
+            Ok(dtcs) => {
+                self.debug_hub.record(
+                    "info",
+                    "DIAG",
+                    "protocol",
+                    Some(bus_id),
+                    "diag.read_stored_dtcs",
+                    format!(
+                        "Read {} stored DTC(s) from 0x{req_id:X} (mask 0x{mask:02X})",
+                        dtcs.len()
+                    ),
+                    None,
+                );
+            }
+            Err(err) => {
+                self.debug_hub.record(
+                    "warn",
+                    "DIAG",
+                    "protocol",
+                    Some(bus_id),
+                    "diag.read_stored_dtcs_failed",
+                    format!("Read stored DTCs failed on 0x{req_id:X}"),
+                    Some(err.message.clone()),
+                );
+            }
+        }
+        res
     }
 
     /// `cmd_diag_set_tester_present` → background `3E 80`. Disabling never opens a session.
@@ -503,6 +661,8 @@ impl PipelineEngine {
         enabled: bool,
         interval_ms: Option<u32>,
     ) -> Result<DiagSessionInfoDto, DiagError> {
+        let bus_id = config.bus_id;
+        let req_id = config.request_id;
         if let Some(ms) = interval_ms {
             if !(100..=60_000).contains(&ms) {
                 return Err(invalid("intervalMs must be within 100..=60000"));
@@ -514,6 +674,15 @@ impl PipelineEngine {
                 Some((session, valid)) => {
                     if valid {
                         session.set_tester_present(false, interval_ms)?;
+                        self.debug_hub.record(
+                            "info",
+                            "DIAG",
+                            "protocol",
+                            Some(bus_id),
+                            "diag.tester_present",
+                            format!("Disabled TesterPresent (0x3E) on 0x{req_id:X}"),
+                            None,
+                        );
                     }
                     Ok(Self::info_of(&session, valid))
                 }
@@ -522,7 +691,20 @@ impl PipelineEngine {
         }
         let session = self.diag_session(&config)?;
         session.set_tester_present(true, interval_ms)?;
-        Ok(Self::info_of(&session, true))
+        let info = Self::info_of(&session, true);
+        self.debug_hub.record(
+            "info",
+            "DIAG",
+            "protocol",
+            Some(bus_id),
+            "diag.tester_present",
+            format!(
+                "Enabled TesterPresent (0x3E 80) on 0x{req_id:X} ({} ms)",
+                info.tester_present_interval_ms
+            ),
+            None,
+        );
+        Ok(info)
     }
 
     /// `cmd_diag_get_conversation` → events with `seq > since_seq` (default max 500).

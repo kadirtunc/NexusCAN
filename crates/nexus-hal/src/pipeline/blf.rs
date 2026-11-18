@@ -9,8 +9,8 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use nexus_core::{
-    dlc_code_to_len, len_to_canfd_dlc_code, CanIdKey, RawCanFrame, EXT_CAN_ID_MASK, FLAG_ESI,
-    FLAG_TX, MAX_CAN_FD_DLC, MAX_CLASSICAL_CAN_DLC, STD_CAN_ID_MASK,
+    dlc_code_to_len, len_to_canfd_dlc_code, CanIdKey, RawCanFrame, EXT_CAN_ID_MASK, FLAG_ERROR,
+    FLAG_ESI, FLAG_TX, MAX_CAN_FD_DLC, MAX_CLASSICAL_CAN_DLC, STD_CAN_ID_MASK,
 };
 use std::io::{Read, Write};
 
@@ -37,7 +37,9 @@ pub const MAX_TOTAL_UNCOMPRESSED_BYTES: usize = 256 * 1024 * 1024;
 
 // Vector BLF Object Type IDs
 const BLF_OBJ_CAN_MESSAGE: u32 = 1;
+const BLF_OBJ_CAN_ERROR: u32 = 2;
 const BLF_OBJ_LOG_CONTAINER: u32 = 10;
+const BLF_OBJ_CAN_ERROR_EXT: u32 = 73;
 const BLF_OBJ_CAN_MESSAGE2: u32 = 86;
 const BLF_OBJ_CAN_FD_MESSAGE: u32 = 100;
 const BLF_OBJ_CAN_FD_MESSAGE_64: u32 = 101;
@@ -309,6 +311,8 @@ fn parse_timestamped_lobj(
     if !matches!(
         object_type,
         BLF_OBJ_CAN_MESSAGE
+            | BLF_OBJ_CAN_ERROR
+            | BLF_OBJ_CAN_ERROR_EXT
             | BLF_OBJ_CAN_MESSAGE2
             | BLF_OBJ_CAN_FD_MESSAGE
             | BLF_OBJ_CAN_FD_MESSAGE_64
@@ -462,6 +466,43 @@ fn parse_timestamped_lobj(
                 out.push((raw_ts_us, frame));
             }
         }
+        BLF_OBJ_CAN_ERROR => {
+            if payload.len() < 4 {
+                return Ok(());
+            }
+            let channel = read_u16_le(payload, 0)?;
+            let bus_id = (channel.saturating_sub(1)).min(255) as u8;
+            let mut frame = RawCanFrame::zeroed();
+            frame.bus_id = bus_id;
+            frame.arb_id = crate::error_frame::CAN_ERR_BUSERROR;
+            frame.dlc = 8;
+            frame.flags = FLAG_ERROR;
+            out.push((raw_ts_us, frame));
+        }
+        BLF_OBJ_CAN_ERROR_EXT => {
+            if payload.len() < 32 {
+                return Ok(());
+            }
+            let channel = read_u16_le(payload, 0)?;
+            let bus_id = (channel.saturating_sub(1)).min(255) as u8;
+            let dlc = payload[10].min(8);
+            let raw_id = read_u32_le(payload, 16)? & EXT_CAN_ID_MASK;
+            let flags_ext = read_u16_le(payload, 20)?;
+
+            let mut frame = RawCanFrame::zeroed();
+            frame.bus_id = bus_id;
+            frame.arb_id = raw_id;
+            frame.dlc = if dlc == 0 { 8 } else { dlc };
+            frame.flags = FLAG_ERROR
+                | if (flags_ext & 0x0001) != 0 {
+                    FLAG_TX
+                } else {
+                    0
+                };
+            let copy_len = usize::from(frame.dlc.min(8));
+            frame.data[..copy_len].copy_from_slice(&payload[24..24 + copy_len]);
+            out.push((raw_ts_us, frame));
+        }
         _ => {}
     }
 
@@ -485,6 +526,36 @@ pub fn encode_blf_bytes(entries: &[CompiledReplayEntry]) -> Result<Vec<u8>, HalE
     for entry in entries {
         let frame = &entry.frame;
         let ts_ns = entry.rel_us.saturating_mul(1_000);
+
+        if frame.is_error() {
+            // `CAN_ERROR_EXT` (`object_type = 73`, `object_size = 32 + 32 = 64` bytes, 4-byte aligned)
+            let object_size = 64u32;
+            write_inner_v1_header(&mut inner_stream, object_size, BLF_OBJ_CAN_ERROR_EXT, ts_ns);
+
+            let channel = u16::from(frame.bus_id).saturating_add(1);
+            let dlc = frame.dlc.min(8);
+            let length_u16 = u16::from(dlc);
+            let err_id = frame.arb_id & EXT_CAN_ID_MASK;
+            let flags_ext = if frame.is_tx() { 1u16 } else { 0u16 };
+            let mut data8 = [0u8; 8];
+            let n = usize::from(dlc);
+            data8[..n].copy_from_slice(&frame.data[..n]);
+
+            inner_stream.extend_from_slice(&channel.to_le_bytes()); // 0..2: channel
+            inner_stream.extend_from_slice(&length_u16.to_le_bytes()); // 2..4: length
+            inner_stream.extend_from_slice(&1u32.to_le_bytes()); // 4..8: flags
+            inner_stream.push(0u8); // 8: ecc
+            inner_stream.push(data8[3]); // 9: position
+            inner_stream.push(dlc); // 10: dlc
+            inner_stream.push(0u8); // 11: reserved1
+            inner_stream.extend_from_slice(&0u32.to_le_bytes()); // 12..16: frame_length_ns
+            inner_stream.extend_from_slice(&err_id.to_le_bytes()); // 16..20: id (error mask)
+            inner_stream.extend_from_slice(&flags_ext.to_le_bytes()); // 20..22: flags_ext
+            inner_stream.extend_from_slice(&0u16.to_le_bytes()); // 22..24: reserved2
+            inner_stream.extend_from_slice(&data8); // 24..32: data[8]
+            continue;
+        }
+
         let raw_id = if frame.is_extended() {
             (frame.arb_id & EXT_CAN_ID_MASK) | BLF_EXT_ID_FLAG
         } else {

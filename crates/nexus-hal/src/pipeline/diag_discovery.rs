@@ -203,6 +203,23 @@ impl PipelineEngine {
                 self.identify_ecu(&req, ecu);
             }
         }
+        self.debug_hub.record(
+            "info",
+            "DIAG",
+            "protocol",
+            Some(req.bus_id),
+            "diag.discover_ecus",
+            format!(
+                "Functional ECU discovery on Bus {} (0x{:X}) found {} ECU(s)",
+                u16::from(req.bus_id) + 1,
+                req.functional_id,
+                result.ecus.len()
+            ),
+            Some(format!(
+                "windowMs={}, identify={}",
+                plan.window_ms, req.identify
+            )),
+        );
         Ok(result)
     }
 

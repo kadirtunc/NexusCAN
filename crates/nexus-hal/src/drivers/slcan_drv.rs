@@ -418,6 +418,48 @@ pub fn parse_slcan_line(mut line: &[u8], bus_id: BusId, timestamp_us: u64) -> Op
     }
     let (&cmd, rest) = line.split_first()?;
 
+    // Lawicel status/error report (`Fxx\r`): surface non-zero bus/controller error flags as `FLAG_ERROR`
+    if cmd == b'F' && rest.len() == 2 {
+        let hi = decode_hex_nibble(rest[0])?;
+        let lo = decode_hex_nibble(rest[1])?;
+        let status = (hi << 4) | lo;
+        if status == 0 {
+            return None;
+        }
+        let mut err_mask = 0u32;
+        let mut crtl = 0u8;
+        if (status & 0x03) != 0 {
+            err_mask |= crate::error_frame::CAN_ERR_CRTL;
+            crtl |= 0x01; // RX/TX FIFO overflow
+        }
+        if (status & 0x04) != 0 {
+            err_mask |= crate::error_frame::CAN_ERR_CRTL;
+            crtl |= 0x0C; // Error Warning
+        }
+        if (status & 0x20) != 0 {
+            err_mask |= crate::error_frame::CAN_ERR_CRTL;
+            crtl |= 0x30; // Error Passive
+        }
+        if (status & 0x40) != 0 {
+            err_mask |= crate::error_frame::CAN_ERR_LOSTARB;
+        }
+        if (status & 0x80) != 0 {
+            err_mask |= crate::error_frame::CAN_ERR_BUSERROR;
+        }
+        let mut out = RawCanFrame::zeroed();
+        out.timestamp_us = timestamp_us;
+        out.bus_id = bus_id;
+        out.arb_id = if err_mask != 0 {
+            err_mask
+        } else {
+            crate::error_frame::CAN_ERR_BUSERROR
+        };
+        out.dlc = 8;
+        out.flags = nexus_core::FLAG_ERROR;
+        out.data[1] = crtl;
+        return Some(out);
+    }
+
     let (is_extended, is_rtr, is_fd, is_brs) = match cmd {
         b't' => (false, false, false, false),
         b'T' => (true, false, false, false),
@@ -640,6 +682,7 @@ pub fn discover_serial_ports() -> Vec<SerialPortInfoDto> {
             }
 
             // `mut` is only used by the Linux sysfs enrichment below.
+            let os_hint = default_serial_os_hint(&p.port_name);
             #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
             let mut info = match p.port_type {
                 SerialPortType::UsbPort(usb) => SerialPortInfoDto {
@@ -648,6 +691,8 @@ pub fn discover_serial_ports() -> Vec<SerialPortInfoDto> {
                     vid_pid: Some(format!("{:04X}:{:04X}", usb.vid, usb.pid)),
                     manufacturer: usb.manufacturer,
                     product: usb.product,
+                    serial_number: usb.serial_number.filter(|s| !s.trim().is_empty()),
+                    os_hint,
                 },
                 SerialPortType::PciPort => SerialPortInfoDto {
                     port_name: p.port_name.clone(),
@@ -655,6 +700,8 @@ pub fn discover_serial_ports() -> Vec<SerialPortInfoDto> {
                     vid_pid: None,
                     manufacturer: None,
                     product: None,
+                    serial_number: None,
+                    os_hint,
                 },
                 SerialPortType::BluetoothPort => SerialPortInfoDto {
                     port_name: p.port_name.clone(),
@@ -662,6 +709,8 @@ pub fn discover_serial_ports() -> Vec<SerialPortInfoDto> {
                     vid_pid: None,
                     manufacturer: None,
                     product: None,
+                    serial_number: None,
+                    os_hint,
                 },
                 SerialPortType::Unknown => SerialPortInfoDto {
                     port_name: p.port_name.clone(),
@@ -669,6 +718,8 @@ pub fn discover_serial_ports() -> Vec<SerialPortInfoDto> {
                     vid_pid: None,
                     manufacturer: None,
                     product: None,
+                    serial_number: None,
+                    os_hint,
                 },
             };
 
@@ -682,7 +733,106 @@ pub fn discover_serial_ports() -> Vec<SerialPortInfoDto> {
     #[cfg(target_os = "linux")]
     scan_linux_tty_devices(&mut by_name);
 
+    // On macOS, if both `/dev/tty.<stem>` and `/dev/cu.<stem>` are enumerated for the same adapter,
+    // keep `/dev/cu.<stem>` first/preferred so SLCAN never blocks on DCD carrier detect.
+    #[cfg(target_os = "macos")]
+    {
+        let cu_stems: Vec<String> = by_name
+            .keys()
+            .filter_map(|k| k.strip_prefix("/dev/cu.").map(str::to_string))
+            .collect();
+        for stem in cu_stems {
+            by_name.remove(&format!("/dev/tty.{stem}"));
+        }
+    }
+
     by_name.into_values().collect()
+}
+
+fn default_serial_os_hint(port_name: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(stem) = port_name.strip_prefix("/dev/tty.") {
+            return Some(format!(
+                "Use /dev/cu.{stem} instead of /dev/tty.{stem} on macOS to avoid DCD carrier block"
+            ));
+        }
+        if port_name.starts_with("/dev/cu.") {
+            return Some(
+                "macOS POSIX call-out device (/dev/cu.*) — ready without DCD carrier wait"
+                    .to_string(),
+            );
+        }
+        return Some("macOS serial device".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return Some(format!(
+            "Windows Win32 COM port ({port_name}) via usbser.sys / FTDI VCP"
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match linux_has_rw_permission(std::path::Path::new(port_name)) {
+            Some(true) => Some("Linux tty read/write permission verified".to_string()),
+            Some(false) => Some(
+                "Permission denied on tty node — run: sudo usermod -aG dialout $USER && re-login"
+                    .to_string(),
+            ),
+            None => Some("Linux POSIX termios device".to_string()),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        let _ = port_name;
+        None
+    }
+}
+
+/// Checks POSIX read+write access on a Linux device node via `/proc/self/status` + `MetadataExt`
+/// without opening the file descriptor (preventing unwanted UART DTR resets during discovery).
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_has_rw_permission(path: &std::path::Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let meta = std::fs::metadata(path).ok()?;
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+
+    let mut euid: Option<u32> = None;
+    let mut egid: Option<u32> = None;
+    let mut groups: Vec<u32> = Vec::new();
+
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            let mut cols = rest.split_whitespace();
+            let _ruid = cols.next();
+            euid = cols.next().and_then(|s| s.parse().ok());
+        } else if let Some(rest) = line.strip_prefix("Gid:") {
+            let mut cols = rest.split_whitespace();
+            let _rgid = cols.next();
+            egid = cols.next().and_then(|s| s.parse().ok());
+        } else if let Some(rest) = line.strip_prefix("Groups:") {
+            groups = rest
+                .split_whitespace()
+                .filter_map(|s| s.parse::<u32>().ok())
+                .collect();
+        }
+    }
+
+    let uid = euid?;
+    if uid == 0 {
+        return Some(true);
+    }
+    let gid = egid.unwrap_or(u32::MAX);
+    let mode = meta.mode();
+
+    if meta.uid() == uid {
+        Some((mode & 0o600) == 0o600)
+    } else if meta.gid() == gid || groups.contains(&meta.gid()) {
+        Some((mode & 0o060) == 0o060)
+    } else {
+        Some((mode & 0o006) == 0o006)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -747,6 +897,12 @@ fn enrich_linux_sysfs_usb_metadata(info: &mut SerialPortInfoDto) {
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
             }
+            if info.serial_number.is_none() {
+                info.serial_number = std::fs::read_to_string(dir.join("serial"))
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+            }
             break;
         }
         cur = dir.parent();
@@ -761,12 +917,15 @@ fn scan_linux_tty_devices(by_name: &mut BTreeMap<String, SerialPortInfoDto>) {
             if name.starts_with("ttyUSB") || name.starts_with("ttyACM") {
                 let full_path = format!("/dev/{name}");
                 by_name.entry(full_path.clone()).or_insert_with(|| {
+                    let os_hint = default_serial_os_hint(&full_path);
                     let mut info = SerialPortInfoDto {
                         port_name: full_path,
                         port_type: "USB-CDC".to_string(),
                         vid_pid: None,
                         manufacturer: None,
                         product: None,
+                        serial_number: None,
+                        os_hint,
                     };
                     enrich_linux_sysfs_usb_metadata(&mut info);
                     info
@@ -786,12 +945,15 @@ fn scan_linux_tty_devices(by_name: &mut BTreeMap<String, SerialPortInfoDto>) {
             }
             let full_path = format!("/dev/{name}");
             by_name.entry(full_path.clone()).or_insert_with(|| {
+                let os_hint = default_serial_os_hint(&full_path);
                 let mut info = SerialPortInfoDto {
                     port_name: full_path,
                     port_type: "USB-CDC".to_string(),
                     vid_pid: None,
                     manufacturer: None,
                     product: None,
+                    serial_number: None,
+                    os_hint,
                 };
                 enrich_linux_sysfs_usb_metadata(&mut info);
                 info
@@ -1055,9 +1217,15 @@ impl CanChannel for SlcanChannel {
                 Ok(n) => n,
                 Err(e)
                     if e.kind() == io::ErrorKind::TimedOut
-                        || e.kind() == io::ErrorKind::WouldBlock =>
+                        || e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::Interrupted =>
                 {
                     0
+                }
+                Err(e) if is_fatal_serial_disconnect(&e) => {
+                    self.port = None;
+                    self.closed = true;
+                    return Err(AdapterError::ChannelClosed);
                 }
                 Err(e) => return Err(AdapterError::Io(e)),
             }
@@ -1128,6 +1296,11 @@ impl CanChannel for SlcanChannel {
         let port = self.port.as_mut().ok_or(AdapterError::ChannelClosed)?;
         if let Err(e) = port.write_all(&wire_buf[..encoded_len]) {
             self.tx_errors = self.tx_errors.saturating_add(1);
+            if is_fatal_serial_disconnect(&e) {
+                self.port = None;
+                self.closed = true;
+                return Err(AdapterError::ChannelClosed);
+            }
             return Err(AdapterError::Io(e));
         }
         Ok(())
@@ -1168,6 +1341,35 @@ impl Drop for SlcanChannel {
     fn drop(&mut self) {
         let _ = self.close();
     }
+}
+
+#[inline]
+fn is_fatal_serial_disconnect(err: &io::Error) -> bool {
+    if matches!(
+        err.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::NotFound
+            | io::ErrorKind::PermissionDenied
+    ) {
+        return true;
+    }
+
+    #[cfg(windows)]
+    if matches!(
+        err.raw_os_error(),
+        Some(2 | 5 | 6 | 21 | 22 | 31 | 995 | 1167)
+    ) {
+        return true;
+    }
+
+    #[cfg(unix)]
+    if matches!(err.raw_os_error(), Some(5 | 6 | 9 | 19 | 108)) {
+        return true;
+    }
+
+    false
 }
 
 #[cfg(test)]

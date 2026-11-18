@@ -380,6 +380,7 @@ impl AdapterDriver for SocketCanDriver {
                 .map_or(ListenOnlyEnforcement::SoftwareOnly, |o| o.enforcement),
             restore_hw_listen_only: hw_listen_only.is_some_and(|o| o.restore_on_close),
             closed: false,
+            bus_state: BusState::Active,
             rx_error_count: 0,
             tx_error_count: 0,
             socket: Some(inner),
@@ -410,6 +411,7 @@ pub struct SocketCanChannel {
     /// We switched the controller into listen-only ctrlmode and must revert it on close.
     restore_hw_listen_only: bool,
     closed: bool,
+    bus_state: BusState,
     rx_error_count: u32,
     tx_error_count: u32,
     socket: Option<SocketHandle>,
@@ -429,35 +431,54 @@ impl SocketCanChannel {
         }
     }
 
+    #[inline]
+    fn apply_error_frame_health(&mut self, raw: &RawCanFrame) {
+        let (maybe_state, maybe_cnt) =
+            crate::error_frame::extract_bus_health_from_error_frame(raw.arb_id, raw.payload());
+        if let Some((tec, rec)) = maybe_cnt {
+            self.tx_error_count = tec;
+            self.rx_error_count = rec;
+        } else {
+            self.rx_error_count = self.rx_error_count.saturating_add(1);
+        }
+        if let Some(st) = maybe_state {
+            self.bus_state = st;
+        }
+    }
+
+    #[inline]
+    fn mark_disconnected(&mut self) -> AdapterError {
+        self.closed = true;
+        self.socket = None;
+        self.bus_state = BusState::Disconnected;
+        self.revert_hw_listen_only();
+        AdapterError::ChannelClosed
+    }
+
     fn read_one_nonblocking(&mut self) -> Result<Option<RawCanFrame>, AdapterError> {
         let sock = self.socket.as_ref().ok_or(AdapterError::ChannelClosed)?;
         let (timestamp_us, _) = resolve_frame_timestamp_us(None);
 
-        match sock {
-            SocketHandle::Classical(s) => match s.read_frame() {
-                Ok(frame) => {
-                    let raw = convert_classical_frame(frame, self.bus_id, timestamp_us);
-                    if raw.is_error() {
-                        self.rx_error_count = self.rx_error_count.saturating_add(1);
-                    }
-                    Ok(Some(raw))
+        let read_res = match sock {
+            SocketHandle::Classical(s) => s
+                .read_frame()
+                .map(|f| convert_classical_frame(f, self.bus_id, timestamp_us)),
+            SocketHandle::Fd(s) => s
+                .read_frame()
+                .map(|f| convert_any_frame(f, self.bus_id, timestamp_us)),
+        };
+
+        match read_res {
+            Ok(raw) => {
+                if raw.is_error() {
+                    self.apply_error_frame_health(&raw);
                 }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => Ok(None),
-                Err(err) => Err(AdapterError::Io(err)),
-            },
-            SocketHandle::Fd(s) => match s.read_frame() {
-                Ok(any_frame) => {
-                    let raw = convert_any_frame(any_frame, self.bus_id, timestamp_us);
-                    if raw.is_error() {
-                        self.rx_error_count = self.rx_error_count.saturating_add(1);
-                    }
-                    Ok(Some(raw))
-                }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => Ok(None),
-                Err(err) => Err(AdapterError::Io(err)),
-            },
+                Ok(Some(raw))
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => Ok(None),
+            Err(err) if is_fatal_socketcan_disconnect(&err) => Err(self.mark_disconnected()),
+            Err(err) => Err(AdapterError::Io(err)),
         }
     }
 }
@@ -501,15 +522,19 @@ impl CanChannel for SocketCanChannel {
             out_batch[0] = first;
             count = 1;
         } else if timeout_ms > 0 {
-            let poll_ready = {
+            let poll_res = {
                 let sock = self.socket.as_ref().ok_or(AdapterError::ChannelClosed)?;
                 let mut fds = [PollFd::new(sock.as_borrowed_fd(), PollFlags::POLLIN)];
                 let poll_timeout = PollTimeout::try_from(timeout_ms).unwrap_or(PollTimeout::MAX);
-                match poll(&mut fds, poll_timeout) {
-                    Ok(n) => n > 0,
-                    Err(nix::errno::Errno::EINTR) => false,
-                    Err(errno) => return Err(AdapterError::Io(io::Error::from(errno))),
+                poll(&mut fds, poll_timeout)
+            };
+            let poll_ready = match poll_res {
+                Ok(n) => n > 0,
+                Err(nix::errno::Errno::EINTR) => false,
+                Err(errno) if is_fatal_socketcan_errno(errno) => {
+                    return Err(self.mark_disconnected());
                 }
+                Err(errno) => return Err(AdapterError::Io(io::Error::from(errno))),
             };
             if !poll_ready {
                 return Ok(0);
@@ -641,11 +666,10 @@ impl CanChannel for SocketCanChannel {
         let oper_path = Path::new(SYS_CLASS_NET)
             .join(&self.descriptor.channel_name)
             .join("operstate");
-        let oper = fs::read_to_string(oper_path).unwrap_or_default();
-        let state = if oper.trim().eq_ignore_ascii_case("down") {
-            BusState::Disconnected
-        } else {
-            BusState::Active
+        let state = match fs::read_to_string(oper_path) {
+            Ok(oper) if oper.trim().eq_ignore_ascii_case("down") => BusState::Disconnected,
+            Ok(_) => self.bus_state,
+            Err(_) => BusState::Disconnected,
         };
 
         BusHealthSnapshot {
@@ -654,6 +678,35 @@ impl CanChannel for SocketCanChannel {
             rx_error_count: self.rx_error_count,
         }
     }
+}
+
+#[inline]
+fn is_fatal_socketcan_errno(errno: nix::errno::Errno) -> bool {
+    matches!(
+        errno,
+        nix::errno::Errno::ENODEV
+            | nix::errno::Errno::ENXIO
+            | nix::errno::Errno::EIO
+            | nix::errno::Errno::EBADF
+            | nix::errno::Errno::ENETDOWN
+            | nix::errno::Errno::ESHUTDOWN
+    )
+}
+
+#[inline]
+fn is_fatal_socketcan_disconnect(err: &io::Error) -> bool {
+    if matches!(
+        err.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::NotFound
+    ) {
+        return true;
+    }
+    err.raw_os_error()
+        .map(nix::errno::Errno::from_raw)
+        .is_some_and(is_fatal_socketcan_errno)
 }
 
 #[inline]

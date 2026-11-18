@@ -133,10 +133,42 @@ impl PipelineEngine {
         let mut payload = Vec::with_capacity(1 + params.len());
         payload.push(sub_function);
         payload.extend_from_slice(&params);
-        let response =
-            self.diag_session_for(&config)?
-                .request(SID_READ_DTC_INFORMATION, &payload, &opts)?;
+        let bus_id = config.bus_id;
+        let req_id = config.request_id;
+        let response = self
+            .diag_session_for(&config)?
+            .request(SID_READ_DTC_INFORMATION, &payload, &opts)
+            .inspect_err(|err| {
+                self.debug_hub.record(
+                    "warn",
+                    "DIAG",
+                    "protocol",
+                    Some(bus_id),
+                    "diag.dtc_report_failed",
+                    format!("UDS 0x19 sub 0x{sub_function:02X} DTC report failed on 0x{req_id:X}"),
+                    Some(err.message.clone()),
+                );
+            })?;
         let (report, report_error) = dtc_report_from_response(sub_function, &params, &response);
+        self.debug_hub.record(
+            if report_error.is_none() {
+                "info"
+            } else {
+                "warn"
+            },
+            "DIAG",
+            "protocol",
+            Some(bus_id),
+            "diag.dtc_report",
+            format!("UDS 0x19 sub 0x{sub_function:02X} DTC report from 0x{req_id:X}"),
+            report_error.clone().or_else(|| {
+                Some(format!(
+                    "rxBytes={}, elapsedUs={}",
+                    response.raw.len(),
+                    response.elapsed_us
+                ))
+            }),
+        );
         Ok(DtcReportResultDto {
             response,
             report,

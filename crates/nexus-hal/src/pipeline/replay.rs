@@ -8,10 +8,11 @@ use crate::dto::{
     TraceReplayControlArgsDto, TraceReplayStatusDto, TraceStorageInfoDto,
 };
 use crate::error::{AdapterError, HalError};
+use crate::error_frame::decode_can_error_summary;
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use nexus_core::{
-    now_monotonic_us, BusId, CanIdKey, RawCanFrame, FLAG_ESI, FLAG_TX, MAX_CAN_FD_DLC,
-    MAX_CLASSICAL_CAN_DLC, STD_CAN_ID_MASK,
+    now_monotonic_us, BusId, CanIdKey, RawCanFrame, EXT_CAN_ID_MASK, FLAG_ERROR, FLAG_ESI, FLAG_TX,
+    MAX_CAN_FD_DLC, MAX_CLASSICAL_CAN_DLC, STD_CAN_ID_MASK,
 };
 use parking_lot::{Mutex, RwLock};
 use std::collections::BTreeMap;
@@ -497,19 +498,40 @@ pub fn entries_to_chronological_dtos(
     let mut out = Vec::with_capacity(entries.len());
     for entry in entries {
         let f = &entry.frame;
-        let can_id = f.can_id_key();
-        out.push(ChronologicalFrameDto {
-            timestamp_us: SYNTHETIC_TRACE_ORIGIN_US.saturating_add(entry.rel_us),
-            bus_id: f.bus_id,
-            message_key: can_id.schema_key(),
-            arb_id: can_id.raw_id(),
-            is_extended: f.is_extended(),
-            is_fd: f.is_fd(),
-            is_brs: f.is_brs(),
-            is_tx: f.is_tx(),
-            dlc: f.dlc,
-            raw_bytes: f.payload().to_vec(),
-        });
+        if f.is_error() {
+            let err_mask = f.arb_id & EXT_CAN_ID_MASK;
+            let payload = f.payload();
+            out.push(ChronologicalFrameDto {
+                timestamp_us: SYNTHETIC_TRACE_ORIGIN_US.saturating_add(entry.rel_us),
+                bus_id: f.bus_id,
+                message_key: format!("ERR:0x{err_mask:08X}"),
+                arb_id: err_mask,
+                is_extended: f.is_extended(),
+                is_fd: f.is_fd(),
+                is_brs: f.is_brs(),
+                is_tx: f.is_tx(),
+                is_error: true,
+                error_summary: Some(decode_can_error_summary(err_mask, payload)),
+                dlc: f.dlc,
+                raw_bytes: payload.to_vec(),
+            });
+        } else {
+            let can_id = f.can_id_key();
+            out.push(ChronologicalFrameDto {
+                timestamp_us: SYNTHETIC_TRACE_ORIGIN_US.saturating_add(entry.rel_us),
+                bus_id: f.bus_id,
+                message_key: can_id.schema_key(),
+                arb_id: can_id.raw_id(),
+                is_extended: f.is_extended(),
+                is_fd: f.is_fd(),
+                is_brs: f.is_brs(),
+                is_tx: f.is_tx(),
+                is_error: false,
+                error_summary: None,
+                dlc: f.dlc,
+                raw_bytes: f.payload().to_vec(),
+            });
+        }
     }
     out
 }
@@ -522,6 +544,19 @@ pub fn compile_chronological_frames(frames: &[ChronologicalFrameDto]) -> Vec<Com
 
     let mut raw: Vec<(u64, RawCanFrame)> = Vec::with_capacity(frames.len());
     for dto in frames {
+        if dto.is_error || dto.message_key.starts_with("ERR:") {
+            let mut frame = RawCanFrame::zeroed();
+            frame.timestamp_us = dto.timestamp_us;
+            frame.bus_id = dto.bus_id;
+            frame.arb_id = dto.arb_id & EXT_CAN_ID_MASK;
+            let len = dto.raw_bytes.len().min(MAX_CLASSICAL_CAN_DLC);
+            frame.dlc = dto.dlc.min(MAX_CLASSICAL_CAN_DLC as u8).max(len as u8);
+            frame.data[..len].copy_from_slice(&dto.raw_bytes[..len]);
+            frame.flags = FLAG_ERROR | if dto.is_tx { FLAG_TX } else { 0 };
+            raw.push((dto.timestamp_us, frame));
+            continue;
+        }
+
         let can_id = CanIdKey::new_masked(dto.arb_id, dto.is_extended);
         let len = dto.raw_bytes.len().min(MAX_CAN_FD_DLC);
         let slice = &dto.raw_bytes[..len];
@@ -710,6 +745,50 @@ fn build_frame_from_parts(
     Some(frame)
 }
 
+#[inline]
+fn build_error_frame(bus_id: BusId, err_mask: u32, is_tx: bool, payload: &[u8]) -> RawCanFrame {
+    let mut frame = RawCanFrame::zeroed();
+    frame.bus_id = bus_id;
+    frame.arb_id = err_mask & EXT_CAN_ID_MASK;
+    let len = payload.len().min(MAX_CLASSICAL_CAN_DLC);
+    frame.dlc = (len as u8).max(if payload.is_empty() { 0 } else { len as u8 });
+    frame.data[..len].copy_from_slice(&payload[..len]);
+    frame.flags = FLAG_ERROR | if is_tx { FLAG_TX } else { 0 };
+    frame
+}
+
+#[inline]
+fn parse_err_mask_token(tok: &str, radix: u32) -> Option<u32> {
+    let t = tok
+        .trim()
+        .strip_prefix("ERR:")
+        .or_else(|| tok.trim().strip_prefix("err:"))
+        .unwrap_or_else(|| tok.trim());
+    let no_suffix = t.strip_suffix(['x', 'X']).unwrap_or(t);
+    let clean = no_suffix
+        .strip_prefix("0x")
+        .or_else(|| no_suffix.strip_prefix("0X"))
+        .unwrap_or(no_suffix);
+    if clean.is_empty() {
+        return None;
+    }
+    let effective_radix = if no_suffix.starts_with("0x") || no_suffix.starts_with("0X") {
+        16
+    } else {
+        radix
+    };
+    u32::from_str_radix(clean, effective_radix)
+        .ok()
+        .map(|v| v & EXT_CAN_ID_MASK)
+}
+
+#[inline]
+fn is_trc_error_token(tok: &str) -> bool {
+    tok.eq_ignore_ascii_case("Error")
+        || tok.eq_ignore_ascii_case("Err")
+        || tok.eq_ignore_ascii_case("ER")
+}
+
 fn parse_pcan_trc_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
     let mut is_v1 = false;
     let mut payload_buf = [0u8; MAX_CAN_FD_DLC];
@@ -736,8 +815,8 @@ fn parse_pcan_trc_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
 
         if is_v1 || tok0.ends_with(')') {
             // PCAN-Trace v1.1 / v1.3:
-            // v1.1: `<idx>) <time_ms> <Rx|Tx> <id_hex> <dlc> <XX ...>`
-            // v1.3: `<idx>) <time_ms> <bus_1based> <Rx|Tx> <id_hex> [-] <dlc> <XX ...>`
+            // v1.1: `<idx>) <time_ms> <Rx|Tx|Error> <id_hex> <dlc> <XX ...>`
+            // v1.3: `<idx>) <time_ms> <bus_1based> <Rx|Tx|Error> <id_hex> [-] <dlc> <XX ...>`
             let Some(time_tok) = iter.next() else {
                 continue;
             };
@@ -752,26 +831,59 @@ fn parse_pcan_trc_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
             let Some(tok2) = iter.next() else {
                 continue;
             };
-            let (bus_id, dir_tok, id_tok) =
-                if tok2.eq_ignore_ascii_case("Rx") || tok2.eq_ignore_ascii_case("Tx") {
-                    let Some(id_t) = iter.next() else {
-                        continue;
-                    };
-                    (0u8, tok2, id_t)
-                } else if let Ok(bus_1based) = tok2.parse::<u16>() {
-                    let Some(dir_t) = iter.next() else {
-                        continue;
-                    };
-                    if !dir_t.eq_ignore_ascii_case("Rx") && !dir_t.eq_ignore_ascii_case("Tx") {
-                        continue;
-                    }
-                    let Some(id_t) = iter.next() else {
-                        continue;
-                    };
-                    ((bus_1based.saturating_sub(1)).min(255) as u8, dir_t, id_t)
-                } else {
+            let (bus_id, dir_tok, id_tok) = if tok2.eq_ignore_ascii_case("Rx")
+                || tok2.eq_ignore_ascii_case("Tx")
+                || is_trc_error_token(tok2)
+            {
+                let id_t = iter.next().unwrap_or("0080");
+                (0u8, tok2, id_t)
+            } else if let Ok(bus_1based) = tok2.parse::<u16>() {
+                let Some(dir_t) = iter.next() else {
                     continue;
                 };
+                if !dir_t.eq_ignore_ascii_case("Rx")
+                    && !dir_t.eq_ignore_ascii_case("Tx")
+                    && !is_trc_error_token(dir_t)
+                {
+                    continue;
+                }
+                let id_t = iter.next().unwrap_or("0080");
+                ((bus_1based.saturating_sub(1)).min(255) as u8, dir_t, id_t)
+            } else {
+                continue;
+            };
+
+            if is_trc_error_token(dir_tok) || is_trc_error_token(id_tok) {
+                let err_mask = parse_err_mask_token(id_tok, 16)
+                    .unwrap_or(crate::error_frame::CAN_ERR_BUSERROR);
+                let mut count = 0usize;
+                if let Some(mut next_tok) = iter.next() {
+                    if next_tok == "-" {
+                        next_tok = iter.next().unwrap_or("");
+                    }
+                    // Optional DLC token followed by hex bytes, or directly hex bytes
+                    if next_tok.parse::<u8>().is_err() {
+                        if let Some(b) = parse_byte_token_radix(next_tok, 16) {
+                            payload_buf[count] = b;
+                            count += 1;
+                        }
+                    }
+                    for b_tok in iter {
+                        if count >= MAX_CLASSICAL_CAN_DLC {
+                            break;
+                        }
+                        if let Some(b) = parse_byte_token_radix(b_tok, 16) {
+                            payload_buf[count] = b;
+                            count += 1;
+                        }
+                    }
+                }
+                out.push((
+                    ts_us,
+                    build_error_frame(bus_id, err_mask, false, &payload_buf[..count]),
+                ));
+                continue;
+            }
 
             let Some(can_id) = parse_id_token_radix(id_tok, 16) else {
                 continue;
@@ -821,7 +933,7 @@ fn parse_pcan_trc_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
             }
         } else {
             // PCAN-Trace v2.0 / v2.1 (`N,O,T,B,I,d,L,D`):
-            // `<idx> <time_ms> <DT|FD|FB|FE|BI|RR> <bus_1based> <id_hex> <Rx|Tx> <dlc_or_len> <XX ...>`
+            // `<idx> <time_ms> <DT|FD|FB|FE|BI|RR|ER> <bus_1based> <id_hex> <Rx|Tx> <dlc_or_len> <XX ...>`
             if tok0.parse::<u64>().is_err() {
                 continue;
             }
@@ -839,7 +951,42 @@ fn parse_pcan_trc_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
             let Some(type_tok) = iter.next() else {
                 continue;
             };
-            let (is_fd, is_brs, is_esi, mut is_rtr) = match type_tok.to_ascii_uppercase().as_str() {
+            let type_upper = type_tok.to_ascii_uppercase();
+            if matches!(type_upper.as_str(), "ER" | "ERR" | "ERROR") {
+                let bus_id = iter
+                    .next()
+                    .and_then(|b| b.parse::<u16>().ok())
+                    .map_or(0u8, |b| (b.saturating_sub(1)).min(255) as u8);
+                let id_tok = iter.next().unwrap_or("0080");
+                let err_mask = parse_err_mask_token(id_tok, 16)
+                    .unwrap_or(crate::error_frame::CAN_ERR_BUSERROR);
+                let mut is_tx = false;
+                if let Some(dir_or_len) = iter.next() {
+                    if dir_or_len.eq_ignore_ascii_case("Tx") {
+                        is_tx = true;
+                        let _ = iter.next(); // consume dlc_or_len
+                    } else if dir_or_len.eq_ignore_ascii_case("Rx") || dir_or_len == "-" {
+                        let _ = iter.next(); // consume dlc_or_len
+                    }
+                }
+                let mut count = 0usize;
+                for b_tok in iter {
+                    if count >= MAX_CLASSICAL_CAN_DLC {
+                        break;
+                    }
+                    if let Some(byte) = parse_byte_token_radix(b_tok, 16) {
+                        payload_buf[count] = byte;
+                        count += 1;
+                    }
+                }
+                out.push((
+                    ts_us,
+                    build_error_frame(bus_id, err_mask, is_tx, &payload_buf[..count]),
+                ));
+                continue;
+            }
+
+            let (is_fd, is_brs, is_esi, mut is_rtr) = match type_upper.as_str() {
                 "DT" => (false, false, false, false),
                 "RR" => (false, false, false, true),
                 "FD" => (true, false, false, false),
@@ -939,7 +1086,7 @@ fn parse_vector_asc_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
         }
 
         let tokens: Vec<&str> = line.split_whitespace().collect();
-        if tokens.len() < 5 {
+        if tokens.len() < 3 {
             continue;
         }
 
@@ -950,6 +1097,69 @@ fn parse_vector_asc_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
             continue;
         }
         let ts_us = (time_sec * 1_000_000.0).round() as i128;
+
+        // Vector `.asc` CAN / CAN-FD ErrorFrame:
+        // - `<time_sec> <ch> ErrorFrame [<id_hex> [<dlc>] <bytes...>]`
+        // - `<time_sec> ErrorFrame ...`
+        // - `<time_sec> CANFD <ch> ErrorFrame ...`
+        if tokens[1].eq_ignore_ascii_case("ErrorFrame")
+            || tokens
+                .get(2)
+                .is_some_and(|t| t.eq_ignore_ascii_case("ErrorFrame"))
+            || (tokens[1].eq_ignore_ascii_case("CANFD")
+                && tokens
+                    .get(3)
+                    .is_some_and(|t| t.eq_ignore_ascii_case("ErrorFrame")))
+        {
+            let (bus_id, tail_start) = if tokens[1].eq_ignore_ascii_case("ErrorFrame") {
+                (0u8, 2usize)
+            } else if tokens[1].eq_ignore_ascii_case("CANFD") {
+                let ch = tokens[2].parse::<u16>().unwrap_or(1);
+                ((ch.saturating_sub(1)).min(255) as u8, 4usize)
+            } else {
+                let ch = tokens[1].parse::<u16>().unwrap_or(1);
+                ((ch.saturating_sub(1)).min(255) as u8, 3usize)
+            };
+
+            let mut err_mask = crate::error_frame::CAN_ERR_BUSERROR;
+            let mut count = 0usize;
+            if let Some(&first_tail) = tokens.get(tail_start) {
+                if let Some(parsed_mask) = parse_err_mask_token(first_tail, 16) {
+                    err_mask = parsed_mask;
+                    let bytes_start = if tokens
+                        .get(tail_start + 1)
+                        .and_then(|t| t.parse::<u8>().ok())
+                        .is_some()
+                        && tokens.len() > tail_start + 2
+                    {
+                        tail_start + 2
+                    } else {
+                        tail_start + 1
+                    };
+                    for &b_tok in &tokens[bytes_start..] {
+                        if count >= MAX_CLASSICAL_CAN_DLC {
+                            break;
+                        }
+                        if let Some(b) = parse_byte_token_radix(b_tok, 16) {
+                            payload_buf[count] = b;
+                            count += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            out.push((
+                ts_us,
+                build_error_frame(bus_id, err_mask, false, &payload_buf[..count]),
+            ));
+            continue;
+        }
+
+        if tokens.len() < 5 {
+            continue;
+        }
 
         if tokens[1].eq_ignore_ascii_case("CANFD") {
             // `<time_sec> CANFD <ch> <Rx|Tx> <id_hex[x]> [sym_name] <brs> <esi> <dlc> <data_len> <bytes...>`
@@ -1164,6 +1374,15 @@ fn parse_candump_log_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
         let bus_id = extract_iface_bus_id(tokens[idx_iface]);
         let frame_tok = tokens[idx_iface + 1];
 
+        if frame_tok.eq_ignore_ascii_case("ERRORFRAME") {
+            let err_mask = tokens
+                .get(idx_iface + 2)
+                .and_then(|t| parse_err_mask_token(t, 16))
+                .unwrap_or(crate::error_frame::CAN_ERR_BUSERROR);
+            out.push((ts_us, build_error_frame(bus_id, err_mask, false, &[])));
+            continue;
+        }
+
         if let Some((id_part, fd_rhs)) = frame_tok.split_once("##") {
             // Compact CAN-FD: `<id>##<flags_nibble><hex_bytes>`
             let Some(can_id) = parse_id_token_radix(id_part, 16) else {
@@ -1203,11 +1422,38 @@ fn parse_candump_log_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
                 out.push((ts_us, frame));
             }
         } else if let Some((id_part, cc_rhs)) = frame_tok.split_once('#') {
-            // Compact Classical CAN: `<id>#<hex_bytes | R[dlc]>`
+            // Compact Classical CAN (`<id>#<hex_bytes | R[dlc]>`) OR SocketCAN Error Frame
+            // (`2000000C#0020881900008800` where bit 29 = `CAN_ERR_FLAG` and bit 31 = 0).
+            let id_clean = id_part
+                .trim()
+                .strip_prefix("0x")
+                .or_else(|| id_part.trim().strip_prefix("0X"))
+                .unwrap_or_else(|| id_part.trim());
+            let raw_id_u32 = u32::from_str_radix(id_clean, 16).ok();
+            let is_socketcan_err =
+                raw_id_u32.is_some_and(|raw| (raw & 0x2000_0000) != 0 && (raw & 0x8000_0000) == 0);
+
+            let rhs = cc_rhs.trim();
+            if is_socketcan_err {
+                let cleaned_rhs: String;
+                let hex_ref = if rhs.contains('.') {
+                    cleaned_rhs = rhs.replace('.', "");
+                    cleaned_rhs.as_str()
+                } else {
+                    rhs
+                };
+                let count = decode_compact_hex_pairs(hex_ref, &mut payload_buf).unwrap_or(0);
+                let err_mask = raw_id_u32.unwrap_or(0) & EXT_CAN_ID_MASK;
+                out.push((
+                    ts_us,
+                    build_error_frame(bus_id, err_mask, false, &payload_buf[..count]),
+                ));
+                continue;
+            }
+
             let Some(can_id) = parse_id_token_radix(id_part, 16) else {
                 continue;
             };
-            let rhs = cc_rhs.trim();
             if let Some(rtr_rest) = rhs.strip_prefix('R').or_else(|| rhs.strip_prefix('r')) {
                 let rtr_dlc = rtr_rest.parse::<u8>().unwrap_or(0);
                 if let Some(frame) = build_frame_from_parts(
@@ -1385,11 +1631,9 @@ fn parse_nexus_csv_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
         let bus_id = (bus_1based.saturating_sub(1)).min(255) as u8;
 
         let proto = cols[3].trim();
-        let is_fd = proto.eq_ignore_ascii_case("FD") || proto.eq_ignore_ascii_case("CANFD");
-
-        let Some(can_id) = parse_id_token_radix(&cols[4], 16) else {
-            continue;
-        };
+        let is_err = proto.eq_ignore_ascii_case("ERR")
+            || proto.eq_ignore_ascii_case("ERROR")
+            || cols[4].trim().starts_with("ERR:");
         let is_tx = cols[5].trim().eq_ignore_ascii_case("Tx");
 
         let mut count = 0usize;
@@ -1403,6 +1647,21 @@ fn parse_nexus_csv_lines(content: &str, out: &mut Vec<(i128, RawCanFrame)>) {
             payload_buf[count] = byte;
             count += 1;
         }
+
+        if is_err {
+            let err_mask =
+                parse_err_mask_token(&cols[4], 16).unwrap_or(crate::error_frame::CAN_ERR_BUSERROR);
+            out.push((
+                ts_us,
+                build_error_frame(bus_id, err_mask, is_tx, &payload_buf[..count]),
+            ));
+            continue;
+        }
+
+        let is_fd = proto.eq_ignore_ascii_case("FD") || proto.eq_ignore_ascii_case("CANFD");
+        let Some(can_id) = parse_id_token_radix(&cols[4], 16) else {
+            continue;
+        };
 
         if let Some(frame) = build_frame_from_parts(
             bus_id,
@@ -2340,8 +2599,9 @@ fn dispatch_due_frames(
             dropped_frames.fetch_add(1, Ordering::Relaxed);
         }
 
-        // Physical Restbus TX onto connected hardware (strictly enforcing Listen-Only, tx_armed & Panic Stop)
-        if hw_tx_enabled && !tx_panic_latched.load(Ordering::Acquire) {
+        // Physical Restbus TX onto connected hardware (strictly enforcing Listen-Only, tx_armed & Panic Stop,
+        // and NEVER transmitting recorded CAN error frames onto a physical bus!)
+        if hw_tx_enabled && !out_frame.is_error() && !tx_panic_latched.load(Ordering::Acquire) {
             let guard = buses.lock();
             if let Some(bus) = guard.get(&out_frame.bus_id) {
                 // Epoch captured under the buses lock, before the arm check: a racing Panic
@@ -2838,6 +3098,8 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
                 is_fd: false,
                 is_brs: false,
                 is_tx: false,
+                is_error: false,
+                error_summary: None,
                 dlc: 8,
                 raw_bytes: vec![0x80, 0x0C, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
             },
@@ -2850,6 +3112,8 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
                 is_fd: true,
                 is_brs: true,
                 is_tx: true,
+                is_error: false,
+                error_summary: None,
                 dlc: 64,
                 raw_bytes: (0u8..64).map(|i| i.wrapping_mul(5)).collect(),
             },

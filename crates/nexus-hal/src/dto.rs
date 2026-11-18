@@ -129,6 +129,10 @@ pub struct FrameTelemetryDto {
     pub is_fd: bool,
     pub is_brs: bool,
     pub is_tx: bool,
+    #[serde(default)]
+    pub is_error: bool,
+    #[serde(default)]
+    pub error_summary: Option<String>,
     pub has_hw_timestamp: bool,
     pub dlc: u8,
     pub raw_bytes: Vec<u8>,
@@ -166,6 +170,10 @@ pub struct ChronologicalFrameDto {
     pub is_brs: bool,
     #[serde(default, alias = "is_tx")]
     pub is_tx: bool,
+    #[serde(default, alias = "is_error")]
+    pub is_error: bool,
+    #[serde(default, alias = "error_summary")]
+    pub error_summary: Option<String>,
     pub dlc: u8,
     #[serde(default, alias = "raw_bytes")]
     pub raw_bytes: Vec<u8>,
@@ -182,6 +190,8 @@ pub struct TelemetrySnapshotDto {
     pub estimated_bus_load_pct: f64,
     pub total_frames_rx: u64,
     pub total_frames_tx: u64,
+    #[serde(default)]
+    pub total_frames_err: u64,
     pub dropped_frames: u64,
     pub active_ids_count: usize,
     pub decoded_signals_count: usize,
@@ -260,8 +270,12 @@ pub struct ProjectSummaryDto {
     pub size_bytes: u64,
 }
 
+fn default_true_bool() -> bool {
+    true
+}
+
 /// Discovered host serial / USB-CDC port metadata for SLCAN adapters.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SerialPortInfoDto {
     pub port_name: String,
@@ -269,30 +283,122 @@ pub struct SerialPortInfoDto {
     pub vid_pid: Option<String>,
     pub manufacturer: Option<String>,
     pub product: Option<String>,
+    #[serde(default)]
+    pub serial_number: Option<String>,
+    #[serde(default)]
+    pub os_hint: Option<String>,
 }
 
-/// Installation & hardware readiness status for a CAN driver family (`mock`, `socketcan`, `slcan`, `pcan`, `kvaser`, `gs_usb`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Host operating system, kernel/WSL2, permission, and native CAN stack summary.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostEnvironmentDto {
+    pub os: String,
+    pub arch: String,
+    pub os_release: String,
+    pub is_wsl: bool,
+    pub udev_rules_present: bool,
+    pub serial_permission_hint: Option<String>,
+    pub native_stacks: Vec<String>,
+    pub os_notes: Vec<String>,
+}
+
+/// Enumerated physical USB CAN / USB-CDC / DFU device discovered on the host USB bus.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsbCanDeviceDto {
+    pub vid_pid: String,
+    pub vendor_name: String,
+    pub product_name: String,
+    pub serial_number: Option<String>,
+    pub bus_number: u8,
+    pub device_address: u8,
+    #[serde(default)]
+    pub location_info: Option<String>,
+    /// `"gs_usb"` | `"pcan"` | `"kvaser"` | `"vector_xl"` | `"slcan"` | `"dfu_bootloader"`
+    pub matched_family: String,
+    pub driver_bound: bool,
+    pub access_status: String,
+    pub suggested_channel: Option<String>,
+}
+
+/// Rich per-channel hardware state, MTU, kernel/USB driver binding, and bring-up hint.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectedChannelDetailDto {
+    pub channel_id: String,
+    pub device_id: String,
+    pub label: String,
+    /// `"up"` | `"down"` | `"ready"` | `"busy"` | `"needs_driver"` | `"virtual"`
+    pub state: String,
+    pub supports_fd: bool,
+    pub mtu: Option<u32>,
+    pub kernel_or_usb_driver: Option<String>,
+    pub source_path: String,
+    pub hardware_id: Option<String>,
+    pub hint_command: Option<String>,
+}
+
+/// Actionable OS-specific installation or bring-up step for a CAN driver family.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OsSetupStepDto {
+    pub title: String,
+    pub description: String,
+    pub command_or_action: Option<String>,
+    pub doc_url: Option<String>,
+}
+
+/// Installation & hardware readiness status for a CAN driver family
+/// (`socketcan`, `gs_usb`, `slcan`, `pcan`, `kvaser`, `vector_xl`, `mock`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriverFamilyStatusDto {
     pub family_id: String,
     pub display_name: String,
     pub installed: bool,
+    #[serde(default = "default_true_bool")]
+    pub os_supported: bool,
+    #[serde(default)]
+    pub hardware_present: bool,
     pub status_label: String,
     pub detected_library_or_module: Option<String>,
+    #[serde(default)]
+    pub architecture_note: Option<String>,
     pub searched_paths: Vec<String>,
+    #[serde(default)]
+    pub os_source_locations: Vec<String>,
     pub detected_channels: Vec<String>,
+    #[serde(default)]
+    pub channel_details: Vec<DetectedChannelDetailDto>,
+    #[serde(default)]
+    pub setup_steps: Vec<OsSetupStepDto>,
     pub install_hint: String,
 }
 
-/// Complete cross-OS driver & serial port diagnostic probe report returned by `cmd_probe_drivers`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Complete cross-OS driver, USB bus, and serial port diagnostic probe report returned by `cmd_probe_drivers`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriverProbeReportDto {
     pub host_os: String,
     pub checked_at_ms: u64,
+    #[serde(default)]
+    pub host_env: HostEnvironmentDto,
+    #[serde(default)]
+    pub usb_devices: Vec<UsbCanDeviceDto>,
     pub families: Vec<DriverFamilyStatusDto>,
     pub serial_ports: Vec<SerialPortInfoDto>,
+}
+
+/// Real-time OS USB hotplug and hardware topology event streamed via `cmd_subscribe_hardware_changes`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareWatchEventDto {
+    /// `"initial"` | `"usb_hotplug"` | `"topology_poll"`
+    pub reason: String,
+    pub timestamp_ms: u64,
+    pub devices: Vec<DeviceDescriptorDto>,
+    pub report: DriverProbeReportDto,
 }
 
 /// Raw `.dbc` or `.kcd` file input for stateless compilation or per-bus binding.
@@ -673,4 +779,63 @@ pub struct PhysicalSweepResultDto {
     pub ignored_frames: u32,
     pub truncated: bool,
     pub dropped_ecus: u32,
+}
+
+// ─── Global & Multi-Window Tear-Off Debug & System Audit Console DTOs ────────
+
+/// Single structured audit / debug event stored in the 5,000-entry `DebugEventHub` ring.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugEventDto {
+    pub seq: u64,
+    pub timestamp_ms: u64,
+    pub monotonic_us: u64,
+    /// `"info"` | `"success"` | `"warn"` | `"error"` | `"safety"`
+    pub severity: String,
+    /// `"CONN"` | `"SAFETY"` | `"TX"` | `"NETDB"` | `"TRACE"` | `"BUS_ERR"` | `"DIAG"` | `"WORKBENCH"`
+    pub category: String,
+    /// `"backend"` | `"ui"` | `"os"` | `"protocol"`
+    pub source: String,
+    pub bus_id: Option<u8>,
+    pub action: String,
+    pub title: String,
+    pub details: Option<String>,
+    pub repeat_count: u32,
+}
+
+/// Frontend / external caller input for appending a structured audit event (`cmd_append_debug_event`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendDebugEventInputDto {
+    pub severity: String,
+    pub category: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub bus_id: Option<u8>,
+    pub action: String,
+    pub title: String,
+    #[serde(default)]
+    pub details: Option<String>,
+}
+
+/// Tear-off multi-window state synchronized across `"main"` and `"debug-console"` windows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugWindowStateDto {
+    pub detached_open: bool,
+    pub always_on_top: bool,
+    pub re_dock_requested: bool,
+    pub session_log_path: Option<String>,
+}
+
+/// Batched event / state update streamed over `cmd_subscribe_debug_events` (and `/ws/debug`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugEventBatchDto {
+    /// `"snapshot"` | `"append"` | `"cleared"` | `"windowState"`
+    pub kind: String,
+    pub events: Vec<DebugEventDto>,
+    pub total_buffered: usize,
+    pub window_state: DebugWindowStateDto,
 }

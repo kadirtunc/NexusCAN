@@ -25,6 +25,8 @@ test-hooks = []
 nexus-core = { workspace = true }
 nexus-netdb = { workspace = true }
 nexus-protocols = { workspace = true }
+# Native seed/key providers: out-of-process GenerateKeyEx helper + external programs.
+nexus-seedkey-native = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
@@ -40,6 +42,10 @@ axum = { workspace = true }
 tower-http = { workspace = true }
 getrandom = { workspace = true }
 serialport = { workspace = true }
+nusb = { workspace = true }
+futures-lite = { workspace = true }
+# PEAK PCAN-Basic is loaded at runtime (missing DLL/SO never prevents startup).
+libloading = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 socketcan = { workspace = true }

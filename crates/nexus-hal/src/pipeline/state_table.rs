@@ -6,8 +6,9 @@ use crate::dto::{
     BusHealthDto, ChronologicalFrameDto, FrameTelemetryDto, LiveSignalDto, TelemetrySnapshotDto,
     TraceReplayStatusDto,
 };
+use crate::error_frame::decode_can_error_summary;
 use indexmap::IndexMap;
-use nexus_core::{estimate_frame_wire_bits, BusId, CanIdKey, RawCanFrame};
+use nexus_core::{estimate_frame_wire_bits, BusId, CanIdKey, RawCanFrame, EXT_CAN_ID_MASK};
 use nexus_netdb::{CompiledDatabase, DecodedSignalSample, SignalId};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -102,10 +103,11 @@ pub struct RetainedSignalSlot {
     pub active_in_last_frame: bool,
 }
 
-/// Live state tracked dynamically on arrival per `(BusId, CanIdKey, MuxPathKey)`.
+/// Live state tracked dynamically on arrival per `(BusId, bool /* is_error */, CanIdKey, MuxPathKey)`.
 #[derive(Clone, Debug)]
 struct MessageLiveState {
     bus_id: BusId,
+    is_error: bool,
     can_id: CanIdKey,
     message_key: String,
     dlc: u8,
@@ -121,11 +123,17 @@ struct MessageLiveState {
 }
 
 impl MessageLiveState {
-    fn new(bus_id: BusId, can_id: CanIdKey) -> Self {
+    fn new(bus_id: BusId, is_error: bool, can_id: CanIdKey) -> Self {
+        let message_key = if is_error {
+            format!("ERR:0x{:08X}", can_id.raw_id() & EXT_CAN_ID_MASK)
+        } else {
+            can_id.schema_key()
+        };
         Self {
             bus_id,
+            is_error,
             can_id,
-            message_key: can_id.schema_key(),
+            message_key,
             dlc: 0,
             flags: 0,
             data: [0u8; 64],
@@ -206,19 +214,40 @@ impl ChronologicalRing {
         for offset in 0..count {
             let idx = (start + offset) % CHRONOLOGICAL_RING_CAP;
             let f = &self.buf[idx];
-            let can_id = f.can_id_key();
-            out.push(ChronologicalFrameDto {
-                timestamp_us: f.timestamp_us,
-                bus_id: f.bus_id,
-                message_key: can_id.schema_key(),
-                arb_id: can_id.raw_id(),
-                is_extended: f.is_extended(),
-                is_fd: f.is_fd(),
-                is_brs: f.is_brs(),
-                is_tx: f.is_tx(),
-                dlc: f.dlc,
-                raw_bytes: f.payload().to_vec(),
-            });
+            if f.is_error() {
+                let err_mask = f.arb_id & EXT_CAN_ID_MASK;
+                let payload = f.payload();
+                out.push(ChronologicalFrameDto {
+                    timestamp_us: f.timestamp_us,
+                    bus_id: f.bus_id,
+                    message_key: format!("ERR:0x{err_mask:08X}"),
+                    arb_id: err_mask,
+                    is_extended: f.is_extended(),
+                    is_fd: f.is_fd(),
+                    is_brs: f.is_brs(),
+                    is_tx: f.is_tx(),
+                    is_error: true,
+                    error_summary: Some(decode_can_error_summary(err_mask, payload)),
+                    dlc: f.dlc,
+                    raw_bytes: payload.to_vec(),
+                });
+            } else {
+                let can_id = f.can_id_key();
+                out.push(ChronologicalFrameDto {
+                    timestamp_us: f.timestamp_us,
+                    bus_id: f.bus_id,
+                    message_key: can_id.schema_key(),
+                    arb_id: can_id.raw_id(),
+                    is_extended: f.is_extended(),
+                    is_fd: f.is_fd(),
+                    is_brs: f.is_brs(),
+                    is_tx: f.is_tx(),
+                    is_error: false,
+                    error_summary: None,
+                    dlc: f.dlc,
+                    raw_bytes: f.payload().to_vec(),
+                });
+            }
         }
 
         self.pending_count = 0;
@@ -239,16 +268,18 @@ pub const MAX_STATE_TABLE_MESSAGES: usize = 16_384;
 
 /// Real-time telemetry state table owned exclusively by the 60Hz aggregator thread.
 ///
-/// Rows are created dynamically **only on frame arrival** per `(BusId, CanIdKey, MuxPathKey)` —
-/// multiplexer branches are never pre-populated before traffic arrives on the bus.
+/// Rows are created dynamically **only on frame arrival** per `(BusId, bool /* is_error */, CanIdKey, MuxPathKey)` —
+/// multiplexer branches are never pre-populated before traffic arrives on the bus, and CAN Error Frames
+/// (`FLAG_ERROR`) never collide with Standard/Extended CAN data frames of the same numeric ID.
 pub struct StateTable {
-    messages: FxHashMap<(BusId, CanIdKey, MuxPathKey), MessageLiveState>,
+    messages: FxHashMap<(BusId, bool, CanIdKey, MuxPathKey), MessageLiveState>,
     chronological: ChronologicalRing,
     database: Option<Arc<CompiledDatabase>>,
     bus_databases: [Option<Option<Arc<CompiledDatabase>>>; MAX_BUS_SLOTS],
     seq: u64,
     total_frames_rx: u64,
     total_frames_tx: u64,
+    total_frames_err: u64,
     window_rx_frames: u64,
     window_tx_frames: u64,
     window_wire_bits: u64,
@@ -277,6 +308,7 @@ impl StateTable {
             seq: 0,
             total_frames_rx: 0,
             total_frames_tx: 0,
+            total_frames_err: 0,
             window_rx_frames: 0,
             window_tx_frames: 0,
             window_wire_bits: 0,
@@ -336,11 +368,11 @@ impl StateTable {
     }
 
     fn rekey_and_redecode_entries(&mut self, filter_bus: Option<BusId>) {
-        let keys_to_rekey: Vec<(BusId, CanIdKey, MuxPathKey)> = self
+        let keys_to_rekey: Vec<(BusId, bool, CanIdKey, MuxPathKey)> = self
             .messages
             .keys()
             .copied()
-            .filter(|&(b, _, _)| filter_bus.is_none_or(|target| b == target))
+            .filter(|&(b, is_err, _, _)| !is_err && filter_bus.is_none_or(|target| b == target))
             .collect();
 
         if keys_to_rekey.is_empty() {
@@ -368,45 +400,48 @@ impl StateTable {
             state.retained_signals.clear();
             state.active_switches.clear();
 
-            let effective_db =
-                resolve_effective_db(&self.database, &self.bus_databases, state.bus_id);
-
             let mut new_mux_path = MuxPathKey::default();
-            if let Some(db) = effective_db {
-                if state.rx_count > 0 {
-                    let mut cached = RawCanFrame::zeroed();
-                    cached.timestamp_us = state.last_timestamp_us;
-                    cached.arb_id = state.can_id.raw_id();
-                    cached.bus_id = state.bus_id;
-                    cached.dlc = state.dlc;
-                    cached.flags = state.flags;
-                    cached.data = state.data;
+            if !state.is_error {
+                let effective_db =
+                    resolve_effective_db(&self.database, &self.bus_databases, state.bus_id);
 
-                    if let Some(summary) =
-                        db.decode_frame_into(&cached, &mut decoded_buf, &mut switch_buf)
-                    {
-                        new_mux_path =
-                            MuxPathKey::from_switches(&switch_buf[..summary.active_switch_count]);
-                        for sample in &decoded_buf[..summary.decoded_count] {
-                            state.retained_signals.insert(
-                                sample.signal_id,
-                                RetainedSignalSlot {
-                                    raw_int: sample.raw_int,
-                                    physical_value: sample.physical_value,
-                                    out_of_range: sample.out_of_range,
-                                    last_updated_us: cached.timestamp_us,
-                                    active_in_last_frame: true,
-                                },
+                if let Some(db) = effective_db {
+                    if state.rx_count > 0 {
+                        let mut cached = RawCanFrame::zeroed();
+                        cached.timestamp_us = state.last_timestamp_us;
+                        cached.arb_id = state.can_id.raw_id();
+                        cached.bus_id = state.bus_id;
+                        cached.dlc = state.dlc;
+                        cached.flags = state.flags;
+                        cached.data = state.data;
+
+                        if let Some(summary) =
+                            db.decode_frame_into(&cached, &mut decoded_buf, &mut switch_buf)
+                        {
+                            new_mux_path = MuxPathKey::from_switches(
+                                &switch_buf[..summary.active_switch_count],
                             );
-                        }
-                        for &sw in &switch_buf[..summary.active_switch_count] {
-                            state.active_switches.push(sw);
+                            for sample in &decoded_buf[..summary.decoded_count] {
+                                state.retained_signals.insert(
+                                    sample.signal_id,
+                                    RetainedSignalSlot {
+                                        raw_int: sample.raw_int,
+                                        physical_value: sample.physical_value,
+                                        out_of_range: sample.out_of_range,
+                                        last_updated_us: cached.timestamp_us,
+                                        active_in_last_frame: true,
+                                    },
+                                );
+                            }
+                            for &sw in &switch_buf[..summary.active_switch_count] {
+                                state.active_switches.push(sw);
+                            }
                         }
                     }
                 }
             }
 
-            let target_key = (state.bus_id, state.can_id, new_mux_path);
+            let target_key = (state.bus_id, state.is_error, state.can_id, new_mux_path);
             match self.messages.entry(target_key) {
                 Entry::Vacant(vacant) => {
                     vacant.insert(state);
@@ -433,16 +468,37 @@ impl StateTable {
 
     /// Clears telemetry entries associated with a specific `bus_id` if desired.
     pub fn clear_bus(&mut self, bus_id: BusId) {
-        self.messages.retain(|&(b, _, _), _| b != bus_id);
+        self.messages.retain(|&(b, _, _, _), _| b != bus_id);
     }
 
-    /// Resets all accumulated message rows, chronological trace frames, and RX/TX rate counters
+    /// Returns the cumulative number of CAN error frames (`FLAG_ERROR`) observed since startup / reset.
+    #[inline]
+    pub fn total_frames_err(&self) -> u64 {
+        self.total_frames_err
+    }
+
+    /// Cold-path 500ms health monitor helper: returns `(bus_id, err_mask, decoded_summary)` for the
+    /// most recently updated CAN error frame row, or `None` if no error frames are present.
+    pub fn latest_error_summary_hint(&self) -> Option<(BusId, u32, String)> {
+        let latest = self
+            .messages
+            .values()
+            .filter(|st| st.is_error)
+            .max_by_key(|st| st.last_timestamp_us)?;
+        let err_mask = latest.can_id.raw_id() & EXT_CAN_ID_MASK;
+        let dlc_len = usize::from(latest.dlc.min(64));
+        let summary = decode_can_error_summary(err_mask, &latest.data[..dlc_len]);
+        Some((latest.bus_id, err_mask, summary))
+    }
+
+    /// Resets all accumulated message rows, chronological trace frames, and RX/TX/ERR rate counters
     /// while preserving any bound `.dbc` / `.kcd` [`CompiledDatabase`].
     pub fn reset_all(&mut self) {
         self.messages.clear();
         self.chronological.clear();
         self.total_frames_rx = 0;
         self.total_frames_tx = 0;
+        self.total_frames_err = 0;
         self.window_rx_frames = 0;
         self.window_tx_frames = 0;
         self.window_wire_bits = 0;
@@ -455,8 +511,9 @@ impl StateTable {
     /// Ingests a single [`RawCanFrame`] on the hot path without per-frame String/Vec allocations.
     ///
     /// Decodes `.dbc`/`.kcd` signals into stack-allocated buffers first to derive the zero-alloc
-    /// [`MuxPathKey`], dynamically creating or updating strictly the matching `(bus_id, can_id, mux_path)`
-    /// row on arrival.
+    /// [`MuxPathKey`], dynamically creating or updating strictly the matching
+    /// `(bus_id, is_error, can_id, mux_path)` row on arrival. Error frames (`FLAG_ERROR`) bypass DBC
+    /// signal decoding completely and defer human-readable summary formatting to the 60Hz snapshot tick.
     #[inline]
     pub fn ingest_frame(&mut self, frame: &RawCanFrame) {
         let wire_bits = estimate_frame_wire_bits(frame.dlc, frame.is_extended(), frame.is_fd());
@@ -464,15 +521,16 @@ impl StateTable {
 
         self.chronological.push(*frame);
 
-        if frame.is_tx() {
+        let is_error = frame.is_error();
+        if is_error {
+            self.total_frames_err = self.total_frames_err.wrapping_add(1);
+        } else if frame.is_tx() {
             self.total_frames_tx = self.total_frames_tx.wrapping_add(1);
             self.window_tx_frames = self.window_tx_frames.wrapping_add(1);
         } else {
             self.total_frames_rx = self.total_frames_rx.wrapping_add(1);
             self.window_rx_frames = self.window_rx_frames.wrapping_add(1);
         }
-
-        let can_id = frame.can_id_key();
 
         let mut decoded_buf = [DecodedSignalSample {
             signal_id: 0,
@@ -484,18 +542,26 @@ impl StateTable {
         }; 128];
         let mut switch_buf = [(0u32, 0i64); 16];
 
-        let decode_summary =
-            resolve_effective_db(&self.database, &self.bus_databases, frame.bus_id)
+        let (can_id, decode_summary, mux_path) = if is_error {
+            // Preserve the full 29-bit Linux/gs_usb error class mask (`0x1FFF_FFFF`) without
+            // 11-bit truncation and NEVER run DBC decoding on error frames!
+            (
+                CanIdKey::Extended(frame.arb_id & EXT_CAN_ID_MASK),
+                None,
+                MuxPathKey::default(),
+            )
+        } else {
+            let id_key = frame.can_id_key();
+            let summary = resolve_effective_db(&self.database, &self.bus_databases, frame.bus_id)
                 .and_then(|db| db.decode_frame_into(frame, &mut decoded_buf, &mut switch_buf));
-
-        let mux_path = match decode_summary {
-            Some(ref summary) => {
-                MuxPathKey::from_switches(&switch_buf[..summary.active_switch_count])
-            }
-            None => MuxPathKey::default(),
+            let path = match summary {
+                Some(ref s) => MuxPathKey::from_switches(&switch_buf[..s.active_switch_count]),
+                None => MuxPathKey::default(),
+            };
+            (id_key, summary, path)
         };
 
-        let key = (frame.bus_id, can_id, mux_path);
+        let key = (frame.bus_id, is_error, can_id, mux_path);
         if self.messages.len() >= MAX_STATE_TABLE_MESSAGES && !self.messages.contains_key(&key) {
             self.note_row_overflow();
             return;
@@ -503,9 +569,9 @@ impl StateTable {
         let state = self
             .messages
             .entry(key)
-            .or_insert_with(|| MessageLiveState::new(frame.bus_id, can_id));
+            .or_insert_with(|| MessageLiveState::new(frame.bus_id, is_error, can_id));
 
-        // 1. Update EMA inter-arrival cycle time for this specific mux branch / CAN ID
+        // 1. Update EMA inter-arrival cycle time for this specific mux branch / CAN ID / error class
         if state.rx_count > 0 && frame.timestamp_us >= state.last_timestamp_us {
             let dt_ms = (frame.timestamp_us - state.last_timestamp_us) as f64 / 1_000.0;
             if state.rx_count == 1 {
@@ -532,7 +598,7 @@ impl StateTable {
         state.flags = frame.flags;
         state.has_prev_data = true;
 
-        // 3. Populate decoded signals & active mux switches strictly for this branch
+        // 3. Populate decoded signals & active mux switches strictly for this branch (never on error frames)
         if let Some(summary) = decode_summary {
             state.retained_signals.clear();
             for sample in &decoded_buf[..summary.decoded_count] {
@@ -601,11 +667,12 @@ impl StateTable {
         self.window_tx_frames = 0;
         self.window_wire_bits = 0;
 
-        // Sort message keys deterministically by (bus_id, is_extended, raw_id, mux_path)
-        let mut sorted_keys: Vec<(BusId, CanIdKey, MuxPathKey)> =
+        // Sort message keys deterministically by (bus_id, is_error, is_extended, raw_id, mux_path)
+        let mut sorted_keys: Vec<(BusId, bool, CanIdKey, MuxPathKey)> =
             self.messages.keys().copied().collect();
-        sorted_keys
-            .sort_by_key(|&(bus, id, mux_path)| (bus, id.is_extended(), id.raw_id(), mux_path));
+        sorted_keys.sort_by_key(|&(bus, is_err, id, mux_path)| {
+            (bus, is_err, id.is_extended(), id.raw_id(), mux_path)
+        });
 
         let mut frames = Vec::with_capacity(sorted_keys.len());
         let mut decoded_signals_count = 0usize;
@@ -617,10 +684,12 @@ impl StateTable {
                 continue;
             };
 
-            let cur_bus_can_id = (state.bus_id, state.can_id);
-            if prev_bus_can_id != Some(cur_bus_can_id) {
-                active_ids_count += 1;
-                prev_bus_can_id = Some(cur_bus_can_id);
+            if !state.is_error {
+                let cur_bus_can_id = (state.bus_id, state.can_id);
+                if prev_bus_can_id != Some(cur_bus_can_id) {
+                    active_ids_count += 1;
+                    prev_bus_can_id = Some(cur_bus_can_id);
+                }
             }
 
             let (changed_bytes_lo, changed_bytes_hi) = state.compute_changed_masks(now_us);
@@ -629,6 +698,37 @@ impl StateTable {
             } else {
                 0.0
             };
+
+            let dlc_len = usize::from(state.dlc.min(64));
+
+            if state.is_error {
+                let err_mask = state.can_id.raw_id() & EXT_CAN_ID_MASK;
+                let payload_slice = &state.data[..dlc_len];
+                frames.push(FrameTelemetryDto {
+                    bus_id: state.bus_id,
+                    message_key: state.message_key.clone(),
+                    arb_id: err_mask,
+                    is_extended: (state.flags & nexus_core::FLAG_EXTENDED) != 0,
+                    is_fd: (state.flags & nexus_core::FLAG_FD) != 0,
+                    is_brs: (state.flags & nexus_core::FLAG_BRS) != 0,
+                    is_tx: (state.flags & nexus_core::FLAG_TX) != 0,
+                    is_error: true,
+                    error_summary: Some(decode_can_error_summary(err_mask, payload_slice)),
+                    has_hw_timestamp: (state.flags & nexus_core::FLAG_HW_TIMESTAMP) != 0,
+                    dlc: state.dlc,
+                    raw_bytes: payload_slice.to_vec(),
+                    changed_bytes_lo,
+                    changed_bytes_hi,
+                    last_timestamp_us: state.last_timestamp_us,
+                    cycle_ms: state.smoothed_cycle_ms,
+                    frequency_hz,
+                    cycle_health: "unconfigured".to_string(),
+                    rx_count: state.rx_count,
+                    active_mux_switches: IndexMap::new(),
+                    signals: Vec::new(),
+                });
+                continue;
+            }
 
             let effective_db =
                 resolve_effective_db(&self.database, &self.bus_databases, state.bus_id);
@@ -642,7 +742,7 @@ impl StateTable {
                 state.smoothed_cycle_ms,
                 state.last_timestamp_us,
                 now_us,
-                !key.2.is_empty(),
+                !key.3.is_empty(),
                 state.rx_count,
             );
 
@@ -671,7 +771,6 @@ impl StateTable {
             signals.sort_by_key(|s| s.signal_id);
             decoded_signals_count += signals.len();
 
-            let dlc_len = usize::from(state.dlc.min(64));
             frames.push(FrameTelemetryDto {
                 bus_id: state.bus_id,
                 message_key: state.message_key.clone(),
@@ -680,6 +779,8 @@ impl StateTable {
                 is_fd: (state.flags & nexus_core::FLAG_FD) != 0,
                 is_brs: (state.flags & nexus_core::FLAG_BRS) != 0,
                 is_tx: (state.flags & nexus_core::FLAG_TX) != 0,
+                is_error: false,
+                error_summary: None,
                 has_hw_timestamp: (state.flags & nexus_core::FLAG_HW_TIMESTAMP) != 0,
                 dlc: state.dlc,
                 raw_bytes: state.data[..dlc_len].to_vec(),
@@ -705,6 +806,7 @@ impl StateTable {
             estimated_bus_load_pct,
             total_frames_rx: self.total_frames_rx,
             total_frames_tx: self.total_frames_tx,
+            total_frames_err: self.total_frames_err,
             dropped_frames,
             active_ids_count,
             decoded_signals_count,
@@ -1092,5 +1194,100 @@ BO_ 256 Thermal_Status: 8 BMS
         assert_eq!(collapsed.raw_bytes[2], 0xCD);
         assert!(collapsed.signals.is_empty());
         assert!(collapsed.active_mux_switches.is_empty());
+    }
+
+    #[test]
+    fn error_frame_004_never_collides_with_standard_data_frame_004() {
+        // Bind a DBC defining Standard CAN ID 0x004 (decimal 4) to verify error frame 0x004
+        // neither overwrites Standard 0x004 nor falsely decodes DBC signals!
+        let dbc_004 = r#"VERSION "1.0"
+BU_: ECU
+BO_ 4 Brake_Cmd: 8 ECU
+ SG_ BrakeTorque : 0|16@1+ (1,0) [0|5000] "Nm" Vector__XXX
+"#;
+        let (db, torque_sig_id) = compile_dbc_str("brake_004.dbc", dbc_004);
+        let mut table = StateTable::new();
+        table.set_bus_database(0, Some(db));
+
+        // 1. Standard CAN data frame 0x004 -> BrakeTorque = 0x03E8 = 1000 Nm
+        let data_frame = RawCanFrame::new_classical(
+            0,
+            CanIdKey::Standard(0x004),
+            &[0xE8, 0x03, 0, 0, 0, 0, 0, 0],
+            10_000,
+        )
+        .expect("std 0x004 frame");
+
+        // 2. Simultaneous CAN Error Frame with class 0x004 (`CAN_ERR_CRTL`: TX-Passive, TEC=128) on Bus 0
+        let mut err_frame = RawCanFrame::zeroed();
+        err_frame.timestamp_us = 10_250;
+        err_frame.arb_id = 0x004;
+        err_frame.bus_id = 0;
+        err_frame.dlc = 8;
+        err_frame.flags = nexus_core::FLAG_ERROR;
+        err_frame.data[..8].copy_from_slice(&[0, 0x20, 0, 0, 0, 0, 128, 0]);
+
+        table.ingest_frame(&data_frame);
+        table.ingest_frame(&err_frame);
+
+        let snap = table.build_snapshot(20_000, 0, false, 500_000, Vec::new());
+        assert_eq!(snap.total_frames_rx, 1);
+        assert_eq!(snap.total_frames_tx, 0);
+        assert_eq!(snap.total_frames_err, 1);
+        assert_eq!(snap.active_ids_count, 1);
+        assert_eq!(
+            snap.frames.len(),
+            2,
+            "Standard 0x004 and Error 0x004 must coexist"
+        );
+
+        let std_row = snap
+            .frames
+            .iter()
+            .find(|r| !r.is_error)
+            .expect("standard 0x004 row");
+        assert_eq!(std_row.message_key, "STD:0x004");
+        assert_eq!(std_row.arb_id, 0x004);
+        assert!(!std_row.is_extended);
+        assert_eq!(std_row.error_summary, None);
+        assert_eq!(std_row.signals.len(), 1);
+        assert_eq!(std_row.signals[0].signal_id, torque_sig_id);
+        assert!((std_row.signals[0].physical_value - 1000.0).abs() < 1e-6);
+
+        let err_row = snap
+            .frames
+            .iter()
+            .find(|r| r.is_error)
+            .expect("error 0x004 row");
+        assert_eq!(err_row.message_key, "ERR:0x00000004");
+        assert_eq!(err_row.arb_id, 0x004);
+        assert!(!err_row.is_extended);
+        assert!(
+            err_row.signals.is_empty(),
+            "Error frame must never decode DBC signals"
+        );
+        let summary = err_row
+            .error_summary
+            .as_deref()
+            .expect("error_summary populated");
+        assert!(summary.contains("CRTL[TX-Passive]"), "got: {summary}");
+        assert!(summary.contains("TEC=128 REC=0"), "got: {summary}");
+
+        assert_eq!(snap.recent_chronological.len(), 2);
+        assert!(!snap.recent_chronological[0].is_error);
+        assert_eq!(snap.recent_chronological[0].message_key, "STD:0x004");
+        assert!(snap.recent_chronological[1].is_error);
+        assert_eq!(snap.recent_chronological[1].message_key, "ERR:0x00000004");
+        assert!(snap.recent_chronological[1]
+            .error_summary
+            .as_deref()
+            .unwrap_or("")
+            .contains("CRTL[TX-Passive]"));
+
+        // Verify reset_all clears total_frames_err as well
+        table.reset_all();
+        let snap_reset = table.build_snapshot(30_000, 0, false, 500_000, Vec::new());
+        assert_eq!(snap_reset.total_frames_err, 0);
+        assert!(snap_reset.frames.is_empty());
     }
 }

@@ -1,7 +1,8 @@
 //! Multi-driver registry discovering and opening channels across all compiled backends.
 
+use crate::drivers::gs_usb_drv::GsUsbDriver;
 use crate::drivers::mock_drv::MockCanDriver;
-use crate::drivers::probe::{GsUsbDriver, KvaserDriver, PcanDriver};
+use crate::drivers::probe::{KvaserDriver, PcanDriver, VectorXlDriver};
 use crate::drivers::slcan_drv::SlcanDriver;
 #[cfg(target_os = "linux")]
 use crate::drivers::socketcan_drv::SocketCanDriver;
@@ -27,22 +28,24 @@ impl DriverRegistry {
     }
 
     /// Creates a registry populated with all built-in drivers supported on the host OS,
-    /// prioritizing real kernel/hardware interfaces (`SocketCAN`, `SLCAN`, `gs_usb`, `PCAN`, `Kvaser`)
+    /// prioritizing real kernel/hardware interfaces (`SocketCAN`, `gs_usb`, `SLCAN`, `PCAN`, `Kvaser`, `Vector XL`)
     /// strictly BEFORE virtual simulation channels (`mock0` + `mock1`):
     /// 1. `SocketCanDriver` (`can*`, `vcan*`, `slcan*` — Linux native)
-    /// 2. `SlcanDriver` (Cross-OS Lawicel Serial / USB-CDC via `serialport`)
-    /// 3. `GsUsbDriver`, `PcanDriver`, `KvaserDriver` (Cross-OS hardware & SDK drivers)
-    /// 4. `MockCanDriver` (`mock0` + `mock1` — virtual simulators always listed last)
+    /// 2. `GsUsbDriver` (Cross-OS pure-Rust `nusb` `gs_usb` / `candleLight` + Linux smart router)
+    /// 3. `SlcanDriver` (Cross-OS Lawicel Serial / USB-CDC via `serialport`)
+    /// 4. `PcanDriver`, `KvaserDriver`, `VectorXlDriver` (Cross-OS hardware & commercial SDK drivers)
+    /// 5. `MockCanDriver` (`mock0` + `mock1` — virtual simulators always listed last)
     pub fn with_defaults() -> Self {
         let mut reg = Self::new();
         #[cfg(target_os = "linux")]
         {
             reg.register(Arc::new(SocketCanDriver::new()));
         }
-        reg.register(Arc::new(SlcanDriver::new()));
         reg.register(Arc::new(GsUsbDriver::new()));
+        reg.register(Arc::new(SlcanDriver::new()));
         reg.register(Arc::new(PcanDriver::new()));
         reg.register(Arc::new(KvaserDriver::new()));
+        reg.register(Arc::new(VectorXlDriver::new()));
         reg.register(Arc::new(MockCanDriver::new()));
         reg
     }
@@ -87,7 +90,8 @@ impl DriverRegistry {
     /// | `socketcan` (`can*`, `slcan*` netdevs; also `pcan`/`kvaser`/`gs_usb` routed to SocketCAN) | **Fails before open**: the netlink listen-only switch is attempted before any socket exists; on failure anything we changed is reverted and no socket is opened. |
     /// | `socketcan` virtual (`vcan` / `vxcan`, detected from kernel facts: no parent `device` link and no CAN ctrlmode over netlink; never from the name) | n/a: `Virtual`, always allowed. If the facts cannot be read, the interface is treated as physical. |
     /// | `slcan` (serial Lawicel) | **Fails before the CAN channel is opened**: the input is drained until quiet after `C` and before `L`; a still-streaming line means `L` is not sent. `Hardware` only if every setup command (`C`, `Sx`, `Yx`) got `CR` and `L` got a bare `CR` (or the exact echo `L\r` then `CR`; at most 16 bytes scanned). Otherwise (`BEL`, no reply, any other line, or a refused / unanswered setup command) `C` is sent, the serial port is closed, and the error is returned; `O` is never sent. Without the flag the channel opens with `O` instead (Lawicel has no other receive mode), so the adapter ACKs, and it is reported `SoftwareOnly` with the software TX lock. Limit: `Hardware` here is the adapter's claim, not proof (Lawicel cannot read back the mode; some clone firmwares answer `CR` to every command). |
-    /// | `pcan` / `kvaser` / `gs_usb` native SDK paths | n/a today: no native backend opens a channel yet (they error or route to SocketCAN). |
+    /// | `pcan` native PCAN-Basic (`PCANBasic.dll` / `libpcanbasic.so` / `libPCBUSB.dylib`, loaded at runtime) | **Fails before open**: `PCAN_LISTEN_ONLY` is set before `CAN_Initialize*`; if PCAN-Basic refuses it the channel is never initialized. After init the parameter is read back: `Hardware` only if it reads ON (or the read is unsupported but the pre-init set succeeded); otherwise the channel is uninitialized and the error returned. Without the flag a refused pre-init set is retried after init, and an unconfirmed mode is reported `SoftwareOnly`. On Linux, `peak_usb` `can*` interfaces are routed to `socketcan` first. |
+    /// | `kvaser` / `gs_usb` native SDK paths | n/a today: no native backend opens a channel yet (they error or route to SocketCAN). |
     /// | `mock` | n/a: `Virtual`, always allowed. |
     /// | any other / future driver keeping the trait default `SoftwareOnly` | **Closes after open**: this function calls [`CanChannel::close`] and drops the channel before returning, so it never reaches a bus-io thread. |
     pub fn open_by_device_id(
@@ -134,7 +138,8 @@ impl DriverRegistry {
                 if let Ok(devs) = drv.discover_devices() {
                     if let Some(desc) = devs.into_iter().find(|d| d.device_id == trimmed_id) {
                         let ch = drv.open_channel(&desc, config)?;
-                        return Ok((desc, ch));
+                        let actual_desc = ch.descriptor().clone();
+                        return Ok((actual_desc, ch));
                     }
                 }
             }
@@ -190,6 +195,21 @@ impl DriverRegistry {
                 let ch = KvaserDriver::new().open_channel(&desc, config)?;
                 return Ok((desc, ch));
             }
+            Some("vector_xl") => {
+                let ch_name = config
+                    .adapter_channel
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(if suffix_channel.is_empty() {
+                        "0"
+                    } else {
+                        suffix_channel
+                    });
+                let desc = VectorXlDriver::descriptor_for_channel(ch_name);
+                let ch = VectorXlDriver::new().open_channel(&desc, config)?;
+                return Ok((desc, ch));
+            }
             Some("gs_usb") => {
                 let ch_name = config
                     .adapter_channel
@@ -203,7 +223,8 @@ impl DriverRegistry {
                     });
                 let desc = GsUsbDriver::descriptor_for_channel(ch_name);
                 let ch = GsUsbDriver::new().open_channel(&desc, config)?;
-                return Ok((desc, ch));
+                let actual_desc = ch.descriptor().clone();
+                return Ok((actual_desc, ch));
             }
             Some("mock") => {
                 let ch_name = if suffix_channel.is_empty() {

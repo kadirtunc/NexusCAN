@@ -290,6 +290,20 @@ impl PipelineEngine {
         // Up-front gate: not connected / Listen-Only / disarmed / Panic latched → error.
         let start_epoch = self.tx_epoch.load(Ordering::SeqCst);
         let port = self.open_diag_tap(req.bus_id, &filters[..n], depth)?;
+        self.debug_hub.record(
+            "info",
+            "DIAG",
+            "protocol",
+            Some(req.bus_id),
+            "diag.sweep_started",
+            format!(
+                "Started UDS physical ID sweep on Bus {} ({} IDs @ {} ms gap)",
+                u16::from(req.bus_id) + 1,
+                plan.ids.len(),
+                plan.gap_ms
+            ),
+            None,
+        );
         let mut sweep = Sweep {
             collector: None,
             pre_tx_ignored: 0,
@@ -386,7 +400,7 @@ impl PipelineEngine {
             DiscoveryCollector::with_spec(plan.pdu[0], u32::MAX, req.is_extended_id, 0, &plan.spec)
         });
         let disc = collector.finish(plan.pdu.clone(), plan.tail_ms);
-        Ok(PhysicalSweepResultDto {
+        let out = PhysicalSweepResultDto {
             bus_id: req.bus_id,
             is_extended_id: req.is_extended_id,
             request_bytes: plan.pdu.clone(),
@@ -404,7 +418,32 @@ impl PipelineEngine {
             ignored_frames: disc.ignored_frames,
             truncated: disc.truncated,
             dropped_ecus: disc.dropped_ecus,
-        })
+        };
+        self.debug_hub.record(
+            if out.completed { "success" } else { "warn" },
+            "DIAG",
+            "protocol",
+            Some(req.bus_id),
+            if out.completed {
+                "diag.sweep_completed"
+            } else {
+                "diag.sweep_aborted"
+            },
+            format!(
+                "Physical sweep on Bus {} {} — {} ECU(s) responded ({}/{} sent)",
+                u16::from(req.bus_id) + 1,
+                if out.completed {
+                    "completed"
+                } else {
+                    "aborted"
+                },
+                out.ecus.len(),
+                out.sent,
+                out.total
+            ),
+            out.abort_reason.clone(),
+        );
+        Ok(out)
     }
 
     /// Feeds RX until `until`; `false` when the tap closed first.
