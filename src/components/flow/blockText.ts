@@ -1,4 +1,4 @@
-import { t, type TranslationKey } from '../../../i18n';
+import { t, type TranslationKey } from '../../i18n';
 import type { BlockDef, LocalizedText } from './types';
 
 /**

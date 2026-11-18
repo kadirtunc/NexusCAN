@@ -13,7 +13,14 @@
     "test:traffic": "esbuild src/components/diagnostics/traffic/trafficModel.test.ts --bundle --platform=node --format=esm | node --input-type=module",
     "test:graph": "esbuild src/components/diagnostics/ecu-graph/graphModel.test.ts --bundle --platform=node --format=esm | node --input-type=module",
     "test:inflight": "esbuild src/services/txInFlight.test.ts --bundle --platform=node --format=esm | node --input-type=module",
-    "test:hwlo": "esbuild src/services/hwListenOnly.test.ts --bundle --platform=node --format=esm | node --input-type=module"
+    "test:flash": "esbuild src/services/flashCodec.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:hwlo": "esbuild src/services/hwListenOnly.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:flasher": "esbuild src/components/flow/ecuFlasher.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:flowcore": "esbuild src/components/flow/flowCore.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:flowreg": "esbuild src/components/flow/registry/flowRegistry.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:flownest": "esbuild src/components/flow/registry/flowNest.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:terminals": "esbuild src/components/flow/flowTerminals.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:diagws": "esbuild src/components/diagnostics/workspace/diagWorkspace.test.ts --bundle --platform=node --format=esm | node --input-type=module"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.2.0",

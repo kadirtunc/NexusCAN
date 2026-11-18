@@ -3,14 +3,19 @@
  * session through a `FlowTransport`; data blocks operate on real block outputs. No simulated
  * values and no `Math.random` anywhere in this file. DEMO mode never reaches this code.
  */
-import { t } from '../../../i18n';
+import { t } from '../../i18n';
 import { flowStore } from './FlowStore';
 import type { FlowBlock, FlowConnection, FlowDiagram } from './types';
 import type { RunContext } from './FlowEngine';
-import type { FlowTransport } from './flowTransport';
+import { hasCustomOptions, type FlowRequestOptions, type FlowTransport } from './flowTransport';
 import { computeKey, crc16ibm, crc32 } from './flowAlgos';
+import { FUNCTIONAL_OK_BLOCKS, SPR_BLOCKS } from './blockDefs';
+import { buildFingerprint, fitBytes, isEmptyValue, textToAscii } from './flowData';
+import { asBytes, compareValues, hexB, hexField, hexList, toBool, valueText } from './flowValues';
+import { CORE_PURE_BLOCKS, evalCorePure, type CoreReader } from './coreRuntime';
 import { flowFiles } from './flowFiles';
 import { flowPrompt } from './flowPrompt';
+import { runFlashBlock } from './flashRun';
 import {
   DTC_COUNT_SUBFUNCTIONS,
   DTC_RECORD_SUBFUNCTIONS,
@@ -18,7 +23,7 @@ import {
   formatDid,
   formatDtc3,
   udsSessionName,
-} from '../../../services/udsDecode';
+} from '../../services/udsDecode';
 
 export interface RealOutcome {
   message: string;
@@ -26,105 +31,42 @@ export interface RealOutcome {
   nextPort?: string;
   /** Values on output ports (`portId -> value`), readable by downstream data connections. */
   outputs?: Record<string, unknown>;
+  /** Block failed (shown as an error); the flow continues on `nextPort` (e.g. `fail_out`). */
+  failed?: boolean;
 }
 
 const MAX_EVAL_DEPTH = 16;
 
 /** Blocks without exec ports: evaluated lazily when a downstream block reads their output. */
 const PURE_BLOCKS: ReadonlySet<string> = new Set([
+  ...CORE_PURE_BLOCKS,
   'data_const',
-  'data_var',
   'data_byte_builder',
   'data_extract',
   'data_bitfield_extract',
   'data_compare',
+  'data_ascii',
+  'data_fingerprint',
 ]);
-
-function hexB(b: number): string {
-  return b.toString(16).padStart(2, '0').toUpperCase();
-}
-
-function hexList(bytes: ArrayLike<number>): string {
-  return Array.from(bytes).map(hexB).join(' ');
-}
 
 function u16(a: number, b: number): number {
   return ((a << 8) | b) & 0xffff;
-}
-
-function asBytes(v: unknown): Uint8Array | null {
-  if (v instanceof Uint8Array) return v;
-  if (Array.isArray(v) && v.every((x): x is number => typeof x === 'number')) return Uint8Array.from(v);
-  return null;
-}
-
-function valueText(v: unknown): string {
-  const b = asBytes(v);
-  if (b) return hexList(b);
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  return JSON.stringify(v) ?? '';
-}
-
-function normText(v: unknown): string {
-  const b = asBytes(v);
-  if (b) return Array.from(b).map(hexB).join('');
-  if (typeof v === 'string') return v.trim().replace(/^0x/i, '').replace(/\s+/g, '').toUpperCase();
-  return String(v).toUpperCase();
-}
-
-function numeric(v: unknown): number {
-  if (typeof v === 'number') return v;
-  if (typeof v === 'boolean') return v ? 1 : 0;
-  const b = asBytes(v);
-  if (b) return b.length > 0 && b.length <= 6 ? b.reduce((acc, x) => acc * 256 + x, 0) : NaN;
-  if (typeof v === 'string') {
-    const s = v.trim();
-    if (/^0x[0-9a-f]+$/i.test(s)) return parseInt(s, 16);
-    if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
-  }
-  return NaN;
-}
-
-function toBool(v: unknown): boolean {
-  if (typeof v === 'boolean') return v;
-  if (typeof v === 'number') return v !== 0;
-  if (typeof v === 'string') return v.trim().length > 0 && v.trim().toLowerCase() !== 'false' && v.trim() !== '0';
-  const b = asBytes(v);
-  return b ? b.some((x) => x !== 0) : false;
-}
-
-function compareValues(op: string, a: unknown, b: unknown): boolean {
-  const an = numeric(a);
-  const bn = numeric(b);
-  switch (op) {
-    case 'eq':
-      return Number.isFinite(an) && Number.isFinite(bn) ? an === bn : normText(a) === normText(b);
-    case 'neq':
-      return Number.isFinite(an) && Number.isFinite(bn) ? an !== bn : normText(a) !== normText(b);
-    case 'contains':
-      return normText(a).includes(normText(b));
-    case 'gt':
-    case 'lt':
-      if (!Number.isFinite(an) || !Number.isFinite(bn)) throw new Error(t('diagReal.flow.notNumeric'));
-      return op === 'gt' ? an > bn : an < bn;
-    default:
-      throw new Error(t('diagReal.flow.badOperator', { op }));
-  }
-}
-
-/** "08 00 00 00" / "0x08000000" -> bytes; odd digit counts are left-padded; empty/invalid -> Error. */
-function hexField(raw: unknown, field: string): number[] {
-  const s = String(raw ?? '').replace(/^\s*0x/i, '').replace(/[\s,]/g, '');
-  if (s.length === 0 || !/^[0-9a-fA-F]+$/.test(s)) throw new Error(t('diagReal.flow.invalidHex', { field }));
-  const even = s.length % 2 === 0 ? s : `0${s}`;
-  return (even.match(/.{2}/g) ?? []).map((p) => parseInt(p, 16));
 }
 
 function byteField(raw: unknown, field: string): number {
   const b = hexField(raw, field);
   if (b.length !== 1) throw new Error(t('diagReal.flow.invalidHex', { field }));
   return b[0];
+}
+
+function intOr(raw: unknown, fallback: number): number {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+function clampInt(raw: unknown, fallback: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, intOr(raw, fallback)));
 }
 
 function didField(raw: unknown): { did: number; bytes: number[] } {
@@ -142,7 +84,55 @@ export class RealFlowExecutor {
     private readonly transport: FlowTransport,
     private readonly ctx: RunContext,
     private readonly log: (block: FlowBlock, msg: string) => void,
+    /** Engine stop / Panic Stop flag: long waits (wait-ready polling) end early when it turns true. */
+    private readonly shouldStop: () => boolean = () => false,
+    /**
+     * Simulated (DEMO) engine: this executor only evaluates PURE data (core pack, constants, compares).
+     * Sources without a real value (simulated UDS blocks) read as "not connected" instead of failing.
+     */
+    private readonly lenient = false,
+    /** Diagram of the frame this executor serves (default: the canvas diagram). */
+    private readonly source: (() => FlowDiagram) | null = null,
   ) {}
+
+  /** Data-input reader handed to the shared core block runtime (`coreRuntime.ts`). */
+  readonly core: CoreReader = {
+    optional: (block, portId, depth) => this.optionalInput(block, portId, depth),
+  };
+
+  /**
+   * Simulated engine gate: the data cone feeding `block.portId` is connected AND made only of pure
+   * blocks with real values (core pack, `data_const`, `data_compare`, `flow_for.index`), so it can be
+   * evaluated for real instead of using the DEMO's fabricated values.
+   */
+  canEvalPure(block: FlowBlock, portId: string): boolean {
+    const conn = this.findInputConn(block, portId);
+    return conn !== undefined && this.coneEvaluable(conn.fromBlockId, conn.fromPortId, new Set());
+  }
+
+  private coneEvaluable(blockId: string, portId: string, seen: Set<string>): boolean {
+    // A block that already ran has a recorded value on this port (e.g. a simulated DID read).
+    if (this.outputs.get(blockId)?.[portId] !== undefined) return true;
+    const src = this.diagram().blocks.find((b) => b.id === blockId);
+    if (!src) return false;
+    if (src.type === 'flow_for') return portId === 'index';
+    if (src.type !== 'data_const' && src.type !== 'data_compare' && !CORE_PURE_BLOCKS.has(src.type)) return false;
+    if (seen.has(blockId)) return false;
+    seen.add(blockId);
+    return this.diagram().connections
+      .filter((c) => c.toBlockId === blockId)
+      .every((c) => this.coneEvaluable(c.fromBlockId, c.fromPortId, seen));
+  }
+
+  /** Interruptible sleep (checks `shouldStop` every 50 ms). */
+  private async sleep(ms: number): Promise<void> {
+    const end = Date.now() + ms;
+    while (!this.shouldStop()) {
+      const left = end - Date.now();
+      if (left <= 0) return;
+      await new Promise<void>((r) => setTimeout(r, Math.min(left, 50)));
+    }
+  }
 
   reset(): void {
     this.outputs.clear();
@@ -157,7 +147,19 @@ export class RealFlowExecutor {
   // ── Data connections ───────────────────────────────────────────────────────
 
   private diagram(): FlowDiagram {
-    return (flowStore.getSnapshot() as { diagram: FlowDiagram }).diagram;
+    return this.source ? this.source() : flowStore.getSnapshot().diagram;
+  }
+
+  /**
+   * Like an optional input, but a value whose (exec) source block has not run on this path reads as absent
+   * instead of failing (`flow_output` outputs of another branch).
+   */
+  async softInput(block: FlowBlock, portId: string): Promise<unknown> {
+    const conn = this.findInputConn(block, portId);
+    if (!conn) return undefined;
+    const src = this.diagram().blocks.find((b) => b.id === conn.fromBlockId);
+    if (src && !PURE_BLOCKS.has(src.type) && src.type !== 'flow_for' && !this.outputs.has(src.id)) return undefined;
+    return this.readOutput(conn.fromBlockId, conn.fromPortId, 1);
   }
 
   private findInputConn(block: FlowBlock, portId: string): FlowConnection | undefined {
@@ -191,12 +193,19 @@ export class RealFlowExecutor {
     if (outs && portId in outs) return outs[portId];
     const src = this.diagram().blocks.find((b) => b.id === blockId);
     if (!src) throw new Error(t('diagReal.flow.sourceMissing'));
+    if (src.type === 'flow_for' && portId === 'index') {
+      const idx = this.ctx.scope.locals.get(src.id);
+      if (idx === undefined) throw new Error(t('diagReal.flow.sourceNotRun', { block: src.label, port: portId }));
+      return idx;
+    }
+    if (this.lenient && !this.coneEvaluable(blockId, portId, new Set())) return undefined;
     if (PURE_BLOCKS.has(src.type)) return this.evalPure(src, depth);
     throw new Error(t('diagReal.flow.sourceNotRun', { block: src.label, port: portId }));
   }
 
   private async evalPure(block: FlowBlock, depth: number): Promise<unknown> {
     const cfg = block.config;
+    if (CORE_PURE_BLOCKS.has(block.type)) return evalCorePure(block, this.core, this.ctx.scope, depth);
     switch (block.type) {
       case 'data_const': {
         const format = String(cfg['format'] ?? 'text');
@@ -208,18 +217,6 @@ export class RealFlowExecutor {
           return n;
         }
         return String(value ?? '');
-      }
-      case 'data_var': {
-        const name = String(cfg['name'] ?? 'myVar');
-        const set = await this.optionalInput(block, 'set_in', depth);
-        if (set !== undefined) {
-          this.ctx.variables.set(name, set);
-          return set;
-        }
-        if (this.ctx.variables.has(name)) return this.ctx.variables.get(name);
-        const initial = cfg['initial'];
-        this.ctx.variables.set(name, initial);
-        return initial;
       }
       case 'data_byte_builder': {
         const format = String(cfg['format'] ?? 'hex');
@@ -255,8 +252,29 @@ export class RealFlowExecutor {
       }
       case 'data_compare': {
         const left = await this.need(block, 'left_in', false, depth);
+        // An empty expected value (e.g. an unfilled data_const) disables the check when configured.
+        if (cfg['pass_if_right_empty'] === true) {
+          const r = await this.optionalInput(block, 'right_in', depth);
+          if (isEmptyValue(r)) return true;
+        }
         const right = await this.need(block, 'right_in', false, depth);
         return compareValues(String(cfg['operator'] ?? 'eq'), left, right);
+      }
+      case 'data_ascii': {
+        const vin = await this.optionalInput(block, 'value_in', depth);
+        const vb = asBytes(vin);
+        const src = vb ? Array.from(vb) : textToAscii(vin === undefined ? String(cfg['text'] ?? '') : valueText(vin));
+        return Uint8Array.from(fitBytes(src, intOr(cfg['length'], 0), byteField(cfg['pad'] ?? '20', 'pad')));
+      }
+      case 'data_fingerprint': {
+        const bytes = buildFingerprint({
+          format: cfg['format'] === 'custom' ? 'custom' : 'iso_f15a',
+          serial: String(cfg['serial'] ?? ''),
+          serialLen: intOr(cfg['serial_len'], 6),
+          pad: byteField(cfg['pad'] ?? '20', 'pad'),
+          template: String(cfg['template'] ?? ''),
+        }, new Date());
+        return Uint8Array.from(bytes);
       }
       default:
         throw new Error(t('diagEng.unknownBlock', { type: block.type }));
@@ -270,16 +288,40 @@ export class RealFlowExecutor {
 
   // ── UDS helper ─────────────────────────────────────────────────────────────
 
+  /**
+   * Per-request options of a block (common "Request options" inspector section). Absent keys keep
+   * the previous behaviour: physical, no SPR, backend timing, no busy retry. Functional is honoured
+   * only for `FUNCTIONAL_OK_BLOCKS`, SPR only for `SPR_BLOCKS`.
+   */
+  reqOpts(block: FlowBlock): FlowRequestOptions {
+    const c = block.config;
+    const timeout = intOr(c['req_timeout_ms'], 0);
+    const delay = intOr(c['req_busy_delay_ms'], 0);
+    return {
+      addressing: c['req_addressing'] === 'functional' && FUNCTIONAL_OK_BLOCKS.has(block.type) ? 'functional' : 'physical',
+      suppressed: SPR_BLOCKS.has(block.type) && c['req_spr'] === true,
+      timeoutMs: timeout > 0 ? timeout : null,
+      busyRetryMax: clampInt(c['req_busy_retry'], 0, 0, 10),
+      busyRetryDelayMs: delay > 0 ? delay : null,
+    };
+  }
+
   private async uds(
     block: FlowBlock,
     sid: number,
     data: readonly number[],
     name: string,
-    suppressed = false,
+    opts: FlowRequestOptions = {},
   ): Promise<number[]> {
-    this.log(block, `TX: ${hexList([sid, ...data])}  (${name})`);
-    const pdu = await this.transport.request(sid, data, { suppressed });
-    this.log(block, suppressed ? t('diagEng.noResponse', { baud: '-' }) : `RX: ${hexList(pdu)}`);
+    const functional = opts.addressing === 'functional';
+    // Never a silent physical send: a functional request needs a functionalId on the pinned session.
+    if (functional && this.transport.functionalId() === null) throw new Error(t('udsFlow.err.noFunctionalId'));
+    const tags = [functional ? 'functional' : '', opts.suppressed ? 'SPR' : '', opts.timeoutMs ? `${opts.timeoutMs} ms` : '']
+      .filter((x) => x.length > 0)
+      .join(', ');
+    this.log(block, `TX: ${hexList([sid, ...data])}  (${name}${tags ? ` · ${tags}` : ''})`);
+    const pdu = await this.transport.request(sid, data, opts);
+    this.log(block, opts.suppressed ? t('udsFlow.log.suppressed') : `RX: ${hexList(pdu)}`);
     return pdu;
   }
 
@@ -296,13 +338,7 @@ export class RealFlowExecutor {
 
     switch (block.type) {
       // ── Flow ────────────────────────────────────────────────────────────────
-      case 'log': {
-        const msg = String(cfg['message'] ?? '');
-        const v = await this.optionalInput(block, 'value_in', 0);
-        const text = v === undefined ? msg : `${msg}${msg ? ' ' : ''}${valueText(v)}`;
-        this.log(block, `LOG: ${text || t('diagEng.empty')}`);
-        return { message: text || t('diagEng.emptyMsg') };
-      }
+      // `log` / `var_set` / `flow_for` / `flow_break` / `flow_continue` run in FlowEngine.dispatchCore (shared by both modes).
 
       case 'flow_timeout_guard': {
         const ms = Number(cfg['timeout_ms'] ?? 5000);
@@ -329,8 +365,9 @@ export class RealFlowExecutor {
         const st = String(cfg['session_type'] ?? 'extended');
         const subFn: Record<string, number> = { default: 0x01, programming: 0x02, extended: 0x03, safety: 0x04 };
         const sf = subFn[st] ?? 0x03;
-        const pdu = await this.uds(block, 0x10, [sf], 'DiagnosticSessionControl');
-        this.expect(pdu, 1, [sf], 'DiagnosticSessionControl');
+        const o = this.reqOpts(block);
+        const pdu = await this.uds(block, 0x10, [o.suppressed ? sf | 0x80 : sf], 'DiagnosticSessionControl', o);
+        if (!o.suppressed) this.expect(pdu, 1, [sf], 'DiagnosticSessionControl');
         let p2: number | null = null;
         let p2ext: number | null = null;
         if (pdu.length >= 6) {
@@ -348,8 +385,9 @@ export class RealFlowExecutor {
         const rt = String(cfg['reset_type'] ?? 'hardReset');
         const rtBytes: Record<string, number> = { hardReset: 0x01, keyOffOnReset: 0x02, softReset: 0x03, enableRapidPowerShutDown: 0x04 };
         const sf = rtBytes[rt] ?? 0x01;
-        const pdu = await this.uds(block, 0x11, [sf], 'ECUReset');
-        this.expect(pdu, 1, [sf], 'ECUReset');
+        const o = this.reqOpts(block);
+        const pdu = await this.uds(block, 0x11, [o.suppressed ? sf | 0x80 : sf], 'ECUReset', o);
+        if (!o.suppressed) this.expect(pdu, 1, [sf], 'ECUReset');
         ctx.sessionType = 'default';
         ctx.securityUnlocked = false;
         ctx.commControlled = false;
@@ -359,7 +397,7 @@ export class RealFlowExecutor {
       case 'uds_clear_dtc': {
         const group = hexField(cfg['group'] ?? 'FFFFFF', 'group');
         if (group.length !== 3) throw new Error(t('diagReal.flow.invalidHex', { field: 'group' }));
-        await this.uds(block, 0x14, group, 'ClearDiagnosticInformation');
+        await this.uds(block, 0x14, group, 'ClearDiagnosticInformation', this.reqOpts(block));
         return { message: t('diagEng.dtcGroupCleared', { group: hexList(group).replace(/ /g, '') }) };
       }
 
@@ -370,7 +408,7 @@ export class RealFlowExecutor {
         let params: number[] = [];
         if ([0x01, 0x02, 0x0f, 0x11, 0x12, 0x13].includes(sf)) params = [mask];
         else if (sf === 0x07 || sf === 0x08) params = [0xff, mask];
-        const pdu = await this.uds(block, 0x19, [sf, ...params], `ReadDTCInformation 0x${hexB(sf)}`);
+        const pdu = await this.uds(block, 0x19, [sf, ...params], `ReadDTCInformation 0x${hexB(sf)}`, this.reqOpts(block));
         this.expect(pdu, 1, [sf], 'ReadDTCInformation');
         if (DTC_COUNT_SUBFUNCTIONS.has(sf)) {
           if (pdu.length < 6) throw new Error(t('diagReal.flow.badEcho', { what: 'DTC count', rx: hexList(pdu) }));
@@ -400,8 +438,17 @@ export class RealFlowExecutor {
       // ── 0x22 / 0x23 ─────────────────────────────────────────────────────────
       case 'uds_read_did': {
         const { did, bytes } = didField(cfg['did'] ?? 'F190');
-        this.log(block, `TX: 22 ${hexList(bytes)}  (ReadDataByIdentifier ${formatDid(did)})`);
-        const record = await this.transport.readDid(did);
+        const o = this.reqOpts(block);
+        let record: number[];
+        if (hasCustomOptions(o)) {
+          // Functional / timeout / busy retry: raw 0x22 through the option-aware request path.
+          const pdu = await this.uds(block, 0x22, bytes, `ReadDataByIdentifier ${formatDid(did)}`, o);
+          this.expect(pdu, 1, bytes, 'ReadDataByIdentifier');
+          record = pdu.slice(3);
+        } else {
+          this.log(block, `TX: 22 ${hexList(bytes)}  (ReadDataByIdentifier ${formatDid(did)})`);
+          record = await this.transport.readDid(did);
+        }
         const decoded = decodeDidValue(did, record);
         this.log(block, `RX: 62 ${hexList(bytes)} ${hexList(record)}`);
         this.log(block, `    ${formatDid(did)}: "${decoded}"`);
@@ -417,7 +464,7 @@ export class RealFlowExecutor {
         const addr = hexField(cfg['memory_address'], 'memory_address');
         const size = hexField(cfg['memory_size'], 'memory_size');
         const fmt = ((addr.length & 0xf) << 4) | (size.length & 0xf);
-        const pdu = await this.uds(block, 0x23, [fmt, ...addr, ...size], 'ReadMemoryByAddress');
+        const pdu = await this.uds(block, 0x23, [fmt, ...addr, ...size], 'ReadMemoryByAddress', this.reqOpts(block));
         const data = Uint8Array.from(pdu.slice(1));
         return {
           message: t('diagEng.memRead', { addr: hexList(addr).replace(/ /g, ''), size: data.length }),
@@ -434,7 +481,8 @@ export class RealFlowExecutor {
         const constantHex = String(cfg['constant'] ?? '5A3C1E8F');
         const script = String(cfg['script'] ?? '');
 
-        const seedPdu = await this.uds(block, 0x27, [odd], `SecurityAccess requestSeed 0x${hexB(odd)}`);
+        const secOpts = this.reqOpts(block);
+        const seedPdu = await this.uds(block, 0x27, [odd], `SecurityAccess requestSeed 0x${hexB(odd)}`, secOpts);
         this.expect(seedPdu, 1, [odd], 'SecurityAccess seed');
         const seed = Uint8Array.from(seedPdu.slice(2));
         if (seed.length === 0) throw new Error(t('diagReal.flow.noSeed'));
@@ -465,7 +513,7 @@ export class RealFlowExecutor {
         }
         this.log(block, `key=${hexList(key)}`);
 
-        const keyPdu = await this.uds(block, 0x27, [even, ...key], `SecurityAccess sendKey 0x${hexB(even)}`);
+        const keyPdu = await this.uds(block, 0x27, [even, ...key], `SecurityAccess sendKey 0x${hexB(even)}`, secOpts);
         this.expect(keyPdu, 1, [even], 'SecurityAccess key');
         ctx.securityUnlocked = true;
         ctx.unlockedLevel = odd;
@@ -501,8 +549,9 @@ export class RealFlowExecutor {
       case 'uds_comm_control': {
         const ctrl = byteField(cfg['control_type'] ?? '03', 'control_type');
         const comm = byteField(cfg['comm_type'] ?? '01', 'comm_type');
-        const pdu = await this.uds(block, 0x28, [ctrl, comm], 'CommunicationControl');
-        this.expect(pdu, 1, [ctrl], 'CommunicationControl');
+        const o = this.reqOpts(block);
+        const pdu = await this.uds(block, 0x28, [o.suppressed ? ctrl | 0x80 : ctrl, comm], 'CommunicationControl', o);
+        if (!o.suppressed) this.expect(pdu, 1, [ctrl], 'CommunicationControl');
         ctx.commControlled = ctrl === 0x03;
         return { message: `CommunicationControl 0x${hexB(ctrl)} 0x${hexB(comm)}` };
       }
@@ -510,7 +559,7 @@ export class RealFlowExecutor {
       case 'uds_write_did': {
         const { did, bytes } = didField(cfg['did'] ?? 'F190');
         const data = await this.needBytes(block, 'data_in', false);
-        const pdu = await this.uds(block, 0x2e, [...bytes, ...data], `WriteDataByIdentifier ${formatDid(did)}`);
+        const pdu = await this.uds(block, 0x2e, [...bytes, ...data], `WriteDataByIdentifier ${formatDid(did)}`, this.reqOpts(block));
         this.expect(pdu, 1, bytes, 'WriteDataByIdentifier');
         return { message: t('diagEng.didWritten', { did: formatDid(did).slice(2) }) };
       }
@@ -519,7 +568,7 @@ export class RealFlowExecutor {
         const { did, bytes } = didField(cfg['did'] ?? '3001');
         const opt = byteField(cfg['io_control'] ?? '03', 'io_control');
         const val = byteField(cfg['control_value'] ?? '00', 'control_value');
-        const pdu = await this.uds(block, 0x2f, [...bytes, opt, val], `InputOutputControl ${formatDid(did)}`);
+        const pdu = await this.uds(block, 0x2f, [...bytes, opt, val], `InputOutputControl ${formatDid(did)}`, this.reqOpts(block));
         this.expect(pdu, 1, bytes, 'InputOutputControl');
         const data = Uint8Array.from(pdu.slice(3));
         return { message: `IO Control ${formatDid(did)}: option 0x${hexB(opt)}`, result: data, outputs: { data_out: data } };
@@ -530,9 +579,31 @@ export class RealFlowExecutor {
         const ridSel = String(cfg['routine_id'] ?? 'FF00');
         const ridBytes = hexField(ridSel === 'custom' ? cfg['routine_id_custom'] : ridSel, 'routine_id');
         if (ridBytes.length !== 2) throw new Error(t('diagReal.flow.invalidHex', { field: 'routine_id' }));
-        const pdu = await this.uds(block, 0x31, [ctrl, ...ridBytes], 'RoutineControl');
+        // Optional routineControlOptionRecord: bytes, or a number (e.g. the CRC32 of a flashed image) as 4 bytes big-endian.
+        const optIn = await this.optionalInput(block, 'option_in', 0);
+        let option: number[] = [];
+        if (optIn !== undefined) {
+          const ob = asBytes(optIn);
+          if (ob) option = Array.from(ob);
+          else if (typeof optIn === 'number' && Number.isInteger(optIn) && optIn >= 0 && optIn <= 0xffffffff) {
+            option = [(optIn >>> 24) & 0xff, (optIn >>> 16) & 0xff, (optIn >>> 8) & 0xff, optIn & 0xff];
+          } else throw new Error(t('diagReal.flow.notBytes', { block: block.label, port: 'option_in' }));
+        }
+        const pdu = await this.uds(block, 0x31, [ctrl, ...ridBytes, ...option], 'RoutineControl', this.reqOpts(block));
         this.expect(pdu, 1, [ctrl, ...ridBytes], 'RoutineControl');
         const status = Uint8Array.from(pdu.slice(4));
+        // Optional required routineStatus (first status record byte), e.g. 0x00 = correct result.
+        const expRaw = cfg['expect_status'];
+        if (expRaw !== undefined && expRaw !== null && String(expRaw).trim() !== '') {
+          const exp = byteField(expRaw, 'expect_status');
+          if (status[0] !== exp) {
+            throw new Error(t('udsFlow.err.routineStatus', {
+              rid: hexList(ridBytes).replace(/ /g, ''),
+              got: status.length > 0 ? hexB(status[0]) : '--',
+              exp: hexB(exp),
+            }));
+          }
+        }
         return {
           message: `Routine 0x${hexList(ridBytes).replace(/ /g, '')} (0x${hexB(ctrl)}) → ${status.length > 0 ? hexList(status) : '—'}`,
           result: status,
@@ -549,7 +620,7 @@ export class RealFlowExecutor {
         const fmtByte = byteField(cfg['data_format'] ?? '00', 'data_format');
         const memFmt = ((addr.length & 0xf) << 4) | (size.length & 0xf);
         const sid = isDownload ? 0x34 : 0x35;
-        const pdu = await this.uds(block, sid, [fmtByte, memFmt, ...addr, ...size], isDownload ? 'RequestDownload' : 'RequestUpload');
+        const pdu = await this.uds(block, sid, [fmtByte, memFmt, ...addr, ...size], isDownload ? 'RequestDownload' : 'RequestUpload', this.reqOpts(block));
         const lenBytes = (pdu[1] ?? 0) >> 4;
         if (lenBytes === 0 || pdu.length < 2 + lenBytes) {
           throw new Error(t('diagReal.flow.badEcho', { what: 'maxNumberOfBlockLength', rx: hexList(pdu) }));
@@ -573,7 +644,7 @@ export class RealFlowExecutor {
         if (!ctx.downloadActive) throw new Error(t('diagReal.flow.noTransfer'));
         const seq = ctx.transferBlockSeq & 0xff;
         if (ctx.uploadActive) {
-          const pdu = await this.uds(block, 0x36, [seq], `TransferData upload block ${seq}`);
+          const pdu = await this.uds(block, 0x36, [seq], `TransferData upload block ${seq}`, this.reqOpts(block));
           this.expect(pdu, 1, [seq], 'TransferData');
           const data = Uint8Array.from(pdu.slice(2));
           ctx.transferredBytes += data.length;
@@ -587,7 +658,7 @@ export class RealFlowExecutor {
         const offset = ctx.transferredBytes;
         if (offset >= data.length) throw new Error(t('diagReal.flow.noDataLeft'));
         const chunk = data.subarray(offset, offset + chunkSize);
-        const pdu = await this.uds(block, 0x36, [seq, ...chunk], `TransferData block ${seq} (${chunk.length} B)`);
+        const pdu = await this.uds(block, 0x36, [seq, ...chunk], `TransferData block ${seq} (${chunk.length} B)`, this.reqOpts(block));
         this.expect(pdu, 1, [seq], 'TransferData block sequence'); // real 0x76 echo
         ctx.transferredBytes += chunk.length;
         ctx.transferBlockSeq = (seq + 1) & 0xff;
@@ -600,7 +671,7 @@ export class RealFlowExecutor {
 
       case 'uds_transfer_exit': {
         if (!ctx.downloadActive) throw new Error(t('diagReal.flow.noTransfer'));
-        await this.uds(block, 0x37, [], 'RequestTransferExit');
+        await this.uds(block, 0x37, [], 'RequestTransferExit', this.reqOpts(block));
         const transferred = ctx.transferredBytes;
         ctx.downloadActive = false;
         ctx.uploadActive = false;
@@ -616,21 +687,22 @@ export class RealFlowExecutor {
         const sizeVal = size.reduce((acc, b) => acc * 256 + b, 0);
         if (sizeVal !== data.length) throw new Error(t('diagReal.flow.dataLen', { size: sizeVal, got: data.length }));
         const fmt = ((addr.length & 0xf) << 4) | (size.length & 0xf);
-        await this.uds(block, 0x3d, [fmt, ...addr, ...size, ...data], 'WriteMemoryByAddress');
+        await this.uds(block, 0x3d, [fmt, ...addr, ...size, ...data], 'WriteMemoryByAddress', this.reqOpts(block));
         return { message: `WriteMemory 0x${hexList(addr).replace(/ /g, '')}  ${data.length} B` };
       }
 
       case 'uds_tester_present': {
         const suppress = !!cfg['suppress'];
         const sf = suppress ? 0x80 : 0x00;
-        await this.uds(block, 0x3e, [sf], `TesterPresent suppress=${suppress}`, suppress);
+        await this.uds(block, 0x3e, [sf], `TesterPresent suppress=${suppress}`, { ...this.reqOpts(block), suppressed: suppress });
         return { message: `TesterPresent${suppress ? ' (suppress)' : ''}` };
       }
 
       case 'uds_dtc_setting': {
         const sf = byteField(cfg['setting_type'] ?? '02', 'setting_type');
-        const pdu = await this.uds(block, 0x85, [sf], 'ControlDTCSetting');
-        this.expect(pdu, 1, [sf], 'ControlDTCSetting');
+        const o = this.reqOpts(block);
+        const pdu = await this.uds(block, 0x85, [o.suppressed ? sf | 0x80 : sf], 'ControlDTCSetting', o);
+        if (!o.suppressed) this.expect(pdu, 1, [sf], 'ControlDTCSetting');
         ctx.dtcSettingOff = sf === 0x02;
         return { message: `ControlDTCSetting ${sf === 0x01 ? 'ON' : sf === 0x02 ? 'OFF' : `0x${hexB(sf)}`}` };
       }
@@ -638,9 +710,10 @@ export class RealFlowExecutor {
       case 'uds_link_control': {
         const lc = byteField(cfg['link_control_type'] ?? '01', 'link_control_type');
         const br = byteField(cfg['link_baudrate_id'] ?? '05', 'link_baudrate_id');
-        const verify = await this.uds(block, 0x87, [lc, br], 'LinkControl verify');
+        const lo = this.reqOpts(block);
+        const verify = await this.uds(block, 0x87, [lc, br], 'LinkControl verify', lo);
         this.expect(verify, 1, [lc], 'LinkControl');
-        await this.uds(block, 0x87, [0x83], 'LinkControl transitionMode (suppressed)', true);
+        await this.uds(block, 0x87, [0x83], 'LinkControl transitionMode (suppressed)', { ...lo, suppressed: true });
         return { message: `LinkControl 0x${hexB(lc)} baud-id 0x${hexB(br)} → transitionMode` };
       }
 
@@ -685,6 +758,75 @@ export class RealFlowExecutor {
           result: file.bytes,
           outputs: { data_out: file.bytes },
         };
+      }
+
+      // ── Flash (0x34 → 0x36* → 0x37 engine in the backend) ────────────────────
+      case 'uds_flash_image':
+        return runFlashBlock(block, {
+          demo: false,
+          tabId: this.transport.tabId ?? null,
+          log: (msg) => this.log(block, msg),
+          transport: this.transport,
+        });
+
+      // ── TesterPresent keep-alive (backend loop of the pinned session) ────────
+      case 'uds_tester_present_keepalive': {
+        const interval = clampInt(cfg['interval_ms'], 2000, 100, 60_000);
+        if (cfg['action'] === 'stop') {
+          await this.transport.setKeepalive(false, interval);
+          ctx.keepaliveActive = false;
+          this.log(block, t('udsFlow.log.kaStopped'));
+          return { message: t('udsFlow.log.kaStopped') };
+        }
+        // Flag first: if the run is stopped while the start call is in flight, cleanup still stops it.
+        ctx.keepaliveActive = true;
+        await this.transport.setKeepalive(true, interval);
+        this.log(block, t('udsFlow.log.kaStarted', { ms: interval }));
+        return { message: t('udsFlow.log.kaStarted', { ms: interval }) };
+      }
+
+      // ── Wait until the ECU answers again (bootloader jump / reset) ───────────
+      case 'uds_wait_ecu_ready': {
+        const initial = clampInt(cfg['initial_delay_ms'], 500, 0, 600_000);
+        const poll = clampInt(cfg['poll_ms'], 250, 10, 60_000);
+        const total = clampInt(cfg['timeout_ms'], 10_000, 100, 600_000);
+        const probeTimeout = clampInt(cfg['probe_timeout_ms'], 300, 20, 60_000);
+        const probe = String(cfg['probe'] ?? '3E00');
+        let sid = 0x3e;
+        let data: number[] = [0x00];
+        if (probe === 'session') {
+          sid = 0x10;
+          data = [byteField(cfg['probe_session'] ?? '02', 'probe_session') & 0x7f];
+        } else if (probe === 'F186') {
+          sid = 0x22;
+          data = [0xf1, 0x86];
+        }
+        const t0 = Date.now();
+        this.log(block, t('udsFlow.wr.start', { probe: hexList([sid, ...data]), initial, total }));
+        await this.sleep(Math.min(initial, total));
+        let attempts = 0;
+        let lastErr = '';
+        while (!this.shouldStop()) {
+          const remaining = total - (Date.now() - t0);
+          if (remaining <= 0) break;
+          attempts += 1;
+          try {
+            // Each probe is a normal gated request (Listen-Only / Arm / Panic enforced by the backend).
+            await this.transport.request(sid, data, { timeoutMs: Math.max(20, Math.min(probeTimeout, remaining)) });
+            const elapsed = Date.now() - t0;
+            this.log(block, t('udsFlow.wr.ready', { ms: elapsed, n: attempts }));
+            return { message: t('udsFlow.wr.ready', { ms: elapsed, n: attempts }), result: elapsed, outputs: { elapsed_out: elapsed } };
+          } catch (e) {
+            lastErr = e instanceof Error ? e.message : String(e);
+            this.log(block, t('udsFlow.wr.probeFail', { n: attempts, msg: lastErr }));
+          }
+          const left = total - (Date.now() - t0);
+          if (left <= 0) break;
+          await this.sleep(Math.min(poll, left));
+        }
+        const elapsed = Date.now() - t0;
+        const message = t('udsFlow.wr.timeout', { ms: elapsed, n: attempts, msg: lastErr || '-' });
+        return { message, failed: true, nextPort: 'timeout_out', result: elapsed, outputs: { elapsed_out: elapsed } };
       }
 
       case 'io_display': {

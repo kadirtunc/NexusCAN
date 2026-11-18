@@ -1,12 +1,29 @@
 import type { FlowBlock, FlowDiagram } from './types';
 import { flowStore } from './FlowStore';
-import { t } from '../../../i18n';
+import { t } from '../../i18n';
 import { crc16ibm, crc32, computeKey } from './flowAlgos';
-import { demoFlowTransport, demoDelay, realFlowTransport } from './flowTransport';
+import { demoFlowTransport, demoDelay, RealFlowTransport, type FlowTransport } from './flowTransport';
 import { RealFlowExecutor } from './flowReal';
 import { flowPrompt } from './flowPrompt';
-import { diagnosticsStore } from '../../../store/diagnosticsStore';
-import { registerTxSource } from '../../../store/txSources';
+import { resolveGotoTarget, terminalName, validateTerminals } from './flowTerminals';
+import { CalleeCache, preflightCalls, terminalIssueMessage, type BodyLoader } from './callGraph';
+import { isCallType, readCallRef } from './callIndex';
+import { checkEcuBinding, checkEcuSession, resolveFrameDiagram, type SessionProbe } from './ecuBinding';
+import { flowRegistry } from './registry/flowRegistryStore';
+import { asBytes } from './flowValues';
+import type { EcuRecordV1 } from '../../types/diagWorkspace';
+import type { BlockStatus } from './types';
+import { cancelAllFlashRuns, runFlashBlock } from './flashRun';
+import { flashRuntime } from './flashRuntime';
+import { createScope, FOR_ITERATION_CAP, forValueAt, formatValue, type FlowScope } from './coreBlocks';
+import { CORE_EXEC_BLOCKS, WHILE_DEFAULT_MAX, execVarSet, readForRange, renderLogMessage } from './coreRuntime';
+import { validateCore, type CoreIssue } from './coreValidate';
+import { findEntryBlock, resolveRunInputs, validateInterface } from './flowInterface';
+import { FLOW_INPUT, flowInputSpecs, flowOutputName, flowOutputOutcome, flowOutputSpecs } from './flowPorts';
+import type { FlowOutcome } from '../../types/flowLibrary';
+import type { TranslationKey } from '../../i18n';
+import { diagnosticsStore } from '../../store/diagnosticsStore';
+import { registerTxSource } from '../../store/txSources';
 
 // ─── Transports (see flowTransport.ts) ───────────────────────────────────────
 
@@ -74,6 +91,65 @@ export interface RunContext {
   transferBlockSeq: number;
   transferredBytes: number;
   variables: Map<string, unknown>;
+  /** A `uds_tester_present_keepalive` START ran: the engine stops the keep-alive on every terminal path. */
+  keepaliveActive: boolean;
+  /** Variables of the current call frame (core pack, §8.1). Phase B swaps this object per frame. */
+  scope: FlowScope;
+}
+
+/** Run options. `transport` injects a transport (headless tests); default = live session or DEMO. */
+export interface FlowRunOptions {
+  transport?: FlowTransport;
+  /**
+   * Values of the `flow_input` inputs by key (`Uint8Array` for file / bytes / hex, text / number / bool / select
+   * as entered). Missing optional inputs take their spec default; a missing required one refuses the run.
+   */
+  inputs?: Record<string, unknown>;
+  /** The ECU bound to this run (single ECU per run): passed as the value of the `ecu` input and checked. */
+  ecu?: EcuRecordV1 | null;
+  /** Session probe override (tests); default = the active diagnostics tab, skipped when a transport is injected. */
+  ecuSession?: () => SessionProbe | null;
+  /** Loader of callee revisions (default: the flow registry). Callees are loaded once per run. */
+  resolveCallee?: BodyLoader;
+  /** Identity of the running flow (default: the canvas diagram). */
+  rootId?: string | null;
+  rootName?: string;
+  /** Runtime limits (diag-workspace-v1 §8): call depth 64, executed blocks 1 000 000. */
+  limits?: { maxDepth?: number; maxBlocks?: number };
+}
+
+export const MAX_CALL_DEPTH = 64;
+export const MAX_RUN_BLOCKS = 1_000_000;
+
+/** One call frame: its own diagram, variables, executors, ECU and control-flow state. */
+interface Frame {
+  diagram: FlowDiagram;
+  name: string;
+  /** Names from the root flow to this frame (stamped on every log entry). */
+  path: string[];
+  /** Call-block ids from the root (`''` = root): key of the frame's live block statuses. */
+  pathKey: string;
+  ecu: EcuRecordV1 | null;
+  inputValues: Record<string, unknown>;
+  scope: FlowScope;
+  real: RealFlowExecutor | null;
+  eval: RealFlowExecutor;
+  finished: boolean;
+  reached: { name: string; outcome: FlowOutcome; outputs: Record<string, unknown> } | null;
+  loopSignal: 'break' | 'continue' | null;
+  loopDepth: number;
+}
+
+/** Result of one run (diag-workspace-v1 §8): the outcome and the values recorded by the reached `flow_output`. */
+export interface FlowRunResult {
+  outcome: FlowOutcome;
+  /** Name of the reached `flow_output`; `null` for the implicit outcome (no `flow_output`, legacy `end`, error, stop). */
+  name: string | null;
+  outputs: Record<string, unknown>;
+  /** Stop / Panic Stop ended the run (outcome `error`). */
+  stopped: boolean;
+  /** Pre-run validation / input resolution refused the run (nothing was transmitted). */
+  refused: boolean;
 }
 
 function newRunContext(): RunContext {
@@ -91,6 +167,8 @@ function newRunContext(): RunContext {
     transferBlockSeq: 1,
     transferredBytes: 0,
     variables: new Map(),
+    keepaliveActive: false,
+    scope: createScope([]),
   };
 }
 
@@ -99,11 +177,29 @@ function log(blockId: string, blockLabel: string, msg: string) {
 }
 
 /** Blocks that are pure flow structure (no transport, no fabricated data) and run identically in real mode. */
-const REAL_STRUCTURAL: ReadonlySet<string> = new Set(['start', 'end', 'delay', 'loop', 'flow_while', 'uds_lockout_guard']);
+const REAL_STRUCTURAL: ReadonlySet<string> = new Set(['start', 'end', 'flow_input', 'flow_output', 'delay', 'loop', 'flow_while', 'uds_lockout_guard', 'flow_terminal', 'flow_goto']);
+
+/** Pre-run refusal of a failed validation: block statuses + log, nothing executes. */
+function refuseRun(diagram: FlowDiagram, issues: Array<{ blockId: string; message: string }>, headerKey: TranslationKey): void {
+  for (const issue of issues) {
+    if (issue.blockId !== '') flowStore.setBlockStatus(issue.blockId, 'error', issue.message);
+    flowStore.addRunLog({ blockId: issue.blockId, blockLabel: diagram.blocks.find((b) => b.id === issue.blockId)?.label ?? '',
+      level: 'error', message: `[${ts()}] ✗ ${issue.message}` });
+  }
+  flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
+    message: `[${ts()}] ✗ ${t(headerKey)}` });
+}
 
 // ─── Engine ───────────────────────────────────────────────────────────────────
 
 let flowEngineSeq = 0;
+
+/** The active diagnostics session tab as seen by the ECU binding check. */
+function activeSessionProbe(): SessionProbe {
+  const st = diagnosticsStore.getState();
+  const tab = st.tabs.find((x) => x.id === st.activeTabId) ?? st.tabs[0];
+  return { tabId: tab.id, ecuId: tab.ecuId, connected: tab.session.connected };
+}
 
 export class FlowEngine {
   private readonly _txSourceId = `uds-flow:${++flowEngineSeq}`;
@@ -113,9 +209,65 @@ export class FlowEngine {
   private _ctx: RunContext = newRunContext();
   /** Snapshot of `diagnosticsStore.mockMode` at run start: true = simulation, false = live bus. */
   private _demo = false;
-  private _real: RealFlowExecutor | null = null;
+  private _transport: FlowTransport | null = null;
+  private _stack: Frame[] = [];
+  private _frame!: Frame;
+  private _callees: CalleeCache | null = null;
+  private _rootEcu: EcuRecordV1 | null = null;
+  private _blocks = 0;
+  private _maxDepth = MAX_CALL_DEPTH;
+  private _maxBlocks = MAX_RUN_BLOCKS;
+  /** Fatal runtime-limit error: halts every frame and ends the run with outcome `error`. */
+  private _abortError: Error | null = null;
+  private get _real(): RealFlowExecutor | null { return this._frame.real; }
+  /**
+   * Evaluator of pure data (core pack, constants, compares): the real executor in real mode, a
+   * lenient pure-only one in simulated mode, so both modes run the same core semantics.
+   */
+  private get _eval(): RealFlowExecutor { return this._frame.eval; }
+  private get _loopSignal(): 'break' | 'continue' | null { return this._frame.loopSignal; }
+  private set _loopSignal(v: 'break' | 'continue' | null) { this._frame.loopSignal = v; }
+  private get _loopDepth(): number { return this._frame.loopDepth; }
+  private set _loopDepth(v: number) { this._frame.loopDepth = v; }
+  /** Result of the last `run()` (`null` while running / before the first run). */
+  result: FlowRunResult | null = null;
+  /** Block whose port led into the block now executing (for the goto jump log). */
+  private _cameFrom: FlowBlock | null = null;
 
-  stop():   void { this._stopped = true; this._resumeResolve?.(); flowPrompt.cancel(); }
+  /** Flow Stop / Panic Stop: aborts the chain, prompts, flash downloads AND the keep-alive of this run. */
+  stop(): void {
+    this._stopped = true;
+    this._resumeResolve?.();
+    flowPrompt.cancel();
+    cancelAllFlashRuns();
+    void this.releaseKeepalive('stop');
+  }
+
+  /**
+   * Stops the backend TesterPresent keep-alive started by this run (idempotent). Called on run end,
+   * error abort, Flow Stop and Panic Stop: no keep-alive survives the run.
+   */
+  private async releaseKeepalive(reason: 'end' | 'stop'): Promise<void> {
+    const tr = this._transport;
+    if (!this._ctx.keepaliveActive || tr === null) return;
+    this._ctx.keepaliveActive = false;
+    try {
+      await tr.setKeepalive(false, 0);
+      flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'warn',
+        message: `[${ts()}] ${t(reason === 'stop' ? 'udsFlow.log.kaReleasedStop' : 'udsFlow.log.kaReleasedEnd')}` });
+    } catch (e) {
+      flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
+        message: `[${ts()}] ✗ ${t('udsFlow.log.kaReleaseFail', { msg: e instanceof Error ? e.message : String(e) })}` });
+    }
+  }
+  private _halted(): boolean {
+    return this._stopped || this._abortError !== null || this._frame.finished;
+  }
+
+  private refuse(): void {
+    this.result = { outcome: 'error', name: null, outputs: {}, stopped: false, refused: true };
+  }
+
   pause():  void { this._paused = true;  flowStore.setPaused(true); }
   resume(): void {
     this._paused = false; flowStore.setPaused(false);
@@ -126,14 +278,78 @@ export class FlowEngine {
     if (this._paused) await new Promise<void>((r) => { this._resumeResolve = r; });
   }
 
-  async run(): Promise<void> {
+  // ── Frames ─────────────────────────────────────────────────────────────────
+
+  private makeFrame(
+    diagram: FlowDiagram, name: string, path: string[], pathKey: string, ecu: EcuRecordV1 | null, inputValues: Record<string, unknown>,
+  ): Frame {
+    const transport = this._transport as FlowTransport;
+    const evalLog = (b: FlowBlock, msg: string): void => log(b.id, b.label, `[${ts()}]   ${msg}`);
+    const frame = {
+      diagram, name, path, pathKey, ecu, inputValues,
+      scope: createScope(diagram.variables ?? []),
+      real: null, finished: false, reached: null, loopSignal: null, loopDepth: 0,
+    } as unknown as Frame;
+    const src = (): FlowDiagram => frame.diagram;
+    frame.real = this._demo ? null : new RealFlowExecutor(transport, this._ctx, evalLog, () => this._stopped, false, src);
+    frame.eval = frame.real ?? new RealFlowExecutor(transport, this._ctx, evalLog, () => this._stopped, true, src);
+    return frame;
+  }
+
+  private enter(frame: Frame): void {
+    this._stack.push(frame);
+    this._frame = frame;
+    this._ctx.scope = frame.scope;
+    flowStore.setFramePath(frame.path);
+  }
+
+  private leave(): void {
+    this._stack.pop();
+    const top = this._stack[this._stack.length - 1];
+    if (top) {
+      this._frame = top;
+      this._ctx.scope = top.scope;
+      flowStore.setFramePath(top.path);
+    } else {
+      flowStore.setFramePath([]);
+    }
+  }
+
+  /**
+   * Runs one frame from its entry block. A child frame that ends with an unhandled error rethrows it (the
+   * call block routes it to its `error` port); keep-alives started inside a child are released when it exits.
+   */
+  private async runFrame(frame: Frame, entry: FlowBlock, child: boolean): Promise<{ unhandled: unknown }> {
+    this.enter(frame);
+    const kaBefore = this._ctx.keepaliveActive;
+    let unhandled: unknown = null;
+    try {
+      this._cameFrom = null;
+      await this.executeChain(entry);
+    } catch (err) {
+      unhandled = err ?? new Error('error');
+    } finally {
+      if (child && !kaBefore && this._ctx.keepaliveActive) await this.releaseKeepalive(this._stopped ? 'stop' : 'end');
+      this.leave();
+    }
+    return { unhandled };
+  }
+
+  async run(opts: FlowRunOptions = {}): Promise<void> {
     this._stopped = false;
     this._paused  = false;
+    this._abortError = null;
+    this._blocks = 0;
+    this._maxDepth = opts.limits?.maxDepth ?? MAX_CALL_DEPTH;
+    this._maxBlocks = opts.limits?.maxBlocks ?? MAX_RUN_BLOCKS;
+    this._stack = [];
+    this.result = null;
     this._ctx     = newRunContext();
-    this._demo    = diagnosticsStore.getState().mockMode;
-    this._real    = this._demo
-      ? null
-      : new RealFlowExecutor(realFlowTransport, this._ctx, (b, msg) => log(b.id, b.label, `[${ts()}]   ${msg}`));
+    this._demo    = opts.transport ? opts.transport.demo : diagnosticsStore.getState().mockMode;
+    this._transport = opts.transport ?? (this._demo ? demoFlowTransport : new RealFlowTransport(diagnosticsStore.getState().activeTabId));
+    this._cameFrom = null;
+    const ecu = opts.ecu ?? null;
+    this._rootEcu = ecu;
 
     // A flow run can transmit UDS requests on its own schedule: Panic Stop must be able to abort it.
     const unregisterTx = this._demo
@@ -146,27 +362,106 @@ export class FlowEngine {
 
     flowStore.setRunning(true);
     flowStore.resetBlockStatuses();
+    flowStore.setFramePath([]);
+    flashRuntime.resetRuns();
     flowStore.clearRunLog();
     flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'info',
       message: `[${ts()}] ${t('diagEng.flowStarted')} (${this._demo ? t('diagReal.flow.modeDemo') : t('diagReal.flow.modeReal')})` });
 
-    const { diagram } = flowStore.getSnapshot() as { diagram: FlowDiagram };
-    const startBlock = diagram.blocks.find((b) => b.type === 'start');
+    const diagram = flowStore.getSnapshot().diagram;
+    const rootId = opts.rootId !== undefined ? opts.rootId : diagram.id;
+    const rootName = opts.rootName ?? diagram.name;
+    const refuseAll = (issues: Array<{ blockId: string; message: string }>, header: TranslationKey): void => {
+      refuseRun(diagram, issues, header);
+      this.refuse();
+      flowStore.setRunning(false);
+      unregisterTx?.();
+    };
+
+    const startBlock = findEntryBlock(diagram);
     if (!startBlock) {
       flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
         message: `[${ts()}] ✗ ${t('diagEng.startNotFound')}` });
+      this.refuse();
       flowStore.setRunning(false);
       unregisterTx?.();
       return;
     }
 
+    // Terminal / goto integrity is checked BEFORE anything is transmitted.
+    const issues = validateTerminals(diagram);
+    if (issues.length > 0) {
+      refuseAll(issues.map((i) => ({ blockId: i.blockId, message: terminalIssueMessage(diagram, i) })), 'udsFlow.term.invalid');
+      return;
+    }
+
+    // Core pack: declarations / references / templates / loop control are checked BEFORE anything is transmitted.
+    const coreIssues: CoreIssue[] = validateCore(diagram);
+    if (coreIssues.length > 0) {
+      refuseAll(coreIssues, 'flowCore.val.invalid');
+      return;
+    }
+
+    // Flow interface (keys, single `flow_input`, `ecu` input) and the run-time input values: refused BEFORE any TX.
+    const ifaceIssues = validateInterface(diagram);
+    if (ifaceIssues.length > 0) {
+      refuseAll(ifaceIssues, 'flowReg.val.invalid');
+      return;
+    }
+    let inputValues: Record<string, unknown> = {};
+    if (startBlock.type === FLOW_INPUT) {
+      const resolved = resolveRunInputs(flowInputSpecs(startBlock), { ...(opts.inputs ?? {}), ...(ecu ? { ecu } : {}) });
+      if (resolved.errors.length > 0) {
+        refuseAll(resolved.errors.map((message) => ({ blockId: startBlock.id, message })), 'flowReg.run.refused');
+        return;
+      }
+      inputValues = resolved.values;
+    }
+
+    // Call graph (cycles, unresolved refs, ports), ECU binding (protocols, `{ecu.*}` per frame) and the session.
+    const cache = new CalleeCache(opts.resolveCallee ?? ((id, rev) => flowRegistry.loadBody(id, rev)));
+    this._callees = cache;
+    const pre = await preflightCalls(diagram, rootId, rootName, cache);
+    const bindIssues = [...pre.issues, ...checkEcuBinding(pre.frames, ecu)];
+    if (ecu && !this._demo) {
+      const probe = opts.ecuSession ? opts.ecuSession() : opts.transport ? undefined : activeSessionProbe();
+      if (probe !== undefined) {
+        const m = checkEcuSession(ecu, probe);
+        if (m !== null) bindIssues.push({ blockId: '', code: 'session', message: m });
+      }
+    }
+    if (bindIssues.length > 0) {
+      refuseAll(bindIssues, 'flowNest.val.invalid');
+      return;
+    }
+
+    let root: Frame;
     try {
-      await this.executeChain(startBlock);
+      root = this.makeFrame(resolveFrameDiagram(diagram, ecu).diagram, rootName, [rootName], '', ecu, inputValues);
     } catch (err) {
       flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
         message: `[${ts()}] ✗ ${err instanceof Error ? err.message : String(err)}` });
+      this.refuse();
+      flowStore.setRunning(false);
+      unregisterTx?.();
+      return;
     }
+
+    const { unhandled } = await this.runFrame(root, startBlock, false);
+    if (unhandled !== null) {
+      flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
+        message: `[${ts()}] ✗ ${unhandled instanceof Error ? unhandled.message : String(unhandled)}` });
+    }
+    // Every terminal path (end, unhandled error, stop, Panic): no keep-alive survives the run.
+    await this.releaseKeepalive(this._stopped ? 'stop' : 'end');
     unregisterTx?.();
+    const reached = root.reached as { name: string; outcome: FlowOutcome; outputs: Record<string, unknown> } | null;
+    const failed = unhandled !== null || this._abortError !== null;
+    this.result = this._stopped
+      ? { outcome: 'error', name: null, outputs: {}, stopped: true, refused: false }
+      : reached && !failed
+        ? { outcome: reached.outcome, name: reached.name, outputs: reached.outputs, stopped: false, refused: false }
+        : { outcome: failed ? 'error' : 'ok', name: null, outputs: {}, stopped: false, refused: false };
 
     flowStore.setRunning(false);
     flowStore.setPaused(false);
@@ -176,63 +471,105 @@ export class FlowEngine {
     }
   }
 
-  private async executeChain(block: FlowBlock): Promise<void> {
-    if (this._stopped) return;
+  private async executeChain(block: FlowBlock, from: FlowBlock | null = null): Promise<void> {
+    if (this._halted()) return;
     await this.waitIfPaused();
-    if (this._stopped) return;
+    if (this._halted()) return;
+    this._cameFrom = from;
     const result = await this.executeBlock(block);
-    if (this._stopped) return;
+    if (this._halted()) return;
+    // flow_break / flow_continue: the chain ends here; the nearest loop driver consumes the signal.
+    if (this._loopSignal !== null) return;
+    if (block.type === 'flow_goto') {
+      // Wireless jump: continue AT the terminal (execute it, then follow its exec_out). The target was
+      // validated by dispatchDemo; a tight goto<->terminal cycle is rejected by validateTerminals.
+      const target = resolveGotoTarget(this._frame.diagram, block);
+      if (target) await this.executeChain(target, block);
+      return;
+    }
     if (result.nextPortId) {
       const next = this.findNextBlock(block.id, result.nextPortId);
-      if (next) await this.executeChain(next);
+      if (next) await this.executeChain(next, block);
     }
   }
 
   private async executeBlock(block: FlowBlock): Promise<{ nextPortId: string; result?: unknown }> {
-    const { diagram } = flowStore.getSnapshot() as { diagram: FlowDiagram };
-    flowStore.setBlockStatus(block.id, 'running');
+    const diagram = this._frame.diagram;
+    if (++this._blocks > this._maxBlocks) {
+      throw this.abort(new Error(t('flowNest.err.blockLimit', { n: this._maxBlocks })));
+    }
+    this.setStatus(block, 'running');
 
     try {
       const outcome = await this.dispatchBlock(block);
-      if (this._real) this._real.record(block, outcome);
-      flowStore.setBlockStatus(block.id, 'success', outcome.message);
-      flowStore.setBlockResult(block.id, outcome.result);
+      this._eval.record(block, outcome);
+      flowStore.setFrameResult(this._frame.pathKey, block.id, outcome.result);
+      if (outcome.failed) {
+        // Handled failure (e.g. flash download error): leave via `fail_out` when wired, else abort the run.
+        const failPort = outcome.nextPort ?? 'fail_out';
+        if (!diagram.connections.some((c) => c.fromBlockId === block.id && c.fromPortId === failPort)) {
+          throw new Error(outcome.message);
+        }
+        this.setStatus(block, 'error', outcome.message);
+        flowStore.addRunLog({ blockId: block.id, blockLabel: block.label, level: 'error',
+          message: `[${ts()}] ✗ ${block.label}  →  ${outcome.message}` });
+        return { nextPortId: outcome.nextPort ?? 'fail_out', result: outcome.result };
+      }
+      this.setStatus(block, 'success', outcome.message);
       flowStore.addRunLog({ blockId: block.id, blockLabel: block.label, level: 'success',
         message: `[${ts()}] ✓ ${block.label}  →  ${outcome.message}` });
 
       if (block.type === 'loop') {
         const iters = Number(block.config['iterations'] ?? 3);
-        for (let i = 1; i < iters; i++) {
-          if (this._stopped) break;
+        for (let i = 0; i < iters; i++) {
+          if (this._halted()) break;
           await this.waitIfPaused();
-          if (this._stopped) break;
-          const bodyNext = this.findNextBlock(block.id, 'body_out');
-          if (bodyNext) await this.executeChain(bodyNext);
+          if (this._halted()) break;
+          if ((await this.runLoopBody(block)) === 'break') break;
         }
         return { nextPortId: 'done_out', result: outcome.result };
       }
+      if (block.type === 'flow_for') {
+        const range = readForRange(block);
+        let n = 0;
+        for (;;) {
+          const v = forValueAt(range, n);
+          if (v === null) break;
+          if (n >= FOR_ITERATION_CAP) throw new Error(t('flowCore.err.forCap', { block: block.label, cap: FOR_ITERATION_CAP }));
+          if (this._halted()) break;
+          await this.waitIfPaused();
+          if (this._halted()) break;
+          this._ctx.scope.locals.set(block.id, v);
+          n++;
+          if ((await this.runLoopBody(block)) === 'break') break;
+        }
+        return { nextPortId: 'done_out', result: n };
+      }
       if (block.type === 'flow_while') {
-        const maxIter = Number(block.config['max_iterations'] ?? 100);
+        const maxIter = Number(block.config['max_iterations'] ?? WHILE_DEFAULT_MAX);
         let iterCount = 0;
-        if (this._real) {
-          // Real: re-evaluate the connected bool input before every iteration (no fixed fake count).
+        if (this._real || this._eval?.canEvalPure(block, 'bool_in')) {
+          // Re-evaluate the connected bool input before every iteration (pure; reads the current variables).
+          const ev = this._eval;
           while (iterCount < maxIter) {
-            if (this._stopped) break;
+            if (this._halted()) break;
             await this.waitIfPaused();
-            if (this._stopped || !(await this._real.evalBool(block, 'bool_in'))) break;
+            if (this._halted() || !(await ev.evalBool(block, 'bool_in'))) break;
             iterCount++;
-            const bodyNext = this.findNextBlock(block.id, 'body_out');
-            if (bodyNext) await this.executeChain(bodyNext);
+            if ((await this.runLoopBody(block)) === 'break') return { nextPortId: 'done_out', result: iterCount };
+          }
+          // Cap reached: only a condition that is still true is an error (never a silent stop).
+          if (iterCount >= maxIter && !this._halted() && (await ev.evalBool(block, 'bool_in'))) {
+            throw new Error(t('flowCore.err.whileCap', { block: block.label, n: iterCount }));
           }
           return { nextPortId: 'done_out', result: iterCount };
         }
-        // DEMO: body runs 3 times (simulation)
+        // DEMO without an evaluable condition: body runs 3 times (simulation)
         while (iterCount < Math.min(3, maxIter)) {
-          if (this._stopped) break;
+          if (this._halted()) break;
           await this.waitIfPaused();
           iterCount++;
-          const bodyNext = this.findNextBlock(block.id, 'body_out');
-          if (bodyNext) await this.executeChain(bodyNext);
+          if ((await this.runLoopBody(block)) === 'break') break;
         }
         return { nextPortId: 'done_out', result: iterCount };
       }
@@ -242,19 +579,67 @@ export class FlowEngine {
       return { nextPortId: outcome.nextPort ?? 'exec_out', result: outcome.result };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      flowStore.setBlockStatus(block.id, 'error', msg);
+      this.setStatus(block, 'error', msg);
       flowStore.addRunLog({ blockId: block.id, blockLabel: block.label, level: 'error',
         message: `[${ts()}] ✗ ${block.label}  →  ${msg}` });
-      const hasErrOut = diagram.connections.some((c) => c.fromBlockId === block.id && c.fromPortId === 'error_out');
-      if (hasErrOut) return { nextPortId: 'error_out' };
+      // The flash block has no `error_out`: its failures (including refused pre-flight) leave via
+      // `fail_out`; wait-ready has only `timeout_out`.
+      const errPort = isCallType(block.type) ? 'error' : block.type === 'uds_flash_image' ? 'fail_out' : block.type === 'uds_wait_ecu_ready' ? 'timeout_out' : 'error_out';
+      const hasErrOut = diagram.connections.some((c) => c.fromBlockId === block.id && c.fromPortId === errPort);
+      if (hasErrOut) return { nextPortId: errPort };
       throw err;
+    }
+  }
+
+  /** Runs the `body_out` chain once; reports a `flow_break` raised inside it (a `flow_continue` just ends the pass). */
+  private async runLoopBody(loop: FlowBlock): Promise<'next' | 'break'> {
+    const bodyNext = this.findNextBlock(loop.id, 'body_out');
+    if (bodyNext) {
+      this._loopDepth++;
+      try {
+        await this.executeChain(bodyNext);
+      } finally {
+        this._loopDepth--;
+      }
+    }
+    const sig = this._loopSignal;
+    this._loopSignal = null;
+    return sig === 'break' ? 'break' : 'next';
+  }
+
+  /**
+   * Core exec blocks (`log` templates, `var_set`, `flow_for`, `flow_break`, `flow_continue`): identical in
+   * simulated and real mode (shared `coreRuntime`), so the two engines cannot diverge.
+   */
+  private async dispatchCore(block: FlowBlock): Promise<{ message: string; result?: unknown }> {
+    const ev = this._eval;
+    const scope = this._ctx.scope;
+    switch (block.type) {
+      case 'log': {
+        const msg = await renderLogMessage(block, ev.core, scope);
+        log(block.id, block.label, `[${ts()}]   LOG: ${msg || t('diagEng.empty')}`);
+        return { message: msg || t('diagEng.emptyMsg') };
+      }
+      case 'var_set':
+        return { message: await execVarSet(block, ev.core, scope) };
+      case 'flow_for': {
+        const r = readForRange(block);
+        return { message: t('flowCore.log.for', { from: formatValue(r.from), to: formatValue(r.to), step: formatValue(r.step) }) };
+      }
+      default: {
+        if (this._loopDepth === 0) throw new Error(t('flowCore.err.loopOutside', { block: block.label }));
+        this._loopSignal = block.type === 'flow_break' ? 'break' : 'continue';
+        return { message: t(block.type === 'flow_break' ? 'flowCore.log.break' : 'flowCore.log.continue') };
+      }
     }
   }
 
   /** Real mode: structural blocks without any bus/data content run as-is; everything else is live. */
   private async dispatchBlock(
     block: FlowBlock,
-  ): Promise<{ message: string; result?: unknown; nextPort?: string; outputs?: Record<string, unknown> }> {
+  ): Promise<{ message: string; result?: unknown; nextPort?: string; outputs?: Record<string, unknown>; failed?: boolean }> {
+    if (isCallType(block.type)) return this.dispatchCall(block);
+    if (CORE_EXEC_BLOCKS.has(block.type)) return this.dispatchCore(block);
     if (this._real && !REAL_STRUCTURAL.has(block.type)) return this._real.execute(block);
     return this.dispatchDemo(block);
   }
@@ -265,12 +650,46 @@ export class FlowEngine {
    */
   private async dispatchDemo(
     block: FlowBlock,
-  ): Promise<{ message: string; result?: unknown; nextPort?: string }> {
+  ): Promise<{ message: string; result?: unknown; nextPort?: string; outputs?: Record<string, unknown>; failed?: boolean }> {
     const ctx = this._ctx;
 
     switch (block.type) {
 
       // ── FLOW ─────────────────────────────────────────────────────────────────
+
+      case 'flow_terminal': return { message: t('udsFlow.term.reached', { name: terminalName(block) }) };
+
+      case 'flow_goto': {
+        // Real and DEMO share this structural path (no bus traffic). Missing / invalid target = block error.
+        const target = resolveGotoTarget(this._frame.diagram, block);
+        if (target === null) throw new Error(t('udsFlow.term.missing'));
+        const msg = t('udsFlow.term.jump', { name: terminalName(target), from: (this._cameFrom ?? block).label });
+        log(block.id, block.label, `[${ts()}]   ${msg}`);
+        return { message: msg };
+      }
+
+      case 'flow_input':
+        return { message: t('diagEng.startMsg'), nextPort: 'start', outputs: { ...this._frame.inputValues } };
+
+      case 'flow_output': {
+        // Records the wired output values and ends the run with this outcome.
+        const ev = this._eval;
+        const outputs: Record<string, unknown> = {};
+        for (const spec of flowOutputSpecs(block)) {
+          // A value whose source never ran on this path (another branch) is simply absent.
+          const v = await ev.softInput(block, spec.key);
+          if (v !== undefined) outputs[spec.key] = v;
+          else if (spec.required && this._real) {
+            // The real engine enforces required outputs; the simulated one stays lenient (fabricated values).
+            throw new Error(t('flowReg.run.outputMissing', { name: spec.key, block: block.label }));
+          }
+        }
+        const name = flowOutputName(block).trim();
+        const outcome = flowOutputOutcome(block);
+        this._frame.reached = { name, outcome, outputs };
+        this._frame.finished = true;
+        return { message: t('flowReg.run.outputReached', { name, outcome }), result: outputs };
+      }
 
       case 'start': return { message: t('diagEng.startMsg') };
       case 'end':   return { message: t('diagEng.endMsg') };
@@ -282,18 +701,19 @@ export class FlowEngine {
         return { message: t('diagEng.delayDone', { ms }) };
       }
 
-      case 'condition': return { message: t('diagEng.condEval'), result: true };
+      case 'condition': {
+        // Wired to a pure, real-valued cone (core pack / constants / compares): evaluate it for real.
+        if (this._eval?.canEvalPure(block, 'bool_in')) {
+          const v = await this._eval.evalBool(block, 'bool_in');
+          return { message: String(v), result: v };
+        }
+        return { message: t('diagEng.condEval'), result: true };
+      }
       case 'loop':      return { message: t('diagEng.loopStart', { n: String(block.config['iterations'] ?? 3) }) };
       case 'assert':    return { message: t('diagEng.assertPass'), result: true };
 
-      case 'log': {
-        const msg = String(block.config['message'] ?? '');
-        log(block.id, block.label, `[${ts()}]   LOG: ${msg || t('diagEng.empty')}`);
-        return { message: msg || t('diagEng.emptyMsg') };
-      }
-
       case 'flow_while': {
-        const maxIter = Number(block.config['max_iterations'] ?? 100);
+        const maxIter = Number(block.config['max_iterations'] ?? WHILE_DEFAULT_MAX);
         // The actual loop execution is handled in executeBlock — just return the message
         return { message: t('diagEng.whileLoop', { max: maxIter }) };
       }
@@ -432,7 +852,7 @@ export class FlowEngine {
         log(block.id, block.label, `[${ts()}]   RX: 62 ${didBytes.map(hexB).join(' ')} ${entry.raw.map(hexB).join(' ')}`);
         log(block.id, block.label, `[${ts()}]       ${entry.label}: "${entry.display}"`);
 
-        return { message: `0x${did} (${entry.label}) = "${entry.display}"`, result: { did, label: entry.label, raw: rawBytes, display: entry.display } };
+        return { message: `0x${did} (${entry.label}) = "${entry.display}"`, result: { did, label: entry.label, raw: rawBytes, display: entry.display }, outputs: { data_out: rawBytes } };
       }
 
       // ── 0x23 ReadMemoryByAddress ──────────────────────────────────────────────
@@ -629,8 +1049,9 @@ export class FlowEngine {
         const ctrlLabel: Record<string, string> = { '01': 'startRoutine', '02': 'stopRoutine', '03': 'requestRoutineResults' };
         const ridNames: Record<string, string> = {
           'FF00': 'eraseMemory',
-          '0202': 'checkProgrammingDependencies',
-          '0203': 'eraseMirrorMemoryDTCs',
+          'FF01': 'checkProgrammingDependencies',
+          '0202': 'checkMemory',
+          '0203': 'checkProgrammingPreconditions',
           'DF01': 'checkMemoryIntegrity',
           'E200': 'requestSoftwareUpdate',
         };
@@ -739,6 +1160,30 @@ export class FlowEngine {
         return { message: t('diagEng.transferDoneMsg', { n: transferred }) };
       }
 
+      // ── Flash Image (DEMO: local simulated download, nothing transmitted) ─────
+
+      case 'uds_flash_image':
+        return runFlashBlock(block, { demo: true, tabId: null, log: (msg) => log(block.id, block.label, `[${ts()}]   ${msg}`), transport: demoFlowTransport });
+
+      // ── Keep-alive / wait-ready (DEMO: simulated, nothing transmitted) ───────
+
+      case 'uds_tester_present_keepalive': {
+        const interval = Number(block.config['interval_ms'] ?? 2000);
+        if (block.config['action'] === 'stop') {
+          ctx.keepaliveActive = false;
+          return { message: t('udsFlow.log.kaStopped') };
+        }
+        ctx.keepaliveActive = true;
+        return { message: t('udsFlow.log.kaStarted', { ms: interval }) };
+      }
+
+      case 'uds_wait_ecu_ready': {
+        const ms = Math.min(1500, Math.max(0, Number(block.config['initial_delay_ms'] ?? 500)) + 120);
+        log(block.id, block.label, `[${ts()}]   ${t('udsFlow.wr.start', { probe: String(block.config['probe'] ?? '3E00'), initial: ms, total: Number(block.config['timeout_ms'] ?? 10000) })}`);
+        await randomDelay(ms, ms + 60);
+        return { message: t('udsFlow.wr.ready', { ms, n: 1 }), result: ms, outputs: { elapsed_out: ms } };
+      }
+
       // ── 0x3D WriteMemoryByAddress ──────────────────────────────────────────────
 
       case 'uds_write_memory': {
@@ -830,15 +1275,6 @@ export class FlowEngine {
         return { message: t('diagEng.constMsg', { val: String(val) }), result: val };
       }
 
-      case 'data_var': {
-        const name = String(block.config['name'] ?? 'myVar');
-        const existing = ctx.variables.get(name);
-        if (existing !== undefined) return { message: `"${name}" = ${JSON.stringify(existing)}`, result: existing };
-        const initial = block.config['initial'];
-        ctx.variables.set(name, initial);
-        return { message: `"${name}" init = ${JSON.stringify(initial)}`, result: initial };
-      }
-
       case 'data_compare': return { message: t('diagEng.cmpEqual'), result: true };
 
       case 'data_extract': {
@@ -916,8 +1352,71 @@ export class FlowEngine {
     }
   }
 
+  private setStatus(block: FlowBlock, status: BlockStatus, message?: string): void {
+    flowStore.setFrameStatus(this._frame.pathKey, block.id, status, message);
+  }
+
+  /** Fatal runtime-limit error: every frame halts and the run ends with outcome `error`. */
+  private abort(err: Error): Error {
+    if (this._abortError === null) this._abortError = err;
+    return err;
+  }
+
+  /**
+   * Call block (`call:<flowId>`): runs the pinned callee as a NESTED FRAME (own variable scope, executors and
+   * statuses). Inputs come from the call block's ports, the reached outcome selects the exec output, the
+   * outcome's outputs are recorded on the call block's data outputs. An unhandled callee error is thrown and
+   * routed by `executeBlock` to the `error` port (unwired = error of the parent frame).
+   */
+  private async dispatchCall(
+    block: FlowBlock,
+  ): Promise<{ message: string; result?: unknown; nextPort?: string; outputs?: Record<string, unknown> }> {
+    const ref = readCallRef(block);
+    const cache = this._callees;
+    if (!ref || !cache) throw new Error(t('flowNest.val.badRef', { block: block.label }));
+    if (this._stack.length - 1 >= this._maxDepth) {
+      throw this.abort(new Error(t('flowNest.err.depth', { n: this._maxDepth })));
+    }
+    const callee = await cache.ensure(ref);
+    const parent = this._frame;
+    // Inputs from the parent's ports (typed values pass through unchanged; missing ones take the default).
+    const values: Record<string, unknown> = {};
+    const errors: string[] = [];
+    for (const spec of callee.iface.inputs) {
+      const v = await parent.eval.core.optional(block, spec.key, 0);
+      if (v !== undefined) {
+        if ((spec.type === 'file' || spec.type === 'bytes') && !asBytes(v)) errors.push(t('flowReg.run.missing', { name: spec.key }));
+        else values[spec.key] = spec.type === 'file' || spec.type === 'bytes' ? asBytes(v) : v;
+      } else {
+        const r = resolveRunInputs([spec], {});
+        errors.push(...r.errors);
+        Object.assign(values, r.values);
+      }
+    }
+    if (errors.length > 0) throw new Error(`${callee.name}: ${errors.join('; ')}`);
+    const childEcu = (values['ecu'] ?? null) as EcuRecordV1 | null;
+    if (childEcu && this._rootEcu && childEcu.id !== this._rootEcu.id) {
+      throw new Error(t('flowNest.err.otherEcu', { callee: callee.name, ecu: childEcu.name }));
+    }
+    const pathKey = parent.pathKey === '' ? block.id : `${parent.pathKey}/${block.id}`;
+    flowStore.clearFrameStatuses(pathKey);
+    const child = this.makeFrame(
+      resolveFrameDiagram(callee.diagram, childEcu).diagram, callee.name, [...parent.path, callee.name], pathKey, childEcu, values,
+    );
+    const entry = findEntryBlock(child.diagram);
+    if (!entry) throw new Error(`${callee.name}: ${t('diagEng.startNotFound')}`);
+    log(block.id, block.label, `[${ts()}]   ${t('flowNest.log.enter', { name: callee.name, rev: ref.revision })}`);
+    const { unhandled } = await this.runFrame(child, entry, true);
+    if (unhandled !== null) throw (unhandled instanceof Error ? unhandled : new Error(String(unhandled)));
+    const reached = child.reached as { name: string; outcome: FlowOutcome; outputs: Record<string, unknown> } | null;
+    const name = reached ? reached.name : 'ok';
+    const outputs = reached ? reached.outputs : {};
+    log(block.id, block.label, `[${ts()}]   ${t('flowNest.log.leave', { name: callee.name, outcome: name })}`);
+    return { message: t('flowNest.log.returned', { name: callee.name, outcome: name }), nextPort: name, outputs, result: outputs };
+  }
+
   private findNextBlock(fromBlockId: string, fromPortId: string): FlowBlock | null {
-    const { diagram } = flowStore.getSnapshot() as { diagram: FlowDiagram };
+    const diagram = this._frame.diagram;
     const conn = diagram.connections.find((c) => c.fromBlockId === fromBlockId && c.fromPortId === fromPortId);
     if (!conn) return null;
     return diagram.blocks.find((b) => b.id === conn.toBlockId) ?? null;

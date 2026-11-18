@@ -1,8 +1,248 @@
-import type { BlockDef, BlockCategory } from './types';
+import type { BlockDef, BlockDefSeed, BlockCategory, FlowBlock, PortDef, PortType } from './types';
+import type { BlockPack } from '../../types/flowLibrary';
+import type { DiagProtocol } from '../../types/diagWorkspace';
+import { formatInputs } from './coreRuntime';
+import { callIndex, isCallType, readCallRef, refKey } from './callIndex';
+import { callPorts, CALL_ERROR, CALL_IN } from './callPorts';
+import { FLOW_INPUT, FLOW_OUTPUT, interfacePorts, interfacePortsKey } from './flowPorts';
+
+// ─── CORE CATEGORY (diag-workspace-v1 §8.1) ───────────────────────────────────
+
+const MATH_SYMBOLS: Array<[string, string]> = [
+  ['add', '+'], ['sub', '−'], ['mul', '×'], ['div', '÷'], ['mod', 'mod'],
+  ['min', 'min'], ['max', 'max'], ['abs', 'abs'], ['round', 'round'], ['floor', 'floor'],
+];
+
+const coreBlocks: BlockDefSeed[] = [
+  {
+    type: 'var_get',
+    labelKey: 'flowCore.blk.varGet',
+    category: 'core',
+    descriptionKey: 'flowCore.desc.varGet',
+    icon: 'Variable',
+    ports: [{ id: 'value', label: 'value', type: 'data', direction: 'output' }],
+    defaultConfig: { name: '' },
+    configSchema: [{ key: 'name', labelKey: 'flowCore.cfg.varName', type: 'variable' }],
+  },
+  {
+    type: 'var_set',
+    labelKey: 'flowCore.blk.varSet',
+    category: 'core',
+    descriptionKey: 'flowCore.desc.varSet',
+    icon: 'Variable',
+    ports: [
+      { id: 'exec_in',  label: 'exec_in',  type: 'exec', direction: 'input' },
+      { id: 'value_in', label: 'value_in', type: 'data', direction: 'input', optional: true },
+      { id: 'exec_out', label: 'exec_out', type: 'exec', direction: 'output' },
+    ],
+    defaultConfig: { name: '', mode: 'set', amount: 1 },
+    configSchema: [
+      { key: 'name', labelKey: 'flowCore.cfg.varName', type: 'variable' },
+      {
+        key: 'mode',
+        labelKey: 'flowCore.cfg.mode',
+        type: 'select',
+        options: [
+          { value: 'set', labelKey: 'flowCore.cfg.modeSet' },
+          { value: 'add', labelKey: 'flowCore.cfg.modeAdd' },
+          { value: 'sub', labelKey: 'flowCore.cfg.modeSub' },
+        ],
+      },
+      {
+        key: 'amount',
+        labelKey: 'flowCore.cfg.amount',
+        type: 'number',
+        placeholder: '1',
+        visibleWhen: (c) => c['mode'] === 'add' || c['mode'] === 'sub',
+      },
+    ],
+  },
+  {
+    type: 'math',
+    labelKey: 'flowCore.blk.math',
+    category: 'core',
+    descriptionKey: 'flowCore.desc.math',
+    icon: 'Calculator',
+    ports: [
+      { id: 'a_in',   label: 'a_in',   type: 'data', direction: 'input' },
+      { id: 'b_in',   label: 'b_in',   type: 'data', direction: 'input', optional: true },
+      { id: 'result', label: 'result', type: 'data', direction: 'output' },
+    ],
+    defaultConfig: { op: 'add', b: 1 },
+    configSchema: [
+      {
+        key: 'op',
+        labelKey: 'diagBlk.operator',
+        type: 'select',
+        options: MATH_SYMBOLS.map(([value, label]) => ({ value, label })),
+      },
+      {
+        key: 'b',
+        labelKey: 'flowCore.cfg.mathB',
+        type: 'number',
+        placeholder: '1',
+        visibleWhen: (c) => c['op'] !== 'abs' && c['op'] !== 'round' && c['op'] !== 'floor',
+      },
+    ],
+  },
+  {
+    type: 'logic',
+    labelKey: 'flowCore.blk.logic',
+    category: 'core',
+    descriptionKey: 'flowCore.desc.logic',
+    icon: 'GitMerge',
+    ports: [
+      { id: 'a_in',   label: 'a_in',   type: 'bool', direction: 'input' },
+      { id: 'b_in',   label: 'b_in',   type: 'bool', direction: 'input', optional: true },
+      { id: 'result', label: 'result', type: 'bool', direction: 'output' },
+    ],
+    defaultConfig: { op: 'and' },
+    configSchema: [
+      {
+        key: 'op',
+        labelKey: 'diagBlk.operator',
+        type: 'select',
+        options: [
+          { value: 'and', label: 'AND' },
+          { value: 'or',  label: 'OR' },
+          { value: 'xor', label: 'XOR' },
+          { value: 'not', label: 'NOT' },
+        ],
+      },
+    ],
+  },
+  {
+    type: 'convert',
+    labelKey: 'flowCore.blk.convert',
+    category: 'core',
+    descriptionKey: 'flowCore.desc.convert',
+    icon: 'Shuffle',
+    ports: [
+      { id: 'value_in', label: 'value_in', type: 'data', direction: 'input' },
+      { id: 'value',    label: 'value',    type: 'data', direction: 'output' },
+    ],
+    defaultConfig: { target: 'number', byteLength: 1, endianness: 'big' },
+    configSchema: [
+      {
+        key: 'target',
+        labelKey: 'flowCore.cfg.target',
+        type: 'select',
+        options: [
+          { value: 'number', labelKey: 'flowCore.cfg.tNumber' },
+          { value: 'text',   labelKey: 'diagBlk.text' },
+          { value: 'hex',    label: 'Hex' },
+          { value: 'bytes',  label: 'Bytes' },
+        ],
+      },
+      {
+        key: 'byteLength',
+        labelKey: 'flowCore.cfg.byteLength',
+        type: 'number',
+        placeholder: '1',
+        visibleWhen: (c) => c['target'] === 'bytes',
+      },
+      {
+        key: 'endianness',
+        labelKey: 'flowCore.cfg.endianness',
+        type: 'select',
+        options: [
+          { value: 'big',    labelKey: 'flowCore.cfg.big' },
+          { value: 'little', labelKey: 'flowCore.cfg.little' },
+        ],
+        visibleWhen: (c) => c['target'] === 'bytes' || c['target'] === 'number',
+      },
+    ],
+  },
+  {
+    type: 'text_format',
+    labelKey: 'flowCore.blk.textFormat',
+    category: 'core',
+    descriptionKey: 'flowCore.desc.textFormat',
+    icon: 'Type',
+    ports: [{ id: 'text_out', label: 'text_out', type: 'data', direction: 'output' }],
+    defaultConfig: { template: '', inputs: [] },
+    configSchema: [
+      { key: 'template', labelKey: 'flowCore.cfg.template', type: 'text', placeholder: 'x = {x}, nrc = {nrc}' },
+      { key: 'inputs', labelKey: 'flowCore.cfg.inputs', type: 'namelist', placeholder: 'nrc, did' },
+    ],
+  },
+  {
+    type: 'flow_for',
+    labelKey: 'flowCore.blk.flowFor',
+    category: 'core',
+    descriptionKey: 'flowCore.desc.flowFor',
+    icon: 'Repeat',
+    ports: [
+      { id: 'exec_in',  label: 'exec_in',  type: 'exec', direction: 'input' },
+      { id: 'body_out', label: 'body_out', type: 'exec', direction: 'output' },
+      { id: 'done_out', label: 'done_out', type: 'exec', direction: 'output' },
+      { id: 'index',    label: 'index',    type: 'data', direction: 'output' },
+    ],
+    defaultConfig: { from: 1, to: 10, step: 1 },
+    configSchema: [
+      { key: 'from', labelKey: 'flowCore.cfg.from', type: 'number', placeholder: '1' },
+      { key: 'to',   labelKey: 'flowCore.cfg.to',   type: 'number', placeholder: '10' },
+      { key: 'step', labelKey: 'flowCore.cfg.step', type: 'number', placeholder: '1' },
+    ],
+  },
+  {
+    type: 'flow_break',
+    labelKey: 'flowCore.blk.flowBreak',
+    category: 'core',
+    descriptionKey: 'flowCore.desc.flowBreak',
+    icon: 'LogOut',
+    ports: [{ id: 'exec_in', label: 'exec_in', type: 'exec', direction: 'input' }],
+    defaultConfig: {},
+    configSchema: [],
+  },
+  {
+    type: 'flow_continue',
+    labelKey: 'flowCore.blk.flowContinue',
+    category: 'core',
+    descriptionKey: 'flowCore.desc.flowContinue',
+    icon: 'SkipForward',
+    ports: [{ id: 'exec_in', label: 'exec_in', type: 'exec', direction: 'input' }],
+    defaultConfig: {},
+    configSchema: [],
+  },
+];
 
 // ─── FLOW CATEGORY ────────────────────────────────────────────────────────────
 
-const flowBlocks: BlockDef[] = [
+const flowBlocks: BlockDefSeed[] = [
+  {
+    type: FLOW_INPUT,
+    labelKey: 'flowReg.blk.flowInput',
+    category: 'flow',
+    descriptionKey: 'flowReg.desc.flowInput',
+    icon: 'LogIn',
+    ports: [{ id: 'start', label: 'start', type: 'exec', direction: 'output' }],
+    defaultConfig: { inputs: [] },
+    configSchema: [{ key: 'inputs', labelKey: 'flowReg.cfg.inputs', type: 'portspecs' }],
+  },
+  {
+    type: FLOW_OUTPUT,
+    labelKey: 'flowReg.blk.flowOutput',
+    category: 'flow',
+    descriptionKey: 'flowReg.desc.flowOutput',
+    icon: 'LogOut',
+    ports: [{ id: 'in', label: 'in', type: 'exec', direction: 'input' }],
+    defaultConfig: { name: 'ok', outcome: 'ok', outputs: [] },
+    configSchema: [
+      { key: 'name', labelKey: 'flowReg.cfg.outputName', type: 'text', placeholder: 'ok' },
+      {
+        key: 'outcome',
+        labelKey: 'flowReg.cfg.outcome',
+        type: 'select',
+        options: [
+          { value: 'ok', label: 'ok' },
+          { value: 'fail', label: 'fail' },
+          { value: 'error', label: 'error' },
+        ],
+      },
+      { key: 'outputs', labelKey: 'flowReg.cfg.outputs', type: 'portspecs' },
+    ],
+  },
   {
     type: 'start',
     labelKey: 'diagBlk.start',
@@ -96,7 +336,9 @@ const flowBlocks: BlockDef[] = [
           { value: 'eq',       labelKey: 'diagBlk.equal' },
           { value: 'neq',      labelKey: 'diagBlk.notEqual' },
           { value: 'gt',       labelKey: 'diagBlk.greater' },
+          { value: 'ge',       label: '≥' },
           { value: 'lt',       labelKey: 'diagBlk.less' },
+          { value: 'le',       label: '≤' },
           { value: 'contains', labelKey: 'diagBlk.contains' },
         ],
       },
@@ -132,9 +374,9 @@ const flowBlocks: BlockDef[] = [
       { id: 'body_out', label: 'body_out', type: 'exec', direction: 'output' },
       { id: 'done_out', label: 'done_out', type: 'exec', direction: 'output' },
     ],
-    defaultConfig: { max_iterations: 100 },
+    defaultConfig: { max_iterations: 10000 },
     configSchema: [
-      { key: 'max_iterations', labelKey: 'diagBlk.maxIterationsSafety', type: 'number', placeholder: '100' },
+      { key: 'max_iterations', labelKey: 'diagBlk.maxIterationsSafety', type: 'number', placeholder: '10000' },
     ],
   },
 
@@ -155,11 +397,55 @@ const flowBlocks: BlockDef[] = [
       { key: 'timeout_ms', labelKey: 'diagBlk.timeoutMs', type: 'number', placeholder: '5000' },
     ],
   },
+
+  // ── Terminal / Goto (wireless jump points) ───────────────────────────────────
+  {
+    type: 'flow_terminal',
+    labelKey: 'diagBlk.terminal',
+    category: 'flow',
+    descriptionKey: 'diagBlk.terminalDesc',
+    icon: 'Flag',
+    ports: [
+      { id: 'exec_out', label: 'exec_out', type: 'exec', direction: 'output' },
+    ],
+    defaultConfig: { name: 'TERMINAL', color: 'amber' },
+    configSchema: [
+      { key: 'name', labelKey: 'diagBlk.terminalName', type: 'text', placeholder: 'SAFE ABORT' },
+      {
+        key: 'color',
+        labelKey: 'diagBlk.terminalColor',
+        type: 'select',
+        options: [
+          { value: 'amber',   labelKey: 'diagBlk.tcol.amber' },
+          { value: 'red',     labelKey: 'diagBlk.tcol.red' },
+          { value: 'orange',  labelKey: 'diagBlk.tcol.orange' },
+          { value: 'cyan',    labelKey: 'diagBlk.tcol.cyan' },
+          { value: 'violet',  labelKey: 'diagBlk.tcol.violet' },
+          { value: 'emerald', labelKey: 'diagBlk.tcol.emerald' },
+        ],
+      },
+    ],
+  },
+  {
+    type: 'flow_goto',
+    labelKey: 'diagBlk.goto',
+    category: 'flow',
+    descriptionKey: 'diagBlk.gotoDesc',
+    icon: 'CornerDownRight',
+    ports: [
+      { id: 'exec_in', label: 'exec_in', type: 'exec', direction: 'input' },
+    ],
+    defaultConfig: { target_terminal_id: '' },
+    // The target is a dropdown of the diagram's terminals (rendered by FlowInspector, value = block id).
+    configSchema: [
+      { key: 'target_terminal_id', labelKey: 'diagBlk.gotoTarget', type: 'select' },
+    ],
+  },
 ];
 
 // ─── UDS CATEGORY ─────────────────────────────────────────────────────────────
 
-const udsBlocks: BlockDef[] = [
+const udsBlocks: BlockDefSeed[] = [
   // ── 0x10 DiagnosticSessionControl ──────────────────────────────────────────
   {
     type: 'uds_session',
@@ -481,6 +767,7 @@ fn calculate_key(seed, level) {
     icon: 'Cpu',
     ports: [
       { id: 'exec_in',    label: 'exec_in',    type: 'exec', direction: 'input' },
+      { id: 'option_in',  label: 'option_in',  type: 'data', direction: 'input', optional: true },
       { id: 'exec_out',   label: 'exec_out',   type: 'exec', direction: 'output' },
       { id: 'result_out', label: 'result_out', type: 'data', direction: 'output' },
       { id: 'error_out',  label: 'error_out',  type: 'exec', direction: 'output' },
@@ -503,14 +790,16 @@ fn calculate_key(seed, level) {
         type: 'select',
         options: [
           { value: 'FF00', label: '0xFF00 — eraseMemory' },
-          { value: '0202', label: '0x0202 — checkProgrammingDependencies' },
-          { value: '0203', label: '0x0203 — eraseMirrorMemoryDTCs' },
+          { value: 'FF01', label: '0xFF01 — checkProgrammingDependencies' },
+          { value: '0202', label: '0x0202 — checkMemory (CRC32, OEM)' },
+          { value: '0203', label: '0x0203 — checkProgrammingPreconditions (OEM)' },
           { value: 'DF01', label: '0xDF01 — checkMemoryIntegrity (CRC/Checksum)' },
           { value: 'E200', label: '0xE200 — requestSoftwareUpdate' },
           { value: 'custom', labelKey: 'diagBlk.customEnterInTheFieldBelow' },
         ],
       },
       { key: 'routine_id_custom', labelKey: 'diagBlk.customRoutineIDHex', type: 'hex', placeholder: '0203' },
+      { key: 'expect_status', labelKey: 'udsFlow.cfg.expectStatus', type: 'hex', placeholderKey: 'udsFlow.cfg.expectStatusPh' },
     ],
   },
 
@@ -585,6 +874,98 @@ fn calculate_key(seed, level) {
     ],
   },
 
+  // ── Flash Image (high-level 0x34 → 0x36* → 0x37) ────────────────────────────
+  {
+    type: 'uds_flash_image',
+    labelKey: 'flash.block.label',
+    category: 'uds',
+    descriptionKey: 'flash.block.desc',
+    icon: 'HardDriveUpload',
+    ports: [
+      { id: 'exec_in',  label: 'exec_in',  type: 'exec', direction: 'input' },
+      { id: 'exec_out', label: 'exec_out', type: 'exec', direction: 'output' },
+      { id: 'fail_out', label: 'fail_out', type: 'exec', direction: 'output' },
+      { id: 'crc32',    label: 'crc32',    type: 'data', direction: 'output' },
+      { id: 'report',   label: 'report',   type: 'data', direction: 'output' },
+    ],
+    defaultConfig: {
+      file_name: '',
+      format: 'auto',
+      base_address: '00000000',
+      alfid: '44',
+      dfi: '00',
+      max_block_len: 0,
+      retries: 2,
+      transfer_timeout_ms: 0,
+      erase_mode: 'none',
+      erase_routine_id: 'FF00',
+      erase_alfid: '44',
+      erase_timeout_ms: 30000,
+      erase_busy_retry: 3,
+      erase_busy_delay_ms: 200,
+      erase_expected_status: '',
+      verify_mode: 'total_crc32',
+      verify_routine_id: '0202',
+      verify_expected_status: '00',
+      verify_timeout_ms: 5000,
+    },
+    configSchema: [
+      {
+        key: 'format',
+        labelKey: 'flash.cfg.format',
+        type: 'select',
+        options: [
+          { value: 'auto',     labelKey: 'flash.fmt.auto' },
+          { value: 'intelHex', labelKey: 'flash.fmt.intelHex' },
+          { value: 'srec',     labelKey: 'flash.fmt.srec' },
+          { value: 'binary',   labelKey: 'flash.fmt.binary' },
+        ],
+      },
+      {
+        key: 'base_address',
+        labelKey: 'flash.cfg.baseAddress',
+        type: 'hex',
+        placeholder: '08000000',
+        visibleWhen: (c) =>
+          c['format'] === 'binary' ||
+          (c['format'] === 'auto' && String(c['file_name'] ?? '').toLowerCase().endsWith('.bin')),
+      },
+      { key: 'alfid', labelKey: 'flash.cfg.alfid', type: 'hex', placeholder: '44' },
+      { key: 'dfi',   labelKey: 'flash.cfg.dfi',   type: 'hex', placeholder: '00' },
+      { key: 'max_block_len',       labelKey: 'flash.cfg.maxBlockLen',       type: 'number', placeholderKey: 'flash.cfg.autoPlaceholder' },
+      { key: 'retries',             labelKey: 'flash.cfg.retries',           type: 'number', placeholder: '2' },
+      { key: 'transfer_timeout_ms', labelKey: 'flash.cfg.transferTimeout',   type: 'number', placeholderKey: 'flash.cfg.autoPlaceholder' },
+      {
+        key: 'erase_mode',
+        labelKey: 'flash.cfg.eraseMode',
+        type: 'select',
+        options: [
+          { value: 'none',        labelKey: 'flash.cfg.eraseNone' },
+          { value: 'per_segment', labelKey: 'flash.cfg.erasePerSegment' },
+        ],
+      },
+      { key: 'erase_routine_id',      labelKey: 'flash.cfg.eraseRoutine',   type: 'hex',    placeholder: 'FF00',  visibleWhen: (c) => c['erase_mode'] === 'per_segment' },
+      { key: 'erase_alfid',           labelKey: 'flash.cfg.eraseAlfid',     type: 'hex',    placeholder: '44',    visibleWhen: (c) => c['erase_mode'] === 'per_segment' },
+      { key: 'erase_timeout_ms',      labelKey: 'flash.cfg.eraseTimeout',   type: 'number', placeholder: '30000', visibleWhen: (c) => c['erase_mode'] === 'per_segment' },
+      { key: 'erase_busy_retry',      labelKey: 'flash.cfg.eraseBusyRetry', type: 'number', placeholder: '3',     visibleWhen: (c) => c['erase_mode'] === 'per_segment' },
+      { key: 'erase_busy_delay_ms',   labelKey: 'flash.cfg.eraseBusyDelay', type: 'number', placeholder: '200',   visibleWhen: (c) => c['erase_mode'] === 'per_segment' },
+      { key: 'erase_expected_status', labelKey: 'flash.cfg.eraseStatus',    type: 'hex',    placeholderKey: 'udsFlow.cfg.expectStatusPh', visibleWhen: (c) => c['erase_mode'] === 'per_segment' },
+      {
+        key: 'verify_mode',
+        labelKey: 'flash.cfg.verifyMode',
+        type: 'select',
+        options: [
+          { value: 'total_crc32',       labelKey: 'flash.cfg.verifyTotal' },
+          { value: 'per_segment_crc32', labelKey: 'flash.cfg.verifyPerSegment' },
+          { value: 'none',              labelKey: 'flash.cfg.verifyNone' },
+        ],
+      },
+      { key: 'verify_routine_id',      labelKey: 'flash.cfg.verifyRoutine', type: 'hex',    placeholder: '0202', visibleWhen: (c) => c['verify_mode'] === 'per_segment_crc32' },
+      { key: 'verify_expected_status', labelKey: 'flash.cfg.verifyStatus',  type: 'hex',    placeholder: '00',   visibleWhen: (c) => c['verify_mode'] === 'per_segment_crc32' },
+      { key: 'verify_timeout_ms',      labelKey: 'flash.cfg.verifyTimeout', type: 'number', placeholder: '5000', visibleWhen: (c) => c['verify_mode'] === 'per_segment_crc32' },
+    ],
+  },
+
   // ── 0x37 RequestTransferExit ────────────────────────────────────────────────
   {
     type: 'uds_transfer_exit',
@@ -639,6 +1020,66 @@ fn calculate_key(seed, level) {
         labelKey: 'diagBlk.suppressResponseSuppressPosRspMsgIndicationBit',
         type: 'boolean',
       },
+    ],
+  },
+
+  // ── TesterPresent keep-alive (backend, per session) ───────────────────────
+  {
+    type: 'uds_tester_present_keepalive',
+    label: 'TesterPresent Keep-Alive (0x3E)',
+    category: 'uds',
+    descriptionKey: 'udsFlow.blk.keepaliveDesc',
+    icon: 'HeartPulse',
+    ports: [
+      { id: 'exec_in',   label: 'exec_in',   type: 'exec', direction: 'input' },
+      { id: 'exec_out',  label: 'exec_out',  type: 'exec', direction: 'output' },
+      { id: 'error_out', label: 'error_out', type: 'exec', direction: 'output' },
+    ],
+    defaultConfig: { action: 'start', interval_ms: 2000 },
+    configSchema: [
+      {
+        key: 'action',
+        labelKey: 'udsFlow.cfg.kaAction',
+        type: 'select',
+        options: [
+          { value: 'start', labelKey: 'udsFlow.cfg.kaStart' },
+          { value: 'stop',  labelKey: 'udsFlow.cfg.kaStop' },
+        ],
+      },
+      { key: 'interval_ms', labelKey: 'udsFlow.cfg.kaInterval', type: 'number', placeholder: '2000', visibleWhen: (c) => c['action'] !== 'stop' },
+    ],
+  },
+
+  // ── Wait for ECU ready (after 10 02 / 11 01) ───────────────────────────────
+  {
+    type: 'uds_wait_ecu_ready',
+    label: 'Wait ECU Ready',
+    category: 'uds',
+    descriptionKey: 'udsFlow.blk.waitReadyDesc',
+    icon: 'Hourglass',
+    ports: [
+      { id: 'exec_in',     label: 'exec_in',     type: 'exec', direction: 'input' },
+      { id: 'exec_out',    label: 'exec_out',    type: 'exec', direction: 'output' },
+      { id: 'timeout_out', label: 'timeout_out', type: 'exec', direction: 'output' },
+      { id: 'elapsed_out', label: 'elapsed_out', type: 'data', direction: 'output' },
+    ],
+    defaultConfig: { initial_delay_ms: 500, poll_ms: 250, timeout_ms: 10000, probe: '3E00', probe_session: '02', probe_timeout_ms: 300 },
+    configSchema: [
+      {
+        key: 'probe',
+        labelKey: 'udsFlow.cfg.wrProbe',
+        type: 'select',
+        options: [
+          { value: '3E00',    label: '3E 00 — TesterPresent' },
+          { value: 'session', labelKey: 'udsFlow.cfg.wrProbeSession' },
+          { value: 'F186',    label: '22 F1 86 — activeDiagnosticSession' },
+        ],
+      },
+      { key: 'timeout_ms',       labelKey: 'udsFlow.cfg.wrTimeout',      type: 'number', placeholder: '10000' },
+      { key: 'initial_delay_ms', labelKey: 'udsFlow.cfg.wrInitial',      type: 'number', placeholder: '500' },
+      { key: 'poll_ms',          labelKey: 'udsFlow.cfg.wrPoll',         type: 'number', placeholder: '250' },
+      { key: 'probe_timeout_ms', labelKey: 'udsFlow.cfg.wrProbeTimeout', type: 'number', placeholder: '300' },
+      { key: 'probe_session',    labelKey: 'udsFlow.cfg.wrSession',      type: 'hex',    placeholder: '02', visibleWhen: (c) => c['probe'] === 'session' },
     ],
   },
 
@@ -771,7 +1212,7 @@ fn calculate_key(seed, level) {
 
 // ─── DATA CATEGORY ────────────────────────────────────────────────────────────
 
-const dataBlocks: BlockDef[] = [
+const dataBlocks: BlockDefSeed[] = [
   {
     type: 'data_const',
     labelKey: 'diagBlk.constant',
@@ -800,6 +1241,7 @@ const dataBlocks: BlockDef[] = [
     type: 'data_var',
     labelKey: 'diagBlk.variable',
     category: 'data',
+    hidden: true,
     descriptionKey: 'diagBlk.storesAndReadsAValue',
     icon: 'Variable',
     ports: [
@@ -823,19 +1265,24 @@ const dataBlocks: BlockDef[] = [
       { id: 'right_in',   label: 'right_in',   type: 'data', direction: 'input' },
       { id: 'result_out', label: 'result_out', type: 'bool', direction: 'output' },
     ],
-    defaultConfig: { operator: 'eq' },
+    defaultConfig: { operator: 'eq', pass_if_right_empty: false },
     configSchema: [
       {
         key: 'operator',
         labelKey: 'diagBlk.operator',
         type: 'select',
         options: [
-          { value: 'eq',  labelKey: 'diagBlk.equal' },
-          { value: 'neq', labelKey: 'diagBlk.notEqual' },
-          { value: 'gt',  labelKey: 'diagBlk.greater' },
-          { value: 'lt',  labelKey: 'diagBlk.less' },
+          { value: 'eq',              labelKey: 'diagBlk.equal' },
+          { value: 'neq',             labelKey: 'diagBlk.notEqual' },
+          { value: 'gt',              labelKey: 'diagBlk.greater' },
+          { value: 'ge',              label: '≥' },
+          { value: 'lt',              labelKey: 'diagBlk.less' },
+          { value: 'le',              label: '≤' },
+          { value: 'ascii_equals',    labelKey: 'udsFlow.cmp.asciiEquals' },
+          { value: 'bytes_not_equal', labelKey: 'udsFlow.cmp.bytesNotEqual' },
         ],
       },
+      { key: 'pass_if_right_empty', labelKey: 'udsFlow.cmp.passIfEmpty', type: 'boolean' },
     ],
   },
   {
@@ -901,6 +1348,53 @@ const dataBlocks: BlockDef[] = [
     ],
   },
 
+  // ── ASCII text → bytes ────────────────────────────────────────────────────────
+  {
+    type: 'data_ascii',
+    labelKey: 'udsFlow.blk.asciiLabel',
+    category: 'data',
+    descriptionKey: 'udsFlow.blk.asciiDesc',
+    icon: 'Type',
+    ports: [
+      { id: 'value_in',  label: 'value_in',  type: 'data',  direction: 'input', optional: true },
+      { id: 'bytes_out', label: 'bytes_out', type: 'bytes', direction: 'output' },
+    ],
+    defaultConfig: { text: '', length: 0, pad: '20' },
+    configSchema: [
+      { key: 'text',   labelKey: 'udsFlow.cfg.asciiText', type: 'text',   placeholder: 'NEXUSCAN' },
+      { key: 'length', labelKey: 'udsFlow.cfg.asciiLen',  type: 'number', placeholderKey: 'udsFlow.cfg.asciiLenPh' },
+      { key: 'pad',    labelKey: 'udsFlow.cfg.padByte',   type: 'hex',    placeholder: '20' },
+    ],
+  },
+
+  // ── Repair-shop fingerprint (e.g. DID F15A) ───────────────────────────────────
+  {
+    type: 'data_fingerprint',
+    labelKey: 'udsFlow.blk.fpLabel',
+    category: 'data',
+    descriptionKey: 'udsFlow.blk.fpDesc',
+    icon: 'Fingerprint',
+    ports: [
+      { id: 'bytes_out', label: 'bytes_out', type: 'bytes', direction: 'output' },
+    ],
+    defaultConfig: { format: 'iso_f15a', serial: 'NEXUS1', serial_len: 6, pad: '20', template: '{YY}{MM}{DD} {SERIAL:6}' },
+    configSchema: [
+      {
+        key: 'format',
+        label: 'Format',
+        type: 'select',
+        options: [
+          { value: 'iso_f15a', labelKey: 'udsFlow.cfg.fpIso' },
+          { value: 'custom',   labelKey: 'udsFlow.cfg.fpCustom' },
+        ],
+      },
+      { key: 'serial',     labelKey: 'udsFlow.cfg.fpSerial',    type: 'text',   placeholder: 'NEXUS1' },
+      { key: 'serial_len', labelKey: 'udsFlow.cfg.fpSerialLen', type: 'number', placeholder: '6', visibleWhen: (c) => c['format'] !== 'custom' },
+      { key: 'pad',        labelKey: 'udsFlow.cfg.padByte',     type: 'hex',    placeholder: '20' },
+      { key: 'template',   labelKey: 'udsFlow.cfg.fpTemplate',  type: 'text',   placeholder: '{YY}{MM}{DD} {SERIAL:6}', visibleWhen: (c) => c['format'] === 'custom' },
+    ],
+  },
+
   // ── Checksum ──────────────────────────────────────────────────────────────────
   {
     type: 'data_checksum',
@@ -943,7 +1437,7 @@ const dataBlocks: BlockDef[] = [
 
 // ─── IO CATEGORY ──────────────────────────────────────────────────────────────
 
-const ioBlocks: BlockDef[] = [
+const ioBlocks: BlockDefSeed[] = [
   {
     type: 'io_file_input',
     labelKey: 'diagBlk.fileInputBin',
@@ -985,6 +1479,7 @@ const ioBlocks: BlockDef[] = [
       { id: 'exec_in',   label: 'exec_in',   type: 'exec', direction: 'input' },
       { id: 'exec_out',  label: 'exec_out',  type: 'exec', direction: 'output' },
       { id: 'value_out', label: 'value_out', type: 'data', direction: 'output' },
+      { id: 'error_out', label: 'error_out', type: 'exec', direction: 'output' },
     ],
     defaultConfig: {},
     defaultConfigKeys: { message: 'diagBlk.enterAValue' },
@@ -994,22 +1489,151 @@ const ioBlocks: BlockDef[] = [
   },
 ];
 
+// ─── PER-REQUEST OPTIONS ──────────────────────────────────────────────────────
+
+/**
+ * Blocks with the common "Request options" inspector section (config keys `req_addressing`,
+ * `req_spr`, `req_timeout_ms`, `req_busy_retry`, `req_busy_delay_ms`). Absent keys = the previous
+ * behaviour: physical, no SPR, backend timing, no busy retry.
+ */
+export const REQUEST_OPTION_BLOCKS: ReadonlySet<string> = new Set([
+  'uds_session', 'uds_ecu_reset', 'uds_clear_dtc', 'uds_read_dtc', 'uds_read_did', 'uds_read_memory',
+  'uds_security_access', 'uds_comm_control', 'uds_write_did', 'uds_io_control', 'uds_routine_ctrl',
+  'uds_req_download', 'uds_req_upload', 'uds_transfer_data', 'uds_transfer_exit', 'uds_write_memory',
+  'uds_tester_present', 'uds_dtc_setting', 'uds_link_control',
+]);
+
+/**
+ * Functional addressing is offered only for single-frame, broadcast-meaningful services
+ * (ISO 15765-2: functional requests are single frame only; seed/key, transfers and writes are
+ * always physical).
+ */
+export const FUNCTIONAL_OK_BLOCKS: ReadonlySet<string> = new Set([
+  'uds_session', 'uds_ecu_reset', 'uds_clear_dtc', 'uds_read_dtc', 'uds_read_did',
+  'uds_comm_control', 'uds_routine_ctrl', 'uds_tester_present', 'uds_dtc_setting',
+]);
+
+/**
+ * suppressPosRspMsgIndicationBit (ISO 14229-1 §7.5, sub-function bit 7) offered by the common
+ * section: 0x10, 0x11, 0x28, 0x85. Not offered for 0x31 (the routine status record is needed),
+ * 0x27 (the seed is needed); 0x3E keeps its own `suppress` field and 0x87 sets it internally.
+ */
+export const SPR_BLOCKS: ReadonlySet<string> = new Set(['uds_session', 'uds_ecu_reset', 'uds_comm_control', 'uds_dtc_setting']);
+
 // ─── EXPORTS ──────────────────────────────────────────────────────────────────
 
+/** Pack of a catalog category: UDS blocks are the `uds` pack (needs a `uds_can` ECU), everything else is `core`. */
+function packed(defs: BlockDefSeed[], pack: BlockPack, requires?: DiagProtocol[]): BlockDef[] {
+  return defs.map((d) => (requires ? { ...d, pack, requires } : { ...d, pack }));
+}
+
+const coreDefs = packed(coreBlocks, 'core');
+const flowDefs = packed(flowBlocks, 'core');
+const udsDefs = packed(udsBlocks, 'uds', ['uds_can']);
+const dataDefs = packed(dataBlocks, 'core');
+const ioDefs = packed(ioBlocks, 'core');
+
 export const BLOCK_CATALOG: BlockDef[] = [
-  ...flowBlocks,
-  ...udsBlocks,
-  ...dataBlocks,
-  ...ioBlocks,
+  ...coreDefs,
+  ...flowDefs,
+  ...udsDefs,
+  ...dataDefs,
+  ...ioDefs,
 ];
 
 export const BLOCK_CATALOG_BY_CATEGORY: Record<BlockCategory, BlockDef[]> = {
-  flow: flowBlocks,
-  uds:  udsBlocks,
-  data: dataBlocks,
-  io:   ioBlocks,
+  core: coreDefs,
+  flow: flowDefs,
+  uds:  udsDefs,
+  data: dataDefs,
+  io:   ioDefs,
 };
 
+/** Palette order of the packs (packs without blocks are not shown). */
+export const PACK_ORDER: readonly BlockPack[] = ['core', 'can', 'uds', 'kwp', 'obd', 'j1939', 'canopen', 'xcp', 'custom'];
+
+/**
+ * Union of `requires` over the diagram's blocks (empty = protocol-agnostic). Phase B2 checks it against the
+ * bound ECU's protocol (and adds the callee interfaces of call blocks); B1 only exposes it.
+ */
+export function requiredProtocols(diagram: { blocks: ReadonlyArray<{ type: string }> }): DiagProtocol[] {
+  const out = new Set<DiagProtocol>();
+  for (const b of diagram.blocks) for (const p of getBlockDef(b.type)?.requires ?? []) out.add(p);
+  return [...out];
+}
+
+const callBaseDefs = new Map<string, BlockDef>();
+
+/** Call block (`call:<flowId>`): ports `in` / `error` until the callee interface is known (`getBlockDefFor`). */
+function callBaseDef(type: string): BlockDef {
+  let d = callBaseDefs.get(type);
+  if (!d) {
+    d = {
+      type, label: 'Custom Block', category: 'flow', pack: 'custom', icon: 'Box', defaultConfig: {}, configSchema: [],
+      ports: [
+        { id: CALL_IN, label: CALL_IN, type: 'exec', direction: 'input' },
+        { id: CALL_ERROR, label: CALL_ERROR, type: 'exec', direction: 'output' },
+      ],
+    };
+    callBaseDefs.set(type, d);
+  }
+  return d;
+}
+
 export function getBlockDef(type: string): BlockDef | undefined {
+  if (isCallType(type)) return callBaseDef(type);
   return BLOCK_CATALOG.find((d) => d.type === type);
+}
+
+/**
+ * Port compatibility of a connection: exec only with exec; otherwise equal types, or `data`
+ * (untyped value) on either side. A typed `bytes` / `bool` port therefore accepts a `data` source
+ * (`var_get`, `math`, `convert`) and a `data` port accepts any typed source.
+ */
+export function portsCompatible(a: PortType, b: PortType): boolean {
+  if (a === 'exec' || b === 'exec' || a === 'ecu' || b === 'ecu') return a === b;
+  return a === b || a === 'data' || b === 'data';
+}
+
+const dynamicDefs = new Map<string, BlockDef>();
+
+/**
+ * Definition of one block instance with its config-derived ports: `text_format` gets one optional `data`
+ * input per name in `config.inputs`; `flow_input` / `flow_output` get one port per interface spec.
+ */
+export function getBlockDefFor(block: FlowBlock): BlockDef | undefined {
+  const def = getBlockDef(block.type);
+  if (!def) return def;
+  if (isCallType(block.type)) {
+    const ref = readCallRef(block);
+    const info = ref ? callIndex.get(ref) : undefined;
+    if (!info) return def;
+    const { ports } = callPorts(info.iface);
+    const key = `call\u0000${ref ? refKey(ref) : ''}\u0000${ports.map((p) => `${p.direction}:${p.id}:${p.type}`).join('|')}`;
+    const cached = dynamicDefs.get(key);
+    if (cached) return cached;
+    const next: BlockDef = { ...def, label: info.name, ports };
+    dynamicDefs.set(key, next);
+    return next;
+  }
+  if (block.type === FLOW_INPUT || block.type === FLOW_OUTPUT) {
+    const extra = interfacePorts(block) ?? [];
+    if (extra.length === 0) return def;
+    const key = interfacePortsKey(block);
+    const cached = dynamicDefs.get(key);
+    if (cached) return cached;
+    const next: BlockDef = { ...def, ports: [...def.ports, ...extra] };
+    dynamicDefs.set(key, next);
+    return next;
+  }
+  if (block.type !== 'text_format') return def;
+  const names = formatInputs(block);
+  if (names.length === 0) return def;
+  const key = `text_format\u0000${names.join('\u0000')}`;
+  const cached = dynamicDefs.get(key);
+  if (cached) return cached;
+  const inputs: PortDef[] = names.map((n) => ({ id: n, label: n, type: 'data', direction: 'input', optional: true }));
+  const next: BlockDef = { ...def, ports: [...inputs, ...def.ports] };
+  dynamicDefs.set(key, next);
+  return next;
 }

@@ -1,20 +1,24 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Activity, AlertTriangle, ChevronRight, Cpu, FileSearch, FlaskConical, Gauge, Network, Terminal, Wifi, Workflow } from 'lucide-react';
+import { Activity, AlertTriangle, ChevronRight, Cpu, FileSearch, FlaskConical, Gauge, Network, Server, Terminal, Wifi, Workflow } from 'lucide-react';
 import { useI18n, type TranslationKey } from '../../i18n';
 import { DIAG_DIVIDER, DiagBadge, DiagDemoBadge, DiagDot, DiagNotice } from './diagUi';
 import { sessionLabel } from './diagFormat';
 import { diagnosticsStore, useDiagnosticsStore } from '../../store/diagnosticsStore';
 import { DiagSessionSetup } from './DiagSessionSetup';
+import { DiagSessionTabs } from './DiagSessionTabs';
 import { DtcPanel } from './DtcPanel';
 import { DidInspector } from './DidInspector';
 import { LivePidGauges } from './LivePidGauges';
 import { UdsConsole } from './UdsConsole';
-import { UdsFlowEditor } from './UdsFlowEditor';
+import { FlowEditor } from '../flow/FlowEditor';
 import { UdsInstrumentPanel } from './uds-panel/UdsInstrumentPanel';
 import { TrafficDock } from './traffic/TrafficDock';
 import { EcuGraphView, type GraphNavTarget } from './ecu-graph/EcuGraphView';
+import { EcuRegistryView } from './workspace/EcuRegistryView';
+import { openSessionFromEcu, type OpenSessionNotice } from './workspace/openSession';
+import type { EcuRecordV1 } from '../../types/diagWorkspace';
 
-export type DiagSubTab = 'session' | 'ecu_graph' | 'dtc' | 'live_pids' | 'uds_console' | 'did_inspector' | 'uds_flow' | 'uds_panel';
+export type DiagSubTab = 'ecu_registry' | 'session' | 'ecu_graph' | 'dtc' | 'live_pids' | 'uds_console' | 'did_inspector' | 'flow' | 'uds_panel';
 
 // ECU Simulator sekmesi kullanıcı kararıyla arayüzden kaldırıldı (kod korunuyor:
 // ./ecu-sim/EcuSimulator.tsx, ./ecu-sim/ecuSimStore.ts). Gerekçe ve yeniden açma kriterleri:
@@ -27,13 +31,14 @@ interface SubTabDef {
 }
 
 const SUB_TABS: SubTabDef[] = [
+  { id: 'ecu_registry',  labelKey: 'diagHmi.tab.ecuRegistry',   icon: <Server className="h-3.5 w-3.5" aria-hidden="true" /> },
   { id: 'session',       labelKey: 'diagHmi.tab.session',       icon: <Wifi className="h-3.5 w-3.5" aria-hidden="true" /> },
   { id: 'ecu_graph',     labelKey: 'diagHmi.tab.ecuGraph',      icon: <Network className="h-3.5 w-3.5" aria-hidden="true" /> },
   { id: 'dtc',           labelKey: 'diagHmi.tab.dtc',           icon: <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> },
   { id: 'live_pids',     labelKey: 'diagHmi.tab.livePids',      icon: <Activity className="h-3.5 w-3.5" aria-hidden="true" /> },
   { id: 'uds_console',   labelKey: 'diagHmi.tab.udsConsole',    icon: <Terminal className="h-3.5 w-3.5" aria-hidden="true" /> },
   { id: 'did_inspector', labelKey: 'diagHmi.tab.didInspector',  icon: <FileSearch className="h-3.5 w-3.5" aria-hidden="true" /> },
-  { id: 'uds_flow',      labelKey: 'diagHmi.tab.udsFlow',       icon: <Workflow className="h-3.5 w-3.5" aria-hidden="true" /> },
+  { id: 'flow',      labelKey: 'diagHmi.tab.flow',       icon: <Workflow className="h-3.5 w-3.5" aria-hidden="true" /> },
   { id: 'uds_panel',     labelKey: 'diagHmi.tab.udsPanel',      icon: <Gauge className="h-3.5 w-3.5" aria-hidden="true" /> },
 ];
 
@@ -51,12 +56,12 @@ const SessionStrip: React.FC = () => {
       {/* ECU address */}
       <div className="flex items-center gap-1.5">
         <Cpu className="h-3.5 w-3.5 text-muted" aria-hidden="true" />
-        <span className="text-muted">{t('diag.session.requestId')}</span>
+        <span className="text-muted">{t('diagTabs.reqShort')}</span>
         <span className="tabular-nums text-ink">
           0x{config.requestId.toString(16).toUpperCase().padStart(3, '0')}
         </span>
         <ChevronRight className="h-3 w-3 text-subtle" aria-hidden="true" />
-        <span className="text-muted">{t('diag.session.responseId')}</span>
+        <span className="text-muted">{t('diagTabs.respShort')}</span>
         <span className="tabular-nums text-ink">
           0x{config.responseId.toString(16).toUpperCase().padStart(3, '0')}
         </span>
@@ -109,24 +114,52 @@ const SessionStrip: React.FC = () => {
 
 export const DiagnosticsView: React.FC = () => {
   const { t } = useI18n();
-  const [activeSubTab, setActiveSubTab] = useState<DiagSubTab>('session');
+  const [activeSubTab, setActiveSubTabRaw] = useState<DiagSubTab>('ecu_registry');
+  /** Notice shown on the Session sub-tab after "Oturum Aç" / "Simüle Et" (cleared when the user changes tab). */
+  const [sessionNotice, setSessionNotice] = useState<OpenSessionNotice | null>(null);
   const [dockMaximized, setDockMaximized] = useState(false);
-  const openConsole = useCallback(() => setActiveSubTab('uds_console'), []);
-  const navigateFromGraph = useCallback((target: GraphNavTarget) => setActiveSubTab(target), []);
-  const { mockMode } = useDiagnosticsStore();
+  const setActiveSubTab = useCallback((tab: DiagSubTab) => {
+    setSessionNotice(null);
+    setActiveSubTabRaw(tab);
+  }, []);
+  const openConsole = useCallback(() => setActiveSubTab('uds_console'), [setActiveSubTab]);
+  const navigateFromGraph = useCallback((target: GraphNavTarget) => setActiveSubTab(target), [setActiveSubTab]);
+  const openEcuSession = useCallback((ecu: EcuRecordV1) => {
+    const res = openSessionFromEcu(ecu);
+    if (!res.ok) {
+      setSessionNotice(res.notice);
+      return;
+    }
+    setActiveSubTabRaw('session');
+    setSessionNotice(res.notice);
+  }, []);
+  const simulateEcu = useCallback(() => {
+    setActiveSubTabRaw('session');
+    setSessionNotice({ tone: 'warn', key: 'diagWs.open.simulateNotice' });
+  }, []);
+  const { mockMode, activeTabId } = useDiagnosticsStore();
 
   // Conversation polling (~4 Hz) runs only while connected AND this view is mounted.
   useEffect(() => diagnosticsStore.attachView(), []);
 
   function renderContent() {
     switch (activeSubTab) {
-      case 'session':       return <DiagSessionSetup />;
+      case 'ecu_registry':
+        return (
+          <EcuRegistryView
+            onOpenSession={openEcuSession}
+            onFindEcu={() => setActiveSubTab('session')}
+            onSimulate={simulateEcu}
+          />
+        );
+      // Keyed by the active tab: the form's local input state re-initialises from that tab's config.
+      case 'session':       return <DiagSessionSetup key={activeTabId} />;
       case 'ecu_graph':     return <EcuGraphView onNavigate={navigateFromGraph} />;
       case 'dtc':           return <DtcPanel />;
       case 'live_pids':     return <LivePidGauges />;
       case 'uds_console':   return <UdsConsole />;
       case 'did_inspector': return <DidInspector />;
-      case 'uds_flow':
+      case 'flow':
         return (
           <>
             {mockMode && (
@@ -135,7 +168,7 @@ export const DiagnosticsView: React.FC = () => {
                 <DiagNotice tone="warn">{t('diagReal.flow.notice')}</DiagNotice>
               </div>
             )}
-            <UdsFlowEditor />
+            <FlowEditor />
           </>
         );
       case 'uds_panel':     return <UdsInstrumentPanel />;
@@ -144,7 +177,10 @@ export const DiagnosticsView: React.FC = () => {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-canvas">
-      {/* Top strip: session info */}
+      {/* Concurrent UDS sessions (one tab per ECU addressing) */}
+      <DiagSessionTabs />
+
+      {/* Top strip: active session info */}
       <SessionStrip />
 
       {/* Sub-tab bar */}
@@ -190,6 +226,16 @@ export const DiagnosticsView: React.FC = () => {
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
         {/* Kept mounted (display:none) while the traffic dock is maximized so tab state survives. */}
         <div className={`min-h-0 flex-1 flex-col overflow-hidden ${dockMaximized ? 'hidden' : 'flex'}`}>
+          {sessionNotice !== null && (
+            <div className="flex shrink-0 items-center gap-2 border-b border-hairline bg-canvas px-3 py-1.5">
+              <div className="min-w-0 flex-1">
+                <DiagNotice tone={sessionNotice.tone}>{t(sessionNotice.key, sessionNotice.params)}</DiagNotice>
+              </div>
+              <button type="button" onClick={() => setSessionNotice(null)} className="cursor-pointer font-mono text-[11px] text-muted hover:text-ink">
+                {t('diagWs.dismiss')}
+              </button>
+            </div>
+          )}
           {renderContent()}
         </div>
         <TrafficDock onOpenConsole={openConsole} onMaximizedChange={setDockMaximized} />

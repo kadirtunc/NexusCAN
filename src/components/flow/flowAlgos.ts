@@ -1,6 +1,6 @@
-import { t } from '../../../i18n';
-import { apiSeedKeyComputeAdhoc } from '../../../services/ipcClient';
-import { parseSeedKeyError } from '../../../types/seedkey';
+import { t } from '../../i18n';
+import { apiSeedKeyComputeAdhoc } from '../../services/ipcClient';
+import { parseSeedKeyError } from '../../types/seedkey';
 
 // ─── Security key algorithms ──────────────────────────────────────────────────
 

@@ -1,17 +1,28 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Play, Pause, Square, Trash2, LayoutTemplate, ChevronDown, ChevronUp,
-  Save, HelpCircle, Grid3x3, Map, X,
+  Save, HelpCircle, Grid3x3, Map, Boxes, Package, Settings2, FilePlus2, Upload, RotateCcw,
 } from 'lucide-react';
-import { FlowCanvas } from './uds-flow/FlowCanvas';
-import { FlowPalette } from './uds-flow/FlowPalette';
-import { FlowInspector } from './uds-flow/FlowInspector';
-import { useFlowStore, flowStore } from './uds-flow/FlowStore';
-import { FlowEngine } from './uds-flow/FlowEngine';
-import { FLOW_TEMPLATES } from './uds-flow/templates';
-import type { RunLogEntry } from './uds-flow/FlowStore';
+import { FlowCanvas } from './FlowCanvas';
+import { FlowPalette } from './FlowPalette';
+import { FlowInspector } from './FlowInspector';
+import { useFlowStore, flowStore } from './FlowStore';
+import { ModalShell } from './ModalShell';
+import { ResizablePanel } from './ResizablePanel';
+import { FlowRegistryPanel } from './registry/FlowRegistryPanel';
+import { FlowDocTabs } from './registry/FlowDocTabs';
+import { RunInputsDialog } from './registry/RunInputsDialog';
+import { flowRegistry, useFlowRegistry } from './registry/flowRegistryStore';
+import { deriveFlowInterface } from './flowInterface';
+import { ExtractDialog, FlowNotices, FlowTrailBar } from './FlowNestUi';
+import type { EcuRecordV1 } from '../../types/diagWorkspace';
+import { formatValue } from './coreBlocks';
+import { FlowEngine } from './FlowEngine';
+import { FLOW_TEMPLATES } from './templates';
+import type { RunLogEntry } from './FlowStore';
+import type { FlowTemplate } from './types';
 import { useI18n } from '../../i18n';
-import { flowPrompt, useFlowPrompt } from './uds-flow/flowPrompt';
+import { flowPrompt, useFlowPrompt } from './flowPrompt';
 import {
   DIAG_BTN,
   DIAG_BTN_ACTIVE,
@@ -27,7 +38,7 @@ import {
   DiagBadge,
   DiagDot,
   type DiagTone,
-} from './diagUi';
+} from '../diagnostics/diagUi';
 
 /** Real user-input dialog of the `io_user_prompt` block. */
 const FlowPromptDialog: React.FC = () => {
@@ -67,95 +78,45 @@ const FlowPromptDialog: React.FC = () => {
   );
 };
 
-// ─── Modal chrome ─────────────────────────────────────────────────────────────
-
-const ModalShell: React.FC<{
-  title: string;
-  onClose: () => void;
-  width: number;
-  children: React.ReactNode;
-}> = ({ title, onClose, width, children }) => (
-  <div
-    className="fixed inset-0 z-50 flex items-center justify-center p-4"
-    style={{ backgroundColor: 'var(--bg-scrim)' }}
-    role="dialog"
-    aria-modal="true"
-  >
-    <div
-      className="flex max-h-[80vh] w-full flex-col overflow-hidden rounded-[2px] border border-strong bg-surface"
-      style={{ maxWidth: width }}
-    >
-      <div className="flex h-10 shrink-0 items-center justify-between border-b border-hairline bg-elevated px-3.5">
-        <span className="font-mono text-xs font-semibold uppercase tracking-wider text-ink">{title}</span>
-        <button
-          type="button"
-          onClick={onClose}
-          className="cursor-pointer rounded-[2px] p-1 text-muted hover:text-ink"
-        >
-          <X className="h-3.5 w-3.5" aria-hidden="true" />
-        </button>
-      </div>
-      {children}
-    </div>
-  </div>
-);
-
 // ─── Template dialog ──────────────────────────────────────────────────────────
 
 const TEMPLATE_CAT_CLASS: Record<string, string> = {
   firmware: 'text-warn',
   diagnostics: 'text-focus',
+  examples: 'text-nominal',
 };
 
 const TemplateDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const { t } = useI18n();
-  const { savedDiagrams } = useFlowStore();
 
-  const handleLoad = useCallback(
-    (templateId: string) => {
-      const tpl = FLOW_TEMPLATES.find((tp) => tp.id === templateId);
-      if (!tpl) return;
-      const confirmed = window.confirm(t('diagHmi.flow.templateLoadConfirm', { name: t(tpl.nameKey) }));
-      if (confirmed) {
-        flowStore.loadTemplate(tpl);
-        onClose();
-      }
+  // A template is only a seed: it opens as a NEW, independent flow (nothing is replaced, nothing to confirm).
+  const handlePick = useCallback(
+    (tpl: FlowTemplate) => {
+      flowRegistry.newFromTemplate(tpl);
+      onClose();
     },
-    [onClose, t],
+    [onClose],
   );
-
-  const handleLoadSaved = useCallback(
-    (id: string) => {
-      const confirmed = window.confirm(t('diagHmi.flow.savedLoadConfirm'));
-      if (confirmed) {
-        flowStore.loadDiagram(id);
-        onClose();
-      }
-    },
-    [onClose, t],
-  );
-
-  const handleDeleteSaved = useCallback((id: string) => {
-    flowStore.deleteSavedDiagram(id);
-  }, []);
 
   return (
-    <ModalShell title={t('diagHmi.flow.templates')} onClose={onClose} width={640}>
+    <ModalShell title={t('flowReg.newFromTemplate')} onClose={onClose} width={640}>
       <div className="flex-1 overflow-y-auto p-4">
-        {/* Built-in templates */}
         <div className={`${DIAG_SECTION_TITLE} mb-3`}>{t('diagHmi.flow.builtinTemplates')}</div>
-        <div className="mb-6 grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           {FLOW_TEMPLATES.map((tpl) => (
             <button
               key={tpl.id}
               type="button"
-              onClick={() => handleLoad(tpl.id)}
-              className="cursor-pointer rounded-[2px] border border-hairline bg-canvas p-3 text-left transition-colors hover:border-focus"
+              onClick={() => handlePick(tpl)}
+              className="cursor-pointer rounded-[2px] border border-hairline bg-canvas p-3 text-left hover:border-focus"
             >
               <div className="mb-1 flex items-center gap-2">
                 <span className={`font-mono text-[12px] font-semibold ${TEMPLATE_CAT_CLASS[tpl.category] ?? 'text-ink'}`}>
                   {t(tpl.nameKey)}
                 </span>
+                {tpl.category === 'examples' && (
+                  <span className="ml-auto font-mono text-[10.5px] uppercase tracking-wider text-subtle">{t('flowCore.tpl.example')}</span>
+                )}
               </div>
               <div className="text-[12px] text-muted">{t(tpl.descriptionKey)}</div>
               <div className="mt-2 font-mono text-[11px] tabular-nums text-subtle">
@@ -167,38 +128,34 @@ const TemplateDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             </button>
           ))}
         </div>
+      </div>
+    </ModalShell>
+  );
+};
 
-        {/* Saved diagrams */}
-        {savedDiagrams.length > 0 && (
-          <>
-            <div className={`${DIAG_SECTION_TITLE} mb-3`}>{t('diagHmi.flow.savedDiagrams')}</div>
-            <div className="flex flex-col gap-2">
-              {savedDiagrams.map((d) => (
-                <div
-                  key={d.id}
-                  className="flex items-center gap-2 rounded-[2px] border border-hairline bg-canvas px-3 py-2"
-                >
-                  <div className="flex-1">
-                    <div className="text-[12px] text-ink">{d.name}</div>
-                    <div className="font-mono text-[11px] tabular-nums text-subtle">
-                      {t('diagHmi.flow.blockCount', { n: d.blocks.length })}
-                    </div>
-                  </div>
-                  <button type="button" onClick={() => handleLoadSaved(d.id)} className={DIAG_BTN_SM}>
-                    {t('diagHmi.flow.load')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteSaved(d.id)}
-                    className={`${DIAG_BTN_SM} hover:!border-critical hover:!text-critical`}
-                  >
-                    <Trash2 className="h-3 w-3" aria-hidden="true" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
+// ─── Conflict dialog ──────────────────────────────────────────────────────────
+
+const ConflictDialog: React.FC = () => {
+  const { t } = useI18n();
+  const { conflict } = useFlowRegistry();
+  if (!conflict) return null;
+  return (
+    <ModalShell title={t('flowReg.conflict.title')} onClose={() => flowRegistry.dismissConflict()} width={460}>
+      <div className="flex flex-col gap-3 p-3.5">
+        <div className="text-[12.5px] leading-snug text-ink">
+          {t('flowReg.conflict.body', { name: conflict.name, rev: conflict.latestRevision ?? '?' })}
+        </div>
+        <div className="flex flex-wrap justify-end gap-2">
+          <button type="button" className={DIAG_BTN} onClick={() => flowRegistry.dismissConflict()}>
+            {t('diagReal.flow.promptCancel')}
+          </button>
+          <button type="button" className={DIAG_BTN_WARN} onClick={() => void flowRegistry.resolveConflictReload()}>
+            {t('flowReg.conflict.reload')}
+          </button>
+          <button type="button" className={DIAG_BTN_PRIMARY} onClick={() => void flowRegistry.resolveConflictSaveCopy()}>
+            {t('flowReg.conflict.copy')}
+          </button>
+        </div>
       </div>
     </ModalShell>
   );
@@ -216,6 +173,7 @@ const LOG_TONE: Record<RunLogEntry['level'], DiagTone> = {
 const LogRow: React.FC<{ entry: RunLogEntry }> = React.memo(({ entry }) => (
   <div className={`flex items-center gap-2 py-0.5 font-mono text-[12px] ${DIAG_TEXT_TONE[LOG_TONE[entry.level]]}`}>
     <DiagDot tone={LOG_TONE[entry.level]} />
+    {entry.path.length > 1 && <span className="shrink-0 text-subtle" title={entry.path.join(' › ')}>{entry.path.slice(1).join(' › ')} ›</span>}
     <span className="break-all">{entry.message}</span>
   </div>
 ));
@@ -252,22 +210,40 @@ const HelpOverlay: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   );
 };
 
-// ─── UdsFlowEditor ────────────────────────────────────────────────────────────
+// ─── FlowEditor ────────────────────────────────────────────────────────────
 
-export const UdsFlowEditor: React.FC = () => {
+/** `in(ecu, image) → ok · fail`: the derived interface of a flow as one line. */
+function interfaceSummary(diagram: Parameters<typeof deriveFlowInterface>[0]): string {
+  const iface = deriveFlowInterface(diagram);
+  const ins = iface.inputs.map((i) => `${i.key}:${i.type}`).join(', ');
+  const outs = iface.outcomes.length > 0 ? iface.outcomes.map((o) => (o.name !== '' ? o.name : o.outcome)).join(' · ') : 'ok';
+  return `${ins || '—'} → ${outs}`;
+}
+
+export const FlowEditor: React.FC = () => {
   const { t } = useI18n();
   const state = useFlowStore();
+  const registry = useFlowRegistry();
   const {
-    diagram, isRunning, isPaused, runLog,
-    templateDialogOpen, zoom, showGrid, showMinimap,
+    diagram, isRunning, isPaused, runLog, readOnly,
+    zoom, showGrid, showMinimap,
   } = state;
+  const activeDoc = registry.docs.find((d) => d.key === registry.activeKey);
 
   const engineRef    = useRef<FlowEngine | null>(null);
   const logEndRef    = useRef<HTMLDivElement>(null);
   const [logOpen,     setLogOpen]     = useState(true);
   const [helpOpen,    setHelpOpen]    = useState(false);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [runDialog,   setRunDialog]   = useState(false);
+  const [extractOpen, setExtractOpen] = useState(false);
   const [nameEditing, setNameEditing] = useState(false);
   const [nameValue,   setNameValue]   = useState(diagram.name);
+
+  // Library index + one-time localStorage migration.
+  useEffect(() => {
+    void flowRegistry.init();
+  }, []);
 
   // Auto-scroll log
   useEffect(() => {
@@ -282,12 +258,18 @@ export const UdsFlowEditor: React.FC = () => {
   // ── Keyboard shortcuts ─────────────────────────────────────────────────────
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Ctrl+S saves the active document (also from inside a field: the browser's "save page" is never wanted here).
+      if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        void flowRegistry.save();
+        return;
+      }
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
         const { selectedBlockIds, selectedConnectionId } = flowStore.getSnapshot();
-        selectedBlockIds.forEach((id) => flowStore.removeBlock(id));
+        flowStore.removeBlocks(selectedBlockIds);
         if (selectedConnectionId) flowStore.removeConnection(selectedConnectionId);
       }
 
@@ -300,10 +282,6 @@ export const UdsFlowEditor: React.FC = () => {
           e.preventDefault();
           flowStore.selectAllBlocks();
         }
-        if (e.key === 's' || e.key === 'S') {
-          e.preventDefault();
-          flowStore.saveDiagram(diagram.name);
-        }
       }
 
       if (e.key === 'Escape') {
@@ -313,16 +291,35 @@ export const UdsFlowEditor: React.FC = () => {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [diagram.name]);
+  }, []);
 
   // ── Run controls ───────────────────────────────────────────────────────────
-  const handleRun = useCallback(async () => {
-    if (isRunning) return;
+  const startRun = useCallback(async (inputs: Record<string, unknown>, ecu: EcuRecordV1 | null = null) => {
+    if (flowStore.getSnapshot().isRunning) return;
     const engine = new FlowEngine();
     engineRef.current = engine;
-    await engine.run();
+    flowRegistry.setRunRoot(flowRegistry.getSnapshot().activeKey);
+    await engine.run({ inputs, ecu });
+    flowRegistry.setRunRoot(null);
     engineRef.current = null;
-  }, [isRunning]);
+    const r = engine.result;
+    if (r && !r.refused && !r.stopped) {
+      flowStore.addRunLog({
+        blockId: '', blockLabel: 'Engine',
+        level: r.outcome === 'ok' ? 'success' : r.outcome === 'fail' ? 'warn' : 'error',
+        message: t('flowReg.run.result', { outcome: r.outcome, name: r.name ?? '—' }),
+      });
+      for (const [k, v] of Object.entries(r.outputs)) {
+        flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'info', message: `  ${k} = ${formatValue(v)}` });
+      }
+    }
+  }, [t]);
+
+  const handleRun = useCallback(() => {
+    if (isRunning || !activeDoc) return;
+    if (deriveFlowInterface(flowStore.getSnapshot().diagram).inputs.length > 0) setRunDialog(true);
+    else void startRun({});
+  }, [activeDoc, isRunning, startRun]);
 
   const handlePause = useCallback(() => {
     if (!engineRef.current) return;
@@ -345,10 +342,6 @@ export const UdsFlowEditor: React.FC = () => {
     }
   }, [t]);
 
-  const handleSave = useCallback(() => {
-    flowStore.saveDiagram(diagram.name);
-  }, [diagram.name]);
-
   const handleNameCommit = useCallback(() => {
     setNameEditing(false);
     if (nameValue.trim()) {
@@ -356,13 +349,17 @@ export const UdsFlowEditor: React.FC = () => {
     }
   }, [nameValue]);
 
+  const hasDoc = activeDoc !== undefined;
+  const editable = hasDoc && !readOnly;
+  const inputsSpec = hasDoc ? deriveFlowInterface(diagram).inputs : [];
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-canvas">
       {/* ── Toolbar ── */}
       <div className={DIAG_TOOLBAR}>
-        {/* Diagram name */}
+        {/* Document name */}
         <div className="mr-1 flex items-center gap-1.5">
-          {nameEditing ? (
+          {nameEditing && editable ? (
             <input
               autoFocus
               className="h-[30px] w-[180px] rounded-[2px] border border-hairline bg-canvas px-2.5 text-[12.5px] text-ink outline-none focus:border-focus"
@@ -376,14 +373,27 @@ export const UdsFlowEditor: React.FC = () => {
             />
           ) : (
             <span
-              className="cursor-pointer font-mono text-xs font-semibold uppercase tracking-wider text-ink hover:text-focus"
-              onDoubleClick={() => setNameEditing(true)}
+              className="max-w-[260px] cursor-pointer truncate font-mono text-xs font-semibold uppercase tracking-wider text-ink hover:text-focus"
+              onDoubleClick={() => editable && setNameEditing(true)}
               title={t('diagHmi.flow.renameHint')}
             >
-              {diagram.name}
+              {hasDoc ? diagram.name : t('flowReg.noDocument')}
             </span>
           )}
-          <button type="button" onClick={handleSave} className={DIAG_BTN_GHOST} title="Ctrl+S">
+          {activeDoc && activeDoc.kind === 'nexuscan.block' && <DiagBadge tone="warn">{t('flowReg.customBlock')}</DiagBadge>}
+          {activeDoc && !activeDoc.readOnly && (
+            <span className="shrink-0 font-mono text-[11.5px] tabular-nums text-muted">
+              {activeDoc.baseRevision > 0 ? `r${activeDoc.baseRevision}` : t('flowReg.unsavedNew')}
+              {activeDoc.dirty && <span className="ml-1 text-warn" title={t('flowReg.unsaved')}>●</span>}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => void flowRegistry.save()}
+            disabled={!editable}
+            className={DIAG_BTN_GHOST}
+            title={`${t('flowReg.save')} (Ctrl+S)`}
+          >
             <Save className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
         </div>
@@ -393,8 +403,8 @@ export const UdsFlowEditor: React.FC = () => {
         {/* Run controls */}
         <button
           type="button"
-          onClick={() => void handleRun()}
-          disabled={isRunning}
+          onClick={handleRun}
+          disabled={isRunning || !hasDoc}
           className={DIAG_BTN_PRIMARY}
         >
           <Play className="h-3.5 w-3.5" aria-hidden="true" />
@@ -416,9 +426,20 @@ export const UdsFlowEditor: React.FC = () => {
           {t('diagHmi.flow.stop')}
         </button>
 
-        <button type="button" onClick={handleClear} className={DIAG_BTN_GHOST}>
+        <button type="button" onClick={handleClear} disabled={!editable} className={DIAG_BTN_GHOST}>
           <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
           {t('diagHmi.flow.clear')}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setExtractOpen(true)}
+          disabled={!editable || state.selectedBlockIds.length === 0}
+          className={DIAG_BTN_GHOST}
+          title={t('flowNest.extract.title')}
+        >
+          <Package className="h-3.5 w-3.5" aria-hidden="true" />
+          {t('flowNest.extract.short')}
         </button>
 
         <div className="flex-1" />
@@ -449,10 +470,10 @@ export const UdsFlowEditor: React.FC = () => {
 
         <div className={DIAG_DIVIDER} />
 
-        {/* Templates */}
-        <button type="button" onClick={() => flowStore.setTemplateDialogOpen(true)} className={DIAG_BTN}>
+        {/* New from template */}
+        <button type="button" onClick={() => setTemplatesOpen(true)} className={DIAG_BTN}>
           <LayoutTemplate className="h-3.5 w-3.5" aria-hidden="true" />
-          {t('diagHmi.flow.templates')}
+          {t('flowReg.newFromTemplate')}
         </button>
 
         {/* Help */}
@@ -466,16 +487,82 @@ export const UdsFlowEditor: React.FC = () => {
         </button>
       </div>
 
-      {/* ── Main 3-panel layout ── */}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        {/* Palette */}
-        <FlowPalette />
+      {/* ── Interface summary / read-only banner ── */}
+      {activeDoc && (
+        <div className={`flex h-7 shrink-0 items-center gap-2 border-b border-hairline px-3.5 ${activeDoc.readOnly ? 'bg-[var(--status-warn-bg)]' : 'bg-surface'}`}>
+          {activeDoc.readOnly ? (
+            <>
+              <span className="font-mono text-[11.5px] font-semibold uppercase text-warn">
+                {t('flowReg.readOnlyBanner', { rev: activeDoc.viewRevision ?? 0 })}
+              </span>
+              <button
+                type="button"
+                className={DIAG_BTN_SM}
+                onClick={() => {
+                  if (activeDoc.viewRevision !== null) void flowRegistry.restoreRevision(activeDoc.id, activeDoc.viewRevision);
+                }}
+              >
+                <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                {t('flowReg.restoreRevision')}
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="font-mono text-[10.5px] font-semibold uppercase tracking-wider text-subtle">{t('flowReg.interface')}</span>
+              <span className="min-w-0 truncate font-mono text-[11.5px] tabular-nums text-muted" title={interfaceSummary(diagram)}>
+                {interfaceSummary(diagram)}
+              </span>
+            </>
+          )}
+        </div>
+      )}
 
-        {/* Canvas area (flex col to accommodate log panel) */}
+      <FlowNotices />
+      <FlowTrailBar />
+
+      {/* ── Main layout: registry | palette | canvas | inspector ── */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <FlowRegistryPanel onNewFromTemplate={() => setTemplatesOpen(true)} />
+
+        <ResizablePanel
+          id="palette"
+          side="left"
+          defaultWidth={220}
+          minWidth={160}
+          maxWidth={480}
+          title={t('flowReg.palette.title')}
+          icon={<Boxes className="h-3.5 w-3.5" aria-hidden="true" />}
+        >
+          <FlowPalette />
+        </ResizablePanel>
+
+        {/* Canvas area (flex col to accommodate tabs + log panel) */}
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          {/* Canvas */}
+          <FlowDocTabs />
+
           <div className="min-h-0 flex-1 overflow-hidden">
-            <FlowCanvas />
+            {hasDoc ? (
+              <FlowCanvas />
+            ) : (
+              <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+                <div className="font-mono text-[12px] font-semibold uppercase tracking-wider text-muted">{t('flowReg.empty.title')}</div>
+                <div className="max-w-[420px] text-[12px] leading-snug text-subtle">{t('flowReg.empty.hint')}</div>
+                <div className="flex flex-wrap justify-center gap-2">
+                  <button type="button" className={DIAG_BTN_PRIMARY} onClick={() => flowRegistry.newDocument('nexuscan.flow')}>
+                    <FilePlus2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    {t('flowReg.newFlow')}
+                  </button>
+                  <button type="button" className={DIAG_BTN} onClick={() => flowRegistry.newDocument('nexuscan.block')}>
+                    <FilePlus2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    {t('flowReg.newBlock')}
+                  </button>
+                  <button type="button" className={DIAG_BTN} onClick={() => void flowRegistry.importFromFile()}>
+                    <Upload className="h-3.5 w-3.5" aria-hidden="true" />
+                    {t('flowReg.import')}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Run log panel */}
@@ -521,15 +608,39 @@ export const UdsFlowEditor: React.FC = () => {
           </div>
         </div>
 
-        {/* Inspector */}
-        <FlowInspector />
+        <ResizablePanel
+          id="inspector"
+          side="right"
+          defaultWidth={260}
+          minWidth={240}
+          maxWidth={640}
+          title={t('diagHmi.flow.properties')}
+          icon={<Settings2 className="h-3.5 w-3.5" aria-hidden="true" />}
+        >
+          <FlowInspector />
+        </ResizablePanel>
       </div>
 
       {/* ── Dialogs ── */}
-      {templateDialogOpen && <TemplateDialog onClose={() => flowStore.setTemplateDialogOpen(false)} />}
+      {templatesOpen && <TemplateDialog onClose={() => setTemplatesOpen(false)} />}
 
       {helpOpen && <HelpOverlay onClose={() => setHelpOpen(false)} />}
 
+      {extractOpen && <ExtractDialog onClose={() => setExtractOpen(false)} />}
+
+      {runDialog && activeDoc && (
+        <RunInputsDialog
+          docId={activeDoc.id}
+          inputs={inputsSpec}
+          onCancel={() => setRunDialog(false)}
+          onRun={(provided, ecu) => {
+            setRunDialog(false);
+            void startRun(provided, ecu);
+          }}
+        />
+      )}
+
+      <ConflictDialog />
       <FlowPromptDialog />
     </div>
   );
