@@ -1,9 +1,12 @@
 import { useSyncExternalStore } from 'react';
 import type {
   ChannelConfigDto,
+  DetectedChannelDetailDto,
+  DriverFamilyStatusDto,
   DriverFamilyId,
   DriverProbeReportDto,
 } from '../types/hal';
+import { logUiDebugEvent } from './debugConsoleStore';
 
 const STORAGE_KEY = 'nexuscan:connectionProfiles:v2';
 
@@ -87,20 +90,55 @@ export const DATA_BITRATES_FD: readonly { value: number; label: string }[] = [
   { value: 8_000_000, label: '8 Mbit/s' },
 ];
 
-export const PCAN_ADAPTER_CHANNELS: readonly string[] = [
+/** Default PCAN channel text when nothing is detected. Never presented as detected hardware. */
+export const PCAN_DEFAULT_CHANNEL = 'PCAN_USBBUS1';
+
+/** Manual-entry hint only (input datalist); NOT a list of detected hardware. */
+export const PCAN_MANUAL_ENTRY_HINT: readonly string[] = [
   'PCAN_USBBUS1',
-  'PCAN_USBBUS2',
-  'PCAN_USBBUS3',
-  'PCAN_USBBUS4',
-  'PCAN_USBBUS5',
-  'PCAN_USBBUS6',
-  'PCAN_USBBUS7',
-  'PCAN_USBBUS8',
   'PCAN_PCIBUS1',
-  'PCAN_PCIBUS2',
-  'PCAN_PCIBUS3',
-  'PCAN_PCIBUS4',
 ];
+
+export interface DetectedPcanChannel {
+  channelId: string;
+  label: string;
+  state: string;
+  occupied: boolean;
+}
+
+/** Unique (by channelId) channels actually reported by the probe for a family. */
+export function getDetectedChannels(
+  family: DriverFamilyStatusDto | undefined,
+): DetectedPcanChannel[] {
+  const out = new Map<string, DetectedPcanChannel>();
+  const details: readonly DetectedChannelDetailDto[] = family?.channelDetails ?? [];
+  for (const cd of details) {
+    const id = cd.channelId.trim();
+    if (id && !out.has(id)) {
+      out.set(id, {
+        channelId: id,
+        label: cd.label || id,
+        state: cd.state,
+        occupied: cd.state === 'occupied' || cd.state === 'busy',
+      });
+    }
+  }
+  for (const raw of family?.detectedChannels ?? []) {
+    const id = raw.trim();
+    if (id && !out.has(id)) {
+      out.set(id, { channelId: id, label: id, state: 'up', occupied: false });
+    }
+  }
+  return Array.from(out.values());
+}
+
+/** Detected PCAN channel ids only; falls back to the single default text (no invented buses). */
+export function pcanCandidateChannels(
+  family: DriverFamilyStatusDto | undefined,
+): string[] {
+  const ids = getDetectedChannels(family).map((c) => c.channelId);
+  return ids.length > 0 ? ids : [PCAN_DEFAULT_CHANNEL];
+}
 
 export const KVASER_ADAPTER_CHANNELS: readonly string[] = [
   '0',
@@ -113,6 +151,71 @@ export const KVASER_ADAPTER_CHANNELS: readonly string[] = [
   '7',
 ];
 
+export const VECTOR_XL_ADAPTER_CHANNELS = ['0', '1', '2', '3'] as const;
+
+export function defaultSerialPortPlaceholder(hostOs?: string): string {
+  const normalized = (hostOs ?? '').toLowerCase();
+  if (normalized === 'windows' || normalized === 'win32') {
+    return 'COM3';
+  }
+  if (normalized === 'macos' || normalized === 'darwin') {
+    return '/dev/cu.usbmodem14101';
+  }
+  return '/dev/ttyACM0';
+}
+
+export function pickNextUnusedChannel(
+  family: DriverFamilyId,
+  candidates: readonly string[],
+  existingProfiles: readonly SavedConnectionProfile[],
+  excludeProfileId?: string,
+  fallback = '0',
+): string {
+  const usedChannels = new Set<string>();
+  for (const p of existingProfiles) {
+    if (p.driverFamily === family && p.id !== excludeProfileId) {
+      usedChannels.add(p.adapterChannel.trim());
+    }
+  }
+  for (const cand of candidates) {
+    const trimmed = cand.trim();
+    if (trimmed && !usedChannels.has(trimmed)) {
+      return trimmed;
+    }
+  }
+  return candidates[0]?.trim() || fallback;
+}
+
+export function pickNextUnusedSerialPort(
+  candidates: readonly string[],
+  existingProfiles: readonly SavedConnectionProfile[],
+  excludeProfileId?: string,
+  fallback = 'COM3',
+): string {
+  const usedPorts = new Set<string>();
+  for (const p of existingProfiles) {
+    if (p.driverFamily === 'slcan' && p.id !== excludeProfileId) {
+      const raw = p.serialPort.trim();
+      const clean = raw.startsWith('slcan:') ? raw.slice(6) : raw;
+      if (clean) usedPorts.add(clean);
+    }
+  }
+  for (const cand of candidates) {
+    const raw = cand.trim();
+    const clean = raw.startsWith('slcan:') ? raw.slice(6) : raw;
+    if (clean && !usedPorts.has(clean)) {
+      return clean;
+    }
+  }
+  const first = candidates[0]?.trim();
+  const firstClean = first
+    ? first.startsWith('slcan:')
+      ? first.slice(6).trim()
+      : first
+    : fallback;
+  return firstClean || fallback;
+}
+
 export function createDefaultConnectionProfiles(): SavedConnectionProfile[] {
   // Empty by default: user adds their own hardware/vcan interfaces (mock is strictly opt-in)
   return [];
@@ -122,7 +225,7 @@ export function resolveDeviceIdForProfile(profile: SavedConnectionProfile): stri
   switch (profile.driverFamily) {
     case 'slcan': {
       const port = profile.serialPort.trim() || '/dev/ttyUSB0';
-      return `slcan:${port}`;
+      return port.startsWith('slcan:') ? port : `slcan:${port}`;
     }
     case 'pcan': {
       const ch = profile.adapterChannel.trim() || 'PCAN_USBBUS1';
@@ -131,6 +234,10 @@ export function resolveDeviceIdForProfile(profile: SavedConnectionProfile): stri
     case 'kvaser': {
       const ch = profile.adapterChannel.trim() || '0';
       return ch.startsWith('kvaser:') ? ch : `kvaser:${ch}`;
+    }
+    case 'vector_xl': {
+      const ch = profile.adapterChannel.trim() || '0';
+      return ch.startsWith('vector_xl:') ? ch : `vector_xl:${ch}`;
     }
     case 'socketcan': {
       const iface = profile.adapterChannel.trim() || 'vcan0';
@@ -168,7 +275,13 @@ export function buildChannelConfigForProfile(
     mockFpsPreset: profile.driverFamily === 'mock' ? profile.mockFpsPreset : null,
     driverFamily: profile.driverFamily,
     serialPort:
-      profile.driverFamily === 'slcan' ? profile.serialPort.trim() || null : null,
+      profile.driverFamily === 'slcan'
+        ? (() => {
+            const raw = profile.serialPort.trim();
+            if (!raw) return null;
+            return raw.startsWith('slcan:') ? raw.slice(6) : raw;
+          })()
+        : null,
     serialBaudRate:
       profile.driverFamily === 'slcan' ? profile.serialBaudRate : null,
     serialDtrRts: profile.driverFamily === 'slcan' ? profile.serialDtrRts : null,
@@ -294,6 +407,7 @@ export const connectionStore = {
     });
 
     const nextProfiles = [...shiftedOthers, resolved];
+    const isNew = !currentState.profiles.some((p) => p.id === resolved.id);
 
     persistProfilesToStorage(nextProfiles);
     currentState = {
@@ -302,9 +416,19 @@ export const connectionStore = {
       selectedProfileId: resolved.id,
     };
     emitChange();
+
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'CONN',
+      action: isNew ? 'conn.profile.create' : 'conn.profile.update',
+      busId: resolved.busId,
+      title: `${isNew ? 'Profile Created' : 'Profile Updated'}: ${resolved.name}`,
+      details: `Driver: ${resolved.driverFamily}, Channel: ${resolved.adapterChannel || resolved.serialPort}, Device: ${resolved.deviceId}`,
+    });
   },
 
   removeProfile(id: string): void {
+    const target = currentState.profiles.find((p) => p.id === id);
     const nextProfiles = currentState.profiles.filter((p) => p.id !== id);
     persistProfilesToStorage(nextProfiles);
     currentState = {
@@ -316,6 +440,17 @@ export const connectionStore = {
           : currentState.selectedProfileId,
     };
     emitChange();
+
+    if (target) {
+      logUiDebugEvent({
+        severity: 'info',
+        category: 'CONN',
+        action: 'conn.profile.delete',
+        busId: target.busId,
+        title: `Profile Deleted: ${target.name}`,
+        details: `Driver: ${target.driverFamily}, Bus: ${target.busId + 1}`,
+      });
+    }
   },
 
   setProfiles(profiles: readonly SavedConnectionProfile[]): void {

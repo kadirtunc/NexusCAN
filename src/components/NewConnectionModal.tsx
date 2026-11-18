@@ -1,12 +1,18 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Plug, Save, X } from 'lucide-react';
 import {
   DATA_BITRATES_FD,
   KVASER_ADAPTER_CHANNELS,
   MAX_BUS_ID,
   NOMINAL_BITRATES,
-  PCAN_ADAPTER_CHANNELS,
+  PCAN_DEFAULT_CHANNEL,
+  getDetectedChannels,
+  pcanCandidateChannels,
   SERIAL_BAUD_RATES,
+  VECTOR_XL_ADAPTER_CHANNELS,
+  defaultSerialPortPlaceholder,
+  pickNextUnusedChannel,
+  pickNextUnusedSerialPort,
   type SavedConnectionProfile,
   buildChannelConfigForProfile,
   clampBusId,
@@ -16,7 +22,7 @@ import {
   useConnectionStore,
 } from '../store/connectionStore';
 import { describeTxError } from '../store/busTxControl';
-import { apiArmActiveBus, apiConnectBus } from '../services/ipcClient';
+import { apiArmActiveBus, apiConnectBus, apiProbeDrivers } from '../services/ipcClient';
 import { telemetryStore } from '../store/telemetryStore';
 import { useI18n, type TranslationKey } from '../i18n';
 import type { DeviceDescriptorDto, DriverFamilyId } from '../types/hal';
@@ -37,6 +43,7 @@ const DRIVER_OPTIONS: readonly { id: DriverFamilyId; labelKey: TranslationKey }[
   { id: 'slcan', labelKey: 'conn.driver.slcan' },
   { id: 'pcan', labelKey: 'conn.driver.pcan' },
   { id: 'kvaser', labelKey: 'conn.driver.kvaser' },
+  { id: 'vector_xl', labelKey: 'conn.driver.vector_xl' },
   { id: 'mock', labelKey: 'conn.driver.mock' },
 ];
 
@@ -47,6 +54,24 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
 }) => {
   const { t } = useI18n();
   const connState = useConnectionStore();
+
+  useEffect(() => {
+    void apiProbeDrivers()
+      .then((report) => {
+        connectionStore.setProbeReport(report);
+      })
+      .catch(() => null);
+
+    const interval = setInterval(() => {
+      void apiProbeDrivers()
+        .then((report) => {
+          connectionStore.setProbeReport(report);
+        })
+        .catch(() => null);
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, []);
 
   // Find next free busId (0..255)
   const usedBuses = useMemo(() => new Set(connState.profiles.map((p) => p.busId)), [connState.profiles]);
@@ -59,30 +84,106 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
   const detectedSocketCan = devices.find((d) => d.driverId === 'socketcan');
   const isLinux = connState.probeReport?.hostOs === 'linux';
   const hasSocketCan = Boolean(detectedSocketCan) || isLinux;
+
+  const gsUsbFamily = connState.probeReport?.families.find((f) => f.familyId === 'gs_usb');
+  const hasGsUsb = Boolean(
+    gsUsbFamily?.installed ||
+    gsUsbFamily?.hardwarePresent ||
+    connState.probeReport?.usbDevices?.some((u) => u.matchedFamily === 'gs_usb'),
+  );
+
   const initialFamily: DriverFamilyId = hasSocketCan
     ? 'socketcan'
-    : (connState.probeReport?.serialPorts?.length ?? 0) > 0
-      ? 'slcan'
-      : 'pcan';
-  const initialChannel: string = hasSocketCan
-    ? (detectedSocketCan?.channelName || 'vcan0')
-    : initialFamily === 'slcan'
-      ? 'slcan0'
-      : PCAN_ADAPTER_CHANNELS[0];
-  const initialName = hasSocketCan
-    ? `SocketCAN (${initialChannel})`
-    : `Bus ${initialBusId + 1} (${initialFamily})`;
+    : hasGsUsb
+      ? 'gs_usb'
+      : (connState.probeReport?.serialPorts?.length ?? 0) > 0
+        ? 'slcan'
+        : 'pcan';
+
+  const serialCandidates = (connState.probeReport?.serialPorts ?? []).map((s) => s.portName);
+  const initialSerialPort = pickNextUnusedSerialPort(
+    serialCandidates,
+    connState.profiles,
+    undefined,
+    defaultSerialPortPlaceholder(connState.probeReport?.hostOs),
+  );
+
+  let initialChannel = '0';
+  if (initialFamily === 'socketcan') {
+    const socketcanCandidates = Array.from(
+      new Set(
+        [
+          ...(connState.probeReport?.families.find((f) => f.familyId === 'socketcan')
+            ?.detectedChannels ?? []),
+          detectedSocketCan?.channelName,
+          'can0',
+          'vcan0',
+        ].filter((x): x is string => Boolean(x)),
+      ),
+    );
+    initialChannel = pickNextUnusedChannel(
+      'socketcan',
+      socketcanCandidates,
+      connState.profiles,
+      undefined,
+      'vcan0',
+    );
+  } else if (initialFamily === 'gs_usb') {
+    const gsUsbCandidates = Array.from(
+      new Set([
+        ...(gsUsbFamily?.detectedChannels ?? []),
+        ...(connState.probeReport?.usbDevices ?? [])
+          .filter((u) => u.matchedFamily === 'gs_usb')
+          .map(
+            (u) =>
+              (u.suggestedChannel?.includes(':')
+                ? u.suggestedChannel.split(':')[1]
+                : u.suggestedChannel) || '0',
+          ),
+        '0',
+        '1',
+        '2',
+        '3',
+      ]),
+    );
+    initialChannel = pickNextUnusedChannel(
+      'gs_usb',
+      gsUsbCandidates,
+      connState.profiles,
+      undefined,
+      '0',
+    );
+  } else if (initialFamily === 'slcan') {
+    initialChannel = 'slcan0';
+  } else if (initialFamily === 'pcan') {
+    const pcanFamily = connState.probeReport?.families.find((f) => f.familyId === 'pcan');
+    const candidates = pcanCandidateChannels(pcanFamily);
+    initialChannel = pickNextUnusedChannel(
+      'pcan',
+      candidates,
+      connState.profiles,
+      undefined,
+      PCAN_DEFAULT_CHANNEL,
+    );
+  }
+
+  const initialName =
+    initialFamily === 'socketcan'
+      ? `SocketCAN (${initialChannel})`
+      : initialFamily === 'gs_usb'
+        ? `USB-CAN gs_usb (ch${initialChannel})`
+        : initialFamily === 'slcan'
+          ? `SLCAN (${initialSerialPort})`
+          : `Bus ${initialBusId + 1} (${initialFamily})`;
 
   const [busId, setBusId] = useState<number>(initialBusId);
   const [name, setName] = useState<string>(initialName);
   const [driverFamily, setDriverFamily] = useState<DriverFamilyId>(initialFamily);
   const [adapterChannel, setAdapterChannel] = useState<string>(initialChannel);
-  const [serialPort, setSerialPort] = useState<string>(
-    connState.probeReport?.serialPorts[0]?.portName ?? 'COM3',
-  );
+  const [serialPort, setSerialPort] = useState<string>(initialSerialPort);
   const [serialBaudRate, setSerialBaudRate] = useState<number>(1_000_000);
   const [bitrate, setBitrate] = useState<number>(500_000);
-  const [enableFd, setEnableFd] = useState<boolean>(true);
+  const [enableFd, setEnableFd] = useState<boolean>(initialFamily !== 'slcan');
   const [dataBitrate, setDataBitrate] = useState<number>(2_000_000);
   const [listenOnly, setListenOnly] = useState<boolean>(true);
   const [mockFpsPreset, setMockFpsPreset] = useState<number | null>(null);
@@ -95,31 +196,121 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
   const handleFamilyChange = (fam: DriverFamilyId): void => {
     setDriverFamily(fam);
     if (fam === 'socketcan') {
-      const ch = detectedSocketCan?.channelName || 'vcan0';
+      const socketcanCandidates = Array.from(
+        new Set(
+          [
+            ...(connState.probeReport?.families.find((f) => f.familyId === 'socketcan')
+              ?.detectedChannels ?? []),
+            detectedSocketCan?.channelName,
+            'can0',
+            'vcan0',
+          ].filter((x): x is string => Boolean(x)),
+        ),
+      );
+      const ch = pickNextUnusedChannel(
+        'socketcan',
+        socketcanCandidates,
+        connState.profiles,
+        undefined,
+        'vcan0',
+      );
       setAdapterChannel(ch);
       setName(`SocketCAN (${ch})`);
       setEnableFd(true);
     } else if (fam === 'gs_usb') {
-      setAdapterChannel('0');
-      setName(`USB-CAN gs_usb (ch0)`);
+      const gsFamily = connState.probeReport?.families.find((f) => f.familyId === 'gs_usb');
+      const candidates = Array.from(
+        new Set([
+          ...(gsFamily?.detectedChannels ?? []),
+          ...(connState.probeReport?.usbDevices ?? [])
+            .filter((u) => u.matchedFamily === 'gs_usb')
+            .map(
+              (u) =>
+                (u.suggestedChannel?.includes(':')
+                  ? u.suggestedChannel.split(':')[1]
+                  : u.suggestedChannel) || '0',
+            ),
+          '0',
+          '1',
+          '2',
+          '3',
+        ]),
+      );
+      const ch = pickNextUnusedChannel(
+        'gs_usb',
+        candidates,
+        connState.profiles,
+        undefined,
+        '0',
+      );
+      setAdapterChannel(ch);
+      setName(`USB-CAN gs_usb (ch${ch})`);
       setEnableFd(true);
     } else if (fam === 'slcan') {
+      const candidates = (connState.probeReport?.serialPorts ?? []).map((s) => s.portName);
+      const nextPort = pickNextUnusedSerialPort(
+        candidates,
+        connState.profiles,
+        undefined,
+        defaultSerialPortPlaceholder(connState.probeReport?.hostOs),
+      );
       setEnableFd(false);
       setAdapterChannel('slcan0');
-      const firstPort = connState.probeReport?.serialPorts[0]?.portName ?? 'COM3';
-      setSerialPort(firstPort);
-      setName(`SLCAN (${firstPort})`);
+      setSerialPort(nextPort);
+      setName(`SLCAN (${nextPort})`);
     } else if (fam === 'pcan') {
-      setAdapterChannel(PCAN_ADAPTER_CHANNELS[0]);
-      setName(`PCAN (${PCAN_ADAPTER_CHANNELS[0]})`);
+      const pFamily = connState.probeReport?.families.find((f) => f.familyId === 'pcan');
+      const candidates = pcanCandidateChannels(pFamily);
+      const ch = pickNextUnusedChannel(
+        'pcan',
+        candidates,
+        connState.profiles,
+        undefined,
+        PCAN_DEFAULT_CHANNEL,
+      );
+      setAdapterChannel(ch);
+      setName(`PCAN (${ch})`);
       setEnableFd(true);
     } else if (fam === 'kvaser') {
-      setAdapterChannel('0');
-      setName(`Kvaser CANlib (ch0)`);
+      const kFamily = connState.probeReport?.families.find((f) => f.familyId === 'kvaser');
+      const candidates = kFamily?.detectedChannels.length
+        ? kFamily.detectedChannels
+        : KVASER_ADAPTER_CHANNELS;
+      const ch = pickNextUnusedChannel(
+        'kvaser',
+        candidates,
+        connState.profiles,
+        undefined,
+        '0',
+      );
+      setAdapterChannel(ch);
+      setName(`Kvaser CANlib (ch${ch})`);
       setEnableFd(false);
+    } else if (fam === 'vector_xl') {
+      const vFamily = connState.probeReport?.families.find((f) => f.familyId === 'vector_xl');
+      const candidates = vFamily?.detectedChannels.length
+        ? vFamily.detectedChannels
+        : VECTOR_XL_ADAPTER_CHANNELS;
+      const ch = pickNextUnusedChannel(
+        'vector_xl',
+        candidates,
+        connState.profiles,
+        undefined,
+        '0',
+      );
+      setAdapterChannel(ch);
+      setName(`Vector XL (ch${ch})`);
+      setEnableFd(true);
     } else if (fam === 'mock') {
-      setAdapterChannel('mock0');
-      setName(`Simulator (mock0)`);
+      const ch = pickNextUnusedChannel(
+        'mock',
+        ['mock0', 'mock1'],
+        connState.profiles,
+        undefined,
+        'mock0',
+      );
+      setAdapterChannel(ch);
+      setName(`Simulator (${ch})`);
       setEnableFd(true);
       void ensureMockPresetDatabasesLoaded().then((presetIds) => {
         setDatabaseIds((prev) => Array.from(new Set([...prev, ...presetIds])));
@@ -402,11 +593,33 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                   }}
                   className="w-full h-[26px] px-2 border text-[11px] font-mono focus:outline-none"
                 >
-                  {PCAN_ADAPTER_CHANNELS.map((ch) => (
-                    <option key={ch} value={ch}>
-                      {ch}
-                    </option>
-                  ))}
+                  {(() => {
+                    const detected = getDetectedChannels(
+                      connState.probeReport?.families.find((f) => f.familyId === 'pcan'),
+                    );
+                    return (
+                      <>
+                        {detected.length === 0 && (
+                          <option value="" disabled>
+                            {t('conn.pcan.noneDetected')}
+                          </option>
+                        )}
+                        {detected.length === 0 && adapterChannel && (
+                          <option value={adapterChannel}>{adapterChannel}</option>
+                        )}
+                        {detected.map((c) => (
+                          <option
+                            key={c.channelId}
+                            value={c.channelId}
+                            style={c.occupied ? { color: 'var(--status-warn)' } : undefined}
+                          >
+                            {c.label}
+                            {c.occupied ? ` · ${t('conn.pcan.inUse')}` : ''}
+                          </option>
+                        ))}
+                      </>
+                    );
+                  })()}
                 </select>
               ) : driverFamily === 'kvaser' ? (
                 <select
@@ -422,6 +635,23 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                   {KVASER_ADAPTER_CHANNELS.map((ch) => (
                     <option key={ch} value={ch}>
                       Channel {ch}
+                    </option>
+                  ))}
+                </select>
+              ) : driverFamily === 'vector_xl' ? (
+                <select
+                  value={adapterChannel}
+                  onChange={(e) => setAdapterChannel(e.target.value)}
+                  style={{
+                    backgroundColor: 'var(--bg-input)',
+                    borderColor: 'var(--border-strong)',
+                    color: 'var(--text-primary)',
+                  }}
+                  className="w-full h-[26px] px-2 border text-[11px] font-mono focus:outline-none"
+                >
+                  {VECTOR_XL_ADAPTER_CHANNELS.map((ch) => (
+                    <option key={ch} value={ch}>
+                      Vector XL Channel {ch}
                     </option>
                   ))}
                 </select>
@@ -445,40 +675,103 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                     }}
                     className="w-full h-[26px] px-2 border text-[11px] font-mono focus:outline-none"
                   />
-                  {driverFamily === 'socketcan' && (
-                    <div className="flex flex-wrap items-center gap-1 mt-1 text-[10px] font-mono">
-                      <span className="text-[var(--text-muted)] text-[9px]">{t('conn.modal.quickLabel')}</span>
-                      {Array.from(
+                  {(() => {
+                    const familyStatus = connState.probeReport?.families.find(
+                      (f) => f.familyId === driverFamily,
+                    );
+                    let quickOptions: string[] = [];
+
+                    if (driverFamily === 'socketcan') {
+                      quickOptions = Array.from(
                         new Set([
-                          'vcan0',
                           'can0',
+                          'vcan0',
+                          ...(familyStatus?.detectedChannels ?? []),
                           ...devices
                             .filter((d) => d.driverId === 'socketcan')
                             .map((d) => d.channelName),
                         ]),
-                      ).map((opt) => (
-                        <button
-                          key={opt}
-                          type="button"
-                          onClick={() => {
-                            setAdapterChannel(opt);
-                            setName((prev) =>
-                              prev.startsWith('SocketCAN') || prev.startsWith('Bus')
-                                ? `SocketCAN (${opt})`
-                                : prev,
-                            );
-                          }}
-                          className={`px-1.5 py-0.2 border rounded cursor-pointer ${
-                            adapterChannel === opt
-                              ? 'bg-emerald-950/60 border-emerald-500/60 text-emerald-300 font-bold'
-                              : 'bg-[var(--bg-panel)] border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                          }`}
-                        >
-                          {opt}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                      );
+                    } else if (driverFamily === 'gs_usb') {
+                      quickOptions = Array.from(
+                        new Set([
+                          ...(familyStatus?.detectedChannels ?? []),
+                          ...(connState.probeReport?.usbDevices ?? [])
+                            .filter((u) => u.matchedFamily === 'gs_usb')
+                            .map((u) => {
+                              const sc = u.suggestedChannel;
+                              return (sc?.includes(':') ? sc.split(':')[1] : sc) || '0';
+                            }),
+                          '0',
+                          '1',
+                        ]),
+                      );
+                    } else if (
+                      familyStatus?.detectedChannels &&
+                      familyStatus.detectedChannels.length > 0
+                    ) {
+                      quickOptions = Array.from(new Set(familyStatus.detectedChannels));
+                    }
+
+                    if (quickOptions.length === 0) return null;
+
+                    return (
+                      <div className="flex flex-wrap items-center gap-1 mt-1 text-[10px] font-mono">
+                        <span className="text-[var(--text-muted)] text-[9px]">
+                          {t('conn.modal.quickLabel')}
+                        </span>
+                        {quickOptions.map((opt) => {
+                          const detail = familyStatus?.channelDetails?.find(
+                            (cd) => cd.channelId === opt,
+                          );
+                          const isCurrent = adapterChannel === opt;
+                          return (
+                            <button
+                              key={opt}
+                              type="button"
+                              onClick={() => {
+                                setAdapterChannel(opt);
+                                setName((prev) => {
+                                  if (driverFamily === 'socketcan') {
+                                    return prev.startsWith('SocketCAN') || prev.startsWith('Bus')
+                                      ? `SocketCAN (${opt})`
+                                      : prev;
+                                  }
+                                  if (driverFamily === 'gs_usb') {
+                                    return prev.startsWith('USB-CAN') || prev.startsWith('Bus')
+                                      ? `USB-CAN gs_usb (ch${opt})`
+                                      : prev;
+                                  }
+                                  return prev.startsWith('Bus')
+                                    ? `${driverFamily.toUpperCase()} (${opt})`
+                                    : prev;
+                                });
+                              }}
+                              title={
+                                detail
+                                  ? `${detail.label} [${detail.state.toUpperCase()}] ${
+                                      detail.supportsFd ? 'CAN-FD' : 'CC'
+                                    }`
+                                  : undefined
+                              }
+                              className={`px-1.5 py-0.2 border rounded cursor-pointer ${
+                                isCurrent
+                                  ? 'bg-emerald-950/60 border-emerald-500/60 text-emerald-300 font-bold'
+                                  : 'bg-[var(--bg-panel)] border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                              }`}
+                            >
+                              {opt}
+                              {detail && (
+                                <span className="ml-1 text-[8.5px] opacity-70">
+                                  [{detail.state}]
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>

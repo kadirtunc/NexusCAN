@@ -19,6 +19,8 @@ export interface FrameTelemetryDto {
   isFd: boolean;
   isBrs: boolean;
   isTx: boolean;
+  isError?: boolean;
+  errorSummary?: string | null;
   hasHwTimestamp: boolean;
   dlc: number;
   rawBytes: number[];
@@ -42,6 +44,8 @@ export interface ChronologicalFrameDto {
   isFd: boolean;
   isBrs?: boolean;
   isTx: boolean;
+  isError?: boolean;
+  errorSummary?: string | null;
   dlc: number;
   rawBytes: number[];
 }
@@ -54,6 +58,7 @@ export interface TelemetrySnapshotDto {
   estimatedBusLoadPct: number;
   totalFramesRx: number;
   totalFramesTx: number;
+  totalFramesErr?: number;
   droppedFrames: number;
   activeIdsCount: number;
   decodedSignalsCount: number;

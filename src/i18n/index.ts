@@ -10,6 +10,9 @@ import {
 } from './core';
 import { cloudSimWorkbenchEn, cloudSimWorkbenchTr } from './shards/cloudSimWorkbench';
 import { diagnosticsEn, diagnosticsTr } from './shards/diagnostics';
+import { diagWorkspaceEn, diagWorkspaceNoticeEn, diagWorkspaceNoticeTr, diagWorkspaceTr } from './shards/diagWorkspace';
+import { flowCoreEn, flowCoreTr } from './shards/flowCore';
+import { flowRegEn, flowRegTr } from './shards/flowRegistry';
 import { hardwareNetdbEn, hardwareNetdbTr } from './shards/hardwareNetdb';
 import { plotterModalsEn, plotterModalsTr } from './shards/plotterModals';
 import { rxtxTraceEn, rxtxTraceTr } from './shards/rxtxTrace';
@@ -30,6 +33,10 @@ export const trDictionary = {
   ...simInspectorPaletteTr,
   ...simWidgetsCanvasTr,
   ...diagnosticsTr,
+  ...flowCoreTr,
+  ...flowRegTr,
+  ...diagWorkspaceTr,
+  ...diagWorkspaceNoticeTr,
   ...securityTr,
 } as const;
 
@@ -44,6 +51,10 @@ export const enDictionary: Record<TranslationKey, string> = {
   ...simInspectorPaletteEn,
   ...simWidgetsCanvasEn,
   ...diagnosticsEn,
+  ...flowCoreEn,
+  ...flowRegEn,
+  ...diagWorkspaceEn,
+  ...diagWorkspaceNoticeEn,
   ...securityEn,
 };
 

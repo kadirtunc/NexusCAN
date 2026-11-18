@@ -42,7 +42,7 @@ export type DtcEntryDto = BackendDtcEntryDto;
 
 /** Error surfaced to the HMI: a backend `[diag:<code>]` error or a transport-level condition. */
 export interface DiagUiError {
-  code: DiagErrorCode | 'not_connected' | 'backend_missing' | 'unknown';
+  code: DiagErrorCode | 'not_connected' | 'backend_missing' | 'duplicate_session' | 'unknown';
   message: string;
 }
 

@@ -133,6 +133,7 @@ export interface TelemetryHeaderSlice {
   estimatedBusLoadPct: number;
   totalFramesRx: number;
   totalFramesTx: number;
+  totalFramesErr: number;
   droppedFrames: number;
   activeIdsCount: number;
   decodedSignalsCount: number;
@@ -168,6 +169,7 @@ let headerSlice: TelemetryHeaderSlice = {
   estimatedBusLoadPct: 0,
   totalFramesRx: 0,
   totalFramesTx: 0,
+  totalFramesErr: 0,
   droppedFrames: 0,
   activeIdsCount: 0,
   decodedSignalsCount: 0,
@@ -189,6 +191,7 @@ const liveChronoRing = new ChronoRingBuffer(DEFAULT_CHRONO_BUFFER_ROWS);
 let pausedChronoRing: ChronoRingBuffer | null = null;
 let chronoVersion = 0;
 let lastSeenChronoMaxTs = -1;
+let lastProcessedChronoSeq = -1;
 let totalChronoCaptured = 0;
 let chronoOriginTimestampUs = 0;
 
@@ -368,6 +371,7 @@ export const telemetryStore = {
     totalChronoCaptured = 0;
     chronoOriginTimestampUs = 0;
     lastSeenChronoMaxTs = -1;
+    lastProcessedChronoSeq = -1;
     const activeRing = chronoSlice.paused && pausedChronoRing ? pausedChronoRing : liveChronoRing;
     chronoVersion += 1;
     chronoSlice = {
@@ -403,6 +407,7 @@ export const telemetryStore = {
       estimatedBusLoadPct: 0,
       totalFramesRx: 0,
       totalFramesTx: 0,
+      totalFramesErr: 0,
       droppedFrames: 0,
       activeIdsCount: 0,
       decodedSignalsCount: 0,
@@ -424,6 +429,7 @@ export const telemetryStore = {
       estimatedBusLoadPct: snap.estimatedBusLoadPct,
       totalFramesRx: snap.totalFramesRx,
       totalFramesTx: snap.totalFramesTx,
+      totalFramesErr: snap.totalFramesErr ?? headerSlice.totalFramesErr,
       droppedFrames: snap.droppedFrames,
       activeIdsCount: snap.activeIdsCount,
       decodedSignalsCount: snap.decodedSignalsCount,
@@ -511,7 +517,8 @@ export const telemetryStore = {
 
     // 4. O(1) Chronological Ring Buffer (Up to 100,000 Rows, Zero Array Copies!)
     const incoming = snap.recentChronological;
-    if (incoming.length > 0) {
+    if (incoming.length > 0 && snap.seq !== lastProcessedChronoSeq) {
+      lastProcessedChronoSeq = snap.seq;
       if (chronoOriginTimestampUs === 0) {
         chronoOriginTimestampUs = incoming[0].timestampUs;
       }
@@ -525,24 +532,11 @@ export const telemetryStore = {
         chronoOriginTimestampUs = incoming[0].timestampUs;
       }
 
-      let appendedCount = 0;
-      if (incoming[0].timestampUs > lastSeenChronoMaxTs) {
-        for (let i = 0; i < incoming.length; i++) {
-          liveChronoRing.push(incoming[i]);
-        }
-        appendedCount = incoming.length;
-      } else {
-        for (let i = 0; i < incoming.length; i++) {
-          if (incoming[i].timestampUs > lastSeenChronoMaxTs) {
-            liveChronoRing.push(incoming[i]);
-            appendedCount += 1;
-          }
-        }
+      for (let i = 0; i < incoming.length; i++) {
+        liveChronoRing.push(incoming[i]);
       }
-
-      if (batchLastTs > lastSeenChronoMaxTs) {
-        lastSeenChronoMaxTs = batchLastTs;
-      }
+      const appendedCount = incoming.length;
+      lastSeenChronoMaxTs = batchLastTs;
 
       if (appendedCount > 0) {
         totalChronoCaptured += appendedCount;

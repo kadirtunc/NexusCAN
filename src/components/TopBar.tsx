@@ -21,6 +21,7 @@ import {
   Save,
   Square,
   Sun,
+  Terminal,
   Unplug,
   UploadCloud,
 } from 'lucide-react';
@@ -37,6 +38,7 @@ import { telemetryStore, useTelemetryHeader } from '../store/telemetryStore';
 import { traceSessionsStore, useTraceSessionsStore } from '../store/traceSessionsStore';
 import { transmitStore } from '../store/transmitStore';
 import { workbenchStore, useWorkbenchStore } from '../store/workbenchStore';
+import { debugConsoleStore, useDebugConsoleStore } from '../store/debugConsoleStore';
 import { isToolpackEnabled } from '../types/toolpacks';
 import type { DeviceDescriptorDto } from '../types/hal';
 
@@ -122,6 +124,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   const cloudHeader = useCloudBridgeHeader();
   const cloudOn = useExperimentalCloud();
   const workbench = useWorkbenchStore();
+  const debugConsole = useDebugConsoleStore();
   const traceState = useTraceSessionsStore();
   const activeTrace = traceSessionsStore.getSession(traceState.activeSessionId);
 
@@ -1733,6 +1736,47 @@ export const TopBar: React.FC<TopBarProps> = ({
             title={t('shell.toolbar.aboutTooltip')}
           >
             <Award className="w-4 h-4 text-amber-400" />
+          </button>
+
+          {/* Global Debug & Audit Console Toggle */}
+          <button
+            type="button"
+            onClick={() => debugConsoleStore.toggleDockOpen()}
+            style={{
+              backgroundColor: debugConsole.detachedOpen
+                ? 'rgba(14, 165, 233, 0.18)'
+                : debugConsole.dockOpen
+                  ? 'var(--bg-row-selected)'
+                  : 'var(--bg-panel)',
+              borderColor: debugConsole.detachedOpen
+                ? 'rgba(14, 165, 233, 0.60)'
+                : debugConsole.dockOpen
+                  ? 'var(--border-strong)'
+                  : 'var(--border-strong)',
+              color: debugConsole.detachedOpen
+                ? '#38BDF8'
+                : debugConsole.dockOpen
+                  ? '#38BDF8'
+                  : 'var(--text-secondary)',
+            }}
+            className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12px] font-mono cursor-pointer rounded-[3px] hover:text-sky-300 transition-colors"
+            title={t('debug.console.statusTooltip')}
+          >
+            <Terminal className="w-3.5 h-3.5 text-sky-400" />
+            <span className="font-semibold">&gt;_ {t('debug.console.statusBtn')}</span>
+            {debugConsole.detachedOpen ? (
+              <span className="px-1 py-0.2 rounded-xs bg-sky-950 border border-sky-500/50 text-[10px] text-sky-300">
+                ↗ {t('debug.console.undockedBadge')}
+              </span>
+            ) : debugConsole.unreadErrorCount > 0 ? (
+              <span className="px-1 py-0.2 rounded-xs bg-rose-950 border border-rose-500 text-[10px] text-rose-300 font-bold animate-pulse">
+                {debugConsole.unreadErrorCount}
+              </span>
+            ) : debugConsole.unreadWarnCount > 0 ? (
+              <span className="px-1 py-0.2 rounded-xs bg-amber-950 border border-amber-500 text-[10px] text-amber-300 font-bold">
+                {debugConsole.unreadWarnCount}
+              </span>
+            ) : null}
           </button>
         </div>
 

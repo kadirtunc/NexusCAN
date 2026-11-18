@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { logUiDebugEvent } from './debugConsoleStore';
 import {
   apiStopPeriodicTx,
   apiTransmitSignalFrame,
@@ -1201,6 +1202,12 @@ export const simulationPanelStore = {
       apiStopPeriodicTx(jobId).catch(() => undefined);
     }
     activeStimulusJobIds.clear();
+    logUiDebugEvent({
+      severity: 'warn',
+      category: 'TX',
+      action: 'simulation.stimulus.stop_all',
+      title: 'Simulation Stimulus Stopped',
+    });
   },
 
   // ==========================================================================

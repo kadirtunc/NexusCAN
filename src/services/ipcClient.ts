@@ -1,15 +1,21 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
+  AppendDebugEventInputDto,
   BusHealthDto,
   ChannelConfigDto,
   DbFileInputDto,
+  DebugEventBatchDto,
+  DebugEventDto,
+  DebugWindowStateDto,
   DeviceDescriptorDto,
   DriverProbeReportDto,
+  HardwareWatchEventDto,
   ProjectSummaryDto,
 } from '../types/hal';
 import { t } from '../i18n';
 import type { DatabaseSchemaDto } from '../types/netdb';
-import type { ComputeKeyResultDto, KeyProviderSpecDto } from '../types/seedkey';
+import type { FlowLibCommandMap, FlowLibEntryDto, FlowLibRevisionDto } from '../types/flowLibrary';
+import type { ComputeKeyResultDto, KeyProviderSpecDto, SeedKeyProfileDto } from '../types/seedkey';
 import type {
   ChronologicalFrameDto,
   LoadedTraceFileDto,
@@ -562,6 +568,10 @@ export function apiSeedKeyComputeAdhoc(
   return invokeCmd<ComputeKeyResultDto>('cmd_seedkey_compute_adhoc', { provider, level, seedHex });
 }
 
+export function apiSeedKeyListProfiles(): Promise<SeedKeyProfileDto[]> {
+  return invokeCmd<SeedKeyProfileDto[]>('cmd_seedkey_list_profiles', {});
+}
+
 export function apiGetPresetDatabaseFiles(): Promise<DbFileInputDto[]> {
   return invokeCmd<DbFileInputDto[]>('cmd_get_preset_database_files', {});
 }
@@ -707,4 +717,356 @@ export function apiControlTraceReplay(
   args: TraceReplayControlArgsDto,
 ): Promise<TraceReplayStatusDto> {
   return invokeCmd<TraceReplayStatusDto>('cmd_control_trace_replay', { args });
+}
+
+/**
+ * Real-time hardware hotplug and topology change subscription.
+ * In Tauri runtime: creates a Channel<HardwareWatchEventDto> and invokes 'cmd_subscribe_hardware_changes'.
+ * In browser bridge fallback: polls apiListDevices() + apiProbeDrivers() every 3500ms when visible
+ * and fires onEvent whenever topology changes.
+ * Returns unsubscribe cleanup function.
+ */
+export function subscribeHardwareChanges(
+  onEvent: (ev: HardwareWatchEventDto) => void,
+): () => void {
+  let disposed = false;
+
+  if (isTauri) {
+    const onEventChan = new Channel<HardwareWatchEventDto>();
+    onEventChan.onmessage = (ev: HardwareWatchEventDto) => {
+      if (!disposed) {
+        onEvent(ev);
+      }
+    };
+    void invoke('cmd_subscribe_hardware_changes', { onEvent: onEventChan }).catch((err) => {
+      console.warn('[ipcClient] cmd_subscribe_hardware_changes warning or unsupported:', err);
+    });
+
+    return () => {
+      disposed = true;
+    };
+  }
+
+  // Non-Tauri fallback: poll every 3500ms
+  let lastFingerprint = '';
+  const poll = async (): Promise<void> => {
+    if (disposed) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    try {
+      const [devices, report] = await Promise.all([apiListDevices(), apiProbeDrivers()]);
+      if (disposed) return;
+      const fp = JSON.stringify({
+        devs: devices.map((d) => d.deviceId),
+        usb: (report.usbDevices ?? []).map((u) => `${u.vidPid}-${u.suggestedChannel}-${u.locationInfo ?? ''}`),
+        ports: report.serialPorts.map((s) => s.portName),
+      });
+      if (fp !== lastFingerprint) {
+        lastFingerprint = fp;
+        onEvent({
+          reason: 'topology_poll',
+          timestampMs: Date.now(),
+          devices,
+          report,
+        });
+      }
+    } catch {
+      // Ignore polling errors
+    }
+  };
+
+  const timer = window.setInterval(() => {
+    void poll();
+  }, 3500);
+
+  return () => {
+    disposed = true;
+    window.clearInterval(timer);
+  };
+}
+
+// ============================================================================
+// Global & Multi-Window Tear-Off Debug & Audit Console Commands
+// ============================================================================
+
+let fallbackDebugSeq = 1;
+const debugWindowSyncChannel: BroadcastChannel | null =
+  typeof window !== 'undefined' && typeof BroadcastChannel !== 'undefined'
+    ? new BroadcastChannel('nexuscan:debug-window-sync')
+    : null;
+
+export function subscribeDebugEvents(
+  onBatch: (batch: DebugEventBatchDto) => void,
+): () => void {
+  let disposed = false;
+
+  if (isTauri) {
+    const onBatchChan = new Channel<DebugEventBatchDto>();
+    onBatchChan.onmessage = (batch: DebugEventBatchDto) => {
+      if (!disposed) {
+        onBatch(batch);
+      }
+    };
+    void invoke('cmd_subscribe_debug_events', { onBatch: onBatchChan }).catch((err) => {
+      console.warn('[ipcClient] cmd_subscribe_debug_events error or unsupported:', err);
+    });
+
+    return () => {
+      disposed = true;
+    };
+  }
+
+  // Non-Tauri fallback: listen on BroadcastChannel for window state sync in pure mock/browser mode
+  const handleBcMessage = (event: MessageEvent<DebugEventBatchDto>): void => {
+    if (!disposed && event.data) {
+      onBatch(event.data);
+    }
+  };
+
+  if (debugWindowSyncChannel) {
+    debugWindowSyncChannel.addEventListener('message', handleBcMessage);
+  }
+
+  // 1) Initial snapshot via bridge command
+  void invokeCmd<{ subscribed: boolean; wsPath: string; initial: DebugEventBatchDto }>(
+    'cmd_subscribe_debug_events',
+    {},
+  )
+    .then((res) => {
+      if (!disposed && res?.initial) {
+        onBatch(res.initial);
+      }
+    })
+    .catch(() => {
+      // Fallback initial window state if command not yet implemented or offline
+      if (!disposed) {
+        onBatch({
+          kind: 'snapshot',
+          events: [],
+          totalBuffered: 0,
+          windowState: {
+            detachedOpen: false,
+            alwaysOnTop: false,
+            reDockRequested: false,
+            sessionLogPath: null,
+          },
+        });
+      }
+    });
+
+  // 2) Open authenticated WebSocket to /ws/debug with auto-reconnect
+  let ws: WebSocket | null = null;
+  let reconnectTimer: number | null = null;
+
+  const clearReconnectTimer = (): void => {
+    if (reconnectTimer !== null) {
+      window.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  };
+
+  const scheduleReconnect = (): void => {
+    clearReconnectTimer();
+    if (!disposed) {
+      reconnectTimer = window.setTimeout(connectDebugWebSocket, 1500);
+    }
+  };
+
+  const openDebugSocket = (token: string): void => {
+    if (disposed) return;
+    const bridgeHost = getBridgeHost();
+    try {
+      const socket = new WebSocket(`ws://${bridgeHost}:${BRIDGE_PORT}/ws/debug`);
+      ws = socket;
+      let authenticated = false;
+
+      socket.onopen = () => {
+        if (disposed) {
+          socket.close();
+          return;
+        }
+        socket.send(JSON.stringify({ type: 'auth', token }));
+        authenticated = true;
+      };
+
+      socket.onmessage = (ev: MessageEvent) => {
+        if (disposed || typeof ev.data !== 'string') return;
+        try {
+          const parsed = JSON.parse(ev.data) as DebugEventBatchDto;
+          onBatch(parsed);
+        } catch {
+          // Ignore malformed transient frames
+        }
+      };
+
+      socket.onerror = () => {
+        // Will trigger onclose and reconnect
+      };
+
+      socket.onclose = (ev: CloseEvent) => {
+        if (disposed) return;
+        ws = null;
+        if (ev.code === 4401 || !authenticated) {
+          cachedBridgeToken = null;
+        }
+        scheduleReconnect();
+      };
+    } catch {
+      scheduleReconnect();
+    }
+  };
+
+  const connectDebugWebSocket = (): void => {
+    if (disposed) return;
+    clearReconnectTimer();
+    getBridgeToken()
+      .then(openDebugSocket)
+      .catch(() => {
+        scheduleReconnect();
+      });
+  };
+
+  connectDebugWebSocket();
+
+  return () => {
+    disposed = true;
+    clearReconnectTimer();
+    if (debugWindowSyncChannel) {
+      debugWindowSyncChannel.removeEventListener('message', handleBcMessage);
+    }
+    if (ws !== null) {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      try {
+        ws.close();
+      } catch {
+        // Ignore close error
+      }
+      ws = null;
+    }
+  };
+}
+
+export async function apiAppendDebugEvent(
+  input: AppendDebugEventInputDto,
+): Promise<DebugEventDto> {
+  try {
+    return await invokeCmd<DebugEventDto>('cmd_append_debug_event', { input });
+  } catch {
+    // Non-Tauri local fallback when bridge is unavailable
+    const now = Date.now();
+    const fallbackEv: DebugEventDto = {
+      seq: fallbackDebugSeq++,
+      timestampMs: now,
+      monotonicUs: now * 1000,
+      severity: input.severity,
+      category: input.category,
+      source: input.source ?? 'ui',
+      busId: input.busId ?? null,
+      action: input.action,
+      title: input.title,
+      details: input.details ?? null,
+      repeatCount: 1,
+    };
+    if (debugWindowSyncChannel) {
+      debugWindowSyncChannel.postMessage({
+        kind: 'append',
+        events: [fallbackEv],
+        totalBuffered: 1,
+      } satisfies DebugEventBatchDto);
+    }
+    return fallbackEv;
+  }
+}
+
+export async function apiClearDebugEvents(): Promise<void> {
+  try {
+    await invokeCmd<void>('cmd_clear_debug_events', {});
+  } catch {
+    if (debugWindowSyncChannel) {
+      debugWindowSyncChannel.postMessage({
+        kind: 'cleared',
+        events: [],
+        totalBuffered: 0,
+      } satisfies DebugEventBatchDto);
+    }
+  }
+}
+
+export async function apiExportDebugEvents(
+  format: 'jsonl' | 'log' | 'csv',
+): Promise<string> {
+  return invokeCmd<string>('cmd_export_debug_events', { format });
+}
+
+export async function apiSetDebugWindowOpen(
+  open: boolean,
+  alwaysOnTop?: boolean | null,
+  redock?: boolean | null,
+): Promise<DebugWindowStateDto> {
+  if (isTauri) {
+    return invokeCmd<DebugWindowStateDto>('cmd_set_debug_window_open', {
+      open,
+      alwaysOnTop: alwaysOnTop ?? null,
+      redock: redock ?? null,
+    });
+  }
+
+  // Non-Tauri browser fallback: open a popup/tab
+  if (open && typeof window !== 'undefined') {
+    window.open(
+      '/?window=debug-console',
+      'NexusCAN_DebugConsole',
+      'width=1140,height=640,resizable=yes,scrollbars=yes',
+    );
+  }
+
+  const state: DebugWindowStateDto = {
+    detachedOpen: open,
+    alwaysOnTop: Boolean(alwaysOnTop),
+    reDockRequested: Boolean(redock),
+    sessionLogPath: null,
+  };
+
+  if (debugWindowSyncChannel) {
+    debugWindowSyncChannel.postMessage({
+      kind: 'windowState',
+      events: [],
+      totalBuffered: 0,
+      windowState: state,
+    } satisfies DebugEventBatchDto);
+  }
+
+  return state;
+}
+
+// ─── Flow library (diag-workspace-v1 §9; same commands over Tauri IPC and the browser bridge) ───────────────
+
+/** Typed call of a flow library command; errors are `"[flowlib:<code>] <message>"` (`parseFlowLibError`). */
+function flowLibCall<K extends keyof FlowLibCommandMap>(cmd: K, args: FlowLibCommandMap[K]['args']): Promise<FlowLibCommandMap[K]['result']> {
+  return invokeCmd<FlowLibCommandMap[K]['result']>(cmd, args);
+}
+
+export function apiFlowLibList(includeDeleted: boolean): Promise<FlowLibEntryDto[]> {
+  return flowLibCall('cmd_flowlib_list', { includeDeleted });
+}
+
+export function apiFlowLibRevisions(id: string): Promise<FlowLibRevisionDto[]> {
+  return flowLibCall('cmd_flowlib_revisions', { id });
+}
+
+/** File JSON of a revision (`null` = latest). */
+export function apiFlowLibLoad(id: string, revision: number | null): Promise<string> {
+  return flowLibCall('cmd_flowlib_load', { id, revision });
+}
+
+/** Saves the next revision (`revision` must be latest + 1, else `[flowlib:conflict]`). */
+export function apiFlowLibSave(fileJson: string): Promise<FlowLibEntryDto> {
+  return flowLibCall('cmd_flowlib_save', { fileJson });
+}
+
+/** Soft delete (revisions stay loadable). */
+export async function apiFlowLibDelete(id: string): Promise<void> {
+  await flowLibCall('cmd_flowlib_delete', { id });
 }

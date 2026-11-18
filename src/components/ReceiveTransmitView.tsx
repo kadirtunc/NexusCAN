@@ -1,40 +1,36 @@
-import { describeTxError } from '../store/busTxControl';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Edit3,
+  Keyboard,
   Pause,
   Plus,
   RotateCcw,
   Send,
+  Copy,
   Trash2,
   Unlock,
-  Unplug,
   X,
 } from 'lucide-react';
 import { useI18n, type TranslationKey } from '../i18n';
 import {
-  apiArmActiveBus,
-  apiConnectBus,
-  apiDisconnectAllBuses,
-  apiDisconnectBus,
+  CAN_ERR_MASK,
+  decodeCanErrorFields,
+  formatErrorFrameShortTitle,
+} from '../utils/canErrorDecoder';
+import {
   apiListPeriodicTx,
   apiResetTelemetry,
-  apiSetBusMode,
   apiStopPeriodicTx,
   apiTransmitRawFrame,
   apiTransmitSignalFrame,
 } from '../services/ipcClient';
-import {
-  type SavedConnectionProfile,
-  buildChannelConfigForProfile,
-  connectionStore,
-  useConnectionStore,
-} from '../store/connectionStore';
 import { databaseStore, useDatabaseStore } from '../store/databaseStore';
 import { plotStore } from '../store/plotStore';
+import { workbenchStore } from '../store/workbenchStore';
 import { projectStore, useProjectStore } from '../store/projectStore';
 import { cloudBridgeStore } from '../store/cloudBridgeStore';
 import { isExperimentalCloudEnabled } from '../store/experimentalStore';
@@ -48,9 +44,7 @@ import {
   transmitStore,
   useTransmitStore,
 } from '../store/transmitStore';
-import { workbenchStore, useWorkbenchStore } from '../store/workbenchStore';
-import { ensureMockPresetDatabasesLoaded, syncAllBusDatabasesWithBackend } from '../utils/busDatabaseSync';
-import type { BusHealthDto, DeviceDescriptorDto } from '../types/hal';
+import type { DeviceDescriptorDto } from '../types/hal';
 import type { MessageSchemaDto, SignalSchemaDto } from '../types/netdb';
 import type { FrameTelemetryDto, LiveSignalDto } from '../types/telemetry';
 import {
@@ -67,8 +61,14 @@ import {
   formatMultiplexedSymbol,
   resolveMuxChainFromSignalValues,
 } from '../utils/muxFormat';
-import { BusStateBadge } from './BusStateBadge';
-import { NewConnectionModal } from './NewConnectionModal';
+import {
+  type ClipboardFrame,
+  formatFrameLine,
+  frameClipboard,
+  isValidFdLength,
+  nextValidFdLength,
+  parseFrameLine,
+} from '../utils/frameClipboard';
 import { QuickPlotButton } from './PlotterView';
 import type { StatusBanner } from './TopBar';
 import { TxMessageModal } from './TxMessageModal';
@@ -307,9 +307,15 @@ function getColumnLabel(
 }
 
 function getFrameTypeTag(
-  frame: { isFd: boolean; dlc: number; isTx?: boolean },
+  frame: { isFd: boolean; dlc: number; isTx?: boolean; isError?: boolean },
   msgSchema?: MessageSchemaDto,
 ): { label: string; cls: string } {
+  if (frame.isError) {
+    return {
+      label: 'ERR',
+      cls: 'pcan-tag font-bold text-[var(--status-critical)] bg-[var(--status-critical-bg)] border border-[var(--status-critical-border)]',
+    };
+  }
   const proto = msgSchema?.protocol.toUpperCase() ?? '';
   const txSuffix = frame.isTx ? '·Tx' : '';
   if (proto.includes('J1939')) {
@@ -364,10 +370,8 @@ function buildActiveSignalTupleList(
 }
 
 export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
-  devices,
   bitrateProfileId: _bitrateProfileId,
   mockFpsPreset: _mockFpsPreset,
-  statusBanner,
   onStatusMessage,
   onSwitchToActiveTx,
   panicCounter,
@@ -379,7 +383,6 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
   const txState = useTransmitStore();
   const projState = useProjectStore();
 
-  const [onboardingNewConnModalOpen, setOnboardingNewConnModalOpen] = useState<boolean>(false);
 
   // Resizable Receive vs Transmit vertical split ratio
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
@@ -388,6 +391,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
 
   // Receive pane controls (expandedRxKeys persisted in databaseStore for Project save/restore)
   const [rxFilter, setRxFilter] = useState<string>('');
+  const [rxErrorsOnly, setRxErrorsOnly] = useState<boolean>(false);
   const [rxColumnMode, setRxColumnMode] = useState<RxColumnMode>('CAN');
   const expandedRxKeys = useMemo(
     () => new Set<string>(dbState.expandedRxKeys),
@@ -409,6 +413,12 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     editing: TxListEntry | null;
   }>({ open: false, editing: null });
   const [busyTxIds, setBusyTxIds] = useState<Set<string>>(() => new Set());
+
+  // Keyboard scope: last clicked/focused pane + RX row selection
+  const [activePane, setActivePane] = useState<'rx' | 'tx' | null>(null);
+  const [selectedRxKey, setSelectedRxKey] = useState<string | null>(null);
+  const rxSectionRef = useRef<HTMLElement | null>(null);
+  const txSectionRef = useRef<HTMLElement | null>(null);
 
   // Column layout state (order + widths) with localStorage persistence
   const [initialLayout] = useState(() => loadPersistedColumnLayout());
@@ -794,35 +804,48 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     const out: FrameTelemetryDto[] = [];
 
     for (const f of framesSlice.frames) {
+      if (rxErrorsOnly && !f.isError) {
+        continue;
+      }
+
       const msgSchema = databaseStore.getMessageForBus(f.busId, f.messageKey, f.arbId, f.isExtended);
       const signalsById = databaseStore.getBusSignals(f.busId);
       const muxSym = formatMultiplexedSymbol(msgSchema, signalsById, f.activeMuxSwitches);
 
       if (q.length > 0) {
-        const idHex = formatPcanIdHex(f.arbId, f.isExtended).toLowerCase();
-        const idDec = String(f.arbId);
-        const sym = (msgSchema?.name ?? '').toLowerCase();
-        const fullMuxSym = muxSym.fullSymbol.toLowerCase();
-        const busLabel = `bus ${f.busId + 1}`.toLowerCase();
-        let sigMatch = false;
-        if (msgSchema) {
-          for (const sigId of msgSchema.signalIds) {
-            const s = signalsById[sigId];
-            if (s && s.name.toLowerCase().includes(q)) {
-              sigMatch = true;
-              break;
+        if (f.isError) {
+          const errTitle = formatErrorFrameShortTitle(f.arbId, f.rawBytes, f.errorSummary).toLowerCase();
+          const idHex = (f.arbId & CAN_ERR_MASK).toString(16).toLowerCase();
+          const busLabel = `bus ${f.busId + 1}`.toLowerCase();
+          if (!errTitle.includes(q) && !idHex.includes(q) && !busLabel.includes(q) && !q.includes('err')) {
+            continue;
+          }
+        } else {
+          const idHex = formatPcanIdHex(f.arbId, f.isExtended).toLowerCase();
+          const idDec = String(f.arbId);
+          const sym = (msgSchema?.name ?? '').toLowerCase();
+          const fullMuxSym = muxSym.fullSymbol.toLowerCase();
+          const busLabel = `bus ${f.busId + 1}`.toLowerCase();
+          let sigMatch = false;
+          if (msgSchema) {
+            for (const sigId of msgSchema.signalIds) {
+              const s = signalsById[sigId];
+              if (s && s.name.toLowerCase().includes(q)) {
+                sigMatch = true;
+                break;
+              }
             }
           }
-        }
-        if (
-          !idHex.includes(q) &&
-          !idDec.includes(q) &&
-          !sym.includes(q) &&
-          !fullMuxSym.includes(q) &&
-          !busLabel.includes(q) &&
-          !sigMatch
-        ) {
-          continue;
+          if (
+            !idHex.includes(q) &&
+            !idDec.includes(q) &&
+            !sym.includes(q) &&
+            !fullMuxSym.includes(q) &&
+            !busLabel.includes(q) &&
+            !sigMatch
+          ) {
+            continue;
+          }
         }
       }
 
@@ -839,7 +862,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     });
 
     return out;
-  }, [framesSlice.frames, rxFilter, dbState.busSchemas]);
+  }, [framesSlice.frames, rxFilter, rxErrorsOnly, dbState.busSchemas]);
 
   // Transmit execution helper (single-shot or start periodic)
   const sendTxEntry = useCallback(
@@ -1097,6 +1120,255 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
   const selectedTxEntry =
     txState.entries.find((e) => e.id === txState.selectedEntryId) ?? null;
 
+  // ── Keyboard: RX frame clipboard, TX paste, list navigation ───────────────
+  const buildClipFromRx = (f: FrameTelemetryDto): ClipboardFrame | 'invalid' | null => {
+    if (f.isError) return null;
+    const rawLen = Math.min(f.dlc, f.rawBytes.length);
+    let len = rawLen;
+    if (f.isFd) {
+      if (!isValidFdLength(len)) {
+        const up = nextValidFdLength(len);
+        if (up === null) return 'invalid';
+        len = up;
+      }
+    } else if (len > 8) {
+      return 'invalid';
+    }
+    const bytes: number[] = [];
+    for (let i = 0; i < len; i++) bytes.push(f.rawBytes[i] ?? 0);
+    const schema = databaseStore.getMessageForBus(f.busId, f.messageKey, f.arbId, f.isExtended);
+    return {
+      busId: f.busId,
+      arbId: f.arbId,
+      isExtended: f.isExtended,
+      isFd: f.isFd,
+      isBrs: f.isFd && f.isBrs,
+      len,
+      bytes,
+      symbolName: schema?.name ?? '',
+    };
+  };
+
+  const findSelectedRxClip = (): ClipboardFrame | null => {
+    if (selectedRxKey === null) {
+      onStatusMessage({ kind: 'info', message: t('rxtx.status.rxCopyNone') });
+      return null;
+    }
+    const frame = rxFrames.find((f) => buildFrameInstanceKey(f) === selectedRxKey);
+    if (!frame) {
+      onStatusMessage({ kind: 'info', message: t('rxtx.status.rxCopyNone') });
+      return null;
+    }
+    const clip = buildClipFromRx(frame);
+    if (clip === null) {
+      onStatusMessage({ kind: 'error', message: t('rxtx.status.rxCopyError') });
+      return null;
+    }
+    if (clip === 'invalid') {
+      onStatusMessage({ kind: 'error', message: t('rxtx.status.rxCopyInvalid') });
+      return null;
+    }
+    return clip;
+  };
+
+  const handleCopySelectedRx = async (): Promise<void> => {
+    const clip = findSelectedRxClip();
+    if (!clip) return;
+    frameClipboard.set(clip);
+    const line = formatFrameLine(clip);
+    try {
+      await navigator.clipboard.writeText(line);
+    } catch {
+      // System clipboard denied; the in-app frame clipboard is still set.
+    }
+    onStatusMessage({ kind: 'success', message: t('rxtx.status.rxCopied', { line }) });
+  };
+
+  /** Creates a SAFE TX entry: raw mode, manual (cycle 0), periodic OFF, never sent. */
+  const addTxEntryFromClip = (clip: ClipboardFrame): void => {
+    const selTx = txState.entries.find((e) => e.id === txState.selectedEntryId);
+    const busId =
+      clip.busId ?? selTx?.busId ?? header.buses.find((b) => b.connected)?.busId ?? 0;
+    const entry: TxListEntry = {
+      id: `tx-clip-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      busId,
+      mode: 'raw',
+      messageKey: null,
+      arbId: clip.arbId,
+      isExtended: clip.isExtended,
+      isFd: clip.isFd,
+      isBrs: clip.isFd && clip.isBrs,
+      dlc: clip.len,
+      symbolName: clip.symbolName,
+      rawBytes: clip.bytes.slice(0, clip.len),
+      signalValues: {},
+      cycleTimeMs: 0,
+      periodicEnabled: false,
+      backendJobId: null,
+      manualSentCount: 0,
+      periodicSentCount: 0,
+      creator: 'Clipboard',
+      comment: '',
+    };
+    transmitStore.addEntry(entry);
+    onStatusMessage({
+      kind: 'success',
+      message: t('rxtx.status.txAddedFromFrame', { line: formatFrameLine(clip) }),
+    });
+  };
+
+  const handleCopySelectedRxToTx = (): void => {
+    const clip = findSelectedRxClip();
+    if (clip) addTxEntryFromClip(clip);
+  };
+
+  const handlePasteToTx = async (): Promise<void> => {
+    let clip = frameClipboard.get();
+    if (!clip) {
+      let text: string;
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        onStatusMessage({ kind: 'error', message: t('rxtx.status.pasteUnavailable') });
+        return;
+      }
+      clip = parseFrameLine(text);
+      if (!clip) {
+        onStatusMessage({ kind: 'error', message: t('rxtx.status.pasteInvalid') });
+        return;
+      }
+    }
+    addTxEntryFromClip(clip);
+  };
+
+  // Latest-closure holder so the window listener is bound once (not per 60 Hz render).
+  const kbRef = useRef<{
+    activePane: 'rx' | 'tx' | null;
+    blocked: boolean;
+    rxFrames: readonly FrameTelemetryDto[];
+    selectedRxKey: string | null;
+    txEntries: readonly TxListEntry[];
+    selectedTxId: string | null;
+    copyRx: () => Promise<void>;
+    rxToTx: () => void;
+    paste: () => Promise<void>;
+    editTx: (e: TxListEntry) => void;
+    deleteTx: () => Promise<void>;
+  } | null>(null);
+  useEffect(() => {
+    kbRef.current = {
+      activePane,
+      blocked: modalState.open || projState.modalOpen,
+      rxFrames,
+      selectedRxKey,
+      txEntries: txState.entries,
+      selectedTxId: txState.selectedEntryId,
+      copyRx: handleCopySelectedRx,
+      rxToTx: handleCopySelectedRxToTx,
+      paste: handlePasteToTx,
+      editTx: (e) => setModalState({ open: true, editing: e }),
+      deleteTx: handleDeleteSelectedTx,
+    };
+  });
+
+  useEffect(() => {
+    const step = (key: string, cur: number, n: number): number => {
+      if (key === 'Home') return 0;
+      if (key === 'End') return n - 1;
+      if (cur < 0) return 0;
+      return key === 'ArrowDown' ? Math.min(n - 1, cur + 1) : Math.max(0, cur - 1);
+    };
+    const onKeyDown = (ev: KeyboardEvent): void => {
+      const c = kbRef.current;
+      if (!c || c.blocked || ev.defaultPrevented || !c.activePane) return;
+      const target = ev.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || target?.isContentEditable) {
+        return;
+      }
+      if (
+        workbenchStore.getState().newConnectionModalOpen ||
+        document.querySelector('[role="dialog"], [aria-modal="true"]')
+      ) {
+        return;
+      }
+
+      const mod = ev.ctrlKey || ev.metaKey;
+      if (mod) {
+        if (ev.altKey || ev.shiftKey) return;
+        const k = ev.key.toLowerCase();
+        if (k === 'c' && c.activePane === 'rx') {
+          if (c.selectedRxKey === null || (window.getSelection()?.toString() ?? '') !== '') return;
+          ev.preventDefault();
+          void c.copyRx();
+        } else if (k === 't' && c.selectedRxKey !== null) {
+          ev.preventDefault();
+          c.rxToTx();
+        } else if (k === 'v' && c.activePane === 'tx') {
+          ev.preventDefault();
+          void c.paste();
+        }
+        return;
+      }
+      if (ev.altKey || ev.shiftKey) return;
+
+      const key = ev.key;
+      const isNav = key === 'ArrowUp' || key === 'ArrowDown' || key === 'Home' || key === 'End';
+      if (c.activePane === 'tx') {
+        const n = c.txEntries.length;
+        if (isNav) {
+          if (n === 0) return;
+          ev.preventDefault();
+          let cur = -1;
+          for (let i = 0; i < n; i++) {
+            if (c.txEntries[i].id === c.selectedTxId) {
+              cur = i;
+              break;
+            }
+          }
+          transmitStore.selectEntry(c.txEntries[step(key, cur, n)].id);
+        } else if (key === 'Enter' && tag !== 'BUTTON') {
+          const sel = c.txEntries.find((e) => e.id === c.selectedTxId);
+          if (sel) {
+            ev.preventDefault();
+            c.editTx(sel);
+          }
+        } else if (key === 'Delete' && c.selectedTxId !== null) {
+          ev.preventDefault();
+          void c.deleteTx();
+        }
+      } else if (isNav) {
+        const n = c.rxFrames.length;
+        if (n === 0) return;
+        ev.preventDefault();
+        let cur = -1;
+        for (let i = 0; i < n; i++) {
+          if (buildFrameInstanceKey(c.rxFrames[i]) === c.selectedRxKey) {
+            cur = i;
+            break;
+          }
+        }
+        setSelectedRxKey(buildFrameInstanceKey(c.rxFrames[step(key, cur, n)]));
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  // Keep keyboard-selected rows visible
+  useEffect(() => {
+    if (selectedRxKey === null) return;
+    rxSectionRef.current
+      ?.querySelector(`[data-rx-key="${CSS.escape(selectedRxKey)}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [selectedRxKey]);
+  useEffect(() => {
+    if (txState.selectedEntryId === null) return;
+    txSectionRef.current
+      ?.querySelector(`[data-tx-id="${CSS.escape(txState.selectedEntryId)}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [txState.selectedEntryId]);
+
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden select-none">
       {/* MAIN DRAG-RESIZABLE RECEIVE (TOP) + TRANSMIT (BOTTOM) WORKSPACE */}
@@ -1108,7 +1380,16 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
         {/* 1. TOP PANE: RECEIVE LIST (LIVE RX + TX LOOPBACK ECHO)           */}
         {/* ================================================================ */}
         <section
-          style={{ height: `${rxHeightPct}%`, backgroundColor: 'var(--bg-panel)' }}
+          ref={rxSectionRef}
+          tabIndex={0}
+          onMouseDown={() => setActivePane('rx')}
+          onFocus={() => setActivePane('rx')}
+          style={{
+            height: `${rxHeightPct}%`,
+            backgroundColor: 'var(--bg-panel)',
+            outline: activePane === 'rx' ? '1px solid var(--text-muted)' : 'none',
+            outlineOffset: '-1px',
+          }}
           className="flex min-h-[120px] overflow-hidden"
         >
           {/* Left 22px Rotated "Receive" Strip */}
@@ -1190,6 +1471,42 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
               </div>
 
               <div className="flex items-center gap-1.5 flex-wrap">
+                {/* Error Frames KPI & Quick Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setRxErrorsOnly((v) => !v)}
+                  style={{
+                    backgroundColor: rxErrorsOnly
+                      ? 'rgba(220, 38, 38, 0.25)'
+                      : (header.totalFramesErr ?? 0) > 0
+                        ? 'rgba(159, 18, 57, 0.20)'
+                        : 'var(--bg-panel)',
+                    borderColor: rxErrorsOnly
+                      ? '#ef4444'
+                      : (header.totalFramesErr ?? 0) > 0
+                        ? 'rgba(244, 63, 94, 0.5)'
+                        : 'var(--border-strong)',
+                    color: (header.totalFramesErr ?? 0) > 0 ? '#f43f5e' : 'var(--text-muted)',
+                  }}
+                  className={`h-[28px] px-2.5 border font-mono text-[11.5px] font-semibold flex items-center gap-1.5 cursor-pointer ${
+                    (header.totalFramesErr ?? 0) > 0 ? 'hover:border-rose-400' : 'hover:text-[var(--text-secondary)]'
+                  }`}
+                  title={
+                    (header.totalFramesErr ?? 0) > 0
+                      ? t('rxtx.rx.errorsToggleTooltip', { count: header.totalFramesErr })
+                      : t('rxtx.rx.noErrorsTooltip')
+                  }
+                >
+                  <AlertTriangle className={`w-3.5 h-3.5 ${(header.totalFramesErr ?? 0) > 0 ? 'text-[var(--status-critical)]' : 'text-slate-500'}`} />
+                  <span>ERR: {header.totalFramesErr ?? 0}</span>
+                  {rxErrorsOnly && (
+                    <span className="ml-0.5 text-[9.5px] uppercase font-bold text-[var(--status-critical)]">
+                      [{t('rxtx.rx.filterActive')}]
+                    </span>
+                  )}
+                </button>
+                <div className="h-4 w-[1px] bg-[var(--border-strong)] mx-1" />
+
                 <button
                   type="button"
                   onClick={() => void handleClearReceive()}
@@ -1233,6 +1550,23 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                 >
                   {t('rxtx.rx.collapseAll')}
                 </button>
+                <div className="h-4 w-[1px] bg-[var(--border-strong)] mx-1" />
+                <button
+                  type="button"
+                  disabled={selectedRxKey === null}
+                  onClick={handleCopySelectedRxToTx}
+                  style={{
+                    backgroundColor: 'var(--bg-panel)',
+                    borderColor: 'var(--border-strong)',
+                    color: 'var(--text-primary)',
+                  }}
+                  className="h-[28px] px-2.5 border flex items-center gap-1.5 hover:border-[var(--text-secondary)] disabled:opacity-40 cursor-pointer"
+                  title={t('rxtx.rx.copyToTxTooltip')}
+                >
+                  <Copy className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>{t('rxtx.rx.copyToTx')}</span>
+                </button>
+                <ShortcutsHelp />
               </div>
             </div>
 
@@ -1323,14 +1657,16 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                       return (
                         <React.Fragment key={rowKey}>
                           <tr
-                            onClick={() =>
+                            data-rx-key={rowKey}
+                            onClick={() => {
+                              setSelectedRxKey(rowKey);
                               setExpandedRxKeys((prev) => {
                                 const next = new Set(prev);
                                 if (next.has(rowKey)) next.delete(rowKey);
                                 else next.add(rowKey);
                                 return next;
-                              })
-                            }
+                              });
+                            }}
                             onDoubleClick={() => {
                               if (msgSchema) {
                                 databaseStore.selectMessageInSymbolsTab(
@@ -1339,19 +1675,40 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                               }
                             }}
                             style={{
-                              backgroundColor:
-                                rowIdx % 2 === 1 ? 'var(--bg-row-alt)' : 'var(--bg-panel)',
+                              scrollMarginTop: '28px',
+                              backgroundColor: rowKey === selectedRxKey
+                                ? 'var(--bg-row-selected)'
+                                : frame.isError
+                                ? isExpanded
+                                  ? 'color-mix(in srgb, var(--status-critical) 24%, transparent)'
+                                  : 'var(--status-critical-bg)'
+                                : rowIdx % 2 === 1
+                                  ? 'var(--bg-row-alt)'
+                                  : 'var(--bg-panel)',
+                              borderLeft: frame.isError ? '2px solid var(--status-critical)' : undefined,
                             }}
                             className="hover:!bg-[var(--bg-row-hover)] cursor-pointer"
                           >
                             {/* Expand Chevron */}
                             <td className="px-0">
                               <div className="pcan-cell pcan-cell-center">
-                                {frame.signals.length > 0 || msgSchema ? (
+                                {frame.isError || frame.signals.length > 0 || msgSchema ? (
                                   isExpanded ? (
-                                    <ChevronDown className="w-3.5 h-3.5 text-[var(--text-secondary)] shrink-0" />
+                                    <ChevronDown
+                                      className={`w-3.5 h-3.5 ${
+                                        frame.isError
+                                          ? 'text-[var(--status-critical)]'
+                                          : 'text-[var(--text-secondary)]'
+                                      } shrink-0`}
+                                    />
                                   ) : (
-                                    <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                                    <ChevronRight
+                                      className={`w-3.5 h-3.5 ${
+                                        frame.isError
+                                          ? 'text-[var(--status-critical)]'
+                                          : 'text-[var(--text-muted)]'
+                                      } shrink-0`}
+                                    />
                                   )
                                 ) : null}
                               </div>
@@ -1384,10 +1741,20 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                                   return (
                                     <td key="id">
                                       <div
-                                        className="pcan-cell"
+                                        className="pcan-cell font-mono"
                                         title={`Dec: ${frame.arbId}`}
                                       >
-                                        {formatPcanIdHex(frame.arbId, frame.isExtended)}
+                                        {frame.isError ? (
+                                          <span className="text-[var(--status-critical)] font-bold">
+                                            {(frame.arbId & CAN_ERR_MASK)
+                                              .toString(16)
+                                              .toUpperCase()
+                                              .padStart(3, '0')}
+                                            h
+                                          </span>
+                                        ) : (
+                                          formatPcanIdHex(frame.arbId, frame.isExtended)
+                                        )}
                                       </div>
                                     </td>
                                   );
@@ -1422,15 +1789,32 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                                     <td key="symbol">
                                       <div
                                         className="pcan-cell font-sans"
-                                        title={muxTooltip}
+                                        title={
+                                          frame.isError
+                                            ? `Arrived at t = ${(frame.lastTimestampUs / 1_000_000).toFixed(3)}s (${frame.lastTimestampUs} µs)`
+                                            : muxTooltip
+                                        }
                                       >
-                                        {msgSchema ? (
+                                        {frame.isError ? (
+                                          <div className="flex items-center gap-1.5 truncate">
+                                            <span className="text-[var(--status-critical)] font-mono text-[11px] font-semibold truncate select-all">
+                                              {formatErrorFrameShortTitle(
+                                                frame.arbId,
+                                                frame.rawBytes,
+                                                frame.errorSummary,
+                                              )}
+                                            </span>
+                                            <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">
+                                              [t={(frame.lastTimestampUs / 1_000_000).toFixed(3)}s]
+                                            </span>
+                                          </div>
+                                        ) : msgSchema ? (
                                           <span className="truncate">
-                                            <span style={{ color: '#E6EDF3' }}>{muxSym.baseName}</span>
+                                            <span style={{ color: 'var(--text-primary)' }}>{muxSym.baseName}</span>
                                             {muxSym.muxSuffix !== null && (
                                               <span
                                                 className="font-mono tabular-nums font-semibold"
-                                                style={{ color: '#79C0FF' }}
+                                                style={{ color: 'var(--status-focus)' }}
                                               >
                                                 .{muxSym.muxSuffix}
                                               </span>
@@ -1503,15 +1887,22 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                             })}
                           </tr>
 
-                          {/* Inline Tree Signal Rows (Locked 26px height, crisp 12px font) */}
+                          {/* Inline Tree Signal Rows (Locked 26px height, crisp 12px font) or Error Diagnostics */}
                           {isExpanded && (
-                            <RxSignalTreeRows
-                              rowKey={rowKey}
-                              frame={frame}
-                              signalsById={signalsById}
-                              recentlyChangedSignals={framesSlice.recentlyChangedSignals}
-                              visibleCols={visibleRxCols}
-                            />
+                            frame.isError ? (
+                              <RxErrorDetailRows
+                                frame={frame}
+                                colSpan={visibleRxCols.length}
+                              />
+                            ) : (
+                              <RxSignalTreeRows
+                                rowKey={rowKey}
+                                frame={frame}
+                                signalsById={signalsById}
+                                recentlyChangedSignals={framesSlice.recentlyChangedSignals}
+                                visibleCols={visibleRxCols}
+                              />
+                            )
                           )}
                         </React.Fragment>
                       );
@@ -1524,7 +1915,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                   anyBusConnected={header.buses.some((b) => b.connected)}
                   hasSchema={dbState.busSchemas.size > 0}
                   schemaName={`${dbState.busSchemas.size} hat · ${dbState.databases.length} DB`}
-                  onOpenNewConnection={() => setOnboardingNewConnModalOpen(true)}
+                  onOpenNewConnection={() => workbenchStore.setNewConnectionModalOpen(true)}
                   onGoToConnections={() => databaseStore.setActiveDocTab('connections')}
                   onOpenDb={() => databaseStore.setActiveDocTab('symbols')}
                   onLoadSampleDb={() => databaseStore.setActiveDocTab('connections')}
@@ -1564,7 +1955,16 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
         {/* 2. BOTTOM PANE: TRANSMIT LIST (STRICTLY TX COMPOSER)             */}
         {/* ================================================================ */}
         <section
-          style={{ height: `${100 - rxHeightPct}%`, backgroundColor: 'var(--bg-panel)' }}
+          ref={txSectionRef}
+          tabIndex={0}
+          onMouseDown={() => setActivePane('tx')}
+          onFocus={() => setActivePane('tx')}
+          style={{
+            height: `${100 - rxHeightPct}%`,
+            backgroundColor: 'var(--bg-panel)',
+            outline: activePane === 'tx' ? '1px solid var(--text-muted)' : 'none',
+            outlineOffset: '-1px',
+          }}
           className="flex min-h-[110px] overflow-hidden"
         >
           {/* Left 22px Rotated "Transmit" Strip */}
@@ -1716,6 +2116,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     {t('rxtx.tx.resetColumns')}
                   </button>
                 )}
+                <ShortcutsHelp />
               </div>
 
               {/* Right-Side Compact Bus TX Safety Status */}
@@ -1760,7 +2161,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                           style={{
                             backgroundColor: 'rgba(217, 155, 38, 0.14)',
                             borderColor: 'rgba(217, 155, 38, 0.55)',
-                            color: '#E3B341',
+                            color: 'var(--status-warn)',
                           }}
                           className="h-[28px] px-2.5 border hover:border-amber-400 flex items-center gap-1.5 font-medium cursor-pointer text-[12px]"
                           title={t('rxtx.tx.enableActiveTxTooltip', {
@@ -1872,11 +2273,13 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                       return (
                         <React.Fragment key={entry.id}>
                           <tr
+                            data-tx-id={entry.id}
                             onClick={() => transmitStore.selectEntry(entry.id)}
                             onDoubleClick={() =>
                               setModalState({ open: true, editing: entry })
                             }
                             style={{
+                              scrollMarginTop: '28px',
                               backgroundColor: isSelected
                                 ? 'var(--bg-row-selected)'
                                 : 'var(--bg-panel)',
@@ -1975,13 +2378,13 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                                       >
                                         {txMuxInfo ? (
                                           <span className="truncate">
-                                            <span style={{ color: '#E6EDF3' }}>
+                                            <span style={{ color: 'var(--text-primary)' }}>
                                               {txMuxInfo.formatted.baseName}
                                             </span>
                                             {txMuxInfo.formatted.muxSuffix !== null && (
                                               <span
                                                 className="font-mono tabular-nums font-semibold"
-                                                style={{ color: '#79C0FF' }}
+                                                style={{ color: 'var(--status-focus)' }}
                                               >
                                                 .{txMuxInfo.formatted.muxSuffix}
                                               </span>
@@ -2112,29 +2515,12 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
         </section>
       </div>
 
-      {/* ================================================================ */}
-      {/* 3. MULTI-BUS CONNECTIONS DOCK & CLASSIC DESKTOP STATUS FOOTER     */}
-      {/* ================================================================ */}
-      <BottomConnectionsDock
-        devices={devices}
-        statusBanner={statusBanner}
-        onStatusMessage={onStatusMessage}
-      />
-
       {modalState.open && (
         <TxMessageModal
           initialEntry={modalState.editing}
           defaultBusId={header.buses.find((b) => b.connected)?.busId ?? 0}
           onClose={() => setModalState({ open: false, editing: null })}
           onSave={(saved) => void handleSaveModalEntry(saved)}
-        />
-      )}
-
-      {onboardingNewConnModalOpen && (
-        <NewConnectionModal
-          devices={devices}
-          onClose={() => setOnboardingNewConnModalOpen(false)}
-          onStatusMessage={onStatusMessage}
         />
       )}
 
@@ -2396,6 +2782,76 @@ const RxEmptyOnboarding: React.FC<RxEmptyOnboardingProps> = ({
         </div>
       </div>
     </div>
+  );
+};
+
+// ============================================================================
+// Clean Indented RX Error Detail Rows for Frame.isError
+// ============================================================================
+
+interface RxErrorDetailRowsProps {
+  frame: FrameTelemetryDto;
+  colSpan: number;
+}
+
+const RxErrorDetailRows: React.FC<RxErrorDetailRowsProps> = ({ frame, colSpan }) => {
+  const fields = useMemo(() => {
+    return decodeCanErrorFields(frame.arbId, frame.rawBytes);
+  }, [frame.arbId, frame.rawBytes]);
+
+  const arrivalSec = (frame.lastTimestampUs / 1_000_000).toFixed(6);
+
+  return (
+    <tr style={{ backgroundColor: 'rgba(69, 10, 10, 0.45)' }}>
+      <td className="px-0" />
+      <td colSpan={colSpan} className="p-2">
+        <div className="border-l-2 border-[var(--status-critical)] pl-3 space-y-1.5 font-mono text-[11.5px]">
+          <div className="flex items-center gap-3 text-[11px] text-[var(--status-critical)] font-semibold flex-wrap">
+            <span>CAN BUS ERROR DIAGNOSTICS</span>
+            <span className="text-[var(--text-secondary)] font-normal">
+              Arrival: <span className="text-[var(--text-primary)] font-mono">{arrivalSec} s</span> ({frame.lastTimestampUs} µs)
+            </span>
+            <span className="text-[var(--text-secondary)] font-normal">
+              Bus {frame.busId + 1}
+            </span>
+            <span className="text-[var(--text-secondary)] font-normal">
+              Count: <span className="text-[var(--text-primary)] font-mono">{frame.rxCount}</span>
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5 pt-1">
+            {fields.map((f, idx) => (
+              <div
+                key={idx}
+                className="flex items-start justify-between gap-2 p-1.5 bg-[var(--bg-panel)] border border-[var(--border-grid)]"
+              >
+                <span className="text-[var(--text-muted)] shrink-0 font-sans text-[11px]">
+                  {f.label}:
+                </span>
+                <span
+                  className={`font-mono text-right text-[11.5px] select-all ${
+                    f.isCritical ? 'text-[var(--status-critical)] font-bold' : 'text-[var(--text-primary)]'
+                  }`}
+                >
+                  {f.value}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {frame.rawBytes.length > 0 && (
+            <div className="flex items-center gap-2 pt-1 text-[11px] text-[var(--text-secondary)]">
+              <span className="font-sans">Payload Hex:</span>
+              <span className="font-mono text-[var(--status-critical)] select-all font-semibold">
+                {frame.rawBytes
+                  .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
+                  .join(' ')}
+              </span>
+            </div>
+          )}
+        </div>
+      </td>
+    </tr>
   );
 };
 
@@ -2672,579 +3128,80 @@ const TxSymbolicSignalRows: React.FC<TxSymbolicSignalRowsProps> = ({
   );
 };
 
-// ============================================================================
-// Interactive Multi-Bus Connections Dock & Classic Desktop Status Footer
-// ============================================================================
-
-interface BottomConnectionsDockProps {
-  devices: readonly DeviceDescriptorDto[];
-  statusBanner: StatusBanner | null;
-  onStatusMessage: (msg: StatusBanner) => void;
-}
-
-const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
-  onStatusMessage,
-}) => {
+const ShortcutsHelp: React.FC = () => {
   const { t } = useI18n();
-  const header = useTelemetryHeader();
-  const connState = useConnectionStore();
-  const workbench = useWorkbenchStore();
+  const [open, setOpen] = useState<boolean>(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
-  const [busyBusIds, setBusyBusIds] = useState<Set<number>>(() => new Set());
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (ev: PointerEvent): void => {
+      if (!rootRef.current?.contains(ev.target as Node)) setOpen(false);
+    };
+    const onKey = (ev: KeyboardEvent): void => {
+      if (ev.key === 'Escape') setOpen(false);
+    };
+    window.addEventListener('pointerdown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
 
-  const connectedBusMap = useMemo(() => {
-    const map = new Map<number, BusHealthDto>();
-    for (const b of header.buses) {
-      if (b.connected) {
-        map.set(b.busId, b);
-      }
-    }
-    return map;
-  }, [header.buses]);
+  const rows: readonly (readonly [string, string])[] = [
+    ['\u2191 / \u2193', t('rxtx.kbd.txNav')],
+    ['Home / End', t('rxtx.kbd.txJump')],
+    ['Enter', t('rxtx.kbd.txEdit')],
+    ['Delete', t('rxtx.kbd.txDelete')],
+    ['Space', t('rxtx.kbd.txSend')],
+    ['Ctrl+V', t('rxtx.kbd.txPaste')],
+    ['\u2191 / \u2193 / Home / End', t('rxtx.kbd.rxNav')],
+    ['Ctrl+C', t('rxtx.kbd.rxCopy')],
+    ['Ctrl+T', t('rxtx.kbd.rxToTx')],
+  ];
 
-  interface ConnectionRowItem {
-    key: string;
-    busId: number;
-    profile: SavedConnectionProfile | null;
-    busHealth: BusHealthDto | null;
-    isConnected: boolean;
-  }
-
-  const allRows: ConnectionRowItem[] = useMemo(() => {
-    const list: ConnectionRowItem[] = connState.profiles.map((prof) => ({
-      key: `prof-${prof.id}`,
-      busId: prof.busId,
-      profile: prof,
-      busHealth: connectedBusMap.get(prof.busId) ?? null,
-      isConnected: connectedBusMap.has(prof.busId),
-    }));
-
-    for (const [busId, busHealth] of connectedBusMap) {
-      if (!list.some((r) => r.busId === busId)) {
-        list.push({
-          key: `bus-${busId}`,
-          busId,
-          profile: null,
-          busHealth,
-          isConnected: true,
-        });
-      }
-    }
-    list.sort((a, b) => a.busId - b.busId);
-    return list;
-  }, [connState.profiles, connectedBusMap]);
-
-  const connectedCount = connectedBusMap.size;
-
-  const handleDisconnectBus = async (busId: number): Promise<void> => {
-    setBusyBusIds((prev) => new Set(prev).add(busId));
-    try {
-      await apiDisconnectBus(busId);
-      telemetryStore.removeBusHealth(busId);
-      onStatusMessage({
-        kind: 'info',
-        message: t('rxtx.dock.busDisconnected', { bus: busId + 1 }),
-      });
-    } catch (err) {
-      onStatusMessage({
-        kind: 'error',
-        message: t('rxtx.dock.disconnectError', {
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      });
-    } finally {
-      setBusyBusIds((prev) => {
-        const next = new Set(prev);
-        next.delete(busId);
-        return next;
-      });
-    }
-  };
-
-  const handleConnectProfile = async (prof: SavedConnectionProfile): Promise<void> => {
-    setBusyBusIds((prev) => new Set(prev).add(prof.busId));
-    try {
-      let effectiveProfile = prof;
-      if (prof.driverFamily === 'mock' && prof.databaseIds.length === 0) {
-        const presetIds = await ensureMockPresetDatabasesLoaded();
-        connectionStore.setProfileDatabases(prof.id, presetIds);
-        effectiveProfile = { ...prof, databaseIds: presetIds };
-        await syncAllBusDatabasesWithBackend();
-      }
-
-      const { deviceId, config } = buildChannelConfigForProfile(effectiveProfile);
-      const health = await apiConnectBus(deviceId, config);
-      telemetryStore.upsertBusHealth(health);
-      onStatusMessage({
-        kind: 'success',
-        message: t('rxtx.dock.busConnected', {
-          bus: prof.busId + 1,
-          channel: health.channelName,
-          mode: health.listenOnly ? 'Listen-Only' : 'Active CAN',
-        }),
-      });
-    } catch (err) {
-      onStatusMessage({
-        kind: 'error',
-        message: t('rxtx.dock.connectError', {
-          name: prof.name,
-          error: describeTxError(err),
-        }),
-      });
-    } finally {
-      setBusyBusIds((prev) => {
-        const next = new Set(prev);
-        next.delete(prof.busId);
-        return next;
-      });
-    }
-  };
-
-  const handleDisconnectAll = async (): Promise<void> => {
-    try {
-      const count = await apiDisconnectAllBuses();
-      telemetryStore.clearAllBuses();
-      onStatusMessage({
-        kind: 'info',
-        message: t('rxtx.dock.allBusesDisconnected', { count }),
-      });
-    } catch (err) {
-      onStatusMessage({
-        kind: 'error',
-        message: t('rxtx.dock.disconnectAllError', {
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      });
-    }
-  };
-
-  const handleToggleArmTx = async (busId: number, currentArmed: boolean): Promise<void> => {
-    setBusyBusIds((prev) => new Set(prev).add(busId));
-    try {
-      const updated = await apiArmActiveBus(busId, !currentArmed);
-      telemetryStore.upsertBusHealth(updated);
-      onStatusMessage({
-        kind: !currentArmed ? 'success' : 'info',
-        message: !currentArmed
-          ? t('rxtx.dock.txArmedMsg', { bus: busId + 1, channel: updated.channelName })
-          : t('rxtx.dock.txDisarmedMsg', { bus: busId + 1, channel: updated.channelName }),
-      });
-    } catch (err) {
-      onStatusMessage({
-        kind: 'error',
-        message: t('rxtx.dock.armTxError', {
-          error: describeTxError(err),
-        }),
-      });
-    } finally {
-      setBusyBusIds((prev) => {
-        const next = new Set(prev);
-        next.delete(busId);
-        return next;
-      });
-    }
-  };
-
-  const handleSwitchToActiveTx = async (busId: number): Promise<void> => {
-    setBusyBusIds((prev) => new Set(prev).add(busId));
-    try {
-      const armed = await apiSetBusMode(busId, false, true);
-      telemetryStore.upsertBusHealth(armed);
-      const prof = connState.profiles.find((p) => p.busId === busId);
-      if (prof) {
-        connectionStore.upsertProfile({ ...prof, listenOnly: false });
-      }
-      onStatusMessage({
-        kind: 'success',
-        message: t('rxtx.dock.switchedActiveTx', { bus: busId + 1, channel: armed.channelName }),
-      });
-    } catch (err) {
-      onStatusMessage({
-        kind: 'error',
-        message: t('rxtx.dock.switchToActiveTxError', {
-          error: describeTxError(err),
-        }),
-      });
-    } finally {
-      setBusyBusIds((prev) => {
-        const next = new Set(prev);
-        next.delete(busId);
-        return next;
-      });
-    }
-  };
-
-  // If collapsed, render slim 28px bar
-  if (workbench.bottomConnectionsCollapsed) {
-    return (
-      <footer
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
         style={{
-          backgroundColor: 'var(--bg-toolbar)',
-          borderTop: '1px solid var(--border-strong)',
+          backgroundColor: 'var(--bg-panel)',
+          borderColor: 'var(--border-strong)',
           color: 'var(--text-secondary)',
         }}
-        className="shrink-0 h-[28px] px-2.5 flex items-center justify-between text-[12px] font-sans select-none"
+        className="h-[28px] w-[28px] border flex items-center justify-center hover:text-[var(--text-primary)] cursor-pointer"
+        title={t('rxtx.kbd.tooltip')}
+        aria-label={t('rxtx.kbd.tooltip')}
       >
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => workbenchStore.toggleBottomConnectionsCollapsed()}
-            className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-            title={t('rxtx.dock.expandTooltip')}
-          >
-            <ChevronRight className="w-3.5 h-3.5" />
-          </button>
-          <span
-            className={`w-2 h-2 rounded-full ${
-              connectedCount > 0 ? 'bg-emerald-500' : 'bg-slate-500'
-            }`}
-          />
-          <span className="font-semibold text-[var(--text-primary)]">
-            {t('rxtx.dock.titleWithCount', { online: connectedCount, total: allRows.length })}
-          </span>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => workbenchStore.setNewConnectionModalOpen(true)}
-            className="h-[22px] px-2.5 border border-[var(--border-strong)] bg-[var(--bg-panel)] text-[11px] hover:border-[var(--text-secondary)] cursor-pointer rounded-[2px]"
-          >
-            {t('rxtx.dock.addConn')}
-          </button>
-        </div>
-      </footer>
-    );
-  }
-
-  // Expanded Industrial Connections Dock
-  return (
-    <footer
-      style={{
-        backgroundColor: 'var(--bg-panel)',
-        borderTop: '1px solid var(--border-strong)',
-      }}
-      className="shrink-0 select-none flex"
-    >
-      {/* Left 26px Rotated "Connections" Strip */}
-      <div className="pcan-side-strip">
-        <span className="pcan-side-strip-label">{t('rxtx.section.connections')}</span>
-      </div>
-
-      <div className="flex flex-col flex-1 min-w-0 min-h-0">
-        {/* Upper 34px Toolbar */}
+        <Keyboard className="w-3.5 h-3.5" />
+      </button>
+      {open && (
         <div
           style={{
-            backgroundColor: 'var(--bg-toolbar)',
-            borderBottom: '1px solid var(--border-strong)',
+            backgroundColor: 'var(--bg-header)',
+            borderColor: 'var(--border-strong)',
+            color: 'var(--text-primary)',
           }}
-          className="min-h-[34px] py-1 px-2.5 flex items-center justify-between text-[12px] flex-wrap gap-2"
+          className="absolute right-0 top-[32px] z-50 w-[420px] max-w-[90vw] border p-2.5 text-[11.5px]"
         >
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={() => workbenchStore.toggleBottomConnectionsCollapsed()}
-              className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-              title={t('rxtx.dock.collapseTooltip')}
-            >
-              <ChevronDown className="w-3.5 h-3.5" />
-            </button>
-            <span
-              className={`w-2 h-2 rounded-full ${
-                connectedCount > 0
-                  ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]'
-                  : 'bg-slate-500'
-              }`}
-            />
-            <span className="font-semibold text-[var(--text-primary)]">
-              {t('rxtx.dock.titleWithCount', { online: connectedCount, total: allRows.length })}
-            </span>
-
-            <button
-              type="button"
-              onClick={() => workbenchStore.setNewConnectionModalOpen(true)}
-              className="h-[24px] px-2 border border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 text-[11.5px] font-semibold flex items-center gap-1 cursor-pointer rounded-[2px]"
-            >
-              <Plus className="w-3 h-3" />
-              <span>{t('rxtx.dock.addConn')}</span>
-            </button>
-
-            {connectedCount > 0 && (
-              <button
-                type="button"
-                onClick={() => void handleDisconnectAll()}
-                className="h-[24px] px-2 border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 text-[11.5px] font-medium flex items-center gap-1 cursor-pointer rounded-[2px]"
-                title={t('rxtx.dock.disconnectAllTooltip')}
-              >
-                <Unplug className="w-3 h-3" />
-                <span>{t('rxtx.dock.disconnectAll')}</span>
-              </button>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2 text-[11px] text-[var(--text-muted)] font-mono">
-            <span>{t('rxtx.dock.inspectHint')}</span>
-          </div>
-        </div>
-
-        {/* Multi-Bus Connections Grid (max-h-[150px] overflow-y-auto) */}
-        <div className="max-h-[150px] overflow-y-auto">
-          <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums">
-            <colgroup>
-              <col style={{ width: '36px' }} />
-              <col style={{ width: '56px' }} />
-              <col style={{ width: '150px' }} />
-              <col />
-              <col style={{ width: '130px' }} />
-              <col style={{ width: '70px' }} />
-              <col style={{ width: '100px' }} />
-              <col style={{ width: '115px' }} />
-              <col style={{ width: '50px' }} />
-              <col style={{ width: '120px' }} />
-            </colgroup>
-            <thead>
-              <tr>
-                <th className="text-center font-sans" title="On / Off">
-                  {t('rxtx.dock.colOn')}
-                </th>
-                <th>{t('rxtx.dock.colBus')}</th>
-                <th className="font-sans">{t('rxtx.dock.colName')}</th>
-                <th className="font-sans">{t('rxtx.dock.colHardware')}</th>
-                <th className="font-sans">{t('rxtx.dock.colBitRate')}</th>
-                <th className="font-sans text-center">{t('rxtx.dock.colDatabases')}</th>
-                <th className="font-sans">{t('rxtx.dock.colMode')}</th>
-                <th className="font-sans">{t('rxtx.dock.colStatus')}</th>
-                <th className="text-right">{t('rxtx.dock.colOvr')}</th>
-                <th className="font-sans">{t('rxtx.dock.colBusLoad')}</th>
-              </tr>
-            </thead>
+          <div className="font-semibold mb-1.5">{t('rxtx.kbd.title')}</div>
+          <div className="text-[var(--text-muted)] mb-2">{t('rxtx.kbd.scope')}</div>
+          <table className="w-full">
             <tbody>
-              {allRows.map((row) => {
-                const isBusy = busyBusIds.has(row.busId);
-                const prof = row.profile;
-                const bus = row.busHealth;
-                const isMock =
-                  prof?.driverFamily === 'mock' ||
-                  bus?.channelName.toLowerCase().includes('mock');
-
-                const bitRateLabel = isMock
-                  ? prof?.mockFpsPreset === null
-                    ? '500k/2M FD · 16 msg/s'
-                    : `500k/2M FD · ${prof?.mockFpsPreset} msg/s`
-                  : prof?.enableFd
-                    ? `${Math.round((prof.bitrate ?? 500000) / 1000)}k/${Math.round((prof.dataBitrate ?? 2000000) / 1000000)}M FD`
-                    : `${Math.round((prof?.bitrate ?? 500000) / 1000)}k CC`;
-
-                const hardwareLabel = prof
-                  ? `${prof.driverFamily.toUpperCase()} · ${prof.adapterChannel || prof.serialPort || 'Ch0'}`
-                  : bus?.channelName ?? 'CAN Channel';
-
-                const busLoadPct = row.isConnected ? header.estimatedBusLoadPct : 0;
-                const dbCount = prof?.databaseIds.length ?? 0;
-
-                return (
-                  <tr
-                    key={row.key}
-                    onClick={() => {
-                      if (prof) {
-                        connectionStore.selectProfile(prof.id);
-                        workbenchStore.setSelection({ kind: 'connection', profileId: prof.id });
-                      }
-                    }}
-                    className={`hover:!bg-[var(--bg-row-hover)] cursor-pointer text-[11px] ${
-                      row.isConnected ? '' : 'opacity-70'
-                    }`}
-                  >
-                    {/* 1. On / Off Checkbox */}
-                    <td onClick={(e) => e.stopPropagation()}>
-                      <div className="pcan-cell pcan-cell-center">
-                        <input
-                          type="checkbox"
-                          checked={row.isConnected}
-                          disabled={isBusy || (!row.isConnected && !prof)}
-                          onChange={() => {
-                            if (row.isConnected) {
-                              void handleDisconnectBus(row.busId);
-                            } else if (prof) {
-                              void handleConnectProfile(prof);
-                            }
-                          }}
-                          className="accent-emerald-600 cursor-pointer"
-                          title={
-                            row.isConnected
-                              ? t('rxtx.dock.connectedTooltip', { bus: row.busId + 1 })
-                              : t('rxtx.dock.offlineTooltip', {
-                                  bus: row.busId + 1,
-                                  name: prof?.name ?? '',
-                                })
-                          }
-                        />
-                      </div>
-                    </td>
-
-                    {/* 2. Bus ID */}
-                    <td>
-                      <div className="pcan-cell font-semibold text-[var(--text-primary)]">
-                        Bus {row.busId + 1}
-                      </div>
-                    </td>
-
-                    {/* 3. Name */}
-                    <td>
-                      <div className="pcan-cell font-sans font-medium truncate" title={prof?.name ?? bus?.channelName}>
-                        {prof?.name ?? bus?.channelName ?? `Bus ${row.busId + 1}`}
-                      </div>
-                    </td>
-
-                    {/* 4. Net / Hardware */}
-                    <td>
-                      <div className="pcan-cell text-[10px] text-[var(--text-secondary)] truncate" title={hardwareLabel}>
-                        {hardwareLabel}
-                      </div>
-                    </td>
-
-                    {/* 5. Bit Rate */}
-                    <td>
-                      <div className="pcan-cell text-[10px]">
-                        <span className="truncate">{bitRateLabel}</span>
-                      </div>
-                    </td>
-
-                    {/* 6. Databases Badge */}
-                    <td
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (prof) {
-                          connectionStore.selectProfile(prof.id);
-                          workbenchStore.setSelection({ kind: 'connection', profileId: prof.id });
-                        }
-                      }}
-                    >
-                      <div className="pcan-cell pcan-cell-center font-sans">
-                        <span
-                          className={`px-1.5 py-0.2 rounded text-[10px] font-mono cursor-pointer hover:opacity-80 ${
-                            dbCount > 0
-                              ? 'bg-sky-950/70 border border-sky-800/60 text-sky-300'
-                              : 'bg-slate-900 border border-slate-700 text-slate-500'
-                          }`}
-                          title={t('rxtx.dock.dbBadgeTooltip', { count: dbCount })}
-                        >
-                          {dbCount} DBC
-                        </span>
-                      </div>
-                    </td>
-
-                    {/* 7. Mode */}
-                    <td>
-                      <div className="pcan-cell font-sans" onClick={(e) => e.stopPropagation()}>
-                        {row.isConnected && bus ? (
-                          bus.listenOnly ? (
-                            <button
-                              type="button"
-                              disabled={isBusy}
-                              onClick={() => void handleSwitchToActiveTx(bus.busId)}
-                              style={{
-                                backgroundColor: 'rgba(217, 155, 38, 0.12)',
-                                borderColor: 'rgba(217, 155, 38, 0.50)',
-                                color: '#E3B341',
-                              }}
-                              className="h-[18px] px-1.5 border text-[10px] font-semibold hover:border-amber-400 cursor-pointer rounded-[1px]"
-                              title="Click to Switch to Active TX Armed"
-                            >
-                              {t('rxtx.dock.switchToTx')}
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              disabled={isBusy}
-                              onClick={() => void handleToggleArmTx(bus.busId, Boolean(bus.txArmed))}
-                              style={{
-                                backgroundColor: bus.txArmed
-                                  ? 'rgba(217, 155, 38, 0.22)'
-                                  : 'var(--bg-panel)',
-                                borderColor: bus.txArmed ? '#E3B341' : 'var(--border-strong)',
-                                color: bus.txArmed ? '#E3B341' : 'var(--text-muted)',
-                              }}
-                              className="h-[18px] px-1.5 border text-[10px] font-semibold cursor-pointer rounded-[1px]"
-                              title="Click to toggle TX Armed / Disarmed"
-                            >
-                              {bus.txArmed ? t('rxtx.dock.txArmed') : t('rxtx.dock.txDisarmed')}
-                            </button>
-                          )
-                        ) : (
-                          <span className="text-[10px] text-[var(--text-muted)] font-mono">
-                            {prof?.listenOnly ? t('rxtx.dock.listen') : t('rxtx.dock.active')}
-                          </span>
-                        )}
-                      </div>
-                    </td>
-
-                    {/* 8. Status */}
-                    <td>
-                      <div className="pcan-cell">
-                        {row.isConnected && bus ? (
-                          <BusStateBadge
-                            busState={bus.busState}
-                            connected={bus.connected}
-                            txErrorCount={bus.txErrorCount}
-                            rxErrorCount={bus.rxErrorCount}
-                            showTecRec
-                            compact
-                          />
-                        ) : (
-                          <span className="text-[10px] text-[var(--text-muted)] font-mono">
-                            {t('rxtx.dock.offline')}
-                          </span>
-                        )}
-                      </div>
-                    </td>
-
-                    {/* 9. Overruns */}
-                    <td>
-                      <div
-                        className={`pcan-cell pcan-cell-right ${
-                          row.isConnected && header.droppedFrames > 0
-                            ? 'text-red-500 font-bold'
-                            : 'text-[var(--text-muted)]'
-                        }`}
-                      >
-                        {row.isConnected ? header.droppedFrames : '—'}
-                      </div>
-                    </td>
-
-                    {/* 10. Bus Load Bar (pcanex7.png style) */}
-                    <td>
-                      <div className="pcan-cell">
-                        {row.isConnected ? (
-                          <div className="flex items-center gap-1.5 w-full pr-1 font-mono text-[10px] tabular-nums">
-                            <div className="flex-1 h-[7px] bg-slate-800 border border-slate-700 rounded-[1px] overflow-hidden">
-                              <div
-                                style={{ width: `${Math.min(100, Math.max(0, busLoadPct))}%` }}
-                                className={`h-full ${
-                                  busLoadPct > 80
-                                    ? 'bg-red-500'
-                                    : busLoadPct > 50
-                                      ? 'bg-amber-400'
-                                      : 'bg-emerald-400'
-                                }`}
-                              />
-                            </div>
-                            <span className="inline-block w-[6ch] text-right font-mono tabular-nums text-[10px] text-[var(--text-secondary)] shrink-0">
-                              {busLoadPct.toFixed(1)}%
-                            </span>
-                          </div>
-                        ) : (
-                          <span className="text-[10px] text-[var(--text-muted)] font-mono">—</span>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+              {rows.map(([keys, desc]) => (
+                <tr key={keys + desc}>
+                  <td className="pr-3 py-0.5 whitespace-nowrap font-mono tabular-nums text-sky-400 align-top">
+                    {keys}
+                  </td>
+                  <td className="py-0.5 font-sans text-[var(--text-secondary)]">{desc}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
-      </div>
-    </footer>
+      )}
+    </div>
   );
 };

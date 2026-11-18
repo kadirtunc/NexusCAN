@@ -657,6 +657,7 @@ export function validateAndNormalizeWorkspaceJson(
             rawFam === 'slcan' ||
             rawFam === 'pcan' ||
             rawFam === 'kvaser' ||
+            rawFam === 'vector_xl' ||
             rawFam === 'mock'
               ? rawFam
               : 'socketcan';

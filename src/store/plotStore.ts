@@ -1,5 +1,6 @@
 import { csvSafeText } from '../utils/csvSafe';
 import { useSyncExternalStore } from 'react';
+import { logUiDebugEvent } from './debugConsoleStore';
 import type { DatabaseSchemaDto, MessageSchemaDto, SignalSchemaDto } from '../types/netdb';
 import type { ChronologicalFrameDto, FrameTelemetryDto } from '../types/telemetry';
 import { decodeTraceFrame } from '../utils/traceDecoder';
@@ -734,11 +735,25 @@ export const plotStore = {
       currentState = { ...currentState, paused: false };
     }
     syncSnapshotAndEmit(true);
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'WORKBENCH',
+      action: 'plotter.signal.add',
+      busId,
+      title: `Signal Added to Plotter: ${sig.name}`,
+      details: `Bus: ${busId + 1}, Signal: ${sig.signalId}, Unit: ${sig.unit || '—'}`,
+    });
   },
 
   removeSeries(key: string): void {
     if (!seriesMap.delete(key)) return;
     syncSnapshotAndEmit(true);
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'WORKBENCH',
+      action: 'plotter.signal.remove',
+      title: `Signal Removed from Plotter: ${key}`,
+    });
   },
 
   toggleSignal(busId: number, sig: SignalSchemaDto): boolean {
@@ -1222,6 +1237,12 @@ export const plotStore = {
     if (currentState.paused === paused) return;
     currentState = { ...currentState, paused };
     syncSnapshotAndEmit(false);
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'WORKBENCH',
+      action: paused ? 'plotter.pause' : 'plotter.resume',
+      title: paused ? 'Plotter Oscilloscope Paused' : 'Plotter Oscilloscope Resumed',
+    });
   },
 
   setIsStaticTraceLoaded(loaded: boolean): void {
@@ -1249,6 +1270,12 @@ export const plotStore = {
     recomputeStickySharedBounds();
     currentState = { ...currentState, isStaticTraceLoaded: false };
     syncSnapshotAndEmit(false);
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'WORKBENCH',
+      action: 'plotter.clear',
+      title: 'Plotter Buffers Cleared',
+    });
   },
 
   clearAllSeries(): void {

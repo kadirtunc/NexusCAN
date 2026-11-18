@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { logUiDebugEvent } from './debugConsoleStore';
 import type { DatabaseSchemaDto } from '../types/netdb';
 import type {
   ChronologicalFrameDto,
@@ -3088,6 +3089,12 @@ export const cloudBridgeStore = {
     };
     persistCurrentSession();
     emitFullChange();
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'WORKBENCH',
+      action: 'cloud.disconnected',
+      title: 'Cloud Bridge Disconnected',
+    });
 
     if (prevToken) {
       void fetch(`${prevBaseUrl}/api/auth/logout`, {

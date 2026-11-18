@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useI18n, type TranslationKey } from '../../../i18n';
 import { panicInFlightBuses, performPanicStop } from '../../../store/panicStop';
+import { useDiagnosticsSelector } from '../../../store/diagnosticsStore';
 import type { SimulationSignalBindingDto, SimulationWidgetKind } from '../../../types/simulation';
 import type { UdsPanelDto, UdsWidgetDto } from '../../../types/uds';
 import { InstrumentCanvasGrid } from '../../simulation/InstrumentCanvasGrid';
@@ -259,6 +260,8 @@ export const UdsInstrumentPanel: React.FC = () => {
   const { t } = useI18n();
   const state = useUdsPanelStore();
   const gate = useUdsTxGate();
+  // Reads/writes always target the ACTIVE diagnostic tab: switching it resets and restarts the poll.
+  const activeDiagTabId = useDiagnosticsSelector((s) => s.activeTabId);
 
   const runtimeBusRef = useRef<SimulationRuntimeBus | null>(null);
   if (runtimeBusRef.current === null) runtimeBusRef.current = new SimulationRuntimeBus();
@@ -304,7 +307,7 @@ export const UdsInstrumentPanel: React.FC = () => {
   // Never let values of a previous panel / run / MOCK session leak into the next one.
   useEffect(() => {
     runtimeBus.reset([], null);
-  }, [runtimeBus, activePanelId, mockMode, mode]);
+  }, [runtimeBus, activePanelId, mockMode, mode, activeDiagTabId]);
 
   useEffect(() => {
     engine.configure(widgets, { defaultPollMs: pollIntervalMs, mock: mockMode });
@@ -323,7 +326,7 @@ export const UdsInstrumentPanel: React.FC = () => {
       window.cancelAnimationFrame(raf);
       engine.stop();
     };
-  }, [engine, runtimeBus, isRun, panel, hasGraph]);
+  }, [engine, runtimeBus, isRun, panel, hasGraph, activeDiagTabId]);
 
   useEffect(() => () => engine.stop(), [engine]);
 

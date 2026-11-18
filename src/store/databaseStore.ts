@@ -100,6 +100,12 @@ const initialTheme: UiTheme =
 
 if (typeof document !== 'undefined') {
   document.documentElement.setAttribute('data-theme', initialTheme);
+  try {
+    // Mirror for the detached debug window (separate webview, same origin).
+    window.localStorage.setItem('nexuscan:theme', initialTheme);
+  } catch {
+    // ignore storage errors
+  }
 }
 
 const EMPTY_SIGNALS: readonly (SignalSchemaDto | undefined)[] = [];
@@ -228,6 +234,7 @@ export const databaseStore = {
     arbId?: number,
     isExtended?: boolean,
   ): MessageSchemaDto | undefined {
+    if (messageKey.startsWith('ERR:')) return undefined;
     const direct = currentState.messagesByKey.get(messageKey);
     if (direct) return direct;
     if (arbId !== undefined && isExtended !== undefined) {
@@ -246,6 +253,7 @@ export const databaseStore = {
     arbId?: number,
     isExtended?: boolean,
   ): MessageSchemaDto | undefined {
+    if (messageKey.startsWith('ERR:')) return undefined;
     const lookup = currentState.busSchemas.get(busId);
     if (!lookup) return undefined;
     const direct = lookup.messagesByKey.get(messageKey);
@@ -625,6 +633,11 @@ export const databaseStore = {
   setTheme(theme: UiTheme): void {
     if (typeof document !== 'undefined') {
       document.documentElement.setAttribute('data-theme', theme);
+      try {
+        window.localStorage.setItem('nexuscan:theme', theme);
+      } catch {
+        // ignore storage errors
+      }
     }
     if (currentState.theme === theme) return;
     currentState = {

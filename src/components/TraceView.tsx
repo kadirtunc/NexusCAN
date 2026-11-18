@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
+  AlertTriangle,
   Check,
   ChevronDown,
   ChevronRight,
@@ -56,6 +57,12 @@ import {
   formatDecodedTraceInline,
   resolveTraceFrameSymbol,
 } from '../utils/traceDecoder';
+import {
+  CAN_ERR_MASK,
+  type DecodedErrorField,
+  decodeCanErrorFields,
+  formatErrorFrameShortTitle,
+} from '../utils/canErrorDecoder';
 import { QuickPlotButton } from './PlotterView';
 import type { StatusBanner } from './TopBar';
 
@@ -78,6 +85,7 @@ interface ExpandedAnchor {
   frameUid: number;
   frame: ChronologicalFrameDto;
   signals: readonly DecodedTraceSignal[];
+  errorFields?: readonly DecodedErrorField[];
   childRowCount: number; // >= 1
   cumExtraBefore: number;
 }
@@ -97,6 +105,7 @@ type VirtualRowItem =
       frameUid: number;
       frame: ChronologicalFrameDto;
       sig: DecodedTraceSignal | null;
+      errField?: DecodedErrorField;
       childIdx: number;
     };
 
@@ -182,7 +191,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
   }, [connState.profiles, header.buses, sess.busFilter]);
 
   const [filterQuery, setFilterQuery] = useState<string>('');
-  const [dirFilter, setDirFilter] = useState<'ALL' | 'RX' | 'TX'>('ALL');
+  const [dirFilter, setDirFilter] = useState<'ALL' | 'RX' | 'TX' | 'ERR'>('ALL');
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
   const [showDecodedCol, setShowDecodedCol] = useState<boolean>(true);
   const [expandedUids, setExpandedUids] = useState<Set<number>>(() => new Set());
@@ -302,6 +311,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
     for (let i = 0; i < len; i++) {
       const f = ring.getAt(i);
       if (!f) continue;
+      if (f.isError) continue;
       const msgKey = f.messageKey || formatFilterMessageKey(f.arbId, f.isExtended);
       const existing = map.get(msgKey);
       if (existing) {
@@ -488,28 +498,51 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
     for (let i = 0; i < len; i++) {
       const row = sess.displayRing.getAt(i);
       if (!row) continue;
-      if (dirFilter === 'RX' && row.isTx) continue;
-      if (dirFilter === 'TX' && !row.isTx) continue;
+      if (dirFilter === 'RX' && (row.isTx || row.isError)) continue;
+      if (dirFilter === 'TX' && (!row.isTx || row.isError)) continue;
+      if (dirFilter === 'ERR' && !row.isError) continue;
 
       if (q.length > 0) {
-        const msg = databaseStore.getMessageForBus(row.busId, row.messageKey, row.arbId, row.isExtended);
-        const signalsById = databaseStore.getBusSignals(row.busId);
-        const muxSym = resolveTraceFrameSymbol(row.rawBytes, msg, signalsById);
-        const idHex = formatPcanIdHex(row.arbId, row.isExtended).toLowerCase();
-        const sym = (msg?.name ?? '').toLowerCase();
-        const fullMuxSym = muxSym.fullSymbol.toLowerCase();
-        let sigMatch = false;
-        if (msg) {
-          for (const sigId of msg.signalIds) {
-            const s = databaseStore.getSignalForBus(row.busId, sigId);
-            if (s && s.name.toLowerCase().includes(q)) {
-              sigMatch = true;
-              break;
+        if (row.isError) {
+          const errTitle = formatErrorFrameShortTitle(
+            row.arbId,
+            row.rawBytes,
+            row.errorSummary,
+          ).toLowerCase();
+          const idHex = (row.arbId & CAN_ERR_MASK).toString(16).toLowerCase();
+          if (!errTitle.includes(q) && !idHex.includes(q) && !q.includes('err')) {
+            continue;
+          }
+        } else {
+          const msg = databaseStore.getMessageForBus(
+            row.busId,
+            row.messageKey,
+            row.arbId,
+            row.isExtended,
+          );
+          const signalsById = databaseStore.getBusSignals(row.busId);
+          const muxSym = resolveTraceFrameSymbol(row.rawBytes, msg, signalsById);
+          const idHex = formatPcanIdHex(row.arbId, row.isExtended).toLowerCase();
+          const sym = (msg?.name ?? '').toLowerCase();
+          const fullMuxSym = muxSym.fullSymbol.toLowerCase();
+          let sigMatch = false;
+          if (msg) {
+            for (const sigId of msg.signalIds) {
+              const s = databaseStore.getSignalForBus(row.busId, sigId);
+              if (s && s.name.toLowerCase().includes(q)) {
+                sigMatch = true;
+                break;
+              }
             }
           }
-        }
-        if (!idHex.includes(q) && !sym.includes(q) && !fullMuxSym.includes(q) && !sigMatch) {
-          continue;
+          if (
+            !idHex.includes(q) &&
+            !sym.includes(q) &&
+            !fullMuxSym.includes(q) &&
+            !sigMatch
+          ) {
+            continue;
+          }
         }
       }
       matches.push(i);
@@ -561,27 +594,42 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
     for (const item of resolvedPairs) {
       const frame = sess.displayRing.getAt(item.ringIdx);
       if (!frame) continue;
-      const msgSchema = databaseStore.getMessageForBus(
-        frame.busId,
-        frame.messageKey,
-        frame.arbId,
-        frame.isExtended,
-      );
-      const decoded = decodeTraceFrame(
-        frame.rawBytes,
-        msgSchema,
-        databaseStore.getBusSignals(frame.busId),
-      );
-      const childRowCount = Math.max(1, decoded.length);
-      anchors.push({
-        baseIdx: item.baseIdx,
-        frameUid: item.frameUid,
-        frame,
-        signals: decoded,
-        childRowCount,
-        cumExtraBefore: cumExtra,
-      });
-      cumExtra += childRowCount;
+      if (frame.isError) {
+        const errorFields = decodeCanErrorFields(frame.arbId, frame.rawBytes);
+        const childRowCount = Math.max(1, errorFields.length);
+        anchors.push({
+          baseIdx: item.baseIdx,
+          frameUid: item.frameUid,
+          frame,
+          signals: [],
+          errorFields,
+          childRowCount,
+          cumExtraBefore: cumExtra,
+        });
+        cumExtra += childRowCount;
+      } else {
+        const msgSchema = databaseStore.getMessageForBus(
+          frame.busId,
+          frame.messageKey,
+          frame.arbId,
+          frame.isExtended,
+        );
+        const decoded = decodeTraceFrame(
+          frame.rawBytes,
+          msgSchema,
+          databaseStore.getBusSignals(frame.busId),
+        );
+        const childRowCount = Math.max(1, decoded.length);
+        anchors.push({
+          baseIdx: item.baseIdx,
+          frameUid: item.frameUid,
+          frame,
+          signals: decoded,
+          childRowCount,
+          cumExtraBefore: cumExtra,
+        });
+        cumExtra += childRowCount;
+      }
     }
 
     return { expandedAnchors: anchors, totalExtraRows: cumExtra };
@@ -694,6 +742,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
             frameUid: anc.frameUid,
             frame: anc.frame,
             sig: anc.signals[childIdx] ?? null,
+            errField: anc.errorFields ? anc.errorFields[childIdx] : undefined,
             childIdx,
           });
           continue;
@@ -976,9 +1025,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 type="button"
                 onClick={() => traceSessionsStore.pauseRecording(sess.id)}
                 style={{
-                  backgroundColor: 'rgba(234, 179, 8, 0.15)',
-                  borderColor: 'rgba(234, 179, 8, 0.45)',
-                  color: '#FACC15',
+                  backgroundColor: 'var(--status-warn-bg)',
+                  borderColor: 'var(--status-warn-border)',
+                  color: 'var(--status-warn)',
                 }}
                 className="h-[28px] px-3 border flex items-center gap-1.5 text-[12px] font-semibold cursor-pointer shrink-0 hover:bg-yellow-500/25 rounded-xs"
                 title={t('trace.toolbar.pauseTooltip')}
@@ -990,9 +1039,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 type="button"
                 onClick={() => traceSessionsStore.stopRecording(sess.id)}
                 style={{
-                  backgroundColor: 'rgba(239, 68, 68, 0.15)',
-                  borderColor: 'rgba(239, 68, 68, 0.45)',
-                  color: '#F87171',
+                  backgroundColor: 'var(--status-critical-bg)',
+                  borderColor: 'var(--status-critical-border)',
+                  color: 'var(--status-critical)',
                 }}
                 className="h-[28px] px-3 border flex items-center gap-1.5 text-[12px] font-semibold cursor-pointer shrink-0 hover:bg-red-500/25 rounded-xs"
                 title={t('trace.toolbar.stopTooltip')}
@@ -1006,9 +1055,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
               type="button"
               onClick={() => traceSessionsStore.startRecording(sess.id, false)}
               style={{
-                backgroundColor: 'rgba(239, 68, 68, 0.15)',
-                borderColor: 'rgba(239, 68, 68, 0.45)',
-                color: '#F87171',
+                backgroundColor: 'var(--status-critical-bg)',
+                borderColor: 'var(--status-critical-border)',
+                color: 'var(--status-critical)',
               }}
               className="h-[28px] px-3 border flex items-center gap-2 text-[12px] font-semibold cursor-pointer shrink-0 hover:bg-red-500/25 rounded-xs"
               title={sess.state === 'paused' ? t('trace.toolbar.resumeTooltip') : t('trace.toolbar.recordTooltip')}
@@ -1051,7 +1100,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
             className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[11px] font-medium hover:border-amber-400 cursor-pointer shrink-0 rounded-xs"
             title={t('trace.toolbar.openTooltip')}
           >
-            <FolderOpen className="w-3.5 h-3.5 text-amber-400" />
+            <FolderOpen className="w-3.5 h-3.5 text-[var(--status-warn)]" />
             <span>{t('trace.toolbar.open')}</span>
           </button>
 
@@ -1062,10 +1111,10 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
             onClick={() => void handleSaveToDisk()}
             style={{
               backgroundColor: 'var(--bg-panel)',
-              borderColor: sess.savedFilePath && !sess.dirtySinceSave ? '#10B981' : 'var(--border-strong)',
-              color: sess.savedFilePath && !sess.dirtySinceSave ? '#34D399' : 'var(--text-primary)',
+              borderColor: sess.savedFilePath && !sess.dirtySinceSave ? 'var(--status-nominal-border)' : 'var(--border-strong)',
+              color: sess.savedFilePath && !sess.dirtySinceSave ? 'var(--status-nominal)' : 'var(--text-primary)',
             }}
-            className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[11px] font-medium hover:border-emerald-500 cursor-pointer shrink-0 disabled:opacity-40 rounded-xs"
+            className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[11px] font-medium hover:border-[var(--status-nominal-border)] cursor-pointer shrink-0 disabled:opacity-40 rounded-xs"
             title={
               sess.savedFilePath
                 ? t('trace.toolbar.savedTooltip', {
@@ -1076,9 +1125,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
             }
           >
             {sess.savedFilePath && !sess.dirtySinceSave ? (
-              <Check className="w-3.5 h-3.5 text-emerald-400" />
+              <Check className="w-3.5 h-3.5 text-[var(--status-nominal)]" />
             ) : (
-              <Save className="w-3.5 h-3.5 text-emerald-400" />
+              <Save className="w-3.5 h-3.5 text-[var(--status-nominal)]" />
             )}
             <span>{sess.savedFilePath && !sess.dirtySinceSave ? t('trace.toolbar.saved') : t('trace.toolbar.save')}</span>
           </button>
@@ -1089,14 +1138,14 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
             disabled={sess.count === 0}
             onClick={handlePlotTraceInPlotter}
             style={{
-              backgroundColor: 'rgba(56, 189, 248, 0.15)',
-              borderColor: 'rgba(56, 189, 248, 0.45)',
-              color: '#38BDF8',
+              backgroundColor: 'var(--status-focus-bg)',
+              borderColor: 'var(--status-focus-border)',
+              color: 'var(--status-focus)',
             }}
-            className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[11px] font-semibold hover:bg-sky-500/25 cursor-pointer shrink-0 disabled:opacity-40 rounded-xs"
+            className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[11px] font-semibold hover:bg-[var(--status-focus-bg)] cursor-pointer shrink-0 disabled:opacity-40 rounded-xs"
             title={t('trace.toolbar.plotterTooltip')}
           >
-            <Activity className="w-3.5 h-3.5 text-sky-400" />
+            <Activity className="w-3.5 h-3.5 text-[var(--status-focus)]" />
             <span>{t('trace.toolbar.plotter')}</span>
           </button>
         </div>
@@ -1115,7 +1164,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 borderColor: 'var(--border-strong)',
                 color: 'var(--text-primary)',
               }}
-              className="h-[28px] w-36 xl:w-48 px-2 pr-6 border text-[11px] rounded-xs focus:outline-none focus:border-cyan-500"
+              className="h-[28px] w-36 xl:w-48 px-2 pr-6 border text-[11px] rounded-xs focus:outline-none focus:border-[var(--status-focus)]"
             />
             {filterQuery && (
               <button
@@ -1156,19 +1205,48 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
           <select
             aria-label="Direction Filter"
             value={dirFilter}
-            onChange={(e) => setDirFilter(e.target.value as 'ALL' | 'RX' | 'TX')}
+            onChange={(e) => setDirFilter(e.target.value as 'ALL' | 'RX' | 'TX' | 'ERR')}
             style={{
               backgroundColor: 'var(--bg-input)',
               borderColor: 'var(--border-strong)',
               color: 'var(--text-primary)',
             }}
             className="h-[28px] px-1.5 border text-[11px] rounded-xs focus:outline-none shrink-0 cursor-pointer"
-            title="Yön Filtresi"
+            title="Yön / Çerçeve Tipi Filtresi"
           >
             <option value="ALL">{t('trace.toolbar.dirAll')}</option>
             <option value="RX">{t('trace.toolbar.dirRx')}</option>
             <option value="TX">{t('trace.toolbar.dirTx')}</option>
+            <option value="ERR">{t('trace.toolbar.dirErr')}</option>
           </select>
+
+          {/* Live Error Counter Pill */}
+          <button
+            type="button"
+            onClick={() => setDirFilter((cur) => (cur === 'ERR' ? 'ALL' : 'ERR'))}
+            style={{
+              backgroundColor:
+                dirFilter === 'ERR'
+                  ? 'var(--status-critical-bg)'
+                  : sess.errCaptured > 0
+                    ? 'var(--status-critical-bg)'
+                    : 'var(--bg-input)',
+              borderColor:
+                dirFilter === 'ERR'
+                  ? 'var(--status-critical-border)'
+                  : sess.errCaptured > 0
+                    ? 'var(--status-critical-border)'
+                    : 'var(--border-strong)',
+              color: sess.errCaptured > 0 ? 'var(--status-critical)' : 'var(--text-muted)',
+            }}
+            className="h-[28px] px-2 border text-[11px] font-mono font-semibold flex items-center gap-1 cursor-pointer shrink-0 rounded-xs"
+            title={`Errors captured: ${sess.errCaptured} (Click to toggle filter)`}
+          >
+            <AlertTriangle
+              className={`w-3 h-3 ${sess.errCaptured > 0 ? 'text-[var(--status-critical)]' : 'text-[var(--text-muted)]'}`}
+            />
+            <span>ERR: {sess.errCaptured}</span>
+          </button>
         </div>
 
         {/* Sağ Grup: Ayarlar ▾ ve Dışa Aktar ▾ Popover Menüleri */}
@@ -1183,10 +1261,10 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
               }}
               style={{
                 backgroundColor: settingsMenuOpen ? 'var(--bg-panel)' : 'var(--bg-panel)',
-                borderColor: settingsMenuOpen ? '#38BDF8' : 'var(--border-strong)',
-                color: settingsMenuOpen ? '#38BDF8' : 'var(--text-primary)',
+                borderColor: settingsMenuOpen ? 'var(--status-focus)' : 'var(--border-strong)',
+                color: settingsMenuOpen ? 'var(--status-focus)' : 'var(--text-primary)',
               }}
-              className="h-[28px] px-2.5 border rounded-xs flex items-center gap-1.5 text-[11px] font-medium hover:border-sky-500 cursor-pointer"
+              className="h-[28px] px-2.5 border rounded-xs flex items-center gap-1.5 text-[11px] font-medium hover:border-[var(--status-focus-border)] cursor-pointer"
               title={t('trace.settings.tooltip')}
             >
               <SlidersHorizontal className="w-3.5 h-3.5" />
@@ -1197,32 +1275,32 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
             {settingsMenuOpen && (
               <div
                 style={{
-                  backgroundColor: '#0F1623',
-                  borderColor: '#1E293B',
+                  backgroundColor: 'var(--bg-toolbar)',
+                  borderColor: 'var(--border-strong)',
                 }}
                 className="absolute right-0 top-[32px] z-50 w-64 p-3 border shadow-2xl rounded-xs flex flex-col gap-2.5 text-[11px]"
               >
-                <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                <div className="text-[10px] font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
                   {t('trace.settings.viewOptions')}
                 </div>
 
-                <label className="flex items-center justify-between text-slate-200 cursor-pointer select-none">
+                <label className="flex items-center justify-between text-[var(--text-primary)] cursor-pointer select-none">
                   <span>{t('trace.settings.autoScroll')}</span>
                   <input
                     type="checkbox"
                     checked={autoScroll}
                     onChange={(e) => setAutoScroll(e.target.checked)}
-                    className="accent-sky-500 cursor-pointer"
+                    className="accent-[var(--status-focus)] cursor-pointer"
                   />
                 </label>
 
-                <label className="flex items-center justify-between text-slate-200 cursor-pointer select-none">
+                <label className="flex items-center justify-between text-[var(--text-primary)] cursor-pointer select-none">
                   <span>{t('trace.settings.showDecoded')}</span>
                   <input
                     type="checkbox"
                     checked={showDecodedCol}
                     onChange={(e) => setShowDecodedCol(e.target.checked)}
-                    className="accent-emerald-500 cursor-pointer"
+                    className="accent-[var(--status-nominal)] cursor-pointer"
                   />
                 </label>
 
@@ -1233,16 +1311,16 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                       setExpandedUids(new Set());
                       setSettingsMenuOpen(false);
                     }}
-                    className="w-full h-[26px] px-2 border border-slate-700 bg-slate-900/60 hover:bg-slate-800 text-slate-300 flex items-center justify-center gap-1.5 rounded-xs cursor-pointer text-[11px]"
+                    className="w-full h-[26px] px-2 border border-[var(--border-grid)] bg-[var(--bg-panel)] hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)] flex items-center justify-center gap-1.5 rounded-xs cursor-pointer text-[11px]"
                   >
                     <Minimize2 className="w-3 h-3" />
                     <span>{t('trace.settings.collapseRows', { count: expandedUids.size })}</span>
                   </button>
                 )}
 
-                <div className="border-t border-slate-800/80 my-0.5" />
+                <div className="border-t border-[var(--border-grid)] my-0.5" />
 
-                <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                <div className="text-[10px] font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
                   {t('trace.settings.bufferCapacity')}
                 </div>
 
@@ -1259,7 +1337,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                         traceSessionsStore.setSessionMaxBufferRows(sess.id, Number(e.target.value));
                       }
                     }}
-                    className="h-[24px] px-1.5 border font-mono tabular-nums text-[11px] bg-slate-900 border-slate-700 text-slate-200 rounded-xs flex-1 focus:outline-none"
+                    className="h-[24px] px-1.5 border font-mono tabular-nums text-[11px] bg-[var(--bg-panel)] border-[var(--border-grid)] text-[var(--text-primary)] rounded-xs flex-1 focus:outline-none"
                   >
                     {BUFFER_PRESETS.map((sz) => (
                       <option key={sz} value={sz}>
@@ -1285,12 +1363,12 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                         applyCustomBufferLimit();
                       }
                     }}
-                    className="h-[24px] w-20 px-1.5 border font-mono tabular-nums text-[11px] text-right bg-slate-900 border-slate-700 text-slate-200 rounded-xs focus:outline-none"
+                    className="h-[24px] w-20 px-1.5 border font-mono tabular-nums text-[11px] text-right bg-[var(--bg-panel)] border-[var(--border-grid)] text-[var(--text-primary)] rounded-xs focus:outline-none"
                     title={t('trace.settings.customBufferTooltip')}
                   />
                 </div>
 
-                <div className="border-t border-slate-800/80 my-0.5" />
+                <div className="border-t border-[var(--border-grid)] my-0.5" />
 
                 {/* Spawn New Trace Action */}
                 <button
@@ -1308,9 +1386,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                       message: t('trace.notify.sessionSpawned', { name: created.name }),
                     });
                   }}
-                  className="w-full h-[26px] px-2 border border-sky-600/50 bg-sky-950/40 hover:bg-sky-900/50 text-sky-300 font-medium text-[11px] flex items-center justify-center gap-1.5 rounded-xs cursor-pointer transition-colors"
+                  className="w-full h-[26px] px-2 border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] hover:bg-[var(--status-focus-bg)] text-[var(--status-focus)] font-medium text-[11px] flex items-center justify-center gap-1.5 rounded-xs cursor-pointer transition-colors"
                 >
-                  <Plus className="w-3.5 h-3.5 text-sky-400" />
+                  <Plus className="w-3.5 h-3.5 text-[var(--status-focus)]" />
                   <span>{t('trace.settings.newSession')}</span>
                 </button>
               </div>
@@ -1328,10 +1406,10 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
               }}
               style={{
                 backgroundColor: exportMenuOpen ? 'var(--bg-panel)' : 'var(--bg-panel)',
-                borderColor: exportMenuOpen ? '#A855F7' : 'var(--border-strong)',
-                color: exportMenuOpen ? '#C084FC' : 'var(--text-primary)',
+                borderColor: exportMenuOpen ? 'var(--status-focus-border)' : 'var(--border-strong)',
+                color: exportMenuOpen ? 'var(--status-focus)' : 'var(--text-primary)',
               }}
-              className="h-[28px] px-2.5 border rounded-xs flex items-center gap-1.5 text-[11px] font-medium hover:border-purple-500 cursor-pointer disabled:opacity-40"
+              className="h-[28px] px-2.5 border rounded-xs flex items-center gap-1.5 text-[11px] font-medium hover:border-[var(--status-focus-border)] cursor-pointer disabled:opacity-40"
               title={t('trace.export.tooltip')}
             >
               <Download className="w-3.5 h-3.5" />
@@ -1342,12 +1420,12 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
             {exportMenuOpen && (
               <div
                 style={{
-                  backgroundColor: '#0F1623',
-                  borderColor: '#1E293B',
+                  backgroundColor: 'var(--bg-toolbar)',
+                  borderColor: 'var(--border-strong)',
                 }}
                 className="absolute right-0 top-[32px] z-50 w-60 p-1.5 border shadow-2xl rounded-xs flex flex-col gap-1 text-[11px]"
               >
-                <div className="px-2 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                <div className="px-2 py-1 text-[10px] font-semibold text-[var(--text-secondary)] uppercase tracking-wider">
                   {t('trace.export.formatTitle')}
                 </div>
 
@@ -1375,13 +1453,13 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                       setExportingBlf(false);
                     }
                   }}
-                  className="w-full text-left px-2.5 py-1.5 rounded-xs hover:bg-purple-950/40 text-purple-300 font-mono text-[11px] flex items-center justify-between border border-transparent hover:border-purple-500/40 cursor-pointer"
+                  className="w-full text-left px-2.5 py-1.5 rounded-xs hover:bg-[var(--status-focus-bg)] text-[var(--status-focus)] font-mono text-[11px] flex items-center justify-between border border-transparent hover:border-[var(--status-focus-border)] cursor-pointer"
                 >
                   <span>{t('trace.export.blf')}</span>
                   {exportingBlf ? (
-                    <Loader2 className="w-3 h-3 animate-spin text-purple-300" />
+                    <Loader2 className="w-3 h-3 animate-spin text-[var(--status-focus)]" />
                   ) : (
-                    <span className="text-[9px] px-1 py-0.2 bg-purple-500/20 text-purple-300 font-bold rounded-xs border border-purple-500/30">
+                    <span className="text-[9px] px-1 py-0.2 bg-[var(--status-focus-bg)] text-[var(--status-focus)] font-bold rounded-xs border border-[var(--status-focus-border)]">
                       BLF
                     </span>
                   )}
@@ -1395,10 +1473,10 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                     const name = traceSessionsStore.exportSessionToFile(sess.id, 'trc');
                     onStatusMessage?.({ kind: 'info', message: t('trace.notify.exported', { name }) });
                   }}
-                  className="w-full text-left px-2.5 py-1.5 rounded-xs hover:bg-slate-800/80 text-slate-200 font-mono text-[11px] flex items-center justify-between border border-transparent hover:border-slate-700 cursor-pointer"
+                  className="w-full text-left px-2.5 py-1.5 rounded-xs hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)] font-mono text-[11px] flex items-center justify-between border border-transparent hover:border-[var(--border-strong)] cursor-pointer"
                 >
                   <span>{t('trace.export.trc')}</span>
-                  <span className="text-[9px] px-1 py-0.2 bg-slate-800 text-slate-300 font-bold rounded-xs border border-slate-700">
+                  <span className="text-[9px] px-1 py-0.2 bg-[var(--bg-strip)] text-[var(--text-primary)] font-bold rounded-xs border border-[var(--border-grid)]">
                     TRC
                   </span>
                 </button>
@@ -1411,10 +1489,10 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                     const name = traceSessionsStore.exportSessionToFile(sess.id, 'asc');
                     onStatusMessage?.({ kind: 'info', message: t('trace.notify.exported', { name }) });
                   }}
-                  className="w-full text-left px-2.5 py-1.5 rounded-xs hover:bg-slate-800/80 text-slate-200 font-mono text-[11px] flex items-center justify-between border border-transparent hover:border-slate-700 cursor-pointer"
+                  className="w-full text-left px-2.5 py-1.5 rounded-xs hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)] font-mono text-[11px] flex items-center justify-between border border-transparent hover:border-[var(--border-strong)] cursor-pointer"
                 >
                   <span>{t('trace.export.asc')}</span>
-                  <span className="text-[9px] px-1 py-0.2 bg-slate-800 text-slate-300 font-bold rounded-xs border border-slate-700">
+                  <span className="text-[9px] px-1 py-0.2 bg-[var(--bg-strip)] text-[var(--text-primary)] font-bold rounded-xs border border-[var(--border-grid)]">
                     ASC
                   </span>
                 </button>
@@ -1427,10 +1505,10 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                     const name = traceSessionsStore.exportSessionToFile(sess.id, 'csv');
                     onStatusMessage?.({ kind: 'info', message: t('trace.notify.exported', { name }) });
                   }}
-                  className="w-full text-left px-2.5 py-1.5 rounded-xs hover:bg-slate-800/80 text-slate-200 font-mono text-[11px] flex items-center justify-between border border-transparent hover:border-slate-700 cursor-pointer"
+                  className="w-full text-left px-2.5 py-1.5 rounded-xs hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)] font-mono text-[11px] flex items-center justify-between border border-transparent hover:border-[var(--border-strong)] cursor-pointer"
                 >
                   <span>{t('trace.export.csv')}</span>
-                  <span className="text-[9px] px-1 py-0.2 bg-slate-800 text-slate-300 font-bold rounded-xs border border-slate-700">
+                  <span className="text-[9px] px-1 py-0.2 bg-[var(--bg-strip)] text-[var(--text-primary)] font-bold rounded-xs border border-[var(--border-grid)]">
                     CSV
                   </span>
                 </button>
@@ -1444,7 +1522,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
       {showReplayTransport && (
         <div
           style={{
-            backgroundColor: '#0F1623',
+            backgroundColor: 'var(--bg-toolbar)',
             borderBottom: '1px solid var(--border-strong)',
           }}
           className="shrink-0 min-h-[40px] py-1 px-3 flex items-center justify-between gap-3 text-[12px] select-none flex-wrap"
@@ -1455,9 +1533,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
               type="button"
               onClick={() => void handleTogglePlayReplay()}
               style={{
-                backgroundColor: replay.state === 'playing' ? 'rgba(234, 179, 8, 0.20)' : 'rgba(6, 182, 212, 0.20)',
-                borderColor: replay.state === 'playing' ? '#FACC15' : '#22D3EE',
-                color: replay.state === 'playing' ? '#FDE047' : '#67E8F9',
+                backgroundColor: replay.state === 'playing' ? 'var(--status-warn-bg)' : 'var(--status-focus-bg)',
+                borderColor: replay.state === 'playing' ? 'var(--status-warn-border)' : 'var(--status-focus-border)',
+                color: replay.state === 'playing' ? 'var(--status-warn)' : 'var(--status-focus)',
               }}
               className="h-[28px] px-3 border font-semibold flex items-center gap-1.5 cursor-pointer rounded-xs hover:opacity-90 text-[12px]"
               title={
@@ -1486,9 +1564,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 type="button"
                 onClick={() => void handleStopReplay()}
                 style={{
-                  backgroundColor: 'rgba(239, 68, 68, 0.18)',
-                  borderColor: '#EF4444',
-                  color: '#F87171',
+                  backgroundColor: 'var(--status-critical-bg)',
+                  borderColor: 'var(--status-critical-border)',
+                  color: 'var(--status-critical)',
                 }}
                 className="h-[28px] px-2.5 border font-semibold flex items-center gap-1.5 cursor-pointer rounded-xs hover:opacity-90 text-[12px]"
                 title={t('trace.replay.stopTooltip')}
@@ -1508,9 +1586,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 }
               }}
               style={{
-                backgroundColor: replayLoop ? 'rgba(168, 85, 247, 0.20)' : 'var(--bg-panel)',
-                borderColor: replayLoop ? '#A855F7' : 'var(--border-strong)',
-                color: replayLoop ? '#C084FC' : 'var(--text-secondary)',
+                backgroundColor: replayLoop ? 'var(--status-focus-bg)' : 'var(--bg-panel)',
+                borderColor: replayLoop ? 'var(--status-focus-border)' : 'var(--border-strong)',
+                color: replayLoop ? 'var(--status-focus)' : 'var(--text-secondary)',
               }}
               className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[11.5px] font-semibold cursor-pointer rounded-xs hover:text-[var(--text-primary)]"
               title={t('trace.replay.loopTooltip')}
@@ -1526,22 +1604,22 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
               style={{
                 backgroundColor: isFilterActive
                   ? filterMode === 'exclude'
-                    ? 'rgba(245, 158, 11, 0.20)'
-                    : 'rgba(6, 182, 212, 0.20)'
+                    ? 'var(--status-warn-bg)'
+                    : 'var(--status-focus-bg)'
                   : restbusFilterOpen
                     ? 'var(--bg-toolbar)'
                     : 'var(--bg-panel)',
                 borderColor: isFilterActive
                   ? filterMode === 'exclude'
-                    ? '#F59E0B'
-                    : '#06B6D4'
+                    ? 'var(--status-warn-border)'
+                    : 'var(--status-focus-border)'
                   : restbusFilterOpen
                     ? 'var(--border-strong)'
                     : 'var(--border-strong)',
                 color: isFilterActive
                   ? filterMode === 'exclude'
-                    ? '#FDE047'
-                    : '#67E8F9'
+                    ? 'var(--status-warn)'
+                    : 'var(--status-focus)'
                   : 'var(--text-secondary)',
               }}
               className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[11.5px] font-semibold cursor-pointer rounded-xs hover:text-[var(--text-primary)]"
@@ -1551,7 +1629,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
               <span>{filterBadgeText}</span>
               <ChevronDown
                 className={`w-3.5 h-3.5 transition-transform ${
-                  restbusFilterOpen ? 'rotate-180 text-cyan-400' : ''
+                  restbusFilterOpen ? 'rotate-180 text-[var(--status-focus)]' : ''
                 }`}
               />
             </button>
@@ -1559,7 +1637,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
 
           {/* Transport Center: Scrubber Slider, Time & Compact Counters */}
           <div className="flex-1 min-w-0 max-w-2xl flex items-center gap-2.5">
-            <span className="font-mono tabular-nums text-[12px] text-cyan-300 font-semibold shrink-0">
+            <span className="font-mono tabular-nums text-[12px] text-[var(--status-focus)] font-semibold shrink-0">
               {formatReplayTime(replay.elapsedUs)} /{' '}
               {formatReplayTime(replay.durationUs || (sess.lastTimestampUs - sess.originTimestampUs))}
             </span>
@@ -1574,14 +1652,14 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 const seekUs = Number(e.target.value);
                 void apiControlTraceReplay({ action: 'seek', seekUs });
               }}
-              className="flex-1 h-2 accent-cyan-400 cursor-pointer min-w-[80px]"
+              className="flex-1 h-2 accent-[var(--status-focus)] cursor-pointer min-w-[80px]"
             />
 
             {/* Compact Live Replay Counters */}
             <div className="flex items-center gap-2 font-mono tabular-nums text-[11px] shrink-0">
               <span className="text-[var(--text-secondary)]">
                 {t('trace.replay.framesCount')}{' '}
-                <strong className="text-cyan-300">
+                <strong className="text-[var(--status-focus)]">
                   {(
                     replay.dispatchedFrames ??
                     (replay.currentIndex >= 0 ? replay.currentIndex + 1 : 0)
@@ -1591,17 +1669,17 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 {(replay.totalFrames || sess.count).toLocaleString('en-US')}
               </span>
               {(isFilterActive || (replay.filteredOutFrames ?? 0) > 0) && (
-                <span className="text-amber-400">
+                <span className="text-[var(--status-warn)]">
                   {t('trace.replay.filteredCount')}{' '}
-                  <strong className="text-amber-300">
+                  <strong className="text-[var(--status-warn)]">
                     {(replay.filteredOutFrames ?? 0).toLocaleString('en-US')}
                   </strong>
                 </span>
               )}
               {replayTxHardware && (
-                <span className="text-emerald-400">
+                <span className="text-[var(--status-nominal)]">
                   {t('trace.replay.hwCount')}{' '}
-                  <strong className="text-emerald-300">
+                  <strong className="text-[var(--status-nominal)]">
                     {(replay.hwTxFrames ?? 0).toLocaleString('en-US')}
                   </strong>
                 </span>
@@ -1678,9 +1756,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
               type="button"
               onClick={() => setFollowCursor(!followCursor)}
               style={{
-                backgroundColor: followCursor ? 'rgba(34, 211, 238, 0.15)' : 'var(--bg-panel)',
-                borderColor: followCursor ? '#22D3EE' : 'var(--border-strong)',
-                color: followCursor ? '#67E8F9' : 'var(--text-secondary)',
+                backgroundColor: followCursor ? 'var(--status-focus-bg)' : 'var(--bg-panel)',
+                borderColor: followCursor ? 'var(--status-focus-border)' : 'var(--border-strong)',
+                color: followCursor ? 'var(--status-focus)' : 'var(--text-secondary)',
               }}
               className="h-[28px] px-2 border flex items-center gap-1 text-[11px] font-semibold cursor-pointer rounded-xs"
               title={t('trace.replay.cursorTooltip')}
@@ -1691,7 +1769,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
 
             {/* Hardware TX Checkbox */}
             <label
-              className="flex items-center gap-1 px-1.5 text-[11px] text-amber-400 font-semibold cursor-pointer shrink-0"
+              className="flex items-center gap-1 px-1.5 text-[11px] text-[var(--status-warn)] font-semibold cursor-pointer shrink-0"
               title={t('trace.replay.hwTxTooltip')}
             >
               <input
@@ -1707,10 +1785,10 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                     });
                   }
                 }}
-                className="accent-amber-500 cursor-pointer"
+                className="accent-[var(--status-warn)] cursor-pointer"
               />
               <span className="flex items-center gap-1">
-                <Zap className="w-3.5 h-3.5 text-amber-400" />
+                <Zap className="w-3.5 h-3.5 text-[var(--status-warn)]" />
                 <span>{t('trace.replay.hwTx')}</span>
               </span>
             </label>
@@ -1719,17 +1797,17 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
             {replayTxHardware && (
               anyTargetDisarmed ? (
                 <div
-                  className="flex items-center gap-1 px-2 h-[26px] rounded-xs text-[11px] font-semibold font-mono bg-amber-950/80 border border-amber-500/70 text-amber-300 shrink-0"
+                  className="flex items-center gap-1 px-2 h-[26px] rounded-xs text-[11px] font-semibold font-mono bg-[var(--status-warn-bg)] border border-[var(--status-warn-border)] text-[var(--status-warn)] shrink-0"
                   title={t('trace.replay.txDisarmedBadgeTooltip')}
                 >
                   <span>{t('trace.replay.txDisarmedBadge')}</span>
                 </div>
               ) : (
                 <div
-                  className="flex items-center gap-1 px-2 h-[26px] rounded-xs text-[11px] font-semibold font-mono bg-emerald-950/80 border border-emerald-500/70 text-emerald-300 shrink-0"
+                  className="flex items-center gap-1 px-2 h-[26px] rounded-xs text-[11px] font-semibold font-mono bg-[var(--status-nominal-bg)] border border-[var(--status-nominal-border)] text-[var(--status-nominal)] shrink-0"
                   title={t('trace.replay.activeTxBadgeTooltip')}
                 >
-                  <span className="text-red-400 animate-pulse font-bold">⚡</span>
+                  <span className="text-[var(--status-critical)] animate-pulse font-bold">⚡</span>
                   <span>
                     {replayBusOverride !== null ? `CAN${replayBusOverride + 1}` : 'CAN'}{' '}
                     {t('trace.replay.activeTxBadge')}
@@ -1745,7 +1823,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
       {showReplayTransport && restbusFilterOpen && (
         <div
           style={{
-            backgroundColor: '#0B0F17',
+            backgroundColor: 'var(--bg-panel)',
             borderBottom: '1px solid var(--border-strong)',
           }}
           className="shrink-0 p-2.5 flex flex-col gap-2 text-[11px] select-none"
@@ -1754,7 +1832,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
           <div className="flex flex-wrap items-center justify-between gap-2">
             {/* Mode Selection */}
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[11px] font-semibold text-slate-400 mr-1 uppercase tracking-wider">
+              <span className="text-[11px] font-semibold text-[var(--text-secondary)] mr-1 uppercase tracking-wider">
                 {t('trace.restbus.modeLabel')}
               </span>
               <button
@@ -1762,8 +1840,8 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 onClick={() => handleSetFilterMode('all')}
                 className={`h-[28px] px-3 text-[12px] border rounded-xs transition-colors cursor-pointer ${
                   filterMode === 'all'
-                    ? 'bg-slate-800 border-slate-600 text-slate-100 font-semibold'
-                    : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-slate-200'
+                    ? 'bg-[var(--bg-strip)] border-[var(--border-grid)] text-[var(--text-primary)] font-semibold'
+                    : 'bg-[var(--bg-panel)] border-[var(--border-grid)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                 }`}
               >
                 {t('trace.restbus.modeAll')}
@@ -1773,8 +1851,8 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 onClick={() => handleSetFilterMode('include')}
                 className={`h-[28px] px-3 text-[12px] border rounded-xs transition-colors cursor-pointer ${
                   filterMode === 'include'
-                    ? 'bg-cyan-950/80 border-cyan-500 text-cyan-300 font-semibold'
-                    : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-slate-200'
+                    ? 'bg-[var(--status-focus-bg)] border-[var(--status-focus-border)] text-[var(--status-focus)] font-semibold'
+                    : 'bg-[var(--bg-panel)] border-[var(--border-grid)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                 }`}
                 title={t('trace.restbus.includeTitle')}
               >
@@ -1785,8 +1863,8 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 onClick={() => handleSetFilterMode('exclude')}
                 className={`h-[28px] px-3 text-[12px] border rounded-xs transition-colors cursor-pointer ${
                   filterMode === 'exclude'
-                    ? 'bg-amber-950/80 border-amber-500 text-amber-300 font-semibold'
-                    : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-slate-200'
+                    ? 'bg-[var(--status-warn-bg)] border-[var(--status-warn-border)] text-[var(--status-warn)] font-semibold'
+                    : 'bg-[var(--bg-panel)] border-[var(--border-grid)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                 }`}
                 title={t('trace.restbus.excludeTitle')}
               >
@@ -1796,17 +1874,17 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
 
             {/* Direction Filter */}
             <div className="flex items-center gap-1.5 text-[11px]">
-              <span className="text-slate-400 font-semibold uppercase tracking-wider mr-1">
+              <span className="text-[var(--text-secondary)] font-semibold uppercase tracking-wider mr-1">
                 {t('trace.restbus.dirLabel')}
               </span>
-              <div className="flex border border-slate-800 rounded-xs overflow-hidden">
+              <div className="flex border border-[var(--border-grid)] rounded-xs overflow-hidden">
                 <button
                   type="button"
                   onClick={() => handleSetDirectionFilter('all')}
                   className={`px-2.5 h-[26px] font-mono cursor-pointer ${
                     directionFilter === 'all'
-                      ? 'bg-slate-800 text-slate-100 font-semibold'
-                      : 'bg-slate-900/60 text-slate-400 hover:text-slate-200'
+                      ? 'bg-[var(--bg-strip)] text-[var(--text-primary)] font-semibold'
+                      : 'bg-[var(--bg-panel)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                   }`}
                 >
                   {t('trace.restbus.dirAll')}
@@ -1814,10 +1892,10 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 <button
                   type="button"
                   onClick={() => handleSetDirectionFilter('rx')}
-                  className={`px-2.5 h-[26px] font-mono border-l border-slate-800 cursor-pointer ${
+                  className={`px-2.5 h-[26px] font-mono border-l border-[var(--border-grid)] cursor-pointer ${
                     directionFilter === 'rx'
-                      ? 'bg-cyan-950 text-cyan-300 font-semibold'
-                      : 'bg-slate-900/60 text-slate-400 hover:text-slate-200'
+                      ? 'bg-[var(--status-focus-bg)] text-[var(--status-focus)] font-semibold'
+                      : 'bg-[var(--bg-panel)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                   }`}
                 >
                   {t('trace.restbus.dirRx')}
@@ -1825,10 +1903,10 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 <button
                   type="button"
                   onClick={() => handleSetDirectionFilter('tx')}
-                  className={`px-2.5 h-[26px] font-mono border-l border-slate-800 cursor-pointer ${
+                  className={`px-2.5 h-[26px] font-mono border-l border-[var(--border-grid)] cursor-pointer ${
                     directionFilter === 'tx'
-                      ? 'bg-amber-950 text-amber-300 font-semibold'
-                      : 'bg-slate-900/60 text-slate-400 hover:text-slate-200'
+                      ? 'bg-[var(--status-warn-bg)] text-[var(--status-warn)] font-semibold'
+                      : 'bg-[var(--bg-panel)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                   }`}
                 >
                   {t('trace.restbus.dirTx')}
@@ -1838,21 +1916,21 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
           </div>
 
           {/* Mode Explanatory Notice */}
-          <div className="text-[11px] text-slate-400 font-sans px-2.5 py-1.5 rounded-xs bg-slate-900/80 border border-slate-800/80 flex items-center justify-between">
+          <div className="text-[11px] text-[var(--text-secondary)] font-sans px-2.5 py-1.5 rounded-xs bg-[var(--bg-panel)] border border-[var(--border-grid)] flex items-center justify-between">
             <span>
               {filterMode === 'all' && t('trace.restbus.descAll')}
               {filterMode === 'include' && (
-                <span className="text-cyan-300 font-medium">
+                <span className="text-[var(--status-focus)] font-medium">
                   {t('trace.restbus.descInclude', { count: filterKeys.length })}
                 </span>
               )}
               {filterMode === 'exclude' && (
-                <span className="text-amber-300 font-medium">
+                <span className="text-[var(--status-warn)] font-medium">
                   {t('trace.restbus.descExclude', { count: filterKeys.length })}
                 </span>
               )}
             </span>
-            <span className="font-mono text-[10px] text-slate-500">
+            <span className="font-mono text-[10px] text-[var(--text-muted)]">
               {t('trace.restbus.liveUpdate')}
             </span>
           </div>
@@ -1860,7 +1938,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
           {/* DBC ECU Node Quick Select Chips */}
           {availableEcus.length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-              <span className="text-[11px] font-semibold text-slate-400 mr-0.5 uppercase tracking-wider">
+              <span className="text-[11px] font-semibold text-[var(--text-secondary)] mr-0.5 uppercase tracking-wider">
                 {t('trace.restbus.ecuQuickSelect')}
               </span>
               {availableEcus.map((ecu) => {
@@ -1877,11 +1955,11 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                     className={`h-[25px] px-2.5 text-[11px] font-mono rounded-xs border flex items-center gap-1.5 transition-colors cursor-pointer ${
                       allSelected
                         ? filterMode === 'exclude'
-                          ? 'bg-amber-950/80 border-amber-500 text-amber-300 font-semibold'
-                          : 'bg-cyan-950/80 border-cyan-500 text-cyan-300 font-semibold'
+                          ? 'bg-[var(--status-warn-bg)] border-[var(--status-warn-border)] text-[var(--status-warn)] font-semibold'
+                          : 'bg-[var(--status-focus-bg)] border-[var(--status-focus-border)] text-[var(--status-focus)] font-semibold'
                         : partialSelected
-                          ? 'bg-slate-800/80 border-dashed border-amber-500/70 text-amber-200'
-                          : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                          ? 'bg-[var(--bg-strip)] border-dashed border-[var(--status-warn-border)] text-[var(--status-warn)]'
+                          : 'bg-[var(--bg-panel)] border-[var(--border-grid)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]'
                     }`}
                     title={t('trace.restbus.ecuTooltip', {
                       name: ecu.name,
@@ -1899,22 +1977,22 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
           )}
 
           {/* Search & Actions Bar */}
-          <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-800/80 flex-wrap">
+          <div className="flex items-center justify-between gap-2 pt-1 border-t border-[var(--border-grid)] flex-wrap">
             <div className="flex items-center gap-1.5 flex-1 min-w-0 max-w-md">
               <div className="relative flex-1">
-                <Search className="w-3.5 h-3.5 absolute left-2 top-2 text-slate-500" />
+                <Search className="w-3.5 h-3.5 absolute left-2 top-2 text-[var(--text-muted)]" />
                 <input
                   type="text"
                   placeholder={t('trace.restbus.searchPlaceholder')}
                   value={restbusSearchQuery}
                   onChange={(e) => setRestbusSearchQuery(e.target.value)}
-                  className="w-full h-[28px] pl-7 pr-2 text-[12px] bg-slate-950 border border-slate-800 rounded-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500 font-sans"
+                  className="w-full h-[28px] pl-7 pr-2 text-[12px] bg-[var(--bg-input)] border border-[var(--border-grid)] rounded-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--status-focus)] font-sans"
                 />
               </div>
               <button
                 type="button"
                 onClick={handleSelectAllVisible}
-                className="h-[28px] px-2.5 text-[11.5px] font-medium bg-slate-900 border border-slate-800 text-slate-300 rounded-xs hover:border-slate-700 cursor-pointer shrink-0"
+                className="h-[28px] px-2.5 text-[11.5px] font-medium bg-[var(--bg-panel)] border border-[var(--border-grid)] text-[var(--text-primary)] rounded-xs hover:border-[var(--border-strong)] cursor-pointer shrink-0"
               >
                 {t('trace.restbus.selectAll')}
               </button>
@@ -1922,7 +2000,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 type="button"
                 onClick={handleClearKeys}
                 disabled={filterKeys.length === 0}
-                className="h-[28px] px-2.5 text-[11.5px] font-medium bg-slate-900 border border-slate-800 text-slate-400 rounded-xs hover:text-rose-400 hover:border-rose-900/50 cursor-pointer disabled:opacity-40 shrink-0"
+                className="h-[28px] px-2.5 text-[11.5px] font-medium bg-[var(--bg-panel)] border border-[var(--border-grid)] text-[var(--text-secondary)] rounded-xs hover:text-[var(--status-critical)] hover:border-[var(--status-critical-border)] cursor-pointer disabled:opacity-40 shrink-0"
               >
                 {t('trace.restbus.clear')}
               </button>
@@ -1930,7 +2008,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
 
             {/* Manual ID Input */}
             <div className="flex items-center gap-1.5 shrink-0">
-              <span className="text-[11px] text-slate-400 font-semibold">
+              <span className="text-[11px] text-[var(--text-secondary)] font-semibold">
                 {t('trace.restbus.manualIdLabel')}
               </span>
               <input
@@ -1944,14 +2022,14 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') handleAddManualId();
                 }}
-                className={`h-[28px] w-[180px] px-2 text-[12px] font-mono tabular-nums bg-slate-950 border rounded-xs text-slate-200 placeholder:text-slate-600 focus:outline-none ${
-                  manualIdError ? 'border-red-500' : 'border-slate-800 focus:border-cyan-500'
+                className={`h-[28px] w-[180px] px-2 text-[12px] font-mono tabular-nums bg-[var(--bg-input)] border rounded-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none ${
+                  manualIdError ? 'border-[var(--status-critical-border)]' : 'border-[var(--border-grid)] focus:border-[var(--status-focus)]'
                 }`}
               />
               <button
                 type="button"
                 onClick={handleAddManualId}
-                className="h-[28px] px-3 text-[11.5px] font-semibold bg-cyan-950 border border-cyan-600 text-cyan-300 rounded-xs hover:bg-cyan-900 cursor-pointer"
+                className="h-[28px] px-3 text-[11.5px] font-semibold bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-[var(--status-focus)] rounded-xs hover:bg-[var(--status-focus-bg)] cursor-pointer"
               >
                 {t('trace.restbus.addBtn')}
               </button>
@@ -1959,15 +2037,15 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
           </div>
 
           {manualIdError && (
-            <div className="text-[11px] text-red-400 font-mono -mt-1">
+            <div className="text-[11px] text-[var(--status-critical)] font-mono -mt-1">
               {manualIdError}
             </div>
           )}
 
           {/* CAN ID Selection Table */}
-          <div className="max-h-64 overflow-y-auto border border-slate-800 rounded-xs bg-slate-950/60 divide-y divide-slate-800/60">
+          <div className="max-h-64 overflow-y-auto border border-[var(--border-grid)] rounded-xs bg-[var(--bg-input)] divide-y divide-[var(--border-grid)]">
             {filteredRestbusMessages.length === 0 ? (
-              <div className="px-3 py-4 text-center text-[11px] text-slate-500 italic">
+              <div className="px-3 py-4 text-center text-[11px] text-[var(--text-muted)] italic">
                 {t('trace.restbus.noMessagesMatch')}
               </div>
             ) : (
@@ -1979,11 +2057,11 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                   <div
                     key={item.messageKey}
                     onClick={() => handleToggleKey(item.messageKey)}
-                    className={`flex items-center justify-between px-2.5 py-1 text-[11px] hover:bg-slate-900/80 cursor-pointer transition-colors ${
+                    className={`flex items-center justify-between px-2.5 py-1 text-[11px] hover:bg-[var(--bg-row-hover)] cursor-pointer transition-colors ${
                       isSelected
                         ? filterMode === 'exclude'
-                          ? 'bg-amber-950/25'
-                          : 'bg-cyan-950/25'
+                          ? 'bg-[var(--status-warn-bg)]'
+                          : 'bg-[var(--status-focus-bg)]'
                         : ''
                     }`}
                   >
@@ -1994,33 +2072,33 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                         onChange={() => handleToggleKey(item.messageKey)}
                         onClick={(e) => e.stopPropagation()}
                         className={`cursor-pointer rounded-xs ${
-                          filterMode === 'exclude' ? 'accent-amber-500' : 'accent-cyan-500'
+                          filterMode === 'exclude' ? 'accent-[var(--status-warn)]' : 'accent-[var(--status-focus)]'
                         }`}
                       />
                       <span
                         className={`text-[9px] font-mono font-bold px-1 py-0.2 rounded-xs uppercase ${
                           item.isExtended
-                            ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-                            : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                            ? 'bg-[var(--status-focus-bg)] text-[var(--status-focus)] border border-[var(--status-focus-border)]'
+                            : 'bg-[var(--status-focus-bg)] text-[var(--status-focus)] border border-[var(--status-focus-border)]'
                         }`}
                       >
                         {item.isExtended ? 'EXT' : 'STD'}
                       </span>
-                      <span className="font-mono tabular-nums font-bold text-slate-200">
+                      <span className="font-mono tabular-nums font-bold text-[var(--text-primary)]">
                         0x{idHex}
                       </span>
-                      <span className="truncate text-slate-300 font-medium ml-1">
+                      <span className="truncate text-[var(--text-primary)] font-medium ml-1">
                         {item.name}
                       </span>
                     </div>
 
                     <div className="flex items-center gap-3 shrink-0 ml-2">
                       {item.senderEcu && item.senderEcu !== '—' && (
-                        <span className="text-[10px] font-mono px-1.5 py-0.2 bg-slate-800/80 text-slate-300 rounded-xs border border-slate-700/60">
+                        <span className="text-[10px] font-mono px-1.5 py-0.2 bg-[var(--bg-strip)] text-[var(--text-primary)] rounded-xs border border-[var(--border-grid)]">
                           {item.senderEcu}
                         </span>
                       )}
-                      <span className="font-mono tabular-nums text-[10px] text-slate-400 w-20 text-right">
+                      <span className="font-mono tabular-nums text-[10px] text-[var(--text-secondary)] w-20 text-right">
                         {item.count > 0
                           ? t('trace.restbus.framesCount', { count: item.count.toLocaleString('en-US') })
                           : 'DBC'}
@@ -2160,6 +2238,45 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
             <div style={{ transform: `translateY(${offsetY}px)` }}>
               {visibleVirtualItems.map((item) => {
                 if (item.kind === 'signal') {
+                  if (item.frame.isError) {
+                    const ef = item.errField;
+                    return (
+                      <div
+                        key={`sig-${item.frameUid}-${item.childIdx}`}
+                        style={{
+                          height: `${ROW_HEIGHT}px`,
+                          minHeight: `${ROW_HEIGHT}px`,
+                          maxHeight: `${ROW_HEIGHT}px`,
+                          backgroundColor: 'var(--status-critical-bg)',
+                          borderBottom: '1px solid var(--border-grid)',
+                        }}
+                        className="group flex items-center justify-between px-2 pl-8 overflow-hidden whitespace-nowrap hover:!bg-[var(--bg-row-hover)]"
+                      >
+                        {!ef ? (
+                          <span className="font-sans text-[11px] text-[var(--status-critical)] border-l-2 border-[var(--status-critical)] pl-3">
+                            {strNoDecodedSignals}
+                          </span>
+                        ) : (
+                          <>
+                            <div className="flex items-center gap-2 min-w-0 border-l-2 border-[var(--status-critical)] pl-3">
+                              <span className="text-[var(--status-critical)] font-mono font-semibold text-[11px] select-text">
+                                {ef.label}
+                              </span>
+                              <span className="text-[var(--text-muted)]">=</span>
+                              <span className="font-semibold text-[var(--status-critical)] select-text font-mono text-[11px]">
+                                {ef.value}
+                              </span>
+                            </div>
+
+                            <div className="text-[10px] text-[var(--status-critical)] shrink-0 ml-4 font-mono tabular-nums">
+                              [t = {(item.frame.timestampUs / 1_000_000).toFixed(6)}s]
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  }
+
                   const d = item.sig;
                   return (
                     <div
@@ -2189,7 +2306,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                               {d.formattedValue}
                             </span>
                             {d.outOfRange && (
-                              <span className="text-red-500 font-sans text-[11px] font-semibold">
+                              <span className="text-[var(--status-critical)] font-sans text-[11px] font-semibold">
                                 {strOutOfRange}
                               </span>
                             )}
@@ -2220,6 +2337,101 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 }
 
                 const row = item.frame;
+                const byteLen = Math.min(row.dlc, row.rawBytes.length);
+                const isReplayCursorRow =
+                  isThisSessionReplaying && item.baseIdx === replay.currentIndex;
+
+                if (row.isError) {
+                  const errorTitle = formatErrorFrameShortTitle(
+                    row.arbId,
+                    row.rawBytes,
+                    row.errorSummary,
+                  );
+                  return (
+                    <div
+                      key={`frm-${item.frameUid}`}
+                      onClick={() => toggleExpandFrame(item.frameUid)}
+                      style={{
+                        height: `${ROW_HEIGHT}px`,
+                        minHeight: `${ROW_HEIGHT}px`,
+                        maxHeight: `${ROW_HEIGHT}px`,
+                        backgroundColor: isReplayCursorRow
+                          ? 'var(--status-focus-bg)'
+                          : item.isExpanded
+                            ? 'color-mix(in srgb, var(--status-critical) 24%, transparent)'
+                            : 'var(--status-critical-bg)',
+                        borderBottom: '1px solid var(--border-grid)',
+                        borderLeft: isReplayCursorRow
+                          ? '3px solid var(--status-focus)'
+                          : '3px solid var(--status-critical)',
+                      }}
+                      className={`grid ${gridTemplateClass} items-center hover:!bg-[var(--bg-row-hover)] cursor-pointer overflow-hidden whitespace-nowrap ${
+                        isReplayCursorRow ? 'font-semibold text-[var(--status-focus)]' : ''
+                      }`}
+                    >
+                      <div className="h-full flex items-center justify-center border-r border-[var(--border-grid)]">
+                        {item.isExpanded ? (
+                          <ChevronDown className="w-3.5 h-3.5 text-[var(--status-critical)]" />
+                        ) : (
+                          <ChevronRight className="w-3.5 h-3.5 text-[var(--status-critical)] opacity-70" />
+                        )}
+                      </div>
+
+                      <div className="px-2 h-full flex items-center justify-end border-r border-[var(--border-grid)] text-[var(--status-critical)]">
+                        {formatRelativeTimeSec(row.timestampUs, sess.originTimestampUs)}
+                      </div>
+
+                      <div className="px-2 h-full flex items-center border-r border-[var(--border-grid)] text-[var(--status-critical)]">
+                        {row.busId + 1}
+                      </div>
+
+                      <div className="px-2 h-full flex items-center border-r border-[var(--border-grid)] font-bold text-[var(--status-critical)]">
+                        ERR
+                      </div>
+
+                      <div className="px-2 h-full flex items-center border-r border-[var(--border-grid)] font-mono text-[var(--status-critical)] font-bold">
+                        {(row.arbId & CAN_ERR_MASK).toString(16).toUpperCase().padStart(3, '0')}h
+                      </div>
+
+                      <div
+                        className="px-2 h-full flex items-center border-r border-[var(--border-grid)] font-sans truncate text-[var(--status-critical)] font-medium"
+                        title={row.errorSummary ?? errorTitle}
+                      >
+                        BUS ERROR
+                      </div>
+
+                      <div className="px-2 h-full flex items-center border-r border-[var(--border-grid)] font-sans font-bold text-[var(--status-critical)]">
+                        Err
+                      </div>
+
+                      <div className="px-2 h-full flex items-center justify-end border-r border-[var(--border-grid)] text-[var(--status-critical)]">
+                        {row.dlc}
+                      </div>
+
+                      <div
+                        className={`px-2 h-full flex items-center overflow-x-auto no-scrollbar select-text text-[var(--status-critical)] ${
+                          showDecodedCol ? 'border-r border-[var(--border-grid)]' : ''
+                        }`}
+                      >
+                        <span>
+                          {Array.from({ length: byteLen }, (_, bIdx) =>
+                            formatByteHex(row.rawBytes[bIdx] ?? 0),
+                          ).join(' ')}
+                        </span>
+                      </div>
+
+                      {showDecodedCol && (
+                        <div
+                          className="px-2 h-full flex items-center text-[11px] text-[var(--status-critical)] truncate select-text"
+                          title={row.errorSummary ?? errorTitle}
+                        >
+                          <span className="truncate">{errorTitle}</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+
                 const msg = databaseStore.getMessageForBus(
                   row.busId,
                   row.messageKey,
@@ -2234,10 +2446,6 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                         decodeTraceFrame(row.rawBytes, msg, signalsById),
                       )
                     : '';
-                const byteLen = Math.min(row.dlc, row.rawBytes.length);
-
-                const isReplayCursorRow =
-                  isThisSessionReplaying && item.baseIdx === replay.currentIndex;
 
                 return (
                   <div
@@ -2248,17 +2456,17 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                       minHeight: `${ROW_HEIGHT}px`,
                       maxHeight: `${ROW_HEIGHT}px`,
                       backgroundColor: isReplayCursorRow
-                        ? 'rgba(8, 51, 68, 0.70)'
+                        ? 'var(--status-focus-bg)'
                         : item.isExpanded
                           ? 'var(--bg-row-selected)'
                           : item.baseIdx % 2 === 1
                             ? 'var(--bg-row-alt)'
                             : 'var(--bg-panel)',
                       borderBottom: '1px solid var(--border-grid)',
-                      borderLeft: isReplayCursorRow ? '3px solid #22D3EE' : undefined,
+                      borderLeft: isReplayCursorRow ? '3px solid var(--status-focus)' : undefined,
                     }}
                     className={`grid ${gridTemplateClass} items-center hover:!bg-[var(--bg-row-hover)] cursor-pointer overflow-hidden whitespace-nowrap ${
-                      isReplayCursorRow ? 'font-semibold text-cyan-200' : ''
+                      isReplayCursorRow ? 'font-semibold text-[var(--status-focus)]' : ''
                     }`}
                   >
                     <div className="h-full flex items-center justify-center border-r border-[var(--border-grid)]">
@@ -2293,9 +2501,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                     >
                       {msg ? (
                         <span className="truncate">
-                          <span style={{ color: '#E6EDF3' }}>{muxSym.baseName}</span>
+                          <span style={{ color: 'var(--text-primary)' }}>{muxSym.baseName}</span>
                           {muxSym.muxSuffix !== null && (
-                            <span className="font-mono tabular-nums" style={{ color: '#79C0FF' }}>
+                            <span className="font-mono tabular-nums" style={{ color: 'var(--status-focus)' }}>
                               .{muxSym.muxSuffix}
                             </span>
                           )}
@@ -2307,7 +2515,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
 
                     <div
                       className={`px-2 h-full flex items-center border-r border-[var(--border-grid)] font-sans ${
-                        row.isTx ? 'text-sky-500 font-semibold' : ''
+                        row.isTx ? 'text-[var(--status-focus)] font-semibold' : ''
                       }`}
                     >
                       {row.isTx ? 'Tx' : 'Rx'}
@@ -2452,6 +2660,8 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
           <span className="text-emerald-400">Rx: {sess.rxCaptured.toLocaleString('en-US')}</span>
           <span className="text-[var(--border-strong)]">|</span>
           <span className="text-sky-400">Tx: {sess.txCaptured.toLocaleString('en-US')}</span>
+          <span className="text-[var(--border-strong)]">|</span>
+          <span className="text-rose-400 font-semibold">ERR: {sess.errCaptured.toLocaleString('en-US')}</span>
         </div>
       </div>
     </div>

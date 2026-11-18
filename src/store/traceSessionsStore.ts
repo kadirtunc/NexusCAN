@@ -29,6 +29,8 @@ import {
   apiStartTraceReplay,
 } from '../services/ipcClient';
 import { formatByteHex, formatPcanIdHex } from '../utils/formatters';
+import { formatErrorFrameShortTitle } from '../utils/canErrorDecoder';
+import { logUiDebugEvent } from './debugConsoleStore';
 import {
   decodeTraceFrame,
   formatDecodedTraceInline,
@@ -98,9 +100,11 @@ export interface TraceSession {
   totalCaptured: number;
   rxCaptured: number;
   txCaptured: number;
+  errCaptured: number;
   originTimestampUs: number;
   lastTimestampUs: number;
   lastSeenMaxTs: number;
+  lastProcessedSeq?: number;
   busFilter: number | null; // null = all buses
   savedFilePath: string | null;
   savedAtIso: string | null;
@@ -157,9 +161,11 @@ function createTraceSessionObject(
     totalCaptured: 0,
     rxCaptured: 0,
     txCaptured: 0,
+    errCaptured: 0,
     originTimestampUs: 0,
     lastTimestampUs: 0,
     lastSeenMaxTs: -1,
+    lastProcessedSeq: -1,
     busFilter,
     savedFilePath: null,
     savedAtIso: null,
@@ -216,48 +222,48 @@ telemetryStore.subscribeRawSnapshots((snap) => {
   let anyMutated = false;
   const nextSessions = storeState.sessions.map((sess) => {
     if (sess.state !== 'recording') return sess;
+    if (sess.lastProcessedSeq !== undefined && sess.lastProcessedSeq === snap.seq) {
+      return sess;
+    }
 
     let originTs = sess.originTimestampUs;
-    let lastSeen = sess.lastSeenMaxTs;
     let lastTs = sess.lastTimestampUs;
     let totalCap = sess.totalCaptured;
     let rxCap = sess.rxCaptured;
     let txCap = sess.txCaptured;
+    let errCap = sess.errCaptured;
 
-    const batchFirstTs = incoming[0].timestampUs;
     const batchLastTs = incoming[incoming.length - 1].timestampUs;
-
-    // Detect backend clock reset
-    if (lastSeen >= 0 && batchLastTs < lastSeen && batchFirstTs < lastSeen) {
-      lastSeen = -1;
-    }
 
     let appended = 0;
     for (let i = 0; i < incoming.length; i++) {
       const f = incoming[i];
-      if (f.timestampUs <= lastSeen) continue;
       if (sess.busFilter !== null && f.busId !== sess.busFilter) continue;
 
       if (originTs === 0) {
         originTs = f.timestampUs;
       }
+      const isErr = Boolean(f.isError);
       sess.ring.push({
         ...f,
         isBrs: Boolean(f.isBrs),
+        isError: isErr,
       });
       lastTs = f.timestampUs;
       totalCap += 1;
-      if (f.isTx) txCap += 1;
-      else rxCap += 1;
+      if (isErr) {
+        errCap += 1;
+      } else if (f.isTx) {
+        txCap += 1;
+      } else {
+        rxCap += 1;
+      }
       appended += 1;
     }
 
-    if (batchLastTs > lastSeen) {
-      lastSeen = batchLastTs;
-    }
-
     if (appended === 0) {
-      sess.lastSeenMaxTs = lastSeen;
+      sess.lastProcessedSeq = snap.seq;
+      sess.lastSeenMaxTs = batchLastTs;
       return sess;
     }
 
@@ -270,9 +276,11 @@ telemetryStore.subscribeRawSnapshots((snap) => {
       totalCaptured: totalCap,
       rxCaptured: rxCap,
       txCaptured: txCap,
+      errCaptured: errCap,
       originTimestampUs: originTs,
       lastTimestampUs: lastTs,
-      lastSeenMaxTs: lastSeen,
+      lastSeenMaxTs: batchLastTs,
+      lastProcessedSeq: snap.seq,
       dirtySinceSave: true,
     };
   });
@@ -410,9 +418,11 @@ export const traceSessionsStore = {
           totalCaptured: 0,
           rxCaptured: 0,
           txCaptured: 0,
+          errCaptured: 0,
           originTimestampUs: 0,
           lastTimestampUs: 0,
           lastSeenMaxTs: baselineLastSeen,
+          lastProcessedSeq: nowSnap?.seq ?? -1,
           savedFilePath: null,
           savedAtIso: null,
           dirtySinceSave: false,
@@ -425,6 +435,7 @@ export const traceSessionsStore = {
         displayRing: s.ring,
         version: s.version + 1,
         lastSeenMaxTs: s.count === 0 ? baselineLastSeen : s.lastSeenMaxTs,
+        lastProcessedSeq: s.count === 0 ? (nowSnap?.seq ?? -1) : s.lastProcessedSeq,
       };
     });
 
@@ -433,6 +444,13 @@ export const traceSessionsStore = {
       plotStore.setPaused(false);
     }
     plotStore.setIsStaticTraceLoaded(false);
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'TRACE',
+      action: target.count === 0 ? 'trace.record.start' : 'trace.record.resume',
+      title: `${target.count === 0 ? 'Trace Started' : 'Trace Resumed'}: ${target.name}`,
+      details: `Bus: ${target.busFilter !== null ? target.busFilter + 1 : 'ALL'}, Max Rows: ${target.maxBufferRows}`,
+    });
     return traceSessionsStore.getSession(target.id);
   },
 
@@ -450,6 +468,13 @@ export const traceSessionsStore = {
       };
     });
     recomputeAndEmit(nextSessions);
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'TRACE',
+      action: 'trace.record.pause',
+      title: `Trace Paused: ${target.name}`,
+      details: `Buffered Frames: ${target.count}`,
+    });
   },
 
   stopRecording(sessionId?: string): TraceSession {
@@ -468,10 +493,15 @@ export const traceSessionsStore = {
     recomputeAndEmit(nextSessions);
 
     if (wasRecording) {
-      const anyStillRecording = nextSessions.some((s) => s.state === 'recording');
-      if (!anyStillRecording) {
-        plotStore.setPaused(true);
-      }
+      logUiDebugEvent({
+        severity: 'info',
+        category: 'TRACE',
+        action: 'trace.record.stop',
+        title: `Trace Stopped: ${target.name}`,
+        details: `Total: ${target.totalCaptured}, Rx: ${target.rxCaptured}, Tx: ${target.txCaptured}, Err: ${target.errCaptured}`,
+      });
+      // NOTE: stopping a trace must NOT pause the plotter. Plot ingestion is independent of
+      // trace recording; `plotStore.paused` is only a user action (Space / Pause button).
     }
 
     if (wasRecording && target.count > 0 && storeState.autoSaveOnStop) {
@@ -520,6 +550,7 @@ export const traceSessionsStore = {
       options?.busFilter ?? null,
     );
     created.lastSeenMaxTs = baselineLastSeen;
+    created.lastProcessedSeq = nowSnap?.seq ?? -1;
 
     const nextSessions = [...storeState.sessions, created];
     recomputeAndEmit(nextSessions, created.id);
@@ -529,6 +560,13 @@ export const traceSessionsStore = {
       }
       plotStore.setIsStaticTraceLoaded(false);
     }
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'TRACE',
+      action: 'trace.session.spawn',
+      title: `New Trace Session Spawned: ${created.name}`,
+      details: `Auto-Start: ${autoStart}, Bus: ${created.busFilter !== null ? created.busFilter + 1 : 'ALL'}`,
+    });
     return created;
   },
 
@@ -567,6 +605,14 @@ export const traceSessionsStore = {
       };
     });
     recomputeAndEmit(nextSessions);
+    const targetSession = storeState.sessions.find((s) => s.id === sessionId);
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'TRACE',
+      action: 'trace.buffer.resize',
+      title: `Trace Buffer Resized: ${targetSession?.name ?? sessionId}`,
+      details: `Max Rows: ${clamped}`,
+    });
   },
 
   clearSession(sessionId?: string): void {
@@ -585,6 +631,7 @@ export const traceSessionsStore = {
         totalCaptured: 0,
         rxCaptured: 0,
         txCaptured: 0,
+        errCaptured: 0,
         originTimestampUs: 0,
         lastTimestampUs: 0,
         savedFilePath: null,
@@ -593,6 +640,12 @@ export const traceSessionsStore = {
       };
     });
     recomputeAndEmit(nextSessions);
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'TRACE',
+      action: 'trace.record.clear',
+      title: `Trace Buffer Cleared: ${target.name}`,
+    });
   },
 
   closeSession(sessionId: string): void {
@@ -622,7 +675,7 @@ export const traceSessionsStore = {
       return s;
     });
     recomputeAndEmit(nextSessions);
-    plotStore.setPaused(true);
+    // Plotter keeps running: only trace recording stops (see stopRecording).
 
     for (const sid of toAutoSave) {
       void traceSessionsStore.saveSessionToDisk(sid, 'trc').catch((err) => {
@@ -665,9 +718,10 @@ export const traceSessionsStore = {
         const f = ring.getAt(i);
         if (!f) continue;
         const relMs = originUs > 0 ? Math.max(0, (f.timestampUs - originUs) / 1000) : 0;
-        const typeStr = f.isFd || f.dlc > 8 ? 'FD' : 'DT';
+        const isErr = Boolean(f.isError);
+        const typeStr = isErr ? 'ER' : f.isFd || f.dlc > 8 ? 'FD' : 'DT';
         const idStr = formatPcanIdHex(f.arbId, f.isExtended);
-        const dirStr = f.isTx ? 'Tx' : 'Rx';
+        const dirStr = isErr ? 'Er' : f.isTx ? 'Tx' : 'Rx';
         const byteCount = Math.min(f.dlc, f.rawBytes.length);
         const bytesHex = Array.from({ length: byteCount }, (_, b) =>
           formatByteHex(f.rawBytes[b] ?? 0),
@@ -687,6 +741,13 @@ export const traceSessionsStore = {
         const f = ring.getAt(i);
         if (!f) continue;
         const relSec = originUs > 0 ? Math.max(0, (f.timestampUs - originUs) / 1_000_000) : 0;
+        const isErr = Boolean(f.isError);
+        if (isErr) {
+          lines.push(
+            `${relSec.toFixed(6).padStart(11, ' ')} ${f.busId + 1}  ErrorFrame`,
+          );
+          continue;
+        }
         const idStr = `${formatPcanIdHex(f.arbId, f.isExtended)}${f.isExtended ? 'x' : ''}`;
         const dirStr = f.isTx ? 'Tx' : 'Rx';
         const byteCount = Math.min(f.dlc, f.rawBytes.length);
@@ -726,15 +787,22 @@ export const traceSessionsStore = {
         const f = ring.getAt(i);
         if (!f) continue;
         const relSec = originUs > 0 ? Math.max(0, (f.timestampUs - originUs) / 1_000_000) : 0;
-        const proto = f.isFd || f.dlc > 8 ? 'FD' : 'CC';
+        const isErr = Boolean(f.isError);
+        const proto = isErr ? 'ERR' : f.isFd || f.dlc > 8 ? 'FD' : 'CC';
         const idStr = formatPcanIdHex(f.arbId, f.isExtended);
-        const dirStr = f.isTx ? 'Tx' : 'Rx';
+        const dirStr = isErr ? 'Err' : f.isTx ? 'Tx' : 'Rx';
         const msg = databaseStore.getMessageForBus(f.busId, f.messageKey, f.arbId, f.isExtended);
         const signalsById = databaseStore.getBusSignals(f.busId);
-        const sym = msg ? resolveTraceFrameSymbol(f.rawBytes, msg, signalsById).fullSymbol : '';
-        const decoded = msg
-          ? formatDecodedTraceInline(decodeTraceFrame(f.rawBytes, msg, signalsById))
-          : '';
+        const sym = isErr
+          ? 'BUS ERROR'
+          : msg
+            ? resolveTraceFrameSymbol(f.rawBytes, msg, signalsById).fullSymbol
+            : '';
+        const decoded = isErr
+          ? f.errorSummary || formatErrorFrameShortTitle(f.arbId, f.rawBytes)
+          : msg
+            ? formatDecodedTraceInline(decodeTraceFrame(f.rawBytes, msg, signalsById))
+            : '';
         const byteCount = Math.min(f.dlc, f.rawBytes.length);
         const bytesHex = Array.from({ length: byteCount }, (_, b) =>
           formatByteHex(f.rawBytes[b] ?? 0),
@@ -790,6 +858,13 @@ export const traceSessionsStore = {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'TRACE',
+      action: 'trace.export',
+      title: `Trace Exported: ${fileName}`,
+      details: `Format: ${format.toUpperCase()}`,
+    });
     return fileName;
   },
 
@@ -859,14 +934,16 @@ export const traceSessionsStore = {
         targetSession.ring.push({
           ...f,
           isBrs: Boolean(f.isBrs),
+          isError: Boolean(f.isError),
         });
       }
       targetSession.displayRing = targetSession.ring;
       targetSession.count = targetSession.ring.length;
       targetSession.maxBufferRows = neededCap;
       targetSession.totalCaptured = targetSession.count;
-      targetSession.rxCaptured = loaded.frames.filter((f) => !f.isTx).length;
-      targetSession.txCaptured = loaded.frames.filter((f) => f.isTx).length;
+      targetSession.rxCaptured = loaded.frames.filter((f) => !f.isTx && !f.isError).length;
+      targetSession.txCaptured = loaded.frames.filter((f) => f.isTx && !f.isError).length;
+      targetSession.errCaptured = loaded.frames.filter((f) => Boolean(f.isError)).length;
       targetSession.originTimestampUs = loaded.frames[0]?.timestampUs ?? 0;
       targetSession.lastTimestampUs = loaded.frames[loaded.frames.length - 1]?.timestampUs ?? 0;
       targetSession.lastSeenMaxTs = loaded.frames[loaded.frames.length - 1]?.timestampUs ?? -1;
@@ -887,6 +964,7 @@ export const traceSessionsStore = {
         ring.push({
           ...f,
           isBrs: Boolean(f.isBrs),
+          isError: Boolean(f.isError),
         });
       }
       session = {
@@ -902,8 +980,9 @@ export const traceSessionsStore = {
         count: ring.length,
         maxBufferRows: neededCap,
         totalCaptured: ring.length,
-        rxCaptured: loaded.frames.filter((f) => !f.isTx).length,
-        txCaptured: loaded.frames.filter((f) => f.isTx).length,
+        rxCaptured: loaded.frames.filter((f) => !f.isTx && !f.isError).length,
+        txCaptured: loaded.frames.filter((f) => f.isTx && !f.isError).length,
+        errCaptured: loaded.frames.filter((f) => Boolean(f.isError)).length,
         originTimestampUs: loaded.frames[0]?.timestampUs ?? 0,
         lastTimestampUs: loaded.frames[loaded.frames.length - 1]?.timestampUs ?? 0,
         lastSeenMaxTs: loaded.frames[loaded.frames.length - 1]?.timestampUs ?? -1,
@@ -980,14 +1059,16 @@ export const traceSessionsStore = {
         targetSession.ring.push({
           ...f,
           isBrs: Boolean(f.isBrs),
+          isError: Boolean(f.isError),
         });
       }
       targetSession.displayRing = targetSession.ring;
       targetSession.count = targetSession.ring.length;
       targetSession.maxBufferRows = neededCap;
       targetSession.totalCaptured = targetSession.count;
-      targetSession.rxCaptured = loaded.frames.filter((f) => !f.isTx).length;
-      targetSession.txCaptured = loaded.frames.filter((f) => f.isTx).length;
+      targetSession.rxCaptured = loaded.frames.filter((f) => !f.isTx && !f.isError).length;
+      targetSession.txCaptured = loaded.frames.filter((f) => f.isTx && !f.isError).length;
+      targetSession.errCaptured = loaded.frames.filter((f) => Boolean(f.isError)).length;
       targetSession.originTimestampUs = loaded.frames[0]?.timestampUs ?? 0;
       targetSession.lastTimestampUs =
         loaded.frames[loaded.frames.length - 1]?.timestampUs ?? 0;
@@ -1009,6 +1090,7 @@ export const traceSessionsStore = {
         ring.push({
           ...f,
           isBrs: Boolean(f.isBrs),
+          isError: Boolean(f.isError),
         });
       }
       session = {
@@ -1024,8 +1106,9 @@ export const traceSessionsStore = {
         count: ring.length,
         maxBufferRows: neededCap,
         totalCaptured: ring.length,
-        rxCaptured: loaded.frames.filter((f) => !f.isTx).length,
-        txCaptured: loaded.frames.filter((f) => f.isTx).length,
+        rxCaptured: loaded.frames.filter((f) => !f.isTx && !f.isError).length,
+        txCaptured: loaded.frames.filter((f) => f.isTx && !f.isError).length,
+        errCaptured: loaded.frames.filter((f) => Boolean(f.isError)).length,
         originTimestampUs: loaded.frames[0]?.timestampUs ?? 0,
         lastTimestampUs: loaded.frames[loaded.frames.length - 1]?.timestampUs ?? 0,
         lastSeenMaxTs: loaded.frames[loaded.frames.length - 1]?.timestampUs ?? -1,

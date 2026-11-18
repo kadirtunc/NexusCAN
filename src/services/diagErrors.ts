@@ -26,6 +26,7 @@ const ERROR_KEY: Record<DiagUiError['code'], TranslationKey> = {
   internal: 'diagReal.err.internal',
   not_connected: 'diag.error.notConnected',
   backend_missing: 'diagReal.err.backendMissing',
+  duplicate_session: 'diagTabs.err.duplicate',
   unknown: 'diagReal.err.unknown',
 };
 

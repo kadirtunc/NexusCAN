@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Info, Loader2, Radar } from 'lucide-react';
+import { ExternalLink, Info, Loader2, Radar } from 'lucide-react';
 import { useI18n } from '../../i18n';
-import { diagnosticsStore, useDiagnosticsStore } from '../../store/diagnosticsStore';
+import { MAX_DIAG_TABS, diagnosticsStore, useDiagnosticsStore } from '../../store/diagnosticsStore';
 import type { DiscoveredEcuDto } from '../../types/udsClient';
 import {
   DIAG_BTN_PRIMARY,
@@ -51,7 +51,7 @@ export const EcuDiscoveryPanel: React.FC<Props> = ({
   onUse,
 }) => {
   const { t } = useI18n();
-  const { discovery, discovering, discoveryError, mockMode } = useDiagnosticsStore();
+  const { discovery, discovering, discoveryError, mockMode, tabs } = useDiagnosticsStore();
 
   const [funcInput, setFuncInput] = useState(idHex(defaultFunctionalId(isExtended), isExtended));
   const [pduInput, setPduInput] = useState(DEFAULT_PDU);
@@ -75,6 +75,40 @@ export const EcuDiscoveryPanel: React.FC<Props> = ({
         : t('diagReal.disc.pduSuppressed');
 
   const blocked = noBus || needsArm;
+
+  /** New session tab pre-filled with the ECU's ids; an identical-addressing tab is just activated. */
+  function openSession(requestId: number | null, responseId: number, ext: boolean) {
+    if (requestId === null) return;
+    diagnosticsStore.openTabForConfig({
+      requestId,
+      responseId,
+      busId,
+      isExtendedId: ext,
+      protocol: 'uds',
+      useFd,
+      padding,
+    });
+  }
+  function openSessionTitle(requestId: number | null, responseId: number, ext: boolean): string {
+    if (requestId === null) return t('diagTabs.openNoRequest');
+    const existing = diagnosticsStore.findTabByAddressing({
+      requestId,
+      responseId,
+      busId,
+      isExtendedId: ext,
+      protocol: 'uds',
+    });
+    if (existing) return t('diagTabs.openExisting', { label: existing.label });
+    if (tabs.length >= MAX_DIAG_TABS) return t('diagTabs.limit', { max: MAX_DIAG_TABS });
+    return t('diagTabs.openHint');
+  }
+  function canOpenSession(requestId: number | null, responseId: number, ext: boolean): boolean {
+    if (requestId === null) return false;
+    if (tabs.length < MAX_DIAG_TABS) return true;
+    return (
+      diagnosticsStore.findTabByAddressing({ requestId, responseId, busId, isExtendedId: ext, protocol: 'uds' }) !== null
+    );
+  }
 
   function handleScan() {
     const built = buildDiscoveryRequest({
@@ -241,7 +275,7 @@ export const EcuDiscoveryPanel: React.FC<Props> = ({
             <p className="text-[12px] text-subtle">{t('diagReal.disc.none')}</p>
           ) : (
             <div className="overflow-x-auto rounded-[2px] border border-hairline bg-surface">
-              <table className={`${DIAG_GRID} min-w-[1000px]`}>
+              <table className={`${DIAG_GRID} min-w-[1090px]`}>
                 <colgroup>
                   <col style={{ width: 110 }} />
                   <col style={{ width: 110 }} />
@@ -251,7 +285,7 @@ export const EcuDiscoveryPanel: React.FC<Props> = ({
                   <col style={{ width: 170 }} />
                   <col style={{ width: 110 }} />
                   <col style={{ width: 110 }} />
-                  <col style={{ width: 80 }} />
+                  <col style={{ width: 170 }} />
                 </colgroup>
                 <thead>
                   <tr>
@@ -306,7 +340,17 @@ export const EcuDiscoveryPanel: React.FC<Props> = ({
                         </div>
                       </td>
                       <td>
-                        <div className="pcan-cell pcan-cell-right">
+                        <div className="pcan-cell pcan-cell-right gap-1">
+                          <button
+                            type="button"
+                            disabled={!canOpenSession(e.requestId, e.responseId, e.isExtendedId)}
+                            title={openSessionTitle(e.requestId, e.responseId, e.isExtendedId)}
+                            onClick={() => openSession(e.requestId, e.responseId, e.isExtendedId)}
+                            className={DIAG_BTN_SM}
+                          >
+                            <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                            {t('diagTabs.openSession')}
+                          </button>
                           <button
                             type="button"
                             disabled={sessionLocked}

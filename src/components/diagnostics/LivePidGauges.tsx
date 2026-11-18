@@ -242,7 +242,7 @@ export const LivePidGauges: React.FC = () => {
           </DiagBadge>
           {!state.mockMode && (
             <span className="font-mono tabular-nums text-[12px] text-muted" title={t('diag.pid.protocolNote')}>
-              {`TX ${fmtCanId(session.config.requestId, session.config.isExtendedId)} → RX ${fmtCanId(session.config.responseId, session.config.isExtendedId)} · phys`}
+              {`${t('diagTabs.reqShort')} ${fmtCanId(session.config.requestId, session.config.isExtendedId)} → ${t('diagTabs.respShort')} ${fmtCanId(session.config.responseId, session.config.isExtendedId)} · phys`}
             </span>
           )}
           <span className="ml-auto min-w-0 truncate text-[11px] text-muted">{t('diag.pid.protocolNote')}</span>

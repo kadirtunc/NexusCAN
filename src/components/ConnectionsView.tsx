@@ -1,19 +1,25 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  BookOpen,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Copy,
   Cpu,
+  ExternalLink,
+  Laptop,
+  Pencil,
   Plug,
   PlugZap,
   Plus,
   RefreshCw,
   Save,
+  Terminal,
   Trash2,
   TriangleAlert,
   Unlock,
   Usb,
+  X,
 } from 'lucide-react';
 import {
   apiConnectBus,
@@ -26,8 +32,15 @@ import {
   KVASER_ADAPTER_CHANNELS,
   MAX_BUS_ID,
   NOMINAL_BITRATES,
-  PCAN_ADAPTER_CHANNELS,
+  PCAN_DEFAULT_CHANNEL,
+  PCAN_MANUAL_ENTRY_HINT,
+  getDetectedChannels,
+  pcanCandidateChannels,
   SERIAL_BAUD_RATES,
+  VECTOR_XL_ADAPTER_CHANNELS,
+  defaultSerialPortPlaceholder,
+  pickNextUnusedChannel,
+  pickNextUnusedSerialPort,
   type SavedConnectionProfile,
   buildChannelConfigForProfile,
   clampBusId,
@@ -36,15 +49,24 @@ import {
   resolveDeviceIdForProfile,
   useConnectionStore,
 } from '../store/connectionStore';
-import { ensureMockPresetDatabasesLoaded, syncAllBusDatabasesWithBackend } from '../utils/busDatabaseSync';
+import {
+  ensureMockPresetDatabasesLoaded,
+  syncAllBusDatabasesWithBackend,
+} from '../utils/busDatabaseSync';
 import { describeTxError, setBusTxArmed } from '../store/busTxControl';
+import { logUiDebugEvent } from '../store/debugConsoleStore';
 import { telemetryStore, useTelemetryHeader } from '../store/telemetryStore';
 import { transmitStore } from '../store/transmitStore';
 import { useI18n, type TranslationKey } from '../i18n';
 import type {
+  DetectedChannelDetailDto,
   DeviceDescriptorDto,
   DriverFamilyId,
   DriverFamilyStatusDto,
+  DriverProbeReportDto,
+  OsSetupStepDto,
+  SerialPortInfoDto,
+  UsbCanDeviceDto,
 } from '../types/hal';
 import { BusStateBadge } from './BusStateBadge';
 import { EnforcementBadge } from './EnforcementBadge';
@@ -64,35 +86,433 @@ const DRIVER_FAMILY_OPTIONS: readonly {
   shortTag: string;
 }[] = [
   { id: 'socketcan', labelKey: 'conn.driver.socketcan', shortTag: 'SOCKETCAN' },
-  {
-    id: 'gs_usb',
-    labelKey: 'conn.driver.gs_usb',
-    shortTag: 'GS_USB',
-  },
-  {
-    id: 'slcan',
-    labelKey: 'conn.driver.slcan',
-    shortTag: 'SLCAN',
-  },
+  { id: 'gs_usb', labelKey: 'conn.driver.gs_usb', shortTag: 'GS_USB' },
+  { id: 'slcan', labelKey: 'conn.driver.slcan', shortTag: 'SLCAN' },
   { id: 'pcan', labelKey: 'conn.driver.pcan', shortTag: 'PCAN' },
   { id: 'kvaser', labelKey: 'conn.driver.kvaser', shortTag: 'KVASER' },
+  { id: 'vector_xl', labelKey: 'conn.driver.vector_xl', shortTag: 'VECTOR_XL' },
   { id: 'mock', labelKey: 'conn.driver.mock', shortTag: 'MOCK' },
 ];
+
+interface OsDriverRefData {
+  sourceLocations: string[];
+  setupSteps: OsSetupStepDto[];
+}
+
+const OS_DRIVER_REFERENCE: Record<
+  DriverFamilyId,
+  Record<'linux' | 'windows' | 'macos', OsDriverRefData>
+> = {
+  socketcan: {
+    linux: {
+      sourceLocations: [
+        '/sys/class/net/*/type=280 (ARPHRD_CAN)',
+        '/proc/net/can (version, stats, rcvlist_all)',
+        'libsocketcan / AF_CAN / rtnetlink',
+      ],
+      setupSteps: [
+        {
+          title: 'Virtual CAN (vcan0) Setup',
+          description:
+            'Load the vcan kernel module, create the vcan0 interface, and bring it UP for loopback simulation.',
+          commandOrAction:
+            'sudo modprobe vcan && sudo ip link add dev vcan0 type vcan && sudo ip link set vcan0 up',
+          docUrl: 'https://docs.kernel.org/networking/can.html',
+        },
+        {
+          title: 'Physical CAN Interface (can0 - 500k / 2M CAN-FD)',
+          description:
+            'Configure nominal and data bitrates, enable CAN-FD, and bring up the hardware interface.',
+          commandOrAction:
+            'sudo ip link set can0 up type can bitrate 500000 dbitrate 2000000 fd on',
+          docUrl: 'https://docs.kernel.org/networking/can.html',
+        },
+      ],
+    },
+    windows: {
+      sourceLocations: [
+        'Not natively supported on Windows (Linux kernel subsystem only)',
+      ],
+      setupSteps: [
+        {
+          title: 'WSL2 Forwarding via usbipd-win',
+          description:
+            'Forward USB-CAN adapters (CANable, PCAN) from Windows host into WSL2 Linux kernel with SocketCAN.',
+          commandOrAction: 'usbipd wsl attach --busid <busid>',
+          docUrl: 'https://github.com/dorssel/usbipd-win',
+        },
+        {
+          title: 'Use gs_usb or PCAN instead',
+          description:
+            'On Windows, NexusCAN natively connects to candleLight / gs_usb and PCAN via nusb and PCANBasic.dll without WSL.',
+          commandOrAction: null,
+          docUrl: null,
+        },
+      ],
+    },
+    macos: {
+      sourceLocations: [
+        'Not supported on macOS (Darwin lacks SocketCAN kernel subsystem)',
+      ],
+      setupSteps: [
+        {
+          title: 'Use Native gs_usb or SLCAN',
+          description:
+            'macOS provides direct zero-driver access to candleLight USB adapters (gs_usb via nusb/IOKit) and USB-serial ports (/dev/cu.*).',
+          commandOrAction: null,
+          docUrl: null,
+        },
+      ],
+    },
+  },
+  gs_usb: {
+    linux: {
+      sourceLocations: [
+        '/sys/bus/usb/devices/* (VID: 1D50/606F, 0483/1234)',
+        'Linux kernel driver: gs_usb (spawns canX interfaces)',
+        '/etc/udev/rules.d/ (non-root raw USB access)',
+      ],
+      setupSteps: [
+        {
+          title: 'Install Udev Rules (Non-root user access)',
+          description:
+            'Grant plugdev/dialout users write access to candleLight/CANable USB devices without root.',
+          commandOrAction:
+            'echo \'SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="606f", MODE="0666"\' | sudo tee /etc/udev/rules.d/99-candlelight.rules && sudo udevadm control --reload-rules && sudo udevadm trigger',
+          docUrl: 'https://canable.io/getting-started.html',
+        },
+        {
+          title: 'Kernel module check',
+          description:
+            'Ensure gs_usb kernel driver is loaded if using SocketCAN translation, or use NexusCAN direct nusb backend.',
+          commandOrAction: 'sudo modprobe gs_usb',
+          docUrl: null,
+        },
+      ],
+    },
+    windows: {
+      sourceLocations: [
+        'WinUSB / libusbK (Direct USB access via nusb)',
+        'SetupAPI Device Instance IDs (VID 1D50 / PID 606F)',
+      ],
+      setupSteps: [
+        {
+          title: 'Install WinUSB Driver with Zadig',
+          description:
+            'CANable / candleLight devices on Windows require the WinUSB driver to be assigned to Interface 0.',
+          commandOrAction:
+            'Zadig -> Options -> List All Devices -> Select "candleLight USB to CAN" -> Target: WinUSB -> Install Driver',
+          docUrl: 'https://zadig.akeo.ie/',
+        },
+      ],
+    },
+    macos: {
+      sourceLocations: [
+        'IOKit USB Subsystem (IOUSBHostDevice)',
+        'Direct user-space USB communication via nusb (Zero-driver)',
+      ],
+      setupSteps: [
+        {
+          title: 'Plug and Play (No Driver Needed)',
+          description:
+            'candleLight / CANable 2.0 works natively on macOS via user-space IOKit. No kext or installation required.',
+          commandOrAction: null,
+          docUrl: 'https://canable.io/',
+        },
+      ],
+    },
+  },
+  slcan: {
+    linux: {
+      sourceLocations: [
+        '/dev/ttyACM* (CDC-ACM virtual COM ports)',
+        '/dev/ttyUSB* (FTDI / CH340 / CP2102 serial ports)',
+        '/sys/class/tty/*/device',
+      ],
+      setupSteps: [
+        {
+          title: 'Dialout Group Membership',
+          description:
+            'Add your Linux user account to the dialout group to access serial ports without sudo permissions.',
+          commandOrAction: 'sudo usermod -aG dialout $USER && newgrp dialout',
+          docUrl: null,
+        },
+      ],
+    },
+    windows: {
+      sourceLocations: [
+        'Win32 SetupAPI / QueryDosDevice (COM1..COM256)',
+        'Registry: HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM',
+      ],
+      setupSteps: [
+        {
+          title: 'Check Device Manager COM Port',
+          description:
+            'Connect your Lawicel / USBtin / CAN232 adapter and verify assigned COM port in Device Manager.',
+          commandOrAction: 'mode COM3: baud=1000000 parity=n data=8 stop=1',
+          docUrl: null,
+        },
+      ],
+    },
+    macos: {
+      sourceLocations: [
+        '/dev/cu.usbmodem* (Callout CDC-ACM devices)',
+        '/dev/cu.usbserial* (Callout FTDI/Silicon Labs devices)',
+      ],
+      setupSteps: [
+        {
+          title: 'Use /dev/cu.* Callout Devices',
+          description:
+            'Always select /dev/cu.* instead of /dev/tty.* on macOS. The tty device waits for hardware carrier detect (DCD) and blocks.',
+          commandOrAction: 'ls -l /dev/cu.usb*',
+          docUrl: null,
+        },
+      ],
+    },
+  },
+  pcan: {
+    linux: {
+      sourceLocations: [
+        'libpcanbasic.so (Dynamic library via dlopen)',
+        '/usr/lib/libpcanbasic.so, /usr/local/lib/libpcanbasic.so',
+        'Kernel driver: pcan / peak_usb (creates canX interfaces)',
+      ],
+      setupSteps: [
+        {
+          title: 'Install PEAK Linux Driver & Library',
+          description:
+            'Download the official PEAK-System Linux driver and compile libpcanbasic.so.',
+          commandOrAction:
+            'tar -xzf peak-linux-driver-*.tar.gz && cd peak-linux-driver-* && make && sudo make install',
+          docUrl: 'https://www.peak-system.com/PCAN-Basic.239.0.html',
+        },
+      ],
+    },
+    windows: {
+      sourceLocations: [
+        'C:\\Windows\\System32\\PCANBasic.dll (64-bit DLL)',
+        'C:\\Windows\\SysWOW64\\PCANBasic.dll',
+        'PEAK-System OEM Driver (PeakOem.sys)',
+      ],
+      setupSteps: [
+        {
+          title: 'Install PCAN-Basic x64 Driver Package',
+          description:
+            'Run PeakDrv.exe setup or copy 64-bit PCANBasic.dll to C:\\Windows\\System32.',
+          commandOrAction: 'https://www.peak-system.com/quick/DrvSetup',
+          docUrl: 'https://www.peak-system.com/PCAN-Basic.239.0.html',
+        },
+      ],
+    },
+    macos: {
+      sourceLocations: [
+        '/opt/homebrew/lib/libPCBUSB.dylib (Apple Silicon Homebrew)',
+        '/usr/local/lib/libPCBUSB.dylib (Intel Homebrew)',
+        'libPCBUSB (macCAN project)',
+      ],
+      setupSteps: [
+        {
+          title: 'Install macCAN PCBUSB library via Homebrew',
+          description:
+            'macCAN provides user-space PCAN-Basic compatible dynamic library for macOS.',
+          commandOrAction: 'brew install mac-can/maccan/pcbusb',
+          docUrl: 'https://www.mac-can.com/',
+        },
+      ],
+    },
+  },
+  kvaser: {
+    linux: {
+      sourceLocations: [
+        'libcanlib.so (Dynamic library via dlopen)',
+        '/usr/lib/libcanlib.so, /usr/local/lib/libcanlib.so',
+        'Kvaser LINUX Driver and SDK (linuxcan)',
+      ],
+      setupSteps: [
+        {
+          title: 'Install Kvaser Linux Driver and SDK',
+          description:
+            'Download Kvaser LINUX Driver and SDK from kvaser.com, build and install kernel modules and canlib.',
+          commandOrAction:
+            'tar -xzf linuxcan.tar.gz && cd linuxcan && make && sudo make install',
+          docUrl: 'https://www.kvaser.com/developer/canlib-sdk/',
+        },
+      ],
+    },
+    windows: {
+      sourceLocations: [
+        'C:\\Windows\\System32\\canlib32.dll (64-bit Kvaser CANlib)',
+        'Kvaser Drivers Setup (kvaser_drivers_setup.exe)',
+      ],
+      setupSteps: [
+        {
+          title: 'Install Kvaser Drivers and CANlib SDK',
+          description:
+            'Download and run Kvaser Driver Setup for Windows to install canlib32.dll in System32.',
+          commandOrAction: 'https://www.kvaser.com/downloads-kvaser/',
+          docUrl: 'https://www.kvaser.com/developer/canlib-sdk/',
+        },
+      ],
+    },
+    macos: {
+      sourceLocations: [
+        'libcanlib.dylib (MacCAN-KvaserCAN via dlopen)',
+        '/opt/homebrew/lib/libcanlib.dylib, /usr/local/lib/libcanlib.dylib',
+      ],
+      setupSteps: [
+        {
+          title: 'Install MacCAN KvaserCAN library',
+          description:
+            'MacCAN driver wrapper for Kvaser Leaf / Memorator USB devices on macOS.',
+          commandOrAction: 'brew install mac-can/maccan/kvasercan',
+          docUrl: 'https://www.mac-can.com/',
+        },
+      ],
+    },
+  },
+  vector_xl: {
+    linux: {
+      sourceLocations: [
+        'libvxlapi.so (Vector Driver for Linux / SocketCAN integration)',
+      ],
+      setupSteps: [
+        {
+          title: 'Vector Linux Driver Package',
+          description:
+            'Vector provides proprietary Linux drivers for VN1600/VN5600 network interfaces that integrate with SocketCAN.',
+          commandOrAction: null,
+          docUrl: 'https://www.vector.com/',
+        },
+      ],
+    },
+    windows: {
+      sourceLocations: [
+        'C:\\Windows\\System32\\vxlapi64.dll (Vector XL Driver Library 64-bit)',
+        'Vector Driver Setup (vxlapi.dll / vxlapi64.dll)',
+        'Vector Hardware Config (Hardware Channel Assignment)',
+      ],
+      setupSteps: [
+        {
+          title: 'Install Vector Driver Setup & XL Driver Library',
+          description:
+            'Install Vector Driver Setup package for VN16xx / VN56xx devices. Verify vxlapi64.dll is in System32.',
+          commandOrAction:
+            'Open Vector Hardware Config -> Assign CAN Channels to Application Ports',
+          docUrl:
+            'https://www.vector.com/int/en/products/products-a-z/libraries/xl-driver-library/',
+        },
+      ],
+    },
+    macos: {
+      sourceLocations: [
+        'Not supported on macOS (Vector XL Driver Library is Windows-only)',
+      ],
+      setupSteps: [
+        {
+          title: 'Windows-only Driver',
+          description:
+            'Vector XL Driver Library (vxlapi64.dll) is exclusively supported on Windows systems.',
+          commandOrAction: null,
+          docUrl: null,
+        },
+      ],
+    },
+  },
+  mock: {
+    linux: {
+      sourceLocations: [
+        'In-Memory synthetic deterministic EV powertrain & BMS simulation engine',
+      ],
+      setupSteps: [
+        {
+          title: 'Deterministic Test Generator',
+          description:
+            'Generates multi-mux BMS cell matrix and powertrain CAN/CAN-FD frames at 16Hz..50kHz without physical hardware.',
+          commandOrAction: null,
+          docUrl: null,
+        },
+      ],
+    },
+    windows: {
+      sourceLocations: [
+        'In-Memory synthetic deterministic EV powertrain & BMS simulation engine',
+      ],
+      setupSteps: [
+        {
+          title: 'Deterministic Test Generator',
+          description:
+            'Generates multi-mux BMS cell matrix and powertrain CAN/CAN-FD frames at 16Hz..50kHz without physical hardware.',
+          commandOrAction: null,
+          docUrl: null,
+        },
+      ],
+    },
+    macos: {
+      sourceLocations: [
+        'In-Memory synthetic deterministic EV powertrain & BMS simulation engine',
+      ],
+      setupSteps: [
+        {
+          title: 'Deterministic Test Generator',
+          description:
+            'Generates multi-mux BMS cell matrix and powertrain CAN/CAN-FD frames at 16Hz..50kHz without physical hardware.',
+          commandOrAction: null,
+          docUrl: null,
+        },
+      ],
+    },
+  },
+};
 
 function createBlankProfile(
   nextBusId: number,
   devices?: readonly DeviceDescriptorDto[],
-  isLinux?: boolean,
+  probeReport?: DriverProbeReportDto | null,
+  existingProfiles: readonly SavedConnectionProfile[] = [],
 ): SavedConnectionProfile {
-  const detectedSocketCan = devices?.find((d) => d.driverId === 'socketcan');
-  const useSocketCan = Boolean(detectedSocketCan) || Boolean(isLinux);
+  const hostOs = (probeReport?.hostOs ?? 'linux').toLowerCase();
+  const serialPorts = probeReport?.serialPorts ?? [];
+  const usbDevices = probeReport?.usbDevices ?? [];
+  const families = probeReport?.families ?? [];
 
-  if (useSocketCan) {
-    const channel = detectedSocketCan?.channelName || 'vcan0';
+  const socketcanFamily = families.find((f) => f.familyId === 'socketcan');
+  const gsUsbFamily = families.find((f) => f.familyId === 'gs_usb');
+  const pcanFamily = families.find((f) => f.familyId === 'pcan');
+  const kvaserFamily = families.find((f) => f.familyId === 'kvaser');
+  const vectorXlFamily = families.find((f) => f.familyId === 'vector_xl');
+
+  // Check for ready hardware first
+  const detectedSocketCan = devices?.find((d) => d.driverId === 'socketcan');
+  const hasSocketCan =
+    hostOs === 'linux' &&
+    (Boolean(socketcanFamily?.detectedChannels.length) ||
+      Boolean(detectedSocketCan) ||
+      socketcanFamily?.installed);
+
+  if (hasSocketCan) {
+    const socketcanCandidates = Array.from(
+      new Set(
+        [
+          ...(socketcanFamily?.detectedChannels ?? []),
+          detectedSocketCan?.channelName,
+          'can0',
+          'can1',
+          'vcan0',
+          'vcan1',
+        ].filter((x): x is string => Boolean(x)),
+      ),
+    );
+    const channel = pickNextUnusedChannel(
+      'socketcan',
+      socketcanCandidates,
+      existingProfiles,
+      undefined,
+      'vcan0',
+    );
     return {
       id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       name: `SocketCAN (${channel})`,
-      busId: Math.max(0, Math.min(7, nextBusId)),
+      busId: Math.max(0, Math.min(MAX_BUS_ID, nextBusId)),
       driverFamily: 'socketcan',
       deviceId: `socketcan:${channel}`,
       adapterChannel: channel,
@@ -111,14 +531,222 @@ function createBlankProfile(
     };
   }
 
+  // Check gs_usb (cross-OS)
+  const gsUsbReady =
+    gsUsbFamily?.installed ||
+    gsUsbFamily?.hardwarePresent ||
+    usbDevices.some((u) => u.matchedFamily === 'gs_usb');
+  if (gsUsbReady) {
+    const gsUsbCandidates = Array.from(
+      new Set([
+        ...(gsUsbFamily?.detectedChannels ?? []),
+        ...usbDevices
+          .filter((u) => u.matchedFamily === 'gs_usb')
+          .map(
+            (u) =>
+              (u.suggestedChannel?.includes(':')
+                ? u.suggestedChannel.split(':')[1]
+                : u.suggestedChannel) || '0',
+          ),
+        '0',
+        '1',
+        '2',
+        '3',
+      ]),
+    );
+    const devCh = pickNextUnusedChannel(
+      'gs_usb',
+      gsUsbCandidates,
+      existingProfiles,
+      undefined,
+      '0',
+    );
+    return {
+      id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: `USB-CAN gs_usb (ch${devCh})`,
+      busId: Math.max(0, Math.min(MAX_BUS_ID, nextBusId)),
+      driverFamily: 'gs_usb',
+      deviceId: `gs_usb:${devCh}`,
+      adapterChannel: devCh,
+      serialPort: '',
+      serialBaudRate: 1_000_000,
+      serialDtrRts: true,
+      bitrateProfileId: 'fd_500k_2m',
+      bitrate: 500_000,
+      enableFd: true,
+      dataBitrate: 2_000_000,
+      listenOnly: true,
+      mockFpsPreset: null,
+      autoConnectOnProjectLoad: false,
+      notes: 'USB-CAN candleLight / CANable 2.0',
+      databaseIds: [],
+    };
+  }
+
+  // Check PCAN
+  if (pcanFamily?.installed || pcanFamily?.hardwarePresent) {
+    const candidates = pcanCandidateChannels(pcanFamily);
+    const ch = pickNextUnusedChannel(
+      'pcan',
+      candidates,
+      existingProfiles,
+      undefined,
+      PCAN_DEFAULT_CHANNEL,
+    );
+    return {
+      id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: `PCAN (${ch})`,
+      busId: Math.max(0, Math.min(MAX_BUS_ID, nextBusId)),
+      driverFamily: 'pcan',
+      deviceId: `pcan:${ch}`,
+      adapterChannel: ch,
+      serialPort: '',
+      serialBaudRate: 1_000_000,
+      serialDtrRts: true,
+      bitrateProfileId: 'fd_500k_2m',
+      bitrate: 500_000,
+      enableFd: true,
+      dataBitrate: 2_000_000,
+      listenOnly: true,
+      mockFpsPreset: null,
+      autoConnectOnProjectLoad: false,
+      notes: 'PEAK PCAN-Basic',
+      databaseIds: [],
+    };
+  }
+
+  // Check Kvaser
+  if (kvaserFamily?.installed || kvaserFamily?.hardwarePresent) {
+    const candidates = kvaserFamily.detectedChannels.length
+      ? kvaserFamily.detectedChannels
+      : KVASER_ADAPTER_CHANNELS;
+    const ch = pickNextUnusedChannel(
+      'kvaser',
+      candidates,
+      existingProfiles,
+      undefined,
+      '0',
+    );
+    return {
+      id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: `Kvaser CANlib (ch${ch})`,
+      busId: Math.max(0, Math.min(MAX_BUS_ID, nextBusId)),
+      driverFamily: 'kvaser',
+      deviceId: `kvaser:${ch}`,
+      adapterChannel: ch,
+      serialPort: '',
+      serialBaudRate: 1_000_000,
+      serialDtrRts: true,
+      bitrateProfileId: 'fd_500k_2m',
+      bitrate: 500_000,
+      enableFd: true,
+      dataBitrate: 2_000_000,
+      listenOnly: true,
+      mockFpsPreset: null,
+      autoConnectOnProjectLoad: false,
+      notes: 'Kvaser CANlib',
+      databaseIds: [],
+    };
+  }
+
+  // Check Vector XL
+  if (vectorXlFamily?.installed || vectorXlFamily?.hardwarePresent) {
+    const candidates = vectorXlFamily.detectedChannels.length
+      ? vectorXlFamily.detectedChannels
+      : VECTOR_XL_ADAPTER_CHANNELS;
+    const ch = pickNextUnusedChannel(
+      'vector_xl',
+      candidates,
+      existingProfiles,
+      undefined,
+      '0',
+    );
+    return {
+      id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: `Vector XL (ch${ch})`,
+      busId: Math.max(0, Math.min(MAX_BUS_ID, nextBusId)),
+      driverFamily: 'vector_xl',
+      deviceId: `vector_xl:${ch}`,
+      adapterChannel: ch,
+      serialPort: '',
+      serialBaudRate: 1_000_000,
+      serialDtrRts: true,
+      bitrateProfileId: 'fd_500k_2m',
+      bitrate: 500_000,
+      enableFd: true,
+      dataBitrate: 2_000_000,
+      listenOnly: true,
+      mockFpsPreset: null,
+      autoConnectOnProjectLoad: false,
+      notes: 'Vector XL Driver Library',
+      databaseIds: [],
+    };
+  }
+
+  // Check Serial / SLCAN
+  if (serialPorts.length > 0) {
+    const serialCandidates = serialPorts.map((s) => s.portName);
+    const sp = pickNextUnusedSerialPort(
+      serialCandidates,
+      existingProfiles,
+      undefined,
+      defaultSerialPortPlaceholder(hostOs),
+    );
+    return {
+      id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: `SLCAN (${sp})`,
+      busId: Math.max(0, Math.min(MAX_BUS_ID, nextBusId)),
+      driverFamily: 'slcan',
+      deviceId: `slcan:${sp}`,
+      adapterChannel: 'slcan0',
+      serialPort: sp,
+      serialBaudRate: 1_000_000,
+      serialDtrRts: true,
+      bitrateProfileId: 'can_500k',
+      bitrate: 500_000,
+      enableFd: false,
+      dataBitrate: 500_000,
+      listenOnly: true,
+      mockFpsPreset: null,
+      autoConnectOnProjectLoad: false,
+      notes: 'Serial / USB-CDC Lawicel SLCAN',
+      databaseIds: [],
+    };
+  }
+
+  // Default fallback per OS
+  const defaultPort = defaultSerialPortPlaceholder(hostOs);
+  if (hostOs === 'linux') {
+    return {
+      id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: `SocketCAN (vcan0)`,
+      busId: Math.max(0, Math.min(MAX_BUS_ID, nextBusId)),
+      driverFamily: 'socketcan',
+      deviceId: 'socketcan:vcan0',
+      adapterChannel: 'vcan0',
+      serialPort: '',
+      serialBaudRate: 1_000_000,
+      serialDtrRts: true,
+      bitrateProfileId: 'fd_500k_2m',
+      bitrate: 500_000,
+      enableFd: true,
+      dataBitrate: 2_000_000,
+      listenOnly: true,
+      mockFpsPreset: null,
+      autoConnectOnProjectLoad: false,
+      notes: 'Linux Native SocketCAN (vcan0 virtual)',
+      databaseIds: [],
+    };
+  }
+
   return {
     id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     name: `New Bus ${nextBusId + 1} (SLCAN)`,
-    busId: Math.max(0, Math.min(7, nextBusId)),
+    busId: Math.max(0, Math.min(MAX_BUS_ID, nextBusId)),
     driverFamily: 'slcan',
-    deviceId: 'slcan:COM3',
+    deviceId: `slcan:${defaultPort}`,
     adapterChannel: 'slcan0',
-    serialPort: 'COM3',
+    serialPort: defaultPort,
     serialBaudRate: 1_000_000,
     serialDtrRts: true,
     bitrateProfileId: 'can_500k',
@@ -137,7 +765,7 @@ function createMockProfile(nextBusId: number): SavedConnectionProfile {
   return {
     id: `conn-mock-${Date.now()}`,
     name: 'EV Powertrain + BMS Sim (mock0)',
-    busId: Math.max(0, Math.min(7, nextBusId)),
+    busId: Math.max(0, Math.min(MAX_BUS_ID, nextBusId)),
     driverFamily: 'mock',
     deviceId: 'mock:mock0',
     adapterChannel: 'mock0',
@@ -175,6 +803,20 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   const [probing, setProbing] = useState<boolean>(false);
   const [busyProfileId, setBusyProfileId] = useState<string | null>(null);
   const [driverDetailsOpen, setDriverDetailsOpen] = useState<boolean>(false);
+  const [drawerOsTab, setDrawerOsTab] = useState<'host' | 'linux' | 'windows' | 'macos'>('host');
+  const [guideOsPreview, setGuideOsPreview] = useState<'active' | 'linux' | 'windows' | 'macos'>('active');
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [editorOpen, setEditorOpen] = useState<boolean>(() => connState.profiles.length === 0);
+
+  const copyToClipboard = useCallback((text: string, key: string): void => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(text);
+      setCopiedKey(key);
+      setTimeout(() => {
+        setCopiedKey((curr) => (curr === key ? null : curr));
+      }, 2000);
+    }
+  }, []);
 
   const selectedStoredProfile = useMemo(
     () =>
@@ -187,7 +829,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   const dbCatalog = useDatabaseStore().databases;
 
   const [draft, setDraft] = useState<SavedConnectionProfile>(() =>
-    selectedStoredProfile ? { ...selectedStoredProfile } : createBlankProfile(0),
+    selectedStoredProfile
+      ? { ...selectedStoredProfile }
+      : createBlankProfile(0, devices, connState.probeReport, connState.profiles),
   );
 
   useEffect(() => {
@@ -213,6 +857,13 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               serialCount: report.serialPorts.length,
             }),
           });
+          logUiDebugEvent({
+            severity: 'info',
+            category: 'CONN',
+            action: 'conn.rescan',
+            title: 'Hardware Driver Probe Complete',
+            details: `Host: ${report.hostOs}, Ready Drivers: ${installedCnt}/${report.families.length}, Serial Ports: ${report.serialPorts.length}`,
+          });
         }
       } catch (err) {
         if (!silent) {
@@ -232,6 +883,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
 
   useEffect(() => {
     void runDriverProbe(true);
+    const interval = setInterval(() => {
+      void runDriverProbe(true);
+    }, 5000);
+    return () => clearInterval(interval);
   }, [runDriverProbe]);
 
   const familyStatusMap = useMemo(() => {
@@ -250,6 +905,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
     [connState.profiles],
   );
 
+  const hostEnv = connState.probeReport?.hostEnv;
+  const currentHostOs = (connState.probeReport?.hostOs ?? 'linux').toLowerCase();
+
   const handleSelectDriverFamily = (family: DriverFamilyId): void => {
     setDraft((prev) => {
       let adapterChannel = prev.adapterChannel;
@@ -257,18 +915,77 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
       let enableFd = prev.enableFd;
 
       if (family === 'mock') {
-        adapterChannel = 'mock0';
+        adapterChannel = pickNextUnusedChannel(
+          'mock',
+          ['mock0', 'mock1'],
+          connState.profiles,
+          prev.id,
+          'mock0',
+        );
       } else if (family === 'pcan') {
-        adapterChannel = PCAN_ADAPTER_CHANNELS[0];
+        const candidates = pcanCandidateChannels(familyStatusMap.get('pcan'));
+        adapterChannel = pickNextUnusedChannel(
+          'pcan',
+          candidates,
+          connState.profiles,
+          prev.id,
+          PCAN_DEFAULT_CHANNEL,
+        );
       } else if (family === 'kvaser') {
-        adapterChannel = '0';
+        const candidates = familyStatusMap.get('kvaser')?.detectedChannels.length
+          ? familyStatusMap.get('kvaser')!.detectedChannels
+          : KVASER_ADAPTER_CHANNELS;
+        adapterChannel = pickNextUnusedChannel(
+          'kvaser',
+          candidates,
+          connState.profiles,
+          prev.id,
+          '0',
+        );
+      } else if (family === 'vector_xl') {
+        const candidates = familyStatusMap.get('vector_xl')?.detectedChannels.length
+          ? familyStatusMap.get('vector_xl')!.detectedChannels
+          : VECTOR_XL_ADAPTER_CHANNELS;
+        adapterChannel = pickNextUnusedChannel(
+          'vector_xl',
+          candidates,
+          connState.profiles,
+          prev.id,
+          '0',
+        );
+        enableFd = true;
       } else if (family === 'socketcan') {
-        adapterChannel = 'vcan0';
+        const candidates = familyStatusMap.get('socketcan')?.detectedChannels.length
+          ? familyStatusMap.get('socketcan')!.detectedChannels
+          : ['can0', 'can1', 'vcan0', 'vcan1'];
+        adapterChannel = pickNextUnusedChannel(
+          'socketcan',
+          candidates,
+          connState.profiles,
+          prev.id,
+          'vcan0',
+        );
+        enableFd = true;
       } else if (family === 'gs_usb') {
-        adapterChannel = '0';
+        const candidates = familyStatusMap.get('gs_usb')?.detectedChannels.length
+          ? familyStatusMap.get('gs_usb')!.detectedChannels
+          : ['0', '1', '2', '3'];
+        adapterChannel = pickNextUnusedChannel(
+          'gs_usb',
+          candidates,
+          connState.profiles,
+          prev.id,
+          '0',
+        );
+        enableFd = true;
       } else if (family === 'slcan') {
-        const firstDetected = connState.probeReport?.serialPorts[0]?.portName;
-        serialPort = prev.serialPort.trim() || firstDetected || 'COM3';
+        const serialCandidates = serialPorts.map((s) => s.portName);
+        serialPort = pickNextUnusedSerialPort(
+          serialCandidates,
+          connState.profiles,
+          prev.id,
+          defaultSerialPortPlaceholder(connState.probeReport?.hostOs),
+        );
         adapterChannel = 'slcan0';
         enableFd = false;
       }
@@ -282,6 +999,325 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
       };
       updated.deviceId = resolveDeviceIdForProfile(updated);
       return updated;
+    });
+  };
+
+  const handleQuickAttachUsbDevice = (dev: UsbCanDeviceDto): void => {
+    // 1. DFU Bootloader guard: do NOT switch draft to gs_usb silently
+    if (dev.matchedFamily === 'dfu_bootloader') {
+      handleSelectDriverFamily('gs_usb');
+      setGuideOsPreview('active');
+      onStatusMessage({
+        kind: 'error',
+        message: t('conn.status.dfuBootloaderWarning', {
+          vidPid: dev.vidPid,
+          name: dev.productName || dev.vendorName,
+        }),
+      });
+      return;
+    }
+
+    // 2. Parse suggestedChannel (split on first colon)
+    let suggestedPrefix: string | null = null;
+    let cleanChannel: string | null = null;
+
+    if (dev.suggestedChannel) {
+      const colonIdx = dev.suggestedChannel.indexOf(':');
+      if (colonIdx !== -1) {
+        suggestedPrefix = dev.suggestedChannel.slice(0, colonIdx).toLowerCase();
+        cleanChannel = dev.suggestedChannel.slice(colonIdx + 1);
+      } else {
+        cleanChannel = dev.suggestedChannel;
+      }
+    }
+
+    // 3. If bound to SocketCAN (e.g. Linux gs_usb/peak_usb/kvaser bound to can0)
+    if (suggestedPrefix === 'socketcan') {
+      const ch = cleanChannel || 'can0';
+      const targetDeviceId = `socketcan:${ch}`;
+      const existingMatch = connState.profiles.find((p) => p.deviceId === targetDeviceId);
+      if (existingMatch) {
+        connectionStore.selectProfile(existingMatch.id);
+        setDraft({ ...existingMatch });
+        setEditorOpen(true);
+        onStatusMessage({
+          kind: 'info',
+          message: t('conn.bar.prefilledProfile', {
+            name: existingMatch.name,
+            channel: ch,
+          }),
+        });
+        return;
+      }
+
+      const isCurrentDraftLive = header.buses.some((b) => b.busId === draft.busId && b.connected);
+      const isCurrentDraftOccupied =
+        isCurrentDraftLive ||
+        connState.profiles.some((p) => p.id === draft.id && p.deviceId !== targetDeviceId);
+
+      if (isCurrentDraftOccupied) {
+        const freeBus = findNextFreeBusId(connState.profiles);
+        const newProfile: SavedConnectionProfile = {
+          id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          name: `${dev.productName || dev.vendorName} (${ch})`,
+          busId: freeBus,
+          driverFamily: 'socketcan',
+          deviceId: targetDeviceId,
+          adapterChannel: ch,
+          serialPort: '',
+          serialBaudRate: 1_000_000,
+          serialDtrRts: true,
+          bitrateProfileId: 'fd_500k_2m',
+          bitrate: 500_000,
+          enableFd: true,
+          dataBitrate: 2_000_000,
+          listenOnly: true,
+          mockFpsPreset: null,
+          autoConnectOnProjectLoad: false,
+          notes: dev.locationInfo ? `USB Location: ${dev.locationInfo}` : '',
+          databaseIds: [],
+        };
+        connectionStore.upsertProfile(newProfile);
+        setDraft(newProfile);
+        setEditorOpen(true);
+        onStatusMessage({
+          kind: 'success',
+          message: t('conn.status.savedProfile', {
+            name: newProfile.name,
+            bus: newProfile.busId + 1,
+          }),
+        });
+        return;
+      }
+
+      setDraft((prev) => {
+        const updated: SavedConnectionProfile = {
+          ...prev,
+          name: `${dev.productName || dev.vendorName} (${ch})`,
+          driverFamily: 'socketcan',
+          adapterChannel: ch,
+          enableFd: true,
+          deviceId: targetDeviceId,
+        };
+        return updated;
+      });
+      setEditorOpen(true);
+
+      onStatusMessage({
+        kind: 'info',
+        message: t('conn.bar.prefilledProfile', {
+          name: dev.productName || dev.vendorName,
+          channel: ch,
+        }),
+      });
+      return;
+    }
+
+    // 4. Resolve driver family
+    const rawFam = (suggestedPrefix || dev.matchedFamily).toLowerCase();
+    const family: DriverFamilyId =
+      rawFam === 'pcan'
+        ? 'pcan'
+        : rawFam === 'kvaser'
+          ? 'kvaser'
+          : rawFam === 'vector_xl'
+            ? 'vector_xl'
+            : rawFam === 'slcan'
+              ? 'slcan'
+              : rawFam === 'socketcan'
+                ? 'socketcan'
+                : 'gs_usb';
+
+    let adapterChannel = cleanChannel || '0';
+    let serialPort = draft.serialPort;
+    let enableFd = true;
+
+    if (family === 'slcan') {
+      const rawPort =
+        cleanChannel ||
+        connState.probeReport?.serialPorts[0]?.portName ||
+        defaultSerialPortPlaceholder(connState.probeReport?.hostOs);
+      serialPort = rawPort.startsWith('slcan:') ? rawPort.slice(6) : rawPort;
+      adapterChannel = 'slcan0';
+      enableFd = false;
+    } else if (family === 'pcan') {
+      adapterChannel = cleanChannel || PCAN_DEFAULT_CHANNEL;
+    } else if (family === 'kvaser' || family === 'vector_xl') {
+      adapterChannel = cleanChannel || '0';
+    } else if (family === 'gs_usb') {
+      adapterChannel = cleanChannel || '0';
+    } else if (family === 'socketcan') {
+      adapterChannel = cleanChannel || 'can0';
+    }
+
+    const targetDeviceId = resolveDeviceIdForProfile({
+      driverFamily: family,
+      adapterChannel,
+      serialPort,
+    } as SavedConnectionProfile);
+
+    // If an existing saved profile already targets this exact deviceId, select it
+    const existingMatch = connState.profiles.find((p) => p.deviceId === targetDeviceId);
+    if (existingMatch) {
+      connectionStore.selectProfile(existingMatch.id);
+      setDraft({ ...existingMatch });
+      setEditorOpen(true);
+      onStatusMessage({
+        kind: 'info',
+        message: t('conn.bar.prefilledProfile', {
+          name: existingMatch.name,
+          channel: family === 'slcan' ? existingMatch.serialPort : existingMatch.adapterChannel,
+        }),
+      });
+      return;
+    }
+
+    // If current draft profile is already live connected OR already saved with a different channel/device
+    const isCurrentDraftLive = header.buses.some((b) => b.busId === draft.busId && b.connected);
+    const isCurrentDraftOccupied =
+      isCurrentDraftLive ||
+      connState.profiles.some((p) => p.id === draft.id && p.deviceId !== targetDeviceId);
+
+    if (isCurrentDraftOccupied) {
+      const freeBus = findNextFreeBusId(connState.profiles);
+      const newProfile: SavedConnectionProfile = {
+        id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: `${dev.productName || dev.vendorName} (${family === 'slcan' ? serialPort : adapterChannel})`,
+        busId: freeBus,
+        driverFamily: family,
+        deviceId: targetDeviceId,
+        adapterChannel,
+        serialPort,
+        serialBaudRate: 1_000_000,
+        serialDtrRts: true,
+        bitrateProfileId: enableFd ? 'fd_500k_2m' : 'can_500k',
+        bitrate: 500_000,
+        enableFd,
+        dataBitrate: 2_000_000,
+        listenOnly: true,
+        mockFpsPreset: null,
+        autoConnectOnProjectLoad: false,
+        notes: dev.locationInfo ? `USB Location: ${dev.locationInfo}` : '',
+        databaseIds: [],
+      };
+      connectionStore.upsertProfile(newProfile);
+      setDraft(newProfile);
+      setEditorOpen(true);
+      onStatusMessage({
+        kind: 'success',
+        message: t('conn.status.savedProfile', {
+          name: newProfile.name,
+          bus: newProfile.busId + 1,
+        }),
+      });
+      return;
+    }
+
+    setDraft((prev) => {
+      const updated: SavedConnectionProfile = {
+        ...prev,
+        name: `${dev.productName || dev.vendorName} (${family === 'slcan' ? serialPort : adapterChannel})`,
+        driverFamily: family,
+        adapterChannel,
+        serialPort,
+        enableFd,
+        deviceId: targetDeviceId,
+      };
+      return updated;
+    });
+    setEditorOpen(true);
+
+    onStatusMessage({
+      kind: 'info',
+      message: t('conn.bar.prefilledProfile', {
+        name: dev.productName || dev.vendorName,
+        channel: family === 'slcan' ? serialPort : adapterChannel,
+      }),
+    });
+  };
+
+  const handleQuickAttachSerialPort = (sp: SerialPortInfoDto): void => {
+    const rawPort = sp.portName.trim();
+    const cleanPort = rawPort.startsWith('slcan:') ? rawPort.slice(6) : rawPort;
+    const targetDeviceId = `slcan:${cleanPort}`;
+
+    const existingMatch = connState.profiles.find((p) => p.deviceId === targetDeviceId);
+    if (existingMatch) {
+      connectionStore.selectProfile(existingMatch.id);
+      setDraft({ ...existingMatch });
+      setEditorOpen(true);
+      onStatusMessage({
+        kind: 'info',
+        message: t('conn.bar.prefilledProfile', {
+          name: existingMatch.name,
+          channel: cleanPort,
+        }),
+      });
+      return;
+    }
+
+    const isCurrentDraftLive = header.buses.some((b) => b.busId === draft.busId && b.connected);
+    const isCurrentDraftOccupied =
+      isCurrentDraftLive ||
+      connState.profiles.some(
+        (p) => p.id === draft.id && (p.driverFamily !== 'slcan' || p.serialPort !== cleanPort),
+      );
+
+    if (isCurrentDraftOccupied) {
+      const freeBus = findNextFreeBusId(connState.profiles);
+      const newProfile: SavedConnectionProfile = {
+        id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: `SLCAN (${cleanPort})`,
+        busId: freeBus,
+        driverFamily: 'slcan',
+        deviceId: targetDeviceId,
+        adapterChannel: 'slcan0',
+        serialPort: cleanPort,
+        serialBaudRate: 1_000_000,
+        serialDtrRts: true,
+        bitrateProfileId: 'can_500k',
+        bitrate: 500_000,
+        enableFd: false,
+        dataBitrate: 500_000,
+        listenOnly: true,
+        mockFpsPreset: null,
+        autoConnectOnProjectLoad: false,
+        notes: sp.product ? `Serial: ${sp.product}` : '',
+        databaseIds: [],
+      };
+      connectionStore.upsertProfile(newProfile);
+      setDraft(newProfile);
+      setEditorOpen(true);
+      onStatusMessage({
+        kind: 'success',
+        message: t('conn.status.savedProfile', {
+          name: newProfile.name,
+          bus: newProfile.busId + 1,
+        }),
+      });
+      return;
+    }
+
+    setDraft((prev) => {
+      const updated: SavedConnectionProfile = {
+        ...prev,
+        name: `SLCAN (${cleanPort})`,
+        driverFamily: 'slcan',
+        serialPort: cleanPort,
+        adapterChannel: 'slcan0',
+        enableFd: false,
+        deviceId: targetDeviceId,
+      };
+      return updated;
+    });
+    setEditorOpen(true);
+
+    onStatusMessage({
+      kind: 'info',
+      message: t('conn.bar.prefilledProfile', {
+        name: `SLCAN (${cleanPort})`,
+        channel: cleanPort,
+      }),
     });
   };
 
@@ -303,6 +1339,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
     };
     connectionStore.upsertProfile(normalized);
     setDraft(normalized);
+    setEditorOpen(false);
     onStatusMessage({
       kind: 'success',
       message: t('conn.status.savedProfile', {
@@ -385,9 +1422,13 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
       telemetryStore.removeBusHealth(saved.busId);
     }
     await handleConnectOrDisconnectProfile(saved);
+    setEditorOpen(false);
   };
 
-  const handleToggleArmOnBus = async (busId: number, currentArmed: boolean): Promise<void> => {
+  const handleToggleArmOnBus = async (
+    busId: number,
+    currentArmed: boolean,
+  ): Promise<void> => {
     try {
       const willArm = !currentArmed;
       const updated = await setBusTxArmed(busId, willArm);
@@ -429,10 +1470,15 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
 
   const handleCreateNewProfile = (): void => {
     const freeBus = findNextFreeBusId(connState.profiles);
-    const isLinux = connState.probeReport?.hostOs === 'linux';
-    const fresh = createBlankProfile(freeBus, devices, isLinux);
+    const fresh = createBlankProfile(
+      freeBus,
+      devices,
+      connState.probeReport,
+      connState.profiles,
+    );
     connectionStore.upsertProfile(fresh);
     setDraft(fresh);
+    setEditorOpen(true);
   };
 
   const handleAddMockProfile = async (): Promise<void> => {
@@ -443,6 +1489,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
     connectionStore.upsertProfile(fresh);
     void syncAllBusDatabasesWithBackend();
     setDraft(fresh);
+    setEditorOpen(true);
     onStatusMessage({
       kind: 'info',
       message: t('conn.status.mockAdded', { name: fresh.name, bus: fresh.busId + 1 }),
@@ -450,17 +1497,108 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   };
 
   const handleDuplicateProfile = (prof: SavedConnectionProfile): void => {
+    const nextBus = findNextFreeBusId(connState.profiles);
+    let adapterChannel = prof.adapterChannel;
+    let serialPort = prof.serialPort;
+
+    if (prof.driverFamily === 'slcan') {
+      const serialCandidates = serialPorts.map((s) => s.portName);
+      serialPort = pickNextUnusedSerialPort(
+        serialCandidates,
+        connState.profiles,
+        undefined,
+        prof.serialPort || defaultSerialPortPlaceholder(connState.probeReport?.hostOs),
+      );
+    } else {
+      let candidates: readonly string[] = [];
+      if (prof.driverFamily === 'gs_usb') {
+        candidates = familyStatusMap.get('gs_usb')?.detectedChannels.length
+          ? familyStatusMap.get('gs_usb')!.detectedChannels
+          : ['0', '1', '2', '3'];
+      } else if (prof.driverFamily === 'pcan') {
+        candidates = pcanCandidateChannels(familyStatusMap.get('pcan'));
+      } else if (prof.driverFamily === 'kvaser') {
+        candidates = familyStatusMap.get('kvaser')?.detectedChannels.length
+          ? familyStatusMap.get('kvaser')!.detectedChannels
+          : KVASER_ADAPTER_CHANNELS;
+      } else if (prof.driverFamily === 'vector_xl') {
+        candidates = familyStatusMap.get('vector_xl')?.detectedChannels.length
+          ? familyStatusMap.get('vector_xl')!.detectedChannels
+          : VECTOR_XL_ADAPTER_CHANNELS;
+      } else if (prof.driverFamily === 'socketcan') {
+        candidates = familyStatusMap.get('socketcan')?.detectedChannels.length
+          ? familyStatusMap.get('socketcan')!.detectedChannels
+          : ['can0', 'can1', 'vcan0', 'vcan1'];
+      }
+      if (candidates.length > 0) {
+        adapterChannel = pickNextUnusedChannel(
+          prof.driverFamily,
+          candidates,
+          connState.profiles,
+          undefined,
+          prof.adapterChannel,
+        );
+      }
+    }
+
     const copy: SavedConnectionProfile = {
       ...prof,
       id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       name: `${prof.name} (Copy)`,
-      busId: Math.min(7, prof.busId + 1),
+      busId: nextBus,
+      adapterChannel,
+      serialPort,
     };
+    copy.deviceId = resolveDeviceIdForProfile(copy);
     connectionStore.upsertProfile(copy);
     setDraft(copy);
+    setEditorOpen(true);
   };
 
   const serialPorts = connState.probeReport?.serialPorts ?? [];
+  const usbDevices = connState.probeReport?.usbDevices ?? [];
+
+  // Effective OS guide calculations
+  const effectiveGuideOs: 'linux' | 'windows' | 'macos' =
+    guideOsPreview === 'active'
+      ? currentHostOs === 'windows'
+        ? 'windows'
+        : currentHostOs === 'macos'
+          ? 'macos'
+          : 'linux'
+      : guideOsPreview;
+
+  const staticRefForDriver =
+    OS_DRIVER_REFERENCE[draft.driverFamily]?.[effectiveGuideOs];
+
+  const effectiveSourceLocations: string[] =
+    guideOsPreview === 'active' &&
+    draftDriverStatus?.osSourceLocations &&
+    draftDriverStatus.osSourceLocations.length > 0
+      ? draftDriverStatus.osSourceLocations
+      : staticRefForDriver?.sourceLocations ?? draftDriverStatus?.searchedPaths ?? [];
+
+  const effectiveSetupSteps: OsSetupStepDto[] =
+    guideOsPreview === 'active' &&
+    draftDriverStatus?.setupSteps &&
+    draftDriverStatus.setupSteps.length > 0
+      ? draftDriverStatus.setupSteps
+      : staticRefForDriver?.setupSteps ?? [];
+
+  // Channel details available for the selected draft family
+  const detectedChannelDetails: readonly DetectedChannelDetailDto[] = (() => {
+    const seen = new Set<string>();
+    return (draftDriverStatus?.channelDetails ?? []).filter((cd) => {
+      if (seen.has(cd.channelId)) return false;
+      seen.add(cd.channelId);
+      return true;
+    });
+  })();
+  const pcanDetected = getDetectedChannels(familyStatusMap.get('pcan'));
+
+  const selectedChannelDetail = detectedChannelDetails.find(
+    (cd) => cd.channelId === draft.adapterChannel,
+  );
 
   const softwareOnlyBuses = header.buses.filter(
     (b) => b.connected && b.listenOnly && !b.txArmed && b.listenOnlyEnforcement === 'softwareOnly',
@@ -482,7 +1620,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
         </div>
       ))}
       {/* ==================================================================== */}
-      {/* 1. COMPACT 28PX DRIVER STATUS STRIP + COLLAPSIBLE DETAILS DRAWER     */}
+      {/* 1. TOP HOST OS & DRIVER DIAGNOSTIC STRIP + EXPANDABLE INSPECTOR      */}
       {/* ==================================================================== */}
       <section
         style={{ borderBottom: '1px solid var(--border-strong)' }}
@@ -492,13 +1630,81 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           style={{
             backgroundColor: 'var(--bg-toolbar)',
             borderBottom:
-              driverDetailsOpen || serialPorts.length > 0
+              driverDetailsOpen ||
+              serialPorts.length > 0 ||
+              usbDevices.length > 0
                 ? '1px solid var(--border-grid)'
                 : 'none',
           }}
           className="min-h-[38px] py-1.5 px-3 flex items-center justify-between gap-2 text-[12px] flex-wrap"
         >
           <div className="flex items-center gap-2 min-w-0 flex-wrap">
+            {/* Host OS Badge */}
+            <div
+              className="flex items-center gap-1.5 font-mono text-[11px] px-2 py-0.5 border"
+              style={{
+                backgroundColor: 'var(--bg-panel)',
+                borderColor: 'var(--border-strong)',
+              }}
+              title={
+                hostEnv
+                  ? `${hostEnv.os.toUpperCase()} ${hostEnv.arch} (${hostEnv.osRelease})\nNative Stacks: ${hostEnv.nativeStacks.join(', ')}\n${hostEnv.osNotes.join('\n')}`
+                  : `Host OS: ${connState.probeReport?.hostOs ?? 'Unknown'}`
+              }
+            >
+              <Laptop className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <span className="text-[var(--text-muted)] font-sans">
+                {t('conn.bar.osBadge')}
+              </span>
+              <span className="font-bold text-[var(--text-primary)]">
+                {hostEnv
+                  ? hostEnv.isWsl
+                    ? 'LINUX (WSL2)'
+                    : hostEnv.os === 'linux'
+                      ? 'LINUX NATIVE'
+                      : hostEnv.os === 'windows'
+                        ? `WINDOWS (${hostEnv.arch === 'x86_64' ? 'x64' : hostEnv.arch})`
+                        : hostEnv.os === 'macos'
+                          ? `MACOS (IOKit · ${hostEnv.arch})`
+                          : `${hostEnv.os.toUpperCase()} (${hostEnv.arch})`
+                  : (connState.probeReport?.hostOs ?? 'HOST').toUpperCase()}
+              </span>
+              {hostEnv?.isWsl && (
+                <span className="bg-sky-950/80 text-sky-300 border border-sky-500/50 px-1 text-[10px] font-semibold">
+                  {t('conn.bar.wslBadge')}
+                </span>
+              )}
+              {hostEnv?.os === 'linux' && (
+                <span
+                  className={
+                    hostEnv.udevRulesPresent
+                      ? 'text-emerald-400 border border-emerald-500/40 px-1 text-[10px]'
+                      : 'text-amber-400 border border-amber-500/40 px-1 text-[10px]'
+                  }
+                  title={
+                    hostEnv.udevRulesPresent
+                      ? t('conn.bar.udevOk')
+                      : t('conn.bar.udevMissing')
+                  }
+                >
+                  {hostEnv.udevRulesPresent ? 'udev ✓' : 'udev ?'}
+                </span>
+              )}
+            </div>
+
+            {/* Real-time Hardware Auto-Watch Badge */}
+            <div
+              className="flex items-center gap-1.5 font-mono text-[10px] px-2 py-0.5 border border-emerald-500/40 bg-emerald-950/40 text-emerald-300 shrink-0"
+              title={t('conn.bar.autoWatchHotplug')}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="font-semibold uppercase tracking-wider">
+                {t('conn.bar.autoWatchHotplug')}
+              </span>
+            </div>
+
+            <span className="text-[var(--text-muted)] font-mono text-[11px]">|</span>
+
             <Cpu className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
             <span className="font-semibold text-[var(--text-secondary)] shrink-0">
               {t('conn.bar.drivers')}
@@ -510,43 +1716,62 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               </span>
             ) : (
               <div className="flex items-center gap-2.5 font-mono text-[12px] shrink-0 flex-wrap">
-                {connState.probeReport?.families.map((fam, idx) => (
-                  <React.Fragment key={fam.familyId}>
-                    {idx > 0 && (
-                      <span className="text-[var(--text-muted)]">·</span>
-                    )}
-                    <span
-                      title={
-                        fam.installed
-                          ? `${fam.displayName}: ${fam.detectedLibraryOrModule ?? t('conn.status.ready')}`
-                          : `${fam.displayName}: ${fam.installHint}`
-                      }
-                      className={
-                        fam.installed
-                          ? 'text-[var(--text-primary)]'
-                          : 'text-[var(--text-muted)]'
-                      }
-                    >
-                      {fam.familyId}{' '}
-                      <span
-                        className={
-                          fam.installed
-                            ? 'text-emerald-500 font-semibold'
-                            : 'text-[var(--text-muted)]'
-                        }
-                      >
-                        {fam.installed ? '✓' : '—'}
-                      </span>
-                    </span>
-                  </React.Fragment>
-                ))}
-              </div>
-            )}
+                {connState.probeReport?.families.map((fam, idx) => {
+                  const isInstalled = fam.installed;
+                  const isOsSupported = fam.osSupported !== false;
+                  const isHwPresent = Boolean(
+                    fam.hardwarePresent && !fam.installed,
+                  );
 
-            {connState.probeReport && (
-              <span className="hidden lg:inline font-mono text-[11px] text-[var(--text-muted)] ml-1 shrink-0">
-                ({connState.probeReport.hostOs} · {devices.length} ch)
-              </span>
+                  let statusBadge: React.ReactNode;
+                  let pillClass = 'text-[var(--text-muted)]';
+                  let tooltip = `${fam.displayName}: ${fam.installHint}`;
+
+                  if (isInstalled) {
+                    statusBadge = (
+                      <span className="text-emerald-500 font-semibold">✓</span>
+                    );
+                    pillClass = 'text-[var(--text-primary)]';
+                    tooltip = `${fam.displayName}: ${fam.detectedLibraryOrModule ?? t('conn.status.ready')}`;
+                  } else if (!isOsSupported) {
+                    statusBadge = (
+                      <span className="text-[var(--text-muted)] text-[10px] opacity-70">
+                        N/A
+                      </span>
+                    );
+                    pillClass = 'text-[var(--text-muted)] opacity-60';
+                    tooltip = `${fam.displayName}: ${t('conn.status.osUnsupported')}`;
+                  } else if (isHwPresent) {
+                    statusBadge = (
+                      <span className="text-amber-400 font-bold bg-amber-950/70 border border-amber-500/60 px-1 text-[10px]">
+                        HW!
+                      </span>
+                    );
+                    pillClass = 'text-amber-300 font-semibold';
+                    tooltip = `${fam.displayName}: ${t('conn.status.hwPresentNeedsDriver')} — ${fam.installHint}`;
+                  } else {
+                    statusBadge = (
+                      <span className="text-[var(--text-muted)]">—</span>
+                    );
+                    pillClass = 'text-[var(--text-muted)]';
+                  }
+
+                  return (
+                    <React.Fragment key={fam.familyId}>
+                      {idx > 0 && (
+                        <span className="text-[var(--text-muted)]">·</span>
+                      )}
+                      <span
+                        title={tooltip}
+                        className={`inline-flex items-center gap-1 ${pillClass}`}
+                      >
+                        <span>{fam.familyId}</span>
+                        {statusBadge}
+                      </span>
+                    </React.Fragment>
+                  );
+                })}
+              </div>
             )}
           </div>
 
@@ -593,139 +1818,361 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           </div>
         </div>
 
-        {driverDetailsOpen && (
-          <div className="max-h-[180px] overflow-y-auto">
-            <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums text-[12px]">
-              <colgroup>
-                <col style={{ width: '220px' }} />
-                <col style={{ width: '140px' }} />
-                <col style={{ width: '220px' }} />
-                <col style={{ width: '230px' }} />
-                <col />
-              </colgroup>
-              <thead>
-                <tr>
-                  <th className="font-sans">{t('conn.table.thDriverFamily')}</th>
-                  <th className="font-sans">{t('conn.table.thStatus')}</th>
-                  <th>{t('conn.table.thLibrary')}</th>
-                  <th>{t('conn.table.thDetectedChannels')}</th>
-                  <th className="font-sans">{t('conn.table.thInstallHint')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(connState.probeReport?.families ?? []).length === 0 ? (
-                  <tr>
-                    <td colSpan={5}>
-                      <div className="pcan-cell font-sans text-[var(--text-muted)] text-[12px]">
-                        {probing ? t('conn.bar.scanningDrivers') : t('conn.table.clickRescan')}
-                      </div>
-                    </td>
-                  </tr>
-                ) : (
-                  connState.probeReport?.families.map((fam) => (
-                    <tr key={fam.familyId}>
-                      <td>
-                        <div className="pcan-cell font-sans font-semibold text-[12px]">
-                          <span className="truncate">{fam.displayName}</span>
-                        </div>
-                      </td>
-                      <td>
-                        <div className="pcan-cell font-sans text-[12px]">
-                          {fam.installed ? (
-                            <span className="inline-flex items-center gap-1 text-emerald-500 font-medium text-[12px]">
-                              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                              <span className="truncate">{fam.statusLabel || t('conn.status.ready')}</span>
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 text-[var(--text-muted)] text-[12px]">
-                              <TriangleAlert className="w-3.5 h-3.5 shrink-0" />
-                              <span className="truncate">
-                                {fam.statusLabel || t('conn.status.notInstalled')}
-                              </span>
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td>
-                        <div
-                          className="pcan-cell text-[12px] text-[var(--text-secondary)]"
-                          title={
-                            fam.searchedPaths.length > 0
-                              ? `Searched paths:\n${fam.searchedPaths.join('\n')}`
-                              : undefined
-                          }
-                        >
-                          <span className="truncate">
-                            {fam.detectedLibraryOrModule ?? '—'}
-                          </span>
-                        </div>
-                      </td>
-                      <td>
-                        <div
-                          className="pcan-cell text-[12px]"
-                          title={fam.detectedChannels.join(', ')}
-                        >
-                          <span className="truncate">
-                            {fam.detectedChannels.length > 0
-                              ? fam.detectedChannels.join(', ')
-                              : '—'}
-                          </span>
-                        </div>
-                      </td>
-                      <td>
-                        <div
-                          className="pcan-cell font-sans text-[12px] text-[var(--text-secondary)]"
-                          title={fam.installHint}
-                        >
-                          <span className="truncate">{fam.installHint}</span>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {/* Detected USB / Serial Ports Quick Strip */}
-        {serialPorts.length > 0 && (
+        {/* Quick-Attach Hardware Strip (USB-CAN + Serial Ports) */}
+        {(usbDevices.length > 0 || serialPorts.length > 0) && (
           <div
             style={{
               backgroundColor: 'var(--bg-row-alt)',
-              borderTop: driverDetailsOpen ? '1px solid var(--border-grid)' : 'none',
+              borderBottom: driverDetailsOpen ? '1px solid var(--border-grid)' : 'none',
             }}
             className="min-h-[36px] px-3 py-1.5 flex flex-wrap items-center gap-2 text-[12px]"
           >
-            <span className="font-semibold text-[var(--text-secondary)] flex items-center gap-1.5">
-              <Usb className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
-              <span>{t('conn.bar.serialPorts')}</span>
+            <span className="font-semibold text-[var(--text-secondary)] flex items-center gap-1.5 shrink-0">
+              <Plug className="w-3.5 h-3.5 text-emerald-400" />
+              <span>{t('conn.bar.quickAttachTitle')}</span>
             </span>
+
+            {/* USB-CAN Device Chips */}
+            {usbDevices.map((dev, idx) => {
+              const isDfu = dev.matchedFamily === 'dfu_bootloader';
+              const isWinUsbNeeded =
+                dev.accessStatus.toLowerCase().includes('winusb') ||
+                dev.accessStatus.toLowerCase().includes('zadig');
+
+              return (
+                <button
+                  key={`usb-${idx}-${dev.vidPid}-${dev.suggestedChannel ?? ''}-${dev.locationInfo ?? ''}`}
+                  type="button"
+                  onClick={() => handleQuickAttachUsbDevice(dev)}
+                  style={{
+                    backgroundColor: 'var(--bg-panel)',
+                    borderColor: isDfu
+                      ? '#f59e0b'
+                      : dev.driverBound
+                        ? '#10b981'
+                        : 'var(--border-strong)',
+                  }}
+                  className="h-[28px] px-2.5 border font-mono text-[12px] hover:border-sky-400 cursor-pointer flex items-center gap-1.5 text-left"
+                  title={`VID:PID ${dev.vidPid} · Vendor: ${dev.vendorName} · Family: ${dev.matchedFamily}${dev.suggestedChannel ? ` · Channel: ${dev.suggestedChannel}` : ''}${dev.locationInfo ? ` · Loc: ${dev.locationInfo}` : ''}${dev.serialNumber ? ` · S/N: ${dev.serialNumber}` : ''}\nStatus: ${dev.accessStatus}`}
+                >
+                  <Usb className="w-3 h-3 text-sky-400 shrink-0" />
+                  <span className="font-semibold text-[var(--text-primary)]">
+                    {dev.vidPid}
+                  </span>
+                  {dev.suggestedChannel && (
+                    <span className="px-1 py-0.5 bg-sky-950/70 text-sky-300 border border-sky-500/40 text-[10px] font-mono font-semibold shrink-0">
+                      {dev.suggestedChannel}
+                    </span>
+                  )}
+                  <span className="text-[var(--text-secondary)] truncate max-w-[140px]">
+                    {dev.productName || dev.vendorName}
+                  </span>
+                  {dev.locationInfo ? (
+                    <span
+                      className="text-[var(--text-muted)] text-[10px] font-mono shrink-0"
+                      title={`Location: ${dev.locationInfo}`}
+                    >
+                      [{dev.locationInfo}]
+                    </span>
+                  ) : dev.serialNumber ? (
+                    <span
+                      className="text-[var(--text-muted)] text-[10px] font-mono shrink-0"
+                      title={`S/N: ${dev.serialNumber}`}
+                    >
+                      [#{dev.serialNumber}]
+                    </span>
+                  ) : null}
+                  <span
+                    className={
+                      isDfu
+                        ? 'text-amber-400 font-bold text-[10px] border border-amber-500/50 px-1 shrink-0'
+                        : dev.driverBound
+                          ? 'text-emerald-400 font-bold text-[10px] border border-emerald-500/50 px-1 shrink-0'
+                          : isWinUsbNeeded
+                            ? 'text-amber-300 font-bold text-[10px] border border-amber-500/50 px-1 shrink-0'
+                            : 'text-[var(--text-muted)] text-[10px] shrink-0'
+                    }
+                  >
+                    {isDfu
+                      ? 'DFU'
+                      : dev.driverBound
+                        ? 'READY'
+                        : isWinUsbNeeded
+                          ? 'WINUSB REQ'
+                          : dev.accessStatus.toUpperCase()}
+                  </span>
+                </button>
+              );
+            })}
+
+            {/* Serial Port Chips */}
             {serialPorts.map((sp) => (
               <button
-                key={sp.portName}
+                key={`sp-${sp.portName}`}
                 type="button"
-                onClick={() =>
-                  setDraft((prev) => ({
-                    ...prev,
-                    driverFamily: 'slcan',
-                    serialPort: sp.portName,
-                    enableFd: false,
-                    deviceId: `slcan:${sp.portName}`,
-                  }))
-                }
+                onClick={() => handleQuickAttachSerialPort(sp)}
                 style={{
                   backgroundColor: 'var(--bg-panel)',
                   borderColor: 'var(--border-strong)',
                 }}
-                className="h-[28px] px-2.5 border font-mono text-[12px] hover:border-[var(--text-secondary)] cursor-pointer flex items-center gap-1"
+                className="h-[28px] px-2.5 border font-mono text-[12px] hover:border-sky-400 cursor-pointer flex items-center gap-1"
                 title={t('conn.bar.selectPortTitle', { port: sp.portName })}
               >
-                <span className="font-semibold text-[var(--text-primary)]">{sp.portName}</span>
-                {sp.product ? ` · ${sp.product}` : ''}
-                {sp.vidPid ? ` [${sp.vidPid}]` : ''}
+                <Plug className="w-3 h-3 text-sky-400 shrink-0" />
+                <span className="font-semibold text-[var(--text-primary)]">
+                  {sp.portName}
+                </span>
+                {sp.product && (
+                  <span className="text-[var(--text-secondary)] truncate max-w-[140px]">
+                    · {sp.product}
+                  </span>
+                )}
+                {sp.vidPid && (
+                  <span className="text-[var(--text-muted)]">[{sp.vidPid}]</span>
+                )}
               </button>
             ))}
+          </div>
+        )}
+
+        {/* Expanded Driver Details Drawer */}
+        {driverDetailsOpen && (
+          <div className="max-h-[300px] overflow-y-auto p-3 space-y-3 bg-[var(--bg-panel)]">
+            {/* Host Environment Notes & Stacks Banner */}
+            {hostEnv && (
+              <div
+                style={{
+                  backgroundColor: 'var(--bg-toolbar)',
+                  borderColor: 'var(--border-strong)',
+                }}
+                className="p-2.5 border text-[11.5px] space-y-2"
+              >
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-[var(--text-primary)]">
+                      {hostEnv.os.toUpperCase()} {hostEnv.arch}
+                    </span>
+                    <span className="text-[var(--text-muted)] font-mono">
+                      ({hostEnv.osRelease})
+                    </span>
+                    {hostEnv.nativeStacks.map((stack) => (
+                      <span
+                        key={stack}
+                        className="px-1.5 py-0.2 border border-sky-500/40 bg-sky-950/30 text-sky-300 font-mono text-[10.5px]"
+                      >
+                        {stack}
+                      </span>
+                    ))}
+                  </div>
+
+                  {/* OS Switcher Tabs */}
+                  <div className="flex items-center gap-1 font-mono text-[11px]">
+                    <span className="text-[var(--text-muted)] mr-1">
+                      {t('conn.guide.previewOs')}
+                    </span>
+                    {(['host', 'linux', 'windows', 'macos'] as const).map((tab) => (
+                      <button
+                        key={tab}
+                        type="button"
+                        onClick={() => setDrawerOsTab(tab)}
+                        style={{
+                          backgroundColor:
+                            drawerOsTab === tab
+                              ? 'var(--bg-header)'
+                              : 'var(--bg-panel)',
+                          borderColor:
+                            drawerOsTab === tab
+                              ? '#38bdf8'
+                              : 'var(--border-strong)',
+                          color:
+                            drawerOsTab === tab
+                              ? '#38bdf8'
+                              : 'var(--text-secondary)',
+                        }}
+                        className="px-2 py-0.5 border text-[10.5px] uppercase font-medium cursor-pointer"
+                      >
+                        {tab === 'host'
+                          ? `${t('conn.guide.activeHost')} (${hostEnv.os})`
+                          : tab}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {hostEnv.osNotes.length > 0 && (
+                  <div className="space-y-1 text-[var(--text-secondary)] font-mono text-[11px]">
+                    {hostEnv.osNotes.map((note, i) => (
+                      <div key={i} className="flex items-start gap-1.5">
+                        <span className="text-sky-400 shrink-0">•</span>
+                        <span>{note}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {hostEnv.serialPermissionHint && (
+                  <div className="p-1.5 bg-amber-950/30 border border-amber-500/50 text-amber-300 flex items-center justify-between gap-2">
+                    <span className="font-mono text-[11px]">
+                      {hostEnv.serialPermissionHint}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        copyToClipboard(
+                          hostEnv.serialPermissionHint!,
+                          'serialPermHint',
+                        )
+                      }
+                      className="px-1.5 py-0.5 border border-amber-500/60 bg-amber-950/60 hover:bg-amber-900/60 text-[10px] flex items-center gap-1 shrink-0 cursor-pointer"
+                    >
+                      {copiedKey === 'serialPermHint' ? (
+                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                      ) : (
+                        <Copy className="w-3 h-3" />
+                      )}
+                      <span>
+                        {copiedKey === 'serialPermHint'
+                          ? t('conn.guide.copied')
+                          : t('conn.guide.copyCmd')}
+                      </span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Driver Families Table */}
+            <div className="border border-[var(--border-strong)] overflow-hidden">
+              <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums text-[12px]">
+                <colgroup>
+                  <col style={{ width: '180px' }} />
+                  <col style={{ width: '130px' }} />
+                  <col style={{ width: '220px' }} />
+                  <col style={{ width: '160px' }} />
+                  <col style={{ width: '260px' }} />
+                  <col />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th className="font-sans">{t('conn.table.thDriverFamily')}</th>
+                    <th className="font-sans">{t('conn.table.thStatus')}</th>
+                    <th>{t('conn.table.thLibrary')}</th>
+                    <th>{t('conn.table.thDetectedChannels')}</th>
+                    <th>{t('conn.table.thOsSources')}</th>
+                    <th className="font-sans">{t('conn.table.thInstallHint')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(connState.probeReport?.families ?? []).map((fam) => {
+                    const effectiveOsForDrawer: 'linux' | 'windows' | 'macos' =
+                      drawerOsTab === 'host'
+                        ? currentHostOs === 'windows'
+                          ? 'windows'
+                          : currentHostOs === 'macos'
+                            ? 'macos'
+                            : 'linux'
+                        : drawerOsTab;
+
+                    const ref =
+                      OS_DRIVER_REFERENCE[fam.familyId as DriverFamilyId]?.[
+                        effectiveOsForDrawer
+                      ];
+
+                    const osSources =
+                      drawerOsTab === 'host' &&
+                      fam.osSourceLocations &&
+                      fam.osSourceLocations.length > 0
+                        ? fam.osSourceLocations
+                        : ref?.sourceLocations ?? fam.searchedPaths;
+
+                    return (
+                      <tr key={fam.familyId}>
+                        <td>
+                          <div className="pcan-cell font-sans font-semibold text-[12px]">
+                            <span className="truncate">{fam.displayName}</span>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="pcan-cell font-sans text-[12px]">
+                            {fam.installed ? (
+                              <span className="inline-flex items-center gap-1 text-emerald-500 font-medium text-[12px]">
+                                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                                <span className="truncate">
+                                  {fam.statusLabel || t('conn.status.ready')}
+                                </span>
+                              </span>
+                            ) : fam.osSupported === false ? (
+                              <span className="inline-flex items-center gap-1 text-[var(--text-muted)] opacity-70 text-[12px]">
+                                <span className="truncate">
+                                  {t('conn.status.osUnsupported')}
+                                </span>
+                              </span>
+                            ) : fam.hardwarePresent ? (
+                              <span className="inline-flex items-center gap-1 text-amber-400 font-semibold text-[12px]">
+                                <TriangleAlert className="w-3.5 h-3.5 shrink-0" />
+                                <span className="truncate">
+                                  {t('conn.status.hwPresentNeedsDriver')}
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-[var(--text-muted)] text-[12px]">
+                                <TriangleAlert className="w-3.5 h-3.5 shrink-0" />
+                                <span className="truncate">
+                                  {fam.statusLabel || t('conn.status.notInstalled')}
+                                </span>
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td>
+                          <div className="pcan-cell text-[12px] text-[var(--text-secondary)] space-y-0.5">
+                            <span className="truncate block">
+                              {fam.detectedLibraryOrModule ?? '—'}
+                            </span>
+                            {fam.architectureNote && (
+                              <span className="inline-block bg-amber-950/60 border border-amber-500/50 text-amber-300 text-[10px] px-1 font-sans">
+                                {fam.architectureNote}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td>
+                          <div
+                            className="pcan-cell text-[12px]"
+                            title={Array.from(new Set(fam.detectedChannels)).join(', ')}
+                          >
+                            <span className="truncate">
+                              {fam.detectedChannels.length > 0
+                                ? Array.from(new Set(fam.detectedChannels)).join(', ')
+                                : '—'}
+                            </span>
+                          </div>
+                        </td>
+                        <td>
+                          <div
+                            className="pcan-cell text-[11px] text-[var(--text-secondary)] select-all font-mono"
+                            title={osSources.join('\n')}
+                          >
+                            <span className="truncate">
+                              {osSources[0] ?? '—'}
+                              {osSources.length > 1 ? ` (+${osSources.length - 1})` : ''}
+                            </span>
+                          </div>
+                        </td>
+                        <td>
+                          <div
+                            className="pcan-cell font-sans text-[12px] text-[var(--text-secondary)]"
+                            title={fam.installHint}
+                          >
+                            <span className="truncate">{fam.installHint}</span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
       </section>
@@ -736,7 +2183,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* LEFT: Saved Connection Profiles */}
         <div
-          style={{ borderRight: '1px solid var(--border-strong)' }}
+          style={{ borderRight: editorOpen ? '1px solid var(--border-strong)' : 'none' }}
           className="flex flex-col flex-1 min-w-0 min-h-0"
         >
           <div
@@ -790,9 +2237,27 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               </button>
             </div>
 
-            <span className="text-[var(--text-muted)] text-[12px]">
-              {t('conn.bar.profilesCount', { count: connState.profiles.length })}
-            </span>
+            <div className="flex items-center gap-2">
+              {!editorOpen && connState.profiles.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setEditorOpen(true)}
+                  style={{
+                    backgroundColor: 'var(--bg-panel)',
+                    borderColor: 'var(--border-strong)',
+                    color: 'var(--text-secondary)',
+                  }}
+                  className="h-[28px] px-2.5 border flex items-center gap-1.5 font-medium text-[12px] hover:text-[var(--text-primary)] hover:border-[var(--text-secondary)] cursor-pointer"
+                  title={t('conn.btn.editTitle')}
+                >
+                  <Pencil className="w-3.5 h-3.5 text-sky-400" />
+                  <span>{t('conn.editor.title')}</span>
+                </button>
+              )}
+              <span className="text-[var(--text-muted)] text-[12px]">
+                {t('conn.bar.profilesCount', { count: connState.profiles.length })}
+              </span>
+            </div>
           </div>
 
           <div className="flex-1 min-h-0 overflow-auto">
@@ -801,17 +2266,19 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 <col style={{ width: '36px' }} />
                 <col style={{ width: '54px' }} />
                 <col />
-                <col style={{ width: '82px' }} />
-                <col style={{ width: '132px' }} />
+                <col style={{ width: '92px' }} />
+                <col style={{ width: '136px' }} />
                 <col style={{ width: '104px' }} />
                 <col style={{ width: '92px' }} />
-                <col style={{ width: '82px' }} />
+                <col style={{ width: '84px' }} />
                 <col style={{ width: '88px' }} />
-                <col style={{ width: '164px' }} />
+                <col style={{ width: '192px' }} />
               </colgroup>
               <thead>
                 <tr>
-                  <th className="text-center font-sans" title={t('conn.th.onTitle')}>{t('conn.th.on')}</th>
+                  <th className="text-center font-sans" title={t('conn.th.onTitle')}>
+                    {t('conn.th.on')}
+                  </th>
                   <th>{t('conn.th.bus')}</th>
                   <th className="font-sans">{t('conn.th.profileName')}</th>
                   <th className="font-sans">{t('conn.th.driver')}</th>
@@ -880,7 +2347,15 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     return (
                       <tr
                         key={prof.id}
-                        onClick={() => connectionStore.selectProfile(prof.id)}
+                        onClick={() => {
+                          connectionStore.selectProfile(prof.id);
+                          setDraft({ ...prof });
+                        }}
+                        onDoubleClick={() => {
+                          connectionStore.selectProfile(prof.id);
+                          setDraft({ ...prof });
+                          setEditorOpen(true);
+                        }}
                         style={{
                           backgroundColor: isSelected
                             ? 'var(--bg-row-selected)'
@@ -895,12 +2370,18 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                               type="checkbox"
                               checked={Boolean(liveBus)}
                               disabled={busyProfileId === prof.id}
-                              onChange={() => void handleConnectOrDisconnectProfile(prof)}
+                              onChange={() =>
+                                void handleConnectOrDisconnectProfile(prof)
+                              }
                               className="accent-emerald-600 cursor-pointer h-4 w-4"
                               title={
                                 Boolean(liveBus)
-                                  ? t('conn.row.connectedTooltip', { bus: prof.busId + 1 })
-                                  : t('conn.row.disconnectedTooltip', { bus: prof.busId + 1 })
+                                  ? t('conn.row.connectedTooltip', {
+                                      bus: prof.busId + 1,
+                                    })
+                                  : t('conn.row.disconnectedTooltip', {
+                                      bus: prof.busId + 1,
+                                    })
                               }
                             />
                           </div>
@@ -920,22 +2401,37 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                             <span className="truncate">{prof.name}</span>
                             {(() => {
                               const bound = prof.databaseIds
-                                .map((id) => dbCatalog.find((d) => d.id === id)?.fileName)
+                                .map(
+                                  (id) =>
+                                    dbCatalog.find((d) => d.id === id)?.fileName,
+                                )
                                 .filter((n): n is string => Boolean(n));
                               return (
                                 <span
                                   className="ml-1.5 shrink-0 truncate max-w-[180px] border px-1.5 py-0.5 font-mono text-[11px]"
                                   style={{
-                                    borderColor: bound.length > 0 ? 'var(--border-strong)' : 'var(--status-warn)',
-                                    color: bound.length > 0 ? 'var(--text-secondary)' : 'var(--status-warn)',
+                                    borderColor:
+                                      bound.length > 0
+                                        ? 'var(--border-strong)'
+                                        : 'var(--status-warn)',
+                                    color:
+                                      bound.length > 0
+                                        ? 'var(--text-secondary)'
+                                        : 'var(--status-warn)',
                                   }}
-                                  title={bound.length > 0 ? bound.join(', ') : t('conn.row.rawHexTooltip')}
+                                  title={
+                                    bound.length > 0
+                                      ? bound.join(', ')
+                                      : t('conn.row.rawHexTooltip')
+                                  }
                                 >
                                   {bound.length === 0
                                     ? t('conn.row.rawHexBadge')
                                     : bound.length === 1
                                       ? bound[0]
-                                      : t('conn.row.dbCountBadge', { count: bound.length })}
+                                      : t('conn.row.dbCountBadge', {
+                                          count: bound.length,
+                                        })}
                                 </span>
                               );
                             })()}
@@ -961,7 +2457,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                         <td>
                           <div className="pcan-cell font-sans text-[12px]">
                             {prof.listenOnly ? (
-                              <span className="text-emerald-500 font-medium">{t('conn.row.listenOnly')}</span>
+                              <span className="text-emerald-500 font-medium">
+                                {t('conn.row.listenOnly')}
+                              </span>
                             ) : (
                               <span className="text-amber-500 font-semibold">
                                 {t('conn.row.activeCan')}
@@ -975,7 +2473,13 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                             {famStatus === undefined ? (
                               <span className="text-[var(--text-muted)]">—</span>
                             ) : famStatus.installed ? (
-                              <span className="text-emerald-500 font-semibold">{t('conn.status.ready')}</span>
+                              <span className="text-emerald-500 font-semibold">
+                                {t('conn.status.ready')}
+                              </span>
+                            ) : famStatus.osSupported === false ? (
+                              <span className="text-[var(--text-muted)] opacity-60">
+                                N/A
+                              </span>
                             ) : (
                               <span
                                 className="text-amber-500 font-semibold"
@@ -1007,7 +2511,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                             <button
                               type="button"
                               disabled={busyProfileId === prof.id}
-                              onClick={() => void handleConnectOrDisconnectProfile(prof)}
+                              onClick={() =>
+                                void handleConnectOrDisconnectProfile(prof)
+                              }
                               style={{
                                 backgroundColor: liveBus
                                   ? 'rgba(220, 38, 38, 0.14)'
@@ -1016,14 +2522,19 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                               }}
                               className="h-[26px] px-2.5 border text-[11.5px] font-semibold cursor-pointer"
                             >
-                              {liveBus ? t('conn.btn.disconnect') : t('conn.btn.connect')}
+                              {liveBus
+                                ? t('conn.btn.disconnect')
+                                : t('conn.btn.connect')}
                             </button>
 
                             {liveBus && !liveBus.listenOnly && (
                               <button
                                 type="button"
                                 onClick={() =>
-                                  void handleToggleArmOnBus(prof.busId, liveBus.txArmed)
+                                  void handleToggleArmOnBus(
+                                    prof.busId,
+                                    liveBus.txArmed,
+                                  )
                                 }
                                 style={{
                                   backgroundColor: liveBus.txArmed
@@ -1042,6 +2553,23 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
 
                             <button
                               type="button"
+                              onClick={() => {
+                                connectionStore.selectProfile(prof.id);
+                                setDraft({ ...prof });
+                                setEditorOpen(true);
+                              }}
+                              style={{
+                                backgroundColor: 'var(--bg-toolbar)',
+                                borderColor: 'var(--border-strong)',
+                              }}
+                              className="h-[26px] px-2 border text-[11.5px] cursor-pointer hover:border-sky-500/60"
+                              title={t('conn.btn.editTitle')}
+                            >
+                              <Pencil className="w-3 h-3 text-sky-400" />
+                            </button>
+
+                            <button
+                              type="button"
                               onClick={() => handleDuplicateProfile(prof)}
                               style={{
                                 backgroundColor: 'var(--bg-toolbar)',
@@ -1056,7 +2584,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                             {connState.profiles.length > 0 && (
                               <button
                                 type="button"
-                                onClick={() => connectionStore.removeProfile(prof.id)}
+                                onClick={() =>
+                                  connectionStore.removeProfile(prof.id)
+                                }
                                 style={{
                                   backgroundColor: 'var(--bg-toolbar)',
                                   borderColor: 'var(--border-strong)',
@@ -1079,21 +2609,33 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
         </div>
 
         {/* RIGHT: Connection Profile Editor */}
-        <aside className="w-[380px] lg:w-[420px] xl:w-[460px] shrink-0 flex flex-col min-h-0 overflow-hidden">
-          <div
-            style={{
-              backgroundColor: 'var(--bg-toolbar)',
-              borderBottom: '1px solid var(--border-strong)',
-            }}
-            className="shrink-0 min-h-[38px] px-3 py-1 flex items-center justify-between text-[12px] flex-wrap gap-2"
-          >
-            <span className="font-semibold text-[var(--text-primary)]">
-              {t('conn.editor.title')}
-            </span>
-            <span className="font-mono text-[11px] text-[var(--text-muted)]">
-              {resolveDeviceIdForProfile(draft)}
-            </span>
-          </div>
+        {editorOpen && (
+          <aside className="w-[400px] lg:w-[440px] xl:w-[480px] shrink-0 flex flex-col min-h-0 overflow-hidden">
+            <div
+              style={{
+                backgroundColor: 'var(--bg-toolbar)',
+                borderBottom: '1px solid var(--border-strong)',
+              }}
+              className="shrink-0 min-h-[38px] px-3 py-1 flex items-center justify-between text-[12px] flex-wrap gap-2"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-semibold text-[var(--text-primary)]">
+                  {t('conn.editor.title')}
+                </span>
+                <span className="font-mono text-[11px] text-[var(--text-muted)] truncate">
+                  {resolveDeviceIdForProfile(draft)}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditorOpen(false)}
+                className="h-[24px] px-2 text-[11px] border border-[var(--border-strong)] bg-[var(--bg-panel)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-slate-500 flex items-center gap-1 cursor-pointer rounded-xs shrink-0"
+                title={t('conn.editor.close')}
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>{t('conn.editor.close')}</span>
+              </button>
+            </div>
 
           <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3 text-[12px]">
             {/* Profile Name & Target Bus */}
@@ -1105,7 +2647,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 <input
                   type="text"
                   value={draft.name}
-                  onChange={(e) => setDraft((p) => ({ ...p, name: e.target.value }))}
+                  onChange={(e) =>
+                    setDraft((p) => ({ ...p, name: e.target.value }))
+                  }
                   style={{
                     backgroundColor: 'var(--bg-input)',
                     borderColor: 'var(--border-strong)',
@@ -1124,7 +2668,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     aria-label={t('conn.editor.busSlot')}
                     value={draft.busId}
                     onChange={(e) =>
-                      setDraft((p) => ({ ...p, busId: clampBusId(Number(e.target.value)) }))
+                      setDraft((p) => ({
+                        ...p,
+                        busId: clampBusId(Number(e.target.value)),
+                      }))
                     }
                     style={{
                       backgroundColor: 'var(--bg-input)',
@@ -1207,6 +2754,35 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       draftDriverStatus.displayName}
                   </span>
                 </div>
+              ) : draftDriverStatus.osSupported === false ? (
+                <div
+                  style={{
+                    backgroundColor: 'var(--bg-row-alt)',
+                    borderColor: 'var(--border-grid)',
+                  }}
+                  className="p-2 border text-[11.5px] text-[var(--text-muted)]"
+                >
+                  <span className="font-semibold">
+                    {t('conn.status.osUnsupported')}
+                  </span>
+                  <div className="text-[11px] mt-0.5">{draftDriverStatus.installHint}</div>
+                </div>
+              ) : draftDriverStatus.hardwarePresent ? (
+                <div
+                  style={{
+                    backgroundColor: 'var(--bg-row-alt)',
+                    borderColor: 'rgba(245, 158, 11, 0.6)',
+                  }}
+                  className="p-2 border text-[12px] space-y-1"
+                >
+                  <div className="font-semibold text-amber-400 flex items-center gap-1">
+                    <TriangleAlert className="w-3.5 h-3.5" />
+                    <span>{t('conn.status.hwPresentNeedsDriver')}</span>
+                  </div>
+                  <div className="text-[var(--text-secondary)] leading-snug text-[11px]">
+                    {draftDriverStatus.installHint}
+                  </div>
+                </div>
               ) : (
                 <div
                   style={{
@@ -1216,13 +2792,117 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   className="p-2.5 border text-[12px] space-y-1"
                 >
                   <div className="font-semibold text-amber-400">
-                    {t('conn.editor.driverNotInstalled', { name: draftDriverStatus.displayName })}
+                    {t('conn.editor.driverNotInstalled', {
+                      name: draftDriverStatus.displayName,
+                    })}
                   </div>
                   <div className="text-[var(--text-secondary)] leading-snug text-[11.5px]">
                     {draftDriverStatus.installHint}
                   </div>
                 </div>
               ))}
+
+            {/* ============================================================== */}
+            {/* DYNAMIC DETECTED HARDWARE CHANNELS SELECTOR                   */}
+            {/* ============================================================== */}
+            {detectedChannelDetails.length > 0 && (
+              <div className="space-y-1.5">
+                <label className="block text-[var(--text-secondary)] mb-1 font-medium flex items-center justify-between">
+                  <span>
+                    {t('conn.editor.detectedChannels')} (
+                    {detectedChannelDetails.length})
+                  </span>
+                  <span className="font-mono text-[10px] text-sky-400">
+                    Live Subsystem
+                  </span>
+                </label>
+                <select
+                  value={
+                    detectedChannelDetails.some(
+                      (cd) => cd.channelId === draft.adapterChannel,
+                    )
+                      ? draft.adapterChannel
+                      : ''
+                  }
+                  onChange={(e) => {
+                    const selected = detectedChannelDetails.find(
+                      (cd) => cd.channelId === e.target.value,
+                    );
+                    if (selected) {
+                      setDraft((p) => {
+                        const updated: SavedConnectionProfile = {
+                          ...p,
+                          adapterChannel: selected.channelId,
+                          enableFd: selected.supportsFd ? p.enableFd : false,
+                        };
+                        updated.deviceId = resolveDeviceIdForProfile(updated);
+                        return updated;
+                      });
+                    }
+                  }}
+                  style={{
+                    backgroundColor: 'var(--bg-input)',
+                    borderColor: 'var(--border-strong)',
+                    color: 'var(--text-primary)',
+                  }}
+                  className="w-full h-[30px] px-2 border font-mono text-[12px]"
+                >
+                  <option value="">
+                    {t('conn.editor.chooseDetectedChannel')}
+                  </option>
+                  {detectedChannelDetails.map((cd) => (
+                    <option key={cd.channelId} value={cd.channelId}>
+                      {cd.channelId} [{cd.state.toUpperCase()}] ·{' '}
+                      {cd.supportsFd ? 'CAN-FD' : 'CC'}{' '}
+                      {cd.mtu ? `(MTU ${cd.mtu})` : ''}{' '}
+                      {cd.kernelOrUsbDriver ? `· ${cd.kernelOrUsbDriver}` : ''}
+                    </option>
+                  ))}
+                </select>
+
+                {/* Hint Command for Selected Channel */}
+                {selectedChannelDetail?.hintCommand && (
+                  <div
+                    style={{
+                      backgroundColor: 'var(--bg-row-alt)',
+                      borderColor: 'rgba(56, 189, 248, 0.4)',
+                    }}
+                    className="p-2 border font-mono text-[11px] space-y-1.5"
+                  >
+                    <div className="flex items-center justify-between text-[var(--text-secondary)]">
+                      <span className="font-sans font-medium text-sky-400 flex items-center gap-1">
+                        <Terminal className="w-3.5 h-3.5" />
+                        {t('conn.editor.runHintCmd')}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          copyToClipboard(
+                            selectedChannelDetail.hintCommand!,
+                            'hintCmd',
+                          )
+                        }
+                        className="px-2 py-0.5 border border-sky-500/50 bg-sky-950/40 text-sky-300 hover:bg-sky-900/50 flex items-center gap-1 cursor-pointer text-[10px]"
+                      >
+                        {copiedKey === 'hintCmd' ? (
+                          <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                        ) : (
+                          <Copy className="w-3 h-3" />
+                        )}
+                        <span>
+                          {copiedKey === 'hintCmd'
+                            ? t('conn.guide.copied')
+                            : t('conn.editor.copyHintCmd')}
+                        </span>
+                      </button>
+                    </div>
+                    <div className="text-[var(--text-primary)] bg-[var(--bg-panel)] p-1.5 border border-[var(--border-grid)] select-all break-all text-[11px]">
+                      {selectedChannelDetail.hintCommand}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* ============================================================== */}
             {/* DRIVER-SPECIFIC HARDWARE FIELDS                                */}
@@ -1254,7 +2934,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       }
                       onChange={(e) => {
                         if (e.target.value) {
-                          setDraft((p) => ({ ...p, serialPort: e.target.value }));
+                          setDraft((p) => {
+                            const updated = { ...p, serialPort: e.target.value };
+                            updated.deviceId = resolveDeviceIdForProfile(updated);
+                            return updated;
+                          });
                         }
                       }}
                       style={{
@@ -1285,9 +2969,15 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       type="text"
                       value={draft.serialPort}
                       onChange={(e) =>
-                        setDraft((p) => ({ ...p, serialPort: e.target.value }))
+                        setDraft((p) => {
+                          const updated = { ...p, serialPort: e.target.value };
+                          updated.deviceId = resolveDeviceIdForProfile(updated);
+                          return updated;
+                        })
                       }
-                      placeholder="COM3 or /dev/ttyUSB0"
+                      placeholder={defaultSerialPortPlaceholder(
+                        connState.probeReport?.hostOs,
+                      )}
                       style={{
                         backgroundColor: 'var(--bg-input)',
                         borderColor:
@@ -1348,25 +3038,73 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 <label className="block text-[var(--text-secondary)] mb-1 font-medium">
                   {t('conn.editor.pcanChannel')}
                 </label>
-                <select
-                  aria-label={t('conn.editor.pcanChannel')}
-                  value={draft.adapterChannel}
-                  onChange={(e) =>
-                    setDraft((p) => ({ ...p, adapterChannel: e.target.value }))
-                  }
-                  style={{
-                    backgroundColor: 'var(--bg-input)',
-                    borderColor: 'var(--border-strong)',
-                    color: 'var(--text-primary)',
-                  }}
-                  className="w-full h-[30px] px-2 border font-mono text-[12px]"
-                >
-                  {PCAN_ADAPTER_CHANNELS.map((ch) => (
-                    <option key={ch} value={ch}>
-                      {ch}
-                    </option>
-                  ))}
-                </select>
+                <div className="flex gap-1.5">
+                  <select
+                    aria-label={t('conn.editor.pcanChannel')}
+                    value={
+                      pcanDetected.some((c) => c.channelId === draft.adapterChannel)
+                        ? draft.adapterChannel
+                        : ''
+                    }
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setDraft((p) => {
+                          const updated = { ...p, adapterChannel: e.target.value };
+                          updated.deviceId = resolveDeviceIdForProfile(updated);
+                          return updated;
+                        });
+                      }
+                    }}
+                    style={{
+                      backgroundColor: 'var(--bg-input)',
+                      borderColor: 'var(--border-strong)',
+                      color: 'var(--text-primary)',
+                    }}
+                    className="flex-1 h-[30px] px-2 border font-mono text-[12px]"
+                  >
+                    {pcanDetected.length === 0 ? (
+                      <option value="" disabled>
+                        {t('conn.pcan.noneDetected')}
+                      </option>
+                    ) : (
+                      <option value="">{t('conn.pcan.quickSelect')}</option>
+                    )}
+                    {pcanDetected.map((c) => (
+                      <option
+                        key={c.channelId}
+                        value={c.channelId}
+                        style={c.occupied ? { color: 'var(--status-warn)' } : undefined}
+                      >
+                        {c.label}
+                        {c.occupied ? ` · ${t('conn.pcan.inUse')}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="text"
+                    value={draft.adapterChannel}
+                    onChange={(e) =>
+                      setDraft((p) => {
+                        const updated = { ...p, adapterChannel: e.target.value };
+                        updated.deviceId = resolveDeviceIdForProfile(updated);
+                        return updated;
+                      })
+                    }
+                    placeholder={PCAN_DEFAULT_CHANNEL}
+                    list="pcan-manual-hint"
+                    style={{
+                      backgroundColor: 'var(--bg-input)',
+                      borderColor: 'var(--border-strong)',
+                      color: 'var(--text-primary)',
+                    }}
+                    className="w-36 h-[30px] px-2 border font-mono tabular-nums text-[12px]"
+                  />
+                  <datalist id="pcan-manual-hint">
+                    {PCAN_MANUAL_ENTRY_HINT.map((ch) => (
+                      <option key={ch} value={ch} />
+                    ))}
+                  </datalist>
+                </div>
               </div>
             )}
 
@@ -1375,25 +3113,116 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 <label className="block text-[var(--text-secondary)] mb-1 font-medium">
                   {t('conn.editor.kvaserChannel')}
                 </label>
-                <select
-                  aria-label={t('conn.editor.kvaserChannel')}
-                  value={draft.adapterChannel}
-                  onChange={(e) =>
-                    setDraft((p) => ({ ...p, adapterChannel: e.target.value }))
-                  }
-                  style={{
-                    backgroundColor: 'var(--bg-input)',
-                    borderColor: 'var(--border-strong)',
-                    color: 'var(--text-primary)',
-                  }}
-                  className="w-full h-[30px] px-2 border font-mono tabular-nums text-[12px]"
-                >
-                  {KVASER_ADAPTER_CHANNELS.map((ch) => (
-                    <option key={ch} value={ch}>
-                      Kvaser Channel {ch}
-                    </option>
-                  ))}
-                </select>
+                <div className="flex gap-1.5">
+                  <select
+                    aria-label={t('conn.editor.kvaserChannel')}
+                    value={
+                      KVASER_ADAPTER_CHANNELS.includes(draft.adapterChannel)
+                        ? draft.adapterChannel
+                        : ''
+                    }
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setDraft((p) => {
+                          const updated = { ...p, adapterChannel: e.target.value };
+                          updated.deviceId = resolveDeviceIdForProfile(updated);
+                          return updated;
+                        });
+                      }
+                    }}
+                    style={{
+                      backgroundColor: 'var(--bg-input)',
+                      borderColor: 'var(--border-strong)',
+                      color: 'var(--text-primary)',
+                    }}
+                    className="flex-1 h-[30px] px-2 border font-mono tabular-nums text-[12px]"
+                  >
+                    <option value="">-- Quick Select Channel --</option>
+                    {KVASER_ADAPTER_CHANNELS.map((ch) => (
+                      <option key={ch} value={ch}>
+                        Kvaser Channel {ch}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="text"
+                    value={draft.adapterChannel}
+                    onChange={(e) =>
+                      setDraft((p) => {
+                        const updated = { ...p, adapterChannel: e.target.value };
+                        updated.deviceId = resolveDeviceIdForProfile(updated);
+                        return updated;
+                      })
+                    }
+                    placeholder="0"
+                    style={{
+                      backgroundColor: 'var(--bg-input)',
+                      borderColor: 'var(--border-strong)',
+                      color: 'var(--text-primary)',
+                    }}
+                    className="w-24 h-[30px] px-2 border font-mono text-center text-[12px]"
+                  />
+                </div>
+              </div>
+            )}
+
+            {draft.driverFamily === 'vector_xl' && (
+              <div>
+                <label className="block text-[var(--text-secondary)] mb-1 font-medium">
+                  {t('conn.editor.vectorXlChannel')}
+                </label>
+                <div className="flex gap-1.5">
+                  <select
+                    aria-label={t('conn.editor.vectorXlChannel')}
+                    value={
+                      VECTOR_XL_ADAPTER_CHANNELS.includes(
+                        draft.adapterChannel as '0' | '1' | '2' | '3',
+                      )
+                        ? draft.adapterChannel
+                        : ''
+                    }
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setDraft((p) => {
+                          const updated = { ...p, adapterChannel: e.target.value };
+                          updated.deviceId = resolveDeviceIdForProfile(updated);
+                          return updated;
+                        });
+                      }
+                    }}
+                    style={{
+                      backgroundColor: 'var(--bg-input)',
+                      borderColor: 'var(--border-strong)',
+                      color: 'var(--text-primary)',
+                    }}
+                    className="flex-1 h-[30px] px-2 border font-mono tabular-nums text-[12px]"
+                  >
+                    <option value="">-- Quick Select Channel --</option>
+                    {VECTOR_XL_ADAPTER_CHANNELS.map((ch) => (
+                      <option key={ch} value={ch}>
+                        Vector XL Channel {ch}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="text"
+                    value={draft.adapterChannel}
+                    onChange={(e) =>
+                      setDraft((p) => {
+                        const updated = { ...p, adapterChannel: e.target.value };
+                        updated.deviceId = resolveDeviceIdForProfile(updated);
+                        return updated;
+                      })
+                    }
+                    placeholder="0"
+                    style={{
+                      backgroundColor: 'var(--bg-input)',
+                      borderColor: 'var(--border-strong)',
+                      color: 'var(--text-primary)',
+                    }}
+                    className="w-24 h-[30px] px-2 border font-mono text-center text-[12px]"
+                  />
+                </div>
               </div>
             )}
 
@@ -1409,9 +3238,15 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   type="text"
                   value={draft.adapterChannel}
                   onChange={(e) =>
-                    setDraft((p) => ({ ...p, adapterChannel: e.target.value }))
+                    setDraft((p) => {
+                      const updated = { ...p, adapterChannel: e.target.value };
+                      updated.deviceId = resolveDeviceIdForProfile(updated);
+                      return updated;
+                    })
                   }
-                  placeholder={draft.driverFamily === 'socketcan' ? 'vcan0' : '0'}
+                  placeholder={
+                    draft.driverFamily === 'socketcan' ? 'can0 or vcan0' : '0'
+                  }
                   style={{
                     backgroundColor: 'var(--bg-input)',
                     borderColor: 'var(--border-strong)',
@@ -1432,7 +3267,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     aria-label={t('conn.editor.virtualChannel')}
                     value={draft.adapterChannel || 'mock0'}
                     onChange={(e) =>
-                      setDraft((p) => ({ ...p, adapterChannel: e.target.value }))
+                      setDraft((p) => {
+                        const updated = { ...p, adapterChannel: e.target.value };
+                        updated.deviceId = resolveDeviceIdForProfile(updated);
+                        return updated;
+                      })
                     }
                     style={{
                       backgroundColor: 'var(--bg-input)',
@@ -1461,7 +3300,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       setDraft((p) => ({
                         ...p,
                         mockFpsPreset:
-                          e.target.value === 'calm' ? null : Number(e.target.value),
+                          e.target.value === 'calm'
+                            ? null
+                            : Number(e.target.value),
                       }))
                     }
                     style={{
@@ -1518,7 +3359,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   disabled={!draft.enableFd || draft.driverFamily === 'slcan'}
                   value={draft.dataBitrate}
                   onChange={(e) =>
-                    setDraft((p) => ({ ...p, dataBitrate: Number(e.target.value) }))
+                    setDraft((p) => ({
+                      ...p,
+                      dataBitrate: Number(e.target.value),
+                    }))
                   }
                   style={{
                     backgroundColor: 'var(--bg-input)',
@@ -1634,6 +3478,142 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 className="w-full h-[30px] px-2.5 border text-[12px] focus:outline-none"
               />
             </div>
+
+            {/* ============================================================== */}
+            {/* DEDICATED COLLAPSIBLE/INLINE OS SOURCE PATHS & SETUP GUIDE     */}
+            {/* ============================================================== */}
+            <div
+              style={{
+                backgroundColor: 'var(--bg-row-alt)',
+                borderColor: 'var(--border-strong)',
+              }}
+              className="p-2.5 border space-y-2.5 text-[12px]"
+            >
+              <div className="flex items-center justify-between gap-1 flex-wrap">
+                <span className="font-semibold text-[var(--text-primary)] flex items-center gap-1.5">
+                  <BookOpen className="w-3.5 h-3.5 text-sky-400" />
+                  <span>{t('conn.guide.title')}</span>
+                </span>
+
+                {/* OS Preview Switcher Pills */}
+                <div className="flex items-center gap-1 text-[10.5px] font-mono">
+                  {(['active', 'linux', 'windows', 'macos'] as const).map(
+                    (osKey) => (
+                      <button
+                        key={osKey}
+                        type="button"
+                        onClick={() => setGuideOsPreview(osKey)}
+                        style={{
+                          backgroundColor:
+                            guideOsPreview === osKey
+                              ? 'var(--bg-header)'
+                              : 'var(--bg-panel)',
+                          borderColor:
+                            guideOsPreview === osKey
+                              ? '#38bdf8'
+                              : 'var(--border-grid)',
+                          color:
+                            guideOsPreview === osKey
+                              ? '#38bdf8'
+                              : 'var(--text-secondary)',
+                        }}
+                        className="px-1.5 py-0.5 border cursor-pointer uppercase font-medium"
+                      >
+                        {osKey === 'active'
+                          ? t('conn.guide.activeHost')
+                          : osKey}
+                      </button>
+                    ),
+                  )}
+                </div>
+              </div>
+
+              {/* 1) Data Source Paths */}
+              <div className="space-y-1">
+                <div className="text-[11px] font-medium text-[var(--text-secondary)] flex items-center justify-between">
+                  <span>
+                    {t('conn.guide.sourcePaths')} ({effectiveGuideOs.toUpperCase()}):
+                  </span>
+                </div>
+                <div className="bg-[var(--bg-panel)] p-2 border border-[var(--border-grid)] font-mono text-[11px] space-y-1 text-[var(--text-muted)] max-h-[90px] overflow-y-auto select-all">
+                  {effectiveSourceLocations.length > 0 ? (
+                    effectiveSourceLocations.map((loc, idx) => (
+                      <div
+                        key={idx}
+                        className="truncate text-[var(--text-secondary)]"
+                      >
+                        • {loc}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-[var(--text-muted)] italic">
+                      No paths registered for this configuration.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 2) Setup Steps & Troubleshooting */}
+              {effectiveSetupSteps.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="text-[11px] font-medium text-[var(--text-secondary)]">
+                    {t('conn.guide.setupSteps')}:
+                  </div>
+                  {effectiveSetupSteps.map((step, idx) => (
+                    <div
+                      key={idx}
+                      className="p-2 border border-[var(--border-grid)] bg-[var(--bg-panel)] text-[11px] space-y-1"
+                    >
+                      <div className="flex items-center justify-between font-semibold text-[var(--text-primary)]">
+                        <span>{step.title}</span>
+                        {step.docUrl && (
+                          <a
+                            href={step.docUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-sky-400 hover:underline flex items-center gap-0.5 text-[10px]"
+                          >
+                            <ExternalLink className="w-2.5 h-2.5" />
+                            {t('conn.guide.openDoc')}
+                          </a>
+                        )}
+                      </div>
+                      <p className="text-[var(--text-secondary)] text-[11px] leading-relaxed">
+                        {step.description}
+                      </p>
+                      {step.commandOrAction && (
+                        <div className="flex items-center justify-between gap-1 bg-[var(--bg-toolbar)] p-1 border border-[var(--border-grid)] font-mono text-[10.5px]">
+                          <span className="truncate select-all text-[var(--text-primary)]">
+                            {step.commandOrAction}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              copyToClipboard(
+                                step.commandOrAction!,
+                                `step-${idx}`,
+                              )
+                            }
+                            className="shrink-0 px-1.5 py-0.5 border border-[var(--border-strong)] hover:border-sky-400 text-sky-400 bg-[var(--bg-panel)] text-[10px] flex items-center gap-0.5 cursor-pointer"
+                          >
+                            {copiedKey === `step-${idx}` ? (
+                              <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-2.5 h-2.5" />
+                            )}
+                            <span>
+                              {copiedKey === `step-${idx}`
+                                ? t('conn.guide.copied')
+                                : t('conn.guide.copyCmd')}
+                            </span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Editor Action Footer */}
@@ -1675,6 +3655,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
             </button>
           </div>
         </aside>
+      )}
       </div>
     </div>
   );

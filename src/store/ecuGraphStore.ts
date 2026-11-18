@@ -317,6 +317,18 @@ export const ecuGraphStore = {
     setNodeError(key, null);
     set({ busy: { key, action: 'connect' } });
     try {
+      // Another session tab already owns this ECU: switch to it instead of re-addressing this tab.
+      const owner = diagnosticsStore.findTabByAddressing({
+        ...diagnosticsStore.getState().session.config,
+        requestId: node.requestId,
+        responseId: node.responseId,
+        busId: node.busId,
+        isExtendedId: node.isExtendedId,
+      });
+      if (owner) {
+        diagnosticsStore.setActiveTab(owner.id);
+        if (isActive(key)) return true;
+      }
       if (diagnosticsStore.getState().session.connected) await diagnosticsStore.disconnect();
       const current = diagnosticsStore.getState().session.config;
       const config: DiagSessionConfig = {

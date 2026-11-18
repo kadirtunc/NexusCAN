@@ -8,6 +8,7 @@ import { NewConnectionModal } from './components/NewConnectionModal';
 import { PlotterView } from './components/PlotterView';
 import { ProjectExplorerDock } from './components/ProjectExplorerDock';
 import { ProjectModal } from './components/ProjectModal';
+import { BottomConnectionsDock } from './components/BottomConnectionsDock';
 import { ReceiveTransmitView } from './components/ReceiveTransmitView';
 import { StartPageView } from './components/StartPageView';
 import { SymbolsLayoutView } from './components/SymbolsLayoutView';
@@ -22,6 +23,7 @@ import {
   resetSessionCompat,
   apiResetTelemetry,
   apiSetBusMode,
+  subscribeHardwareChanges,
   subscribeTelemetry,
 } from './services/ipcClient';
 import { connectionStore, useConnectionStore } from './store/connectionStore';
@@ -42,6 +44,12 @@ import { ImportedProjectNotice } from './components/ImportedProjectNotice';
 import { panicInFlightBuses, performPanicStop } from './store/panicStop';
 import { workbenchStore, useWorkbenchStore } from './store/workbenchStore';
 import { traceSessionsStore, useTraceSessionsStore } from './store/traceSessionsStore';
+import { DebugConsolePanel } from './components/DebugConsolePanel';
+import {
+  debugConsoleStore,
+  useDebugConsoleStore,
+  initDebugConsoleSubscription,
+} from './store/debugConsoleStore';
 import type { DeviceDescriptorDto } from './types/hal';
 import { installBusDatabaseAutoSync } from './utils/busDatabaseSync';
 import { Plus, X } from 'lucide-react';
@@ -61,6 +69,7 @@ export const App: React.FC = () => {
   const cloudOn = useExperimentalCloud();
   const workbench = useWorkbenchStore();
   const traceState = useTraceSessionsStore();
+  const debugConsole = useDebugConsoleStore();
 
   const [devices, setDevices] = useState<readonly DeviceDescriptorDto[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
@@ -160,10 +169,24 @@ export const App: React.FC = () => {
       },
     );
 
+    const unsubHw = subscribeHardwareChanges((ev) => {
+      setDevices(ev.devices);
+      connectionStore.setProbeReport(ev.report);
+    });
+
     return () => {
       unsubscribe();
+      unsubHw();
     };
   }, [applyQuickBarState, refreshDevices]);
+
+  // Dedicated debug console subscription: empty dependency array prevents re-subscription churn
+  useEffect(() => {
+    const unsubDebug = initDebugConsoleSubscription();
+    return () => {
+      unsubDebug();
+    };
+  }, []);
 
   const busesSummary = useMemo(
     () =>
@@ -362,6 +385,14 @@ export const App: React.FC = () => {
         return;
       }
       if (
+        (ev.ctrlKey || ev.metaKey) &&
+        (ev.key === '`' || (ev.shiftKey && ev.key.toLowerCase() === 'd'))
+      ) {
+        ev.preventDefault();
+        debugConsoleStore.toggleDockOpen();
+        return;
+      }
+      if (
         ev.code === 'Escape' &&
         !projState.modalOpen &&
         !workbenchStore.getState().newConnectionModalOpen
@@ -528,6 +559,60 @@ export const App: React.FC = () => {
         return t('shell.tab.workspace');
     }
   };
+
+  const handleBottomResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = debugConsoleStore.getState().bottomHeightPx;
+    const onMove = (moveEv: MouseEvent) => {
+      const delta = startY - moveEv.clientY;
+      debugConsoleStore.setBottomHeight(startH + delta);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, []);
+
+  const handleRightResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = debugConsoleStore.getState().rightWidthPx;
+    const onMove = (moveEv: MouseEvent) => {
+      const delta = startX - moveEv.clientX;
+      debugConsoleStore.setRightWidth(startW + delta);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, []);
+
+  const handleFloatingDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const currentRect = debugConsoleStore.getState().floatingRect;
+    const onMove = (moveEv: MouseEvent) => {
+      const deltaX = moveEv.clientX - startX;
+      const deltaY = moveEv.clientY - startY;
+      debugConsoleStore.setFloatingRect({
+        ...currentRect,
+        x: Math.max(0, currentRect.x + deltaX),
+        y: Math.max(0, currentRect.y + deltaY),
+      });
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, []);
 
   return (
     <div
@@ -947,6 +1032,15 @@ export const App: React.FC = () => {
               </>
             )}
           </main>
+
+          {/* 3. Global Connections Dock (single instance, visible in every view; shrink-0 so <main> keeps flex-1 min-h-0) */}
+          <div className="shrink-0 flex flex-col min-w-0">
+            <BottomConnectionsDock
+              devices={devices}
+              statusBanner={statusBanner}
+              onStatusMessage={setStatusBanner}
+            />
+          </div>
         </div>
 
         {/* Right-docked ProjectExplorerDock */}
@@ -964,7 +1058,68 @@ export const App: React.FC = () => {
             />
           </aside>
         )}
+
+        {/* Right-docked DebugConsolePanel */}
+        {debugConsole.dockOpen && !debugConsole.detachedOpen && debugConsole.dockLayout === 'right' && (
+          <aside
+            style={{ width: `${debugConsole.rightWidthPx}px`, minWidth: '280px', maxWidth: '60vw' }}
+            className="shrink-0 h-full flex flex-col border-l border-[var(--border-strong)] relative overflow-hidden bg-[#0B0F17]"
+          >
+            <div
+              onMouseDown={handleRightResizeStart}
+              className="w-1 cursor-col-resize hover:bg-sky-500/50 bg-[var(--border-strong)] transition-colors shrink-0 select-none absolute left-0 top-0 bottom-0 z-20"
+              title="Resize Debug Console"
+            />
+            <div className="flex-1 min-h-0 min-w-0 pl-1 flex flex-col overflow-hidden">
+              <DebugConsolePanel />
+            </div>
+          </aside>
+        )}
       </div>
+
+      {/* Bottom-docked DebugConsolePanel */}
+      {debugConsole.dockOpen && !debugConsole.detachedOpen && debugConsole.dockLayout === 'bottom' && (
+        <div
+          style={{ height: `${debugConsole.bottomHeightPx}px`, maxHeight: '60vh' }}
+          className="shrink-0 flex flex-col border-t border-[var(--border-strong)] relative overflow-hidden bg-[#0B0F17]"
+        >
+          <div
+            onMouseDown={handleBottomResizeStart}
+            className="h-1 cursor-row-resize hover:bg-sky-500/50 bg-[var(--border-strong)] transition-colors shrink-0 select-none z-20"
+            title="Resize Debug Console"
+          />
+          <div className="flex-1 min-h-0 min-w-0 flex flex-col overflow-hidden">
+            <DebugConsolePanel />
+          </div>
+        </div>
+      )}
+
+      {/* Floating DebugConsolePanel */}
+      {debugConsole.dockOpen && !debugConsole.detachedOpen && debugConsole.dockLayout === 'floating' && (
+        <div
+          style={{
+            position: 'fixed',
+            left: `min(${debugConsole.floatingRect.x}px, calc(100vw - 320px))`,
+            top: `min(${debugConsole.floatingRect.y}px, calc(100vh - 120px))`,
+            width: `min(${debugConsole.floatingRect.w}px, 100vw)`,
+            height: `min(${debugConsole.floatingRect.h}px, calc(100vh - 60px))`,
+            zIndex: 40,
+          }}
+          className="border border-slate-700 shadow-2xl rounded-xs overflow-hidden flex flex-col bg-[#0B0F17]"
+        >
+          <div
+            onMouseDown={handleFloatingDragStart}
+            className="h-4 bg-slate-900 border-b border-slate-800 cursor-move flex items-center justify-between px-2 shrink-0 select-none"
+            title="Drag to reposition Debug Console"
+          >
+            <span className="text-[10px] text-slate-400 font-mono tracking-wider font-semibold">DEBUG &amp; AUDIT CONSOLE</span>
+            <span className="text-[10px] text-slate-500 font-mono">⠿</span>
+          </div>
+          <div className="flex-1 min-h-0 min-w-0 flex flex-col overflow-hidden">
+            <DebugConsolePanel />
+          </div>
+        </div>
+      )}
 
       {/* 3. Global Single Status Bar (28px, full window width) */}
       <footer
@@ -990,6 +1145,38 @@ export const App: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3 shrink-0 text-[var(--text-muted)] text-[11.5px]">
+          {/* Debug Console Status Pill */}
+          <button
+            type="button"
+            onClick={() => debugConsoleStore.toggleDockOpen()}
+            className={`h-[20px] px-2 rounded-xs border text-[11px] font-mono flex items-center gap-1.5 cursor-pointer transition-colors ${
+              debugConsole.detachedOpen
+                ? 'bg-sky-950/80 border-sky-500/70 text-sky-300 font-semibold'
+                : debugConsole.dockOpen
+                  ? 'bg-slate-800 border-slate-600 text-slate-200'
+                  : 'bg-transparent border-slate-700/60 text-slate-400 hover:text-slate-200 hover:border-slate-600'
+            }`}
+            title={t('debug.console.statusTooltip')}
+          >
+            <span className="text-sky-400 font-bold">&gt;_</span>
+            <span>{t('debug.console.statusBtn')}</span>
+            {debugConsole.detachedOpen ? (
+              <span className="text-[10px] text-sky-400 font-sans">↗ {t('debug.console.undockedBadge')}</span>
+            ) : (
+              <>
+                {debugConsole.unreadErrorCount > 0 && (
+                  <span className="px-1 py-0.2 rounded-xs bg-rose-950 border border-rose-600 text-rose-300 text-[9.5px] font-bold">
+                    {debugConsole.unreadErrorCount}
+                  </span>
+                )}
+                {debugConsole.unreadWarnCount > 0 && (
+                  <span className="px-1 py-0.2 rounded-xs bg-amber-950 border border-amber-600 text-amber-300 text-[9.5px] font-bold">
+                    {debugConsole.unreadWarnCount}
+                  </span>
+                )}
+              </>
+            )}
+          </button>
           <span className="font-sans">
             {cloudOn && cloudHeader.isAuthenticated
               ? projState.cloudBinding

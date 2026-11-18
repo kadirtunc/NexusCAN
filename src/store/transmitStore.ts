@@ -1,6 +1,7 @@
 import { buildSignalTable } from '../utils/signalTable';
 import { registerTxSource } from './txSources';
 import { useSyncExternalStore } from 'react';
+import { logUiDebugEvent } from './debugConsoleStore';
 import type { DatabaseSchemaDto, SignalSchemaDto } from '../types/netdb';
 import type { PeriodicTxJobDto } from '../types/telemetry';
 import { previewPackSymbolicBytes } from '../utils/formatters';
@@ -189,6 +190,14 @@ export const transmitStore = {
       configRevision: currentState.configRevision + 1,
     };
     emitChange();
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'TX',
+      action: 'tx.entry.add',
+      busId: entry.busId,
+      title: `TX Entry Added: ${entry.symbolName || `0x${entry.arbId.toString(16).toUpperCase()}`}`,
+      details: `Bus: ${entry.busId + 1}, Mode: ${entry.mode}, DLC: ${entry.dlc}, Cycle: ${entry.cycleTimeMs}ms`,
+    });
   },
 
   updateEntry(id: string, updater: (prev: TxListEntry) => TxListEntry): void {
@@ -209,6 +218,14 @@ export const transmitStore = {
         : currentState.configRevision,
     };
     emitChange();
+    if (persistentChanged) {
+      logUiDebugEvent({
+        severity: 'info',
+        category: 'TX',
+        action: 'tx.entry.update',
+        title: `TX Entry Updated: ${id}`,
+      });
+    }
   },
 
   removeEntry(id: string): void {
@@ -223,6 +240,12 @@ export const transmitStore = {
       configRevision: currentState.configRevision + 1,
     };
     emitChange();
+    logUiDebugEvent({
+      severity: 'info',
+      category: 'TX',
+      action: 'tx.entry.remove',
+      title: `TX Entry Removed: ${id}`,
+    });
   },
 
   resetToPresets(): void {
@@ -471,6 +494,12 @@ export const transmitStore = {
       })),
     };
     emitChange();
+    logUiDebugEvent({
+      severity: 'warn',
+      category: 'TX',
+      action: 'tx.pause_all',
+      title: 'All Periodic TX Entries Paused',
+    });
   },
 
   resetCounters(): void {

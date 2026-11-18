@@ -7,13 +7,21 @@ import type { MessageSchemaDto, SignalSchemaDto } from '../types/netdb';
  * For multiplexed frames with active switch branches: `${busId}:${messageKey}#Sw1=val1/Sw2=val2`
  */
 export function buildFrameInstanceKey(
-  frame: Pick<FrameTelemetryDto, 'busId' | 'messageKey' | 'activeMuxSwitches'>,
+  frame: Pick<FrameTelemetryDto, 'busId' | 'messageKey' | 'activeMuxSwitches'> & {
+    isError?: boolean;
+    arbId?: number;
+  },
 ): string {
+  const isErr = Boolean(frame.isError) || frame.messageKey.startsWith('ERR:');
+  const baseKey =
+    isErr && !frame.messageKey.startsWith('ERR:')
+      ? `ERR:${frame.busId}:${frame.messageKey}`
+      : `${frame.busId}:${frame.messageKey}`;
   const entries = frame.activeMuxSwitches ? Object.entries(frame.activeMuxSwitches) : [];
   if (entries.length === 0) {
-    return `${frame.busId}:${frame.messageKey}`;
+    return baseKey;
   }
-  return `${frame.busId}:${frame.messageKey}#${entries.map(([k, v]) => `${k}=${v}`).join('/')}`;
+  return `${baseKey}#${entries.map(([k, v]) => `${k}=${v}`).join('/')}`;
 }
 
 /**
