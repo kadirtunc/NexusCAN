@@ -1,0 +1,35 @@
+[package]
+name = "nexus-ecu-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Independent ISO 14229-1 / ISO 15765-2 bootloader ECU simulator (UDS server over the Linux kernel CAN_ISOTP socket) used as the HIL target for the NexusCAN flasher"
+publish = false
+
+[lib]
+name = "nexus_ecu_sim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nexus-ecu-sim"
+path = "src/main.rs"
+
+[[bin]]
+name = "nexus-flash-compare"
+path = "src/bin/nexus-flash-compare.rs"
+
+# Deliberately NO dependency on nexus-protocols / automotive: this server must
+# stay an independent implementation so it can cross-check the NexusCAN client.
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+getrandom = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true
