@@ -60,13 +60,19 @@ export interface ConsoleDraft {
   nonce: number;
 }
 
-interface DiagnosticsState {
+/** Mirrors the backend `MAX_DIAG_TAPS` (one tap per concurrent UDS session). */
+export const MAX_DIAG_TABS = 8;
+const MAX_TAB_LABEL = 32;
+
+/**
+ * Everything that belongs to ONE ECU session. Lives inside a `DiagSessionTab`; the public
+ * `DiagnosticsState` exposes the ACTIVE tab's copy flattened, so single-session consumers keep working.
+ */
+export interface DiagTabData {
   session: DiagSessionState;
   /** Last `DiagSessionInfoDto` from the backend (real mode only). */
   sessionInfo: DiagSessionInfoDto | null;
   connecting: boolean;
-  /** DEMO mode: local synthetic data, no `cmd_diag_*` traffic. Default false. */
-  mockMode: boolean;
   storedDtcs: DtcEntryDto[];
   pendingDtcs: DtcEntryDto[];
   didValues: Map<number, DidValueEntry>;
@@ -74,8 +80,6 @@ interface DiagnosticsState {
   livePidValues: Map<number, LivePidValue>;
   /** Real mode: per-PID poll failures (value in `livePidValues` is then stale). */
   livePidErrors: Map<number, LivePidError>;
-  activePids: Set<number>;
-  pidPollingMs: number;
   /** Chronological (oldest first), bounded to MAX_CONVERSATION. Real: backend log; demo: local DEMO events. */
   conversation: ConversationEntry[];
   lastUds: UdsExchange | null;
@@ -84,8 +88,31 @@ interface DiagnosticsState {
   /** Pending "Resend in Console" prefill (null = none). */
   consoleDraft: ConsoleDraft | null;
   isScanning: boolean;
+  /** PID polling runs for the ACTIVE tab only; switching tabs stops it. */
   isPolling: boolean;
   lastError: DiagUiError | null;
+  /** Last ReadDTCInformation report (any reportType) with the sub-function it answers. */
+  dtcReport: { subFunction: number; result: DtcReportResultDto } | null;
+  dtcReportBusy: boolean;
+  /** Set when `connect` was refused because another tab owns the same addressing (that tab's id). */
+  duplicateOfTabId: string | null;
+}
+
+export interface DiagSessionTab extends DiagTabData {
+  id: string;
+  /** User-editable; follows the addressing until the user renames it (`labelCustom`). */
+  label: string;
+  labelCustom: boolean;
+  /** ECU registry record this tab was opened from ("Oturum Aç"); display only, never read back into the config. */
+  ecuId: string | null;
+}
+
+/** Process-wide state (not per ECU). */
+interface DiagGlobalState {
+  /** DEMO mode: local synthetic data, no `cmd_diag_*` traffic. Default false. */
+  mockMode: boolean;
+  activePids: Set<number>;
+  pidPollingMs: number;
   /** Last functional ECU discovery result (real: `cmd_diag_discover_ecus`; demo: DEMO-only synthetic). */
   discovery: EcuDiscoveryResultDto | null;
   discovering: boolean;
@@ -99,10 +126,20 @@ interface DiagnosticsState {
   sweeping: boolean;
   sweepResult: PhysicalSweepResultDto | null;
   sweepError: DiagUiError | null;
-  /** Last ReadDTCInformation report (any reportType) with the sub-function it answers. */
-  dtcReport: { subFunction: number; result: DtcReportResultDto } | null;
-  dtcReportBusy: boolean;
 }
+
+interface RawState extends DiagGlobalState {
+  tabs: DiagSessionTab[];
+  activeTabId: string;
+}
+
+/** Public snapshot: global fields + the ACTIVE tab's fields flattened + the tab list. */
+export interface DiagnosticsState extends DiagGlobalState, DiagTabData {
+  tabs: DiagSessionTab[];
+  activeTabId: string;
+}
+
+type TabPatch = Partial<Omit<DiagSessionTab, 'id'>>;
 
 const DEFAULT_CONFIG: DiagSessionConfig = {
   requestId: 0x7e0,
@@ -112,44 +149,201 @@ const DEFAULT_CONFIG: DiagSessionConfig = {
   protocol: 'uds',
 };
 
-const INITIAL_STATE: DiagnosticsState = {
-  session: {
-    connected: false,
-    config: DEFAULT_CONFIG,
-    udsSession: 'default',
-    testerPresentActive: false,
-    lastResponseMs: null,
-  },
-  sessionInfo: null,
-  connecting: false,
-  mockMode: false,
-  storedDtcs: [],
-  pendingDtcs: [],
-  didValues: new Map(),
-  didErrors: new Map(),
-  livePidValues: new Map(),
-  livePidErrors: new Map(),
-  activePids: new Set(),
-  pidPollingMs: 500,
-  conversation: [],
-  lastUds: null,
-  isotpFrames: [],
-  consoleDraft: null,
-  isScanning: false,
-  isPolling: false,
-  lastError: null,
-  discovery: null,
-  discovering: false,
-  discoveryError: null,
-  passive: null,
-  passiveBusy: false,
-  passiveError: null,
-  sweeping: false,
-  sweepResult: null,
-  sweepError: null,
-  dtcReport: null,
-  dtcReportBusy: false,
-};
+// ─── Tab construction / addressing ───────────────────────────────────────────
+
+function toHex(n: number, width = 2): string {
+  return n.toString(16).toUpperCase().padStart(width, '0');
+}
+
+function newTabId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export function defaultTabLabel(c: DiagSessionConfig): string {
+  return `Bus${c.busId + 1} ${toHex(c.requestId, 3)}→${toHex(c.responseId, 3)}`;
+}
+
+/** Backend session identity (the keys that make two sessions collide in `diag_session.rs`). */
+export function addressingKey(c: DiagSessionConfig): string {
+  return [
+    c.busId,
+    c.requestId,
+    c.responseId,
+    c.isExtendedId ? 1 : 0,
+    c.addressFormat ?? 'normal',
+    c.targetAddress ?? '',
+    c.responseAddress ?? '',
+  ].join('|');
+}
+
+function freshTabData(config: DiagSessionConfig): DiagTabData {
+  return {
+    session: {
+      connected: false,
+      config,
+      udsSession: 'default',
+      testerPresentActive: false,
+      lastResponseMs: null,
+    },
+    sessionInfo: null,
+    connecting: false,
+    storedDtcs: [],
+    pendingDtcs: [],
+    didValues: new Map(),
+    didErrors: new Map(),
+    livePidValues: new Map(),
+    livePidErrors: new Map(),
+    conversation: [],
+    lastUds: null,
+    isotpFrames: [],
+    consoleDraft: null,
+    isScanning: false,
+    isPolling: false,
+    lastError: null,
+    dtcReport: null,
+    dtcReportBusy: false,
+    duplicateOfTabId: null,
+  };
+}
+
+function makeTab(config: DiagSessionConfig): DiagSessionTab {
+  return { id: newTabId(), label: defaultTabLabel(config), labelCustom: false, ecuId: null, ...freshTabData(config) };
+}
+
+function makeInitialRaw(): RawState {
+  const first = makeTab(DEFAULT_CONFIG);
+  return {
+    tabs: [first],
+    activeTabId: first.id,
+    mockMode: false,
+    activePids: new Set(),
+    pidPollingMs: 500,
+    discovery: null,
+    discovering: false,
+    discoveryError: null,
+    passive: null,
+    passiveBusy: false,
+    passiveError: null,
+    sweeping: false,
+    sweepResult: null,
+    sweepError: null,
+  };
+}
+
+// ─── Core state (tabs are the single source of truth; the public view is derived) ─────
+
+let raw: RawState = makeInitialRaw();
+const listeners = new Set<() => void>();
+
+function emit(): void {
+  for (const fn of listeners) {
+    fn();
+  }
+}
+
+function setRaw(next: RawState): void {
+  raw = next;
+  emit();
+}
+
+function setGlobal(partial: Partial<DiagGlobalState>): void {
+  setRaw({ ...raw, ...partial });
+}
+
+function getTab(id: string): DiagSessionTab | undefined {
+  return raw.tabs.find((tab) => tab.id === id);
+}
+
+function activeTabOf(state: RawState): DiagSessionTab {
+  return state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0];
+}
+
+/**
+ * Writes into ONE tab by id (never "the active tab"): late async results of a tab the user has left
+ * land in that tab; results for a closed tab are dropped (no-op).
+ */
+function updateTab(id: string, patch: TabPatch | ((tab: DiagSessionTab) => TabPatch)): void {
+  const idx = raw.tabs.findIndex((tab) => tab.id === id);
+  if (idx < 0) return;
+  const cur = raw.tabs[idx];
+  const p = typeof patch === 'function' ? patch(cur) : patch;
+  const next: DiagSessionTab = { ...cur, ...p };
+  if (!next.labelCustom && next.session.config !== cur.session.config) {
+    next.label = defaultTabLabel(next.session.config);
+  }
+  const tabs = raw.tabs.slice();
+  tabs[idx] = next;
+  setRaw({ ...raw, tabs });
+}
+
+function patchSession(id: string, partial: Partial<DiagSessionState>): void {
+  updateTab(id, (tab) => ({ session: { ...tab.session, ...partial } }));
+}
+
+let viewCache: { src: RawState; view: DiagnosticsState } | null = null;
+
+function view(): DiagnosticsState {
+  if (viewCache !== null && viewCache.src === raw) return viewCache.view;
+  const active = activeTabOf(raw);
+  const { id: _id, label: _label, labelCustom: _labelCustom, ecuId: _ecuId, ...data } = active;
+  void _id;
+  void _label;
+  void _labelCustom;
+  void _ecuId;
+  const next: DiagnosticsState = { ...raw, ...data };
+  viewCache = { src: raw, view: next };
+  return next;
+}
+
+/** Active tab of a public snapshot (`state.tabs` always contains `state.activeTabId`). */
+export function selectActiveTab(state: DiagnosticsState): DiagSessionTab {
+  return state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0];
+}
+
+/** Public snapshots always expose the active tab's session as `state.session`. */
+export function selectSession(state: DiagnosticsState): DiagSessionState {
+  return state.session;
+}
+
+// ─── Per-tab runtime (cursors / reassembler; not React state) ────────────────
+
+interface TabRuntime {
+  conversationCursor: number; // backend `sinceSeq`
+  lastStoredSeq: number; // highest event seq of the current backend seq epoch
+  /** Seq epoch: incremented when the backend session was reopened (seq restarts at 1). Joins use (epoch, seq). */
+  seqEpoch: number;
+  isotpCursor: number;
+  isotpLastStored: number;
+  isotpUnavailable: boolean; // backend command missing: stop asking until the next connect
+  isotpReassembler: IsoTpReassembler;
+}
+
+const runtimes = new Map<string, TabRuntime>();
+
+function rtOf(tabId: string): TabRuntime {
+  let r = runtimes.get(tabId);
+  if (!r) {
+    r = {
+      conversationCursor: 0,
+      lastStoredSeq: 0,
+      seqEpoch: 0,
+      isotpCursor: 0,
+      isotpLastStored: 0,
+      isotpUnavailable: false,
+      isotpReassembler: new IsoTpReassembler(),
+    };
+    runtimes.set(tabId, r);
+  }
+  return r;
+}
+
+function resetIsoTpTap(rt: TabRuntime): void {
+  rt.isotpCursor = 0;
+  rt.isotpLastStored = 0;
+  rt.isotpUnavailable = false;
+  rt.isotpReassembler.reset();
+}
 
 const MOCK_STORED_DTCS: DtcEntryDto[] = [
   {
@@ -177,10 +371,6 @@ let pollingIntervalId: ReturnType<typeof setInterval> | null = null;
 let pollingTickCount = 0;
 let mockSpeedAccum = 0;
 
-function toHex(n: number, width = 2): string {
-  return n.toString(16).toUpperCase().padStart(width, '0');
-}
-
 function makeMockDidValue(did: number): DidValueEntry {
   const ascii = (text: string): number[] => Array.from(text).map((c) => c.charCodeAt(0));
   let bytes: number[];
@@ -198,20 +388,6 @@ function makeMockDidValue(did: number): DidValueEntry {
       bytes = [0x01, 0x02, 0x03, 0x04];
   }
   return { did, raw: bytes, decoded: decodeDidValue(did, bytes), timestampMs: Date.now() };
-}
-
-let currentState: DiagnosticsState = { ...INITIAL_STATE };
-const listeners = new Set<() => void>();
-
-function emit(): void {
-  for (const fn of listeners) {
-    fn();
-  }
-}
-
-function setState(partial: Partial<DiagnosticsState>): void {
-  currentState = { ...currentState, ...partial };
-  emit();
 }
 
 function computeMockPidValue(pid: number, tick: number): number {
@@ -246,13 +422,14 @@ function computeMockPidValue(pid: number, tick: number): number {
   }
 }
 
-function startPollingInternal(): void {
+function startPollingInternal(tabId: string): void {
   if (pollingIntervalId !== null) return;
   pollingTickCount = 0;
   mockSpeedAccum = 0;
 
   pollingIntervalId = setInterval(() => {
-    if (!currentState.isPolling) {
+    const tab = getTab(tabId);
+    if (!tab || !tab.isPolling) {
       stopPollingInternal();
       return;
     }
@@ -261,8 +438,8 @@ function startPollingInternal(): void {
     mockSpeedAccum = Math.min(120, mockSpeedAccum + (Math.random() - 0.3) * 3);
     if (mockSpeedAccum < 0) mockSpeedAccum = 0;
 
-    const nextPidValues = new Map(currentState.livePidValues);
-    for (const pid of currentState.activePids) {
+    const nextPidValues = new Map(tab.livePidValues);
+    for (const pid of raw.activePids) {
       const def = PID_CATALOG.find((p) => p.pid === pid);
       if (!def) continue;
       const physical = computeMockPidValue(pid, pollingTickCount);
@@ -274,8 +451,8 @@ function startPollingInternal(): void {
       });
     }
 
-    setState({ livePidValues: nextPidValues });
-  }, currentState.pidPollingMs);
+    updateTab(tabId, { livePidValues: nextPidValues });
+  }, raw.pidPollingMs);
 }
 
 function stopPollingInternal(): void {
@@ -301,11 +478,13 @@ function stopRealPidLoop(): void {
   }
 }
 
-/** Stops any PID polling (demo timer or real loop) and clears `isPolling`. */
+/** Stops any PID polling (demo timer or real loop; only one runs, for the active tab) and clears `isPolling` everywhere. */
 function haltPidPolling(): void {
   stopPollingInternal();
   stopRealPidLoop();
-  if (currentState.isPolling) setState({ isPolling: false });
+  if (raw.tabs.some((tab) => tab.isPolling)) {
+    setRaw({ ...raw, tabs: raw.tabs.map((tab) => (tab.isPolling ? { ...tab, isPolling: false } : tab)) });
+  }
 }
 
 function pidSleep(ms: number): Promise<void> {
@@ -317,18 +496,21 @@ function pidSleep(ms: number): Promise<void> {
   });
 }
 
-function setPidError(pid: number, err: LivePidError): void {
-  const livePidErrors = new Map(currentState.livePidErrors);
-  livePidErrors.set(pid, err);
-  setState({ livePidErrors });
+function setPidError(tabId: string, pid: number, err: LivePidError): void {
+  updateTab(tabId, (tab) => {
+    const livePidErrors = new Map(tab.livePidErrors);
+    livePidErrors.set(pid, err);
+    return { livePidErrors };
+  });
 }
 
-async function pollOnePid(pid: number, gen: number): Promise<void> {
+async function pollOnePid(tabId: string, pid: number, gen: number): Promise<void> {
   const def = PID_CATALOG.find((p) => p.pid === pid);
-  if (!def) return;
+  const dto = dtoOf(tabId);
+  if (!def || !dto) return;
   try {
     const r = await diagInvoke('cmd_diag_send_uds', {
-      config: currentDto(),
+      config: dto,
       sid: 0x01,
       subFunction: null,
       data: [pid],
@@ -336,44 +518,46 @@ async function pollOnePid(pid: number, gen: number): Promise<void> {
     });
     if (gen !== pidGen) return;
     if (!r.positive) {
-      setPidError(pid, { kind: 'nrc', nrc: r.nrc, nrcName: r.nrcName, atMs: Date.now() });
+      setPidError(tabId, pid, { kind: 'nrc', nrc: r.nrc, nrcName: r.nrcName, atMs: Date.now() });
       return;
     }
-    const raw = r.raw;
-    if (raw.length < 2 + def.bytes || raw[0] !== 0x41 || raw[1] !== pid) {
-      setPidError(pid, { kind: 'badResponse', atMs: Date.now() });
+    const rawBytes = r.raw;
+    if (rawBytes.length < 2 + def.bytes || rawBytes[0] !== 0x41 || rawBytes[1] !== pid) {
+      setPidError(tabId, pid, { kind: 'badResponse', atMs: Date.now() });
       return;
     }
-    const physical = def.formula(raw.slice(2, 2 + def.bytes));
-    const livePidValues = new Map(currentState.livePidValues);
-    livePidValues.set(pid, { pid, rawValue: Math.round(physical), physicalValue: physical, timestampMs: Date.now() });
-    const livePidErrors = new Map(currentState.livePidErrors);
-    livePidErrors.delete(pid);
-    setState({ livePidValues, livePidErrors });
-    touchResponse();
+    const physical = def.formula(rawBytes.slice(2, 2 + def.bytes));
+    updateTab(tabId, (tab) => {
+      const livePidValues = new Map(tab.livePidValues);
+      livePidValues.set(pid, { pid, rawValue: Math.round(physical), physicalValue: physical, timestampMs: Date.now() });
+      const livePidErrors = new Map(tab.livePidErrors);
+      livePidErrors.delete(pid);
+      return { livePidValues, livePidErrors };
+    });
+    touchResponse(tabId);
   } catch (err) {
     if (gen !== pidGen) return;
     const e = toDiagUiError(err);
     if (e.code === 'backend_missing' || SESSION_LOST_CODES.has(e.code)) {
       haltPidPolling();
-      if (currentState.session.connected) markSessionLost(e);
-      else setState({ lastError: e });
+      if (getTab(tabId)?.session.connected) markLost(tabId, e);
+      else updateTab(tabId, { lastError: e });
       return;
     }
-    setPidError(pid, { kind: 'transport', error: e, atMs: Date.now() });
+    setPidError(tabId, pid, { kind: 'transport', error: e, atMs: Date.now() });
   }
 }
 
-async function realPidLoop(gen: number): Promise<void> {
+async function realPidLoop(tabId: string, gen: number): Promise<void> {
   while (gen === pidGen) {
     const roundStart = Date.now();
-    for (const pid of Array.from(currentState.activePids)) {
+    for (const pid of Array.from(raw.activePids)) {
       if (gen !== pidGen) return;
-      if (!currentState.activePids.has(pid)) continue;
-      await pollOnePid(pid, gen); // one request in flight at a time
+      if (!raw.activePids.has(pid)) continue;
+      await pollOnePid(tabId, pid, gen); // one request in flight at a time
     }
     if (gen !== pidGen) return;
-    await pidSleep(Math.max(20, currentState.pidPollingMs - (Date.now() - roundStart)));
+    await pidSleep(Math.max(20, raw.pidPollingMs - (Date.now() - roundStart)));
   }
 }
 
@@ -418,8 +602,10 @@ function toDiagDto(c: DiagSessionConfig): DiagSessionConfigDto {
   };
 }
 
-function currentDto(): DiagSessionConfigDto {
-  return toDiagDto(currentState.session.config);
+/** Backend config of a SPECIFIC tab (null once the tab is closed). */
+function dtoOf(tabId: string): DiagSessionConfigDto | null {
+  const tab = getTab(tabId);
+  return tab ? toDiagDto(tab.session.config) : null;
 }
 
 function mapActiveSession(code: number): DiagSessionState['udsSession'] | null {
@@ -444,7 +630,6 @@ const POLL_ERROR_BACKOFF_MS = 1000;
 const INFO_REFRESH_EVERY_TICKS = 8; // ~2 s
 const CONVERSATION_PAGE_MAX = 500;
 
-let conversationCursor = 0; // backend `sinceSeq`
 let demoSeq = 0;
 let exchangeSeq = 0;
 
@@ -455,60 +640,64 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
 let entryUid = 0;
 let consoleDraftNonce = 0;
-let lastStoredSeq = 0; // highest event seq of the current backend seq epoch
-/** Seq epoch: incremented when the backend session was reopened (seq restarts at 1). Joins use (epoch, seq). */
-let seqEpoch = 0;
 
-function pushEntries(entries: ConversationEntry[]): void {
+function pushEntries(tabId: string, entries: ConversationEntry[]): void {
   if (entries.length === 0) return;
-  let conversation = currentState.conversation.concat(entries);
-  if (conversation.length > MAX_CONVERSATION) {
-    conversation = conversation.slice(conversation.length - MAX_CONVERSATION);
-  }
-  setState({ conversation });
+  updateTab(tabId, (tab) => {
+    let conversation = tab.conversation.concat(entries);
+    if (conversation.length > MAX_CONVERSATION) {
+      conversation = conversation.slice(conversation.length - MAX_CONVERSATION);
+    }
+    return { conversation };
+  });
 }
 
-function appendEvents(events: readonly ConversationEventDto[], gapBefore: boolean): void {
-  const fresh = events.filter((e) => e.seq > lastStoredSeq);
+function appendEvents(tabId: string, events: readonly ConversationEventDto[], gapBefore: boolean): void {
+  const rt = rtOf(tabId);
+  const fresh = events.filter((e) => e.seq > rt.lastStoredSeq);
   if (fresh.length === 0) return;
   const entries: ConversationEntry[] = [];
-  if (gapBefore) entries.push({ uid: ++entryUid, epoch: seqEpoch, event: null, note: 'gap' });
-  for (const raw of fresh) {
-    entries.push({ uid: ++entryUid, epoch: seqEpoch, event: normalizeConversationEvent(raw), note: null });
+  if (gapBefore) entries.push({ uid: ++entryUid, epoch: rt.seqEpoch, event: null, note: 'gap' });
+  for (const ev of fresh) {
+    entries.push({ uid: ++entryUid, epoch: rt.seqEpoch, event: normalizeConversationEvent(ev), note: null });
   }
-  lastStoredSeq = fresh[fresh.length - 1].seq;
-  pushEntries(entries);
+  rt.lastStoredSeq = fresh[fresh.length - 1].seq;
+  pushEntries(tabId, entries);
 }
 
 /**
  * Backend session was reopened (Panic, config change, closed tap): its seq restarts at 1.
  * Keep the old log, add a note, restart the cursor.
  */
-function resetSeqEpoch(): void {
-  conversationCursor = 0;
-  lastStoredSeq = 0;
-  seqEpoch += 1;
-  pushEntries([{ uid: ++entryUid, epoch: seqEpoch, event: null, note: 'reopened' }]);
+function resetSeqEpoch(tabId: string): void {
+  const rt = rtOf(tabId);
+  rt.conversationCursor = 0;
+  rt.lastStoredSeq = 0;
+  rt.seqEpoch += 1;
+  pushEntries(tabId, [{ uid: ++entryUid, epoch: rt.seqEpoch, event: null, note: 'reopened' }]);
 }
 
 /** Returns false when the page belonged to a restarted seq epoch (caller re-fetches from 0). */
-function applyConversationPage(page: ConversationPageDto): boolean {
-  if (page.lastSeq < conversationCursor) {
-    resetSeqEpoch();
+function applyConversationPage(tabId: string, page: ConversationPageDto): boolean {
+  const rt = rtOf(tabId);
+  if (page.lastSeq < rt.conversationCursor) {
+    resetSeqEpoch(tabId);
     return false;
   }
-  appendEvents(page.events, page.truncated);
-  conversationCursor = Math.max(conversationCursor, page.lastSeq);
+  appendEvents(tabId, page.events, page.truncated);
+  rt.conversationCursor = Math.max(rt.conversationCursor, page.lastSeq);
   return true;
 }
 
 /** DEMO-only synthetic event. Never called in real mode. */
 function demoEvent(
+  tabId: string,
   kind: ConversationEventKind,
   fields: Partial<Omit<ConversationEventDto, 'seq' | 'kind'>> = {},
 ): number {
   demoSeq += 1;
   appendEvents(
+    tabId,
     [
       {
         seq: demoSeq,
@@ -532,6 +721,7 @@ function demoEvent(
 
 /** DEMO-only synthetic ISO-TP tap frames for one demo exchange (SF, or FF + FC + CF*). Never used in real mode. */
 let demoFrameSeq = 0;
+let isotpUid = 0;
 const DEMO_PAD = 0xaa;
 
 function demoFrameData(pci: readonly number[], payload: readonly number[]): number[] {
@@ -541,13 +731,17 @@ function demoFrameData(pci: readonly number[], payload: readonly number[]): numb
 }
 
 function demoPushFrame(
+  tabId: string,
   dir: 'tx' | 'rx',
   kind: IsoTpFrameKind,
   data: number[],
   requestSeq: number,
   timestampUs: number,
 ): void {
-  const cfg = currentState.session.config;
+  const tab = getTab(tabId);
+  if (!tab) return;
+  const cfg = tab.session.config;
+  const rt = rtOf(tabId);
   const dto: IsoTpFrameDto = {
     seq: ++demoFrameSeq,
     timestampUs,
@@ -559,36 +753,39 @@ function demoPushFrame(
     kind,
     requestSeq,
   };
-  pushIsoTpEntries([isoTpEntryFromDto(dto, ++isotpUid, seqEpoch, isotpReassembler)]);
+  pushIsoTpEntries(tabId, [isoTpEntryFromDto(dto, ++isotpUid, rt.seqEpoch, rt.isotpReassembler)]);
 }
 
 /** Request SF (tx) at `reqTsUs`; response as SF (rx) or FF + FC(CTS, BS=0, STmin=2 ms) + CF* ending at `rspTsUs`. */
 function demoIsoTpExchange(
+  tabId: string,
   requestSeq: number,
   request: readonly number[],
   response: readonly number[],
   reqTsUs: number,
   rspTsUs: number,
 ): void {
-  demoPushFrame('tx', 'single', demoFrameData([request.length & 0x0f], request), requestSeq, reqTsUs + 120);
+  demoPushFrame(tabId, 'tx', 'single', demoFrameData([request.length & 0x0f], request), requestSeq, reqTsUs + 120);
   if (response.length <= 7) {
-    demoPushFrame('rx', 'single', demoFrameData([response.length & 0x0f], response), requestSeq, rspTsUs - 80);
+    demoPushFrame(tabId, 'rx', 'single', demoFrameData([response.length & 0x0f], response), requestSeq, rspTsUs - 80);
     return;
   }
   const cfCount = Math.ceil((response.length - 6) / 7);
   const gapUs = 2_300; // above the demo STmin (2 ms)
   const ffTs = rspTsUs - 400 - cfCount * gapUs;
   demoPushFrame(
+    tabId,
     'rx',
     'first',
     [0x10 | ((response.length >> 8) & 0x0f), response.length & 0xff, ...response.slice(0, 6)],
     requestSeq,
     ffTs,
   );
-  demoPushFrame('tx', 'flowControl', demoFrameData([0x30, 0x00, 0x02], []), requestSeq, ffTs + 400);
+  demoPushFrame(tabId, 'tx', 'flowControl', demoFrameData([0x30, 0x00, 0x02], []), requestSeq, ffTs + 400);
   for (let i = 0; i < cfCount; i += 1) {
     const chunk = response.slice(6 + i * 7, 6 + (i + 1) * 7);
     demoPushFrame(
+      tabId,
       'rx',
       'consecutive',
       demoFrameData([0x20 | ((i + 1) & 0x0f)], chunk),
@@ -600,57 +797,87 @@ function demoIsoTpExchange(
 
 // ─── Session info / loss handling ─────────────────────────────────────────────
 
-function markSessionLost(err: DiagUiError): void {
-  stopConversationPolling();
-  haltPidPolling();
-  setState({
-    session: { ...currentState.session, connected: false, testerPresentActive: false },
+/** True when a poll/command loop is bound to this tab (polling + PID loops only ever serve the active tab). */
+function isActiveTab(tabId: string): boolean {
+  return raw.activeTabId === tabId;
+}
+
+function markSessionLost(tabId: string, err: DiagUiError): void {
+  if (isActiveTab(tabId)) {
+    stopConversationPolling();
+    haltPidPolling();
+  }
+  updateTab(tabId, (tab) => ({
+    session: { ...tab.session, connected: false, testerPresentActive: false },
     sessionInfo: null,
+    isPolling: false,
     lastError: err,
-  });
+  }));
+}
+
+/** Errors that are properties of the BUS (armed / panic / listen-only / gone), not of one ECU session. */
+const BUS_WIDE_LOST_CODES: ReadonlySet<DiagUiError['code']> = new Set<DiagUiError['code']>([
+  'panic_latched',
+  'disarmed',
+  'listen_only',
+  'bus_not_connected',
+]);
+
+/** Marks the tab lost; for bus-wide causes every connected tab on the same bus is lost too. */
+function markLost(tabId: string, err: DiagUiError): void {
+  const origin = getTab(tabId);
+  markSessionLost(tabId, err);
+  if (!origin || !BUS_WIDE_LOST_CODES.has(err.code)) return;
+  for (const other of raw.tabs) {
+    if (other.id !== tabId && other.session.connected && other.session.config.busId === origin.session.config.busId) {
+      markSessionLost(other.id, err);
+    }
+  }
 }
 
 /** `info.open` is deliberately NOT used for the connected state (backend may report false); errors decide. */
-function applyInfo(info: DiagSessionInfoDto): void {
-  if (info.lastSeq < conversationCursor) resetSeqEpoch();
-  setState({
+function applyInfo(tabId: string, info: DiagSessionInfoDto): void {
+  if (info.lastSeq < rtOf(tabId).conversationCursor) resetSeqEpoch(tabId);
+  updateTab(tabId, (tab) => ({
     sessionInfo: info,
     session: {
-      ...currentState.session,
+      ...tab.session,
       testerPresentActive: info.testerPresentEnabled,
-      udsSession: mapActiveSession(info.activeSession) ?? currentState.session.udsSession,
+      udsSession: mapActiveSession(info.activeSession) ?? tab.session.udsSession,
     },
-  });
+  }));
 }
 
-async function refreshSessionInfo(gen?: number): Promise<void> {
-  if (currentState.mockMode || !currentState.session.connected) return;
-  const info = await diagInvoke('cmd_diag_session_info', { config: currentDto() });
+async function refreshSessionInfo(tabId: string, gen?: number): Promise<void> {
+  const tab = getTab(tabId);
+  if (raw.mockMode || !tab || !tab.session.connected) return;
+  const dto = toDiagDto(tab.session.config);
+  const info = await diagInvoke('cmd_diag_session_info', { config: dto });
   if (gen !== undefined && gen !== pollGen) return;
-  if (!currentState.session.connected) return;
-  applyInfo(info);
+  if (!getTab(tabId)?.session.connected) return;
+  applyInfo(tabId, info);
 }
 
 /** After a user command: refresh session info in the background (poll loop reports real faults). */
-function refreshSessionInfoSoon(): void {
-  void refreshSessionInfo().catch(() => undefined);
+function refreshSessionInfoSoon(tabId: string): void {
+  void refreshSessionInfo(tabId).catch(() => undefined);
 }
 
-/** Central handler for a failed real command. */
-function handleCommandError(err: unknown): DiagUiError {
+/** Central handler for a failed real command (result is pinned to `tabId`). */
+function handleCommandError(tabId: string, err: unknown): DiagUiError {
   const e = toDiagUiError(err);
-  setState({ lastError: e });
-  if (SESSION_LOST_CODES.has(e.code) && currentState.session.connected && !currentState.mockMode) {
-    markSessionLost(e);
+  updateTab(tabId, { lastError: e });
+  if (SESSION_LOST_CODES.has(e.code) && getTab(tabId)?.session.connected && !raw.mockMode) {
+    markLost(tabId, e);
   }
   return e;
 }
 
-function touchResponse(): void {
-  setState({ session: { ...currentState.session, lastResponseMs: Date.now() } });
+function touchResponse(tabId: string): void {
+  patchSession(tabId, { lastResponseMs: Date.now() });
 }
 
-// ─── Conversation polling (~4 Hz; only while connected AND a Diagnostics view is mounted) ──
+// ─── Conversation polling (~4 Hz; ACTIVE tab only; only while connected AND a Diagnostics view is mounted) ──
 
 function pollSleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -665,88 +892,83 @@ function pollSleep(ms: number): Promise<void> {
 
 const MAX_ISOTP_FRAMES = 4096;
 const ISOTP_PAGE_MAX = 500;
-let isotpCursor = 0;
-let isotpLastStored = 0;
-let isotpUid = 0;
-let isotpUnavailable = false; // backend command missing: stop asking until the next connect
-const isotpReassembler = new IsoTpReassembler();
-
-function resetIsoTpTap(): void {
-  isotpCursor = 0;
-  isotpLastStored = 0;
-  isotpUnavailable = false;
-  isotpReassembler.reset();
-}
 
 /** Appends chronologically (oldest first) and trims the oldest rows beyond the cap. */
-function pushIsoTpEntries(entries: IsoTpFrameEntry[]): void {
+function pushIsoTpEntries(tabId: string, entries: IsoTpFrameEntry[]): void {
   if (entries.length === 0) return;
-  let isotpFrames = currentState.isotpFrames.concat(entries);
-  if (isotpFrames.length > MAX_ISOTP_FRAMES) isotpFrames = isotpFrames.slice(isotpFrames.length - MAX_ISOTP_FRAMES);
-  setState({ isotpFrames });
+  updateTab(tabId, (tab) => {
+    let isotpFrames = tab.isotpFrames.concat(entries);
+    if (isotpFrames.length > MAX_ISOTP_FRAMES) isotpFrames = isotpFrames.slice(isotpFrames.length - MAX_ISOTP_FRAMES);
+    return { isotpFrames };
+  });
 }
 
-function applyIsoTpPage(page: IsoTpFramePageDto): void {
-  if (page.lastSeq < isotpCursor) {
+function applyIsoTpPage(tabId: string, page: IsoTpFramePageDto): void {
+  const rt = rtOf(tabId);
+  if (page.lastSeq < rt.isotpCursor) {
     // Backend session reopened (seq restarted at 1): keep the old rows, restart the cursor.
-    isotpCursor = 0;
-    isotpLastStored = 0;
-    isotpReassembler.reset();
+    rt.isotpCursor = 0;
+    rt.isotpLastStored = 0;
+    rt.isotpReassembler.reset();
     return;
   }
-  if (page.truncated || page.dropped > 0) isotpReassembler.reset(); // gap: partial multi-frame state is invalid
+  if (page.truncated || page.dropped > 0) rt.isotpReassembler.reset(); // gap: partial multi-frame state is invalid
   const fresh: IsoTpFrameDto[] = page.frames
-    .filter((f: IsoTpFrameDto) => f.seq > isotpLastStored)
+    .filter((f: IsoTpFrameDto) => f.seq > rt.isotpLastStored)
     .map(normalizeIsoTpFrame);
   if (fresh.length > 0) {
-    const entries = fresh.map((f) => isoTpEntryFromDto(f, ++isotpUid, seqEpoch, isotpReassembler));
-    isotpLastStored = fresh[fresh.length - 1].seq;
-    pushIsoTpEntries(entries);
+    const entries = fresh.map((f) => isoTpEntryFromDto(f, ++isotpUid, rt.seqEpoch, rt.isotpReassembler));
+    rt.isotpLastStored = fresh[fresh.length - 1].seq;
+    pushIsoTpEntries(tabId, entries);
   }
-  isotpCursor = Math.max(isotpCursor, page.lastSeq);
+  rt.isotpCursor = Math.max(rt.isotpCursor, page.lastSeq);
 }
 
-async function pollIsoTp(gen: number): Promise<void> {
-  if (isotpUnavailable) return;
+async function pollIsoTp(tabId: string, gen: number): Promise<void> {
+  const rt = rtOf(tabId);
+  const dto = dtoOf(tabId);
+  if (rt.isotpUnavailable || !dto) return;
   try {
     const page = await diagInvoke('cmd_diag_get_isotp_frames', {
-      config: currentDto(),
-      sinceSeq: isotpCursor,
+      config: dto,
+      sinceSeq: rt.isotpCursor,
       max: ISOTP_PAGE_MAX,
     });
     if (gen !== pollGen) return;
-    applyIsoTpPage(page);
+    applyIsoTpPage(tabId, page);
   } catch (err) {
     if (gen !== pollGen) return;
     // A missing / failing frame tap must never tear down the UDS session: just stop asking.
-    if (toDiagUiError(err).code === 'backend_missing') isotpUnavailable = true;
+    if (toDiagUiError(err).code === 'backend_missing') rt.isotpUnavailable = true;
   }
 }
 
-async function pollLoop(gen: number): Promise<void> {
+async function pollLoop(tabId: string, gen: number): Promise<void> {
   let tick = 0;
   while (gen === pollGen) {
     let delay = POLL_INTERVAL_MS;
+    const dto = dtoOf(tabId);
+    if (!dto) return;
     try {
       const page = await diagInvoke('cmd_diag_get_conversation', {
-        config: currentDto(),
-        sinceSeq: conversationCursor,
+        config: dto,
+        sinceSeq: rtOf(tabId).conversationCursor,
         max: CONVERSATION_PAGE_MAX,
       });
       if (gen !== pollGen) return;
-      if (!applyConversationPage(page)) continue; // seq restarted: re-fetch from 0 immediately
-      await pollIsoTp(gen);
+      if (!applyConversationPage(tabId, page)) continue; // seq restarted: re-fetch from 0 immediately
+      await pollIsoTp(tabId, gen);
       if (gen !== pollGen) return;
       tick += 1;
-      if (tick % INFO_REFRESH_EVERY_TICKS === 0) await refreshSessionInfo(gen);
+      if (tick % INFO_REFRESH_EVERY_TICKS === 0) await refreshSessionInfo(tabId, gen);
     } catch (err) {
       if (gen !== pollGen) return;
       const e = toDiagUiError(err);
       if (e.code === 'backend_missing' || SESSION_LOST_CODES.has(e.code)) {
-        markSessionLost(e);
+        markLost(tabId, e);
         return;
       }
-      setState({ lastError: e });
+      updateTab(tabId, { lastError: e });
       delay = POLL_ERROR_BACKOFF_MS;
     }
     if (gen !== pollGen) return;
@@ -754,11 +976,11 @@ async function pollLoop(gen: number): Promise<void> {
   }
 }
 
-function startConversationPolling(): void {
+function startConversationPolling(tabId: string): void {
   if (pollRunning) return;
   pollRunning = true;
   pollGen += 1;
-  void pollLoop(pollGen);
+  void pollLoop(tabId, pollGen);
 }
 
 function stopConversationPolling(): void {
@@ -770,12 +992,16 @@ function stopConversationPolling(): void {
   }
 }
 
+/** One poll loop for the ACTIVE tab: re-evaluated on connect / disconnect / tab switch / view attach. */
 function syncConversationPolling(): void {
-  const want = !currentState.mockMode && currentState.session.connected && viewRefs > 0;
-  if (want) startConversationPolling();
-  else stopConversationPolling();
+  const tab = activeTabOf(raw);
+  const want = !raw.mockMode && tab.session.connected && viewRefs > 0;
+  if (!want) {
+    stopConversationPolling();
+    return;
+  }
+  startConversationPolling(tab.id);
 }
-
 
 // ─── ECU discovery (DEMO-only synthetic result) ──────────────────────────────
 
@@ -825,6 +1051,32 @@ function makeMockDiscovery(req: EcuDiscoveryRequestDto): EcuDiscoveryResultDto {
   };
 }
 
+// ─── Tab lifecycle helpers ───────────────────────────────────────────────────
+
+function findDuplicate(selfId: string | null, config: DiagSessionConfig): DiagSessionTab | undefined {
+  const key = addressingKey(config);
+  return raw.tabs.find((tab) => tab.id !== selfId && addressingKey(tab.session.config) === key);
+}
+
+function activateTab(id: string): void {
+  if (id === raw.activeTabId || !getTab(id)) return;
+  // PID polling and the conversation poll serve the ACTIVE tab only: stop them before switching.
+  haltPidPolling();
+  stopConversationPolling();
+  setRaw({ ...raw, activeTabId: id });
+  syncConversationPolling();
+}
+
+/** Fire-and-forget backend close of a session whose tab is already gone / reset. */
+function closeBackendSession(config: DiagSessionConfigDto): Promise<DiagUiError | null> {
+  return diagInvoke('cmd_diag_close_session', { config })
+    .then(() => null)
+    .catch((err: unknown) => {
+      const e = toDiagUiError(err);
+      return e.code === 'session_closed' ? null : e;
+    });
+}
+
 // ─── Public store ─────────────────────────────────────────────────────────────
 
 export const diagnosticsStore = {
@@ -836,7 +1088,12 @@ export const diagnosticsStore = {
   },
 
   getState(): DiagnosticsState {
-    return currentState;
+    return view();
+  },
+
+  /** Backend session config of a specific tab (the object every `cmd_diag_*` / `cmd_flash_*` receives); null once closed. */
+  getTabConfigDto(tabId: string): DiagSessionConfigDto | null {
+    return dtoOf(tabId);
   },
 
   /**
@@ -855,26 +1112,112 @@ export const diagnosticsStore = {
     };
   },
 
-  async connect(config: DiagSessionConfig): Promise<void> {
-    if (currentState.connecting || currentState.session.connected) return;
+  // ── Tabs ──
 
-    if (currentState.mockMode) {
-      setState({
-        session: { connected: true, config, udsSession: 'default', testerPresentActive: false, lastResponseMs: Date.now() },
-        isotpFrames: [],
-        conversation: [],
-              lastError: null,
+  /** Existing tab with identical backend addressing (excluding `excludeTabId`), if any. */
+  findTabByAddressing(config: DiagSessionConfig, excludeTabId: string | null = null): DiagSessionTab | null {
+    return findDuplicate(excludeTabId, config) ?? null;
+  },
+
+  /** Creates and activates a new (disconnected) tab; `null` at the `MAX_DIAG_TABS` limit. */
+  addTab(partial: Partial<DiagSessionConfig> = {}): string | null {
+    if (raw.tabs.length >= MAX_DIAG_TABS) return null;
+    const tab = makeTab({ ...DEFAULT_CONFIG, ...partial });
+    setRaw({ ...raw, tabs: [...raw.tabs, tab] });
+    activateTab(tab.id);
+    return tab.id;
+  },
+
+  /**
+   * "Open session" from discovery: switches to a tab with identical addressing if one exists,
+   * otherwise creates a new tab. `null` when a new tab was needed but the limit is reached.
+   */
+  openTabForConfig(partial: Partial<DiagSessionConfig>): string | null {
+    const config: DiagSessionConfig = { ...DEFAULT_CONFIG, ...partial };
+    const existing = findDuplicate(null, config);
+    if (existing) {
+      activateTab(existing.id);
+      return existing.id;
+    }
+    return diagnosticsStore.addTab(partial);
+  },
+
+  setActiveTab(id: string): void {
+    activateTab(id);
+  },
+
+  renameTab(id: string, label: string): void {
+    const tab = getTab(id);
+    if (!tab) return;
+    const trimmed = label.trim().slice(0, MAX_TAB_LABEL);
+    if (trimmed.length === 0) updateTab(id, { label: defaultTabLabel(tab.session.config), labelCustom: false });
+    else updateTab(id, { label: trimmed, labelCustom: true });
+  },
+
+  /** Closes the tab and its backend session. Always leaves at least one (blank) tab. */
+  async closeTab(id: string): Promise<void> {
+    const tab = getTab(id);
+    if (!tab) return;
+    const wasActive = raw.activeTabId === id;
+    const needClose = tab.session.connected && !raw.mockMode;
+    const dto = toDiagDto(tab.session.config);
+    const idx = raw.tabs.findIndex((x) => x.id === id);
+    let tabs = raw.tabs.filter((x) => x.id !== id);
+    if (tabs.length === 0) tabs = [makeTab(DEFAULT_CONFIG)];
+    const nextActive = wasActive ? tabs[Math.min(idx, tabs.length - 1)].id : raw.activeTabId;
+    if (wasActive) {
+      haltPidPolling();
+      stopConversationPolling();
+    }
+    runtimes.delete(id);
+    setRaw({ ...raw, tabs, activeTabId: nextActive });
+    if (wasActive) syncConversationPolling();
+    if (needClose) {
+      const e = await closeBackendSession(dto);
+      if (e) updateTab(raw.activeTabId, { lastError: e });
+    }
+  },
+
+  /** Connects the ACTIVE tab (refused when another tab owns the same addressing). */
+  async connect(config: DiagSessionConfig): Promise<void> {
+    const tabId = raw.activeTabId;
+    const tab = getTab(tabId);
+    if (!tab || tab.connecting || tab.session.connected) return;
+
+    const dup = findDuplicate(tabId, config);
+    if (dup) {
+      updateTab(tabId, {
+        session: { ...tab.session, config },
+        lastError: { code: 'duplicate_session', message: dup.label },
+        duplicateOfTabId: dup.id,
       });
       return;
     }
 
-    setState({ connecting: true, lastError: null, session: { ...currentState.session, config } });
+    if (raw.mockMode) {
+      updateTab(tabId, {
+        session: { connected: true, config, udsSession: 'default', testerPresentActive: false, lastResponseMs: Date.now() },
+        isotpFrames: [],
+        conversation: [],
+        lastError: null,
+        duplicateOfTabId: null,
+      });
+      return;
+    }
+
+    updateTab(tabId, { connecting: true, lastError: null, duplicateOfTabId: null, session: { ...tab.session, config } });
     try {
       const info = await diagInvoke('cmd_diag_open_session', { config: toDiagDto(config) });
-      conversationCursor = info.lastSeq;
-      lastStoredSeq = info.lastSeq;
-      resetIsoTpTap();
-      setState({
+      if (!getTab(tabId)) {
+        // Tab was closed while connecting: do not leave an orphan backend session behind.
+        void closeBackendSession(toDiagDto(config));
+        return;
+      }
+      const rt = rtOf(tabId);
+      rt.conversationCursor = info.lastSeq;
+      rt.lastStoredSeq = info.lastSeq;
+      resetIsoTpTap(rt);
+      updateTab(tabId, {
         connecting: false,
         session: {
           connected: true,
@@ -888,98 +1231,144 @@ export const diagnosticsStore = {
         livePidValues: new Map(),
         livePidErrors: new Map(),
         conversation: [],
-              lastError: null,
+        lastError: null,
       });
       syncConversationPolling();
     } catch (err) {
-      setState({ connecting: false, lastError: toDiagUiError(err) });
+      updateTab(tabId, { connecting: false, lastError: toDiagUiError(err) });
     }
   },
 
-  async disconnect(): Promise<void> {
-    const wasMock = currentState.mockMode;
-    const wasConnected = currentState.session.connected;
-    const config = currentDto();
-    stopConversationPolling();
-    haltPidPolling();
-    setState({
-      session: { ...currentState.session, connected: false, testerPresentActive: false, lastResponseMs: null },
+  /** Disconnects the given tab (default: the active one). */
+  async disconnect(tabId: string = raw.activeTabId): Promise<void> {
+    const tab = getTab(tabId);
+    if (!tab) return;
+    const wasMock = raw.mockMode;
+    const wasConnected = tab.session.connected;
+    const dto = toDiagDto(tab.session.config);
+    if (isActiveTab(tabId)) {
+      stopConversationPolling();
+      haltPidPolling();
+    }
+    updateTab(tabId, (cur) => ({
+      session: { ...cur.session, connected: false, testerPresentActive: false, lastResponseMs: null },
       sessionInfo: null,
       isPolling: false,
-    });
+    }));
     if (wasMock || !wasConnected) return;
-    try {
-      await diagInvoke('cmd_diag_close_session', { config });
-    } catch (err) {
-      const e = toDiagUiError(err);
-      if (e.code !== 'session_closed') setState({ lastError: e });
-    }
+    const e = await closeBackendSession(dto);
+    if (e) updateTab(tabId, { lastError: e });
   },
 
   setMockMode(v: boolean): void {
-    if (v === currentState.mockMode) return;
-    if (currentState.session.connected) void diagnosticsStore.disconnect();
+    if (v === raw.mockMode) return;
     haltPidPolling();
-    conversationCursor = 0;
-    lastStoredSeq = 0;
-    resetIsoTpTap();
-    setState({
-      mockMode: v,
-      sessionInfo: null,
-      storedDtcs: [],
-      pendingDtcs: [],
-      didValues: new Map(),
-      didErrors: new Map(),
-      livePidValues: new Map(),
-      livePidErrors: new Map(),
-      isPolling: false,
-      conversation: [],
-          lastUds: null,
-      isotpFrames: [],
-      lastError: null,
-      discovery: null,
-      discoveryError: null,
-    });
+    stopConversationPolling();
+    // Real sessions of the mode being left are closed in the backend; mock sessions have nothing to close.
+    const toClose = raw.mockMode ? [] : raw.tabs.filter((tab) => tab.session.connected).map((tab) => toDiagDto(tab.session.config));
+    runtimes.clear();
+    const tabs = raw.tabs.map((tab) => ({
+      id: tab.id,
+      label: tab.label,
+      labelCustom: tab.labelCustom,
+      ecuId: tab.ecuId,
+      ...freshTabData(tab.session.config),
+    }));
+    setRaw({ ...raw, tabs, mockMode: v, discovery: null, discoveryError: null });
+    for (const dto of toClose) void closeBackendSession(dto);
   },
 
-  updateConfig(config: DiagSessionConfig): void {
-    setState({ session: { ...currentState.session, config } });
+  /** Stores the (not yet connected) form values in the tab. Ignored while connected / connecting. */
+  updateConfig(config: DiagSessionConfig, tabId: string = raw.activeTabId): void {
+    const tab = getTab(tabId);
+    if (!tab || tab.session.connected || tab.connecting) return;
+    if (JSON.stringify(tab.session.config) === JSON.stringify(config)) return;
+    // Hand-edited addressing no longer belongs to the registry ECU the tab was opened from.
+    const ecuId = tab.ecuId !== null && addressingKey(config) !== addressingKey(tab.session.config) ? null : tab.ecuId;
+    updateTab(tabId, { session: { ...tab.session, config }, duplicateOfTabId: null, ecuId });
+  },
+
+  /** Remembers which ECU registry record a tab was opened from (display only). */
+  setTabEcu(tabId: string, ecuId: string | null): void {
+    const tab = getTab(tabId);
+    if (!tab || tab.ecuId === ecuId) return;
+    updateTab(tabId, { ecuId });
   },
 
   clearError(): void {
-    if (currentState.lastError !== null) setState({ lastError: null });
+    const tab = activeTabOf(raw);
+    if (tab.lastError !== null || tab.duplicateOfTabId !== null) {
+      updateTab(tab.id, { lastError: null, duplicateOfTabId: null });
+    }
   },
 
   /** DiagnosticSessionControl (0x10). Real mode: session state comes back via `DiagSessionInfoDto`. */
   async setUdsSession(udsSession: DiagSessionState['udsSession']): Promise<void> {
+    const tabId = raw.activeTabId;
     const subFn = udsSession === 'default' ? 0x01 : udsSession === 'extended' ? 0x03 : 0x02;
-    if (currentState.mockMode) {
-      setState({ session: { ...currentState.session, udsSession } });
-    }
-    await diagnosticsStore.sendUds(0x10, subFn, [], 'physical', 'session');
+    if (raw.mockMode) patchSession(tabId, { udsSession });
+    await sendUdsOn(tabId, 0x10, subFn, [], 'physical', 'session');
   },
 
   /** TesterPresent background keep-alive (`3E 80`). Real: `cmd_diag_set_tester_present`. */
   async setTesterPresent(active: boolean, intervalMs: number | null = null): Promise<void> {
-    if (!currentState.session.connected) {
-      setState({ lastError: NOT_CONNECTED });
+    const tabId = raw.activeTabId;
+    const tab = getTab(tabId);
+    if (!tab || !tab.session.connected) {
+      updateTab(tabId, { lastError: NOT_CONNECTED });
       return;
     }
-    if (currentState.mockMode) {
-      setState({ session: { ...currentState.session, testerPresentActive: active } });
-      demoEvent('keepalive_sent', { sid: 0x3e, bytes: [0x3e, 0x80], detail: active ? 'DEMO on' : 'DEMO off', origin: 'keepalive' });
+    if (raw.mockMode) {
+      patchSession(tabId, { testerPresentActive: active });
+      demoEvent(tabId, 'keepalive_sent', { sid: 0x3e, bytes: [0x3e, 0x80], detail: active ? 'DEMO on' : 'DEMO off', origin: 'keepalive' });
       return;
     }
     try {
       const info = await diagInvoke('cmd_diag_set_tester_present', {
-        config: currentDto(),
+        config: toDiagDto(tab.session.config),
         enabled: active,
         intervalMs,
       });
-      if (currentState.session.connected) applyInfo(info);
+      if (getTab(tabId)?.session.connected) applyInfo(tabId, info);
     } catch (err) {
-      handleCommandError(err);
+      handleCommandError(tabId, err);
     }
+  },
+
+  /**
+   * Strict, tab-pinned TesterPresent keep-alive (UDS flow `uds_tester_present_keepalive`). The
+   * backend keep-alive sends `3E 80` PHYSICALLY to the tab's request id, only when the tester was
+   * silent for one interval (any request restarts S3). Throws UdsTransportError on failure.
+   * `intervalMs` is clamped to the backend range 100..60000. Demo mode only flips the HMI flag.
+   */
+  async setTesterPresentOn(tabId: string, active: boolean, intervalMs: number | null = null): Promise<void> {
+    const tab = getTab(tabId);
+    if (!tab || !tab.session.connected) {
+      // Nothing to stop on a closed session; starting needs one.
+      if (!active) return;
+      throw new UdsTransportError('notConnected', formatDiagError(t, NOT_CONNECTED), NOT_CONNECTED);
+    }
+    const interval = intervalMs === null ? null : Math.min(60_000, Math.max(100, Math.round(intervalMs)));
+    if (raw.mockMode) {
+      patchSession(tabId, { testerPresentActive: active });
+      demoEvent(tabId, 'keepalive_sent', { sid: 0x3e, bytes: [0x3e, 0x80], detail: active ? 'DEMO on' : 'DEMO off', origin: 'keepalive' });
+      return;
+    }
+    try {
+      const info = await diagInvoke('cmd_diag_set_tester_present', {
+        config: toDiagDto(tab.session.config),
+        enabled: active,
+        intervalMs: interval,
+      });
+      if (getTab(tabId)?.session.connected) applyInfo(tabId, info);
+    } catch (err) {
+      throw err instanceof UdsTransportError ? err : strictError(tabId, err);
+    }
+  },
+
+  /** Functional request id of a tab's session config (`null` = physical addressing only). */
+  functionalIdOf(tabId: string): number | null {
+    return getTab(tabId)?.session.config.functionalId ?? null;
   },
 
   /**
@@ -987,29 +1376,29 @@ export const diagnosticsStore = {
    * deterministic synthetic result (marked DEMO in the UI); real mode never fabricates data.
    */
   async discoverEcus(req: EcuDiscoveryRequestDto): Promise<EcuDiscoveryResultDto | null> {
-    if (currentState.discovering) return null;
-    setState({ discovering: true, discoveryError: null });
-    if (currentState.mockMode) {
+    if (raw.discovering) return null;
+    setGlobal({ discovering: true, discoveryError: null });
+    if (raw.mockMode) {
       await new Promise<void>((r) => setTimeout(r, 400));
       const discovery = makeMockDiscovery(req);
-      setState({ discovering: false, discovery });
+      setGlobal({ discovering: false, discovery });
       return discovery;
     }
     const opGen = diagOpGen;
     try {
       const discovery = await diagInvoke('cmd_diag_discover_ecus', { request: req });
       if (opGen !== diagOpGen) return null;
-      setState({ discovering: false, discovery });
+      setGlobal({ discovering: false, discovery });
       return discovery;
     } catch (err) {
       if (opGen !== diagOpGen) return null;
-      setState({ discovering: false, discoveryError: toDiagUiError(err) });
+      setGlobal({ discovering: false, discoveryError: toDiagUiError(err) });
       return null;
     }
   },
 
   clearDiscovery(): void {
-    setState({ discovery: null, discoveryError: null });
+    setGlobal({ discovery: null, discoveryError: null });
   },
 
   /**
@@ -1017,43 +1406,43 @@ export const diagnosticsStore = {
    * `passiveError`, apart from `lastError`: they never imply a lost UDS session.
    */
   async passiveStart(busId: number): Promise<void> {
-    if (currentState.mockMode || currentState.passiveBusy) return;
-    setState({ passiveBusy: true, passiveError: null });
+    if (raw.mockMode || raw.passiveBusy) return;
+    setGlobal({ passiveBusy: true, passiveError: null });
     try {
       const passive = await diagInvoke('cmd_diag_passive_discovery_start', { busId });
-      setState({ passiveBusy: false, passive });
+      setGlobal({ passiveBusy: false, passive });
     } catch (err) {
-      setState({ passiveBusy: false, passiveError: toDiagUiError(err) });
+      setGlobal({ passiveBusy: false, passiveError: toDiagUiError(err) });
     }
   },
 
   async passiveStop(busId: number): Promise<void> {
-    if (currentState.mockMode || currentState.passiveBusy) return;
-    setState({ passiveBusy: true, passiveError: null });
+    if (raw.mockMode || raw.passiveBusy) return;
+    setGlobal({ passiveBusy: true, passiveError: null });
     try {
       const passive = await diagInvoke('cmd_diag_passive_discovery_stop', { busId });
-      setState({ passiveBusy: false, passive });
+      setGlobal({ passiveBusy: false, passive });
     } catch (err) {
-      setState({ passiveBusy: false, passiveError: toDiagUiError(err) });
+      setGlobal({ passiveBusy: false, passiveError: toDiagUiError(err) });
     }
   },
 
   /** 1 Hz poll target. Never overlaps itself; silent on transient errors except the first (kept in state). */
   async passiveSnapshot(busId: number): Promise<void> {
-    if (currentState.mockMode || passiveSnapshotInFlight) return;
+    if (raw.mockMode || passiveSnapshotInFlight) return;
     passiveSnapshotInFlight = true;
     try {
       const passive = await diagInvoke('cmd_diag_passive_discovery_snapshot', { busId });
-      setState({ passive, passiveError: null });
+      setGlobal({ passive, passiveError: null });
     } catch (err) {
-      setState({ passiveError: toDiagUiError(err) });
+      setGlobal({ passiveError: toDiagUiError(err) });
     } finally {
       passiveSnapshotInFlight = false;
     }
   },
 
   clearPassive(): void {
-    setState({ passive: null, passiveError: null });
+    setGlobal({ passive: null, passiveError: null });
   },
 
   /**
@@ -1061,20 +1450,20 @@ export const diagnosticsStore = {
    * backend aborts and returns the partial result (`abortCode`), which the operator must see.
    */
   async runSweep(request: PhysicalSweepRequestDto): Promise<PhysicalSweepResultDto | null> {
-    if (currentState.mockMode || currentState.sweeping) return null;
-    setState({ sweeping: true, sweepError: null, sweepResult: null });
+    if (raw.mockMode || raw.sweeping) return null;
+    setGlobal({ sweeping: true, sweepError: null, sweepResult: null });
     try {
       const sweepResult = await diagInvoke('cmd_diag_physical_sweep', { request });
-      setState({ sweeping: false, sweepResult });
+      setGlobal({ sweeping: false, sweepResult });
       return sweepResult;
     } catch (err) {
-      setState({ sweeping: false, sweepError: toDiagUiError(err) });
+      setGlobal({ sweeping: false, sweepError: toDiagUiError(err) });
       return null;
     }
   },
 
   clearSweep(): void {
-    setState({ sweepResult: null, sweepError: null });
+    setGlobal({ sweepResult: null, sweepError: null });
   },
 
   /**
@@ -1087,59 +1476,63 @@ export const diagnosticsStore = {
     params: readonly number[],
     retry: BusyRetryOptions | null = null,
   ): Promise<DtcReportResultDto | null> {
-    if (!currentState.session.connected) {
-      setState({ lastError: NOT_CONNECTED });
+    const tabId = raw.activeTabId;
+    const tab = getTab(tabId);
+    if (!tab || !tab.session.connected) {
+      updateTab(tabId, { lastError: NOT_CONNECTED });
       return null;
     }
-    if (currentState.mockMode || currentState.dtcReportBusy) return null;
-    setState({ dtcReportBusy: true, lastError: null });
+    if (raw.mockMode || tab.dtcReportBusy) return null;
+    updateTab(tabId, { dtcReportBusy: true, lastError: null });
     const opGen = diagOpGen;
     try {
       const result = await diagInvoke('cmd_diag_read_dtc_report', {
-        config: currentDto(),
+        config: toDiagDto(tab.session.config),
         subFunction,
         params: [...params],
         options: { addressing: 'physical', timeoutMs: null, origin: 'dtc', ...busyRetryFields(retry) },
       });
       if (opGen !== diagOpGen) return null;
-      setState({ dtcReportBusy: false, dtcReport: { subFunction, result } });
-      touchResponse();
-      refreshSessionInfoSoon();
+      updateTab(tabId, { dtcReportBusy: false, dtcReport: { subFunction, result } });
+      touchResponse(tabId);
+      refreshSessionInfoSoon(tabId);
       return result;
     } catch (err) {
       if (opGen !== diagOpGen) return null;
-      setState({ dtcReportBusy: false });
-      handleCommandError(err);
+      updateTab(tabId, { dtcReportBusy: false });
+      handleCommandError(tabId, err);
       return null;
     }
   },
 
   clearDtcReport(): void {
-    setState({ dtcReport: null });
+    updateTab(raw.activeTabId, { dtcReport: null });
   },
 
   async scanDtcs(): Promise<void> {
-    if (!currentState.session.connected) {
-      setState({ lastError: NOT_CONNECTED });
+    const tabId = raw.activeTabId;
+    const tab = getTab(tabId);
+    if (!tab || !tab.session.connected) {
+      updateTab(tabId, { lastError: NOT_CONNECTED });
       return;
     }
-    setState({ isScanning: true, lastError: null });
+    updateTab(tabId, { isScanning: true, lastError: null });
 
-    if (currentState.mockMode) {
+    if (raw.mockMode) {
       const reqBytes = [0x19, 0x02, 0xff];
       const reqTs = Date.now() * 1000;
-      const reqSeq = demoEvent('request', { sid: 0x19, bytes: reqBytes, origin: 'dtc', timestampUs: reqTs });
+      const reqSeq = demoEvent(tabId, 'request', { sid: 0x19, bytes: reqBytes, origin: 'dtc', timestampUs: reqTs });
       await new Promise<void>((r) => setTimeout(r, 600));
-      setState({
+      updateTab(tabId, (cur) => ({
         storedDtcs: MOCK_STORED_DTCS.filter((d) => d.isConfirmed),
         pendingDtcs: MOCK_STORED_DTCS.filter((d) => d.isPending),
         isScanning: false,
-        session: { ...currentState.session, lastResponseMs: Date.now() },
-      });
+        session: { ...cur.session, lastResponseMs: Date.now() },
+      }));
       const rspBytes = [0x59, 0x02, 0xff, 0x00, 0x01, 0x00, 0x0c, 0x00, 0x03, 0x00, 0x04];
       const rspTs = Date.now() * 1000;
-      demoIsoTpExchange(reqSeq, reqBytes, rspBytes, reqTs, rspTs);
-      demoEvent('response', {
+      demoIsoTpExchange(tabId, reqSeq, reqBytes, rspBytes, reqTs, rspTs);
+      demoEvent(tabId, 'response', {
         sid: 0x59,
         bytes: rspBytes,
         requestSeq: reqSeq,
@@ -1153,132 +1546,87 @@ export const diagnosticsStore = {
     const opGen = diagOpGen;
     try {
       const result = await diagInvoke('cmd_diag_read_stored_dtcs', {
-        config: currentDto(),
+        config: toDiagDto(tab.session.config),
         statusMask: null,
         origin: 'dtc',
       });
       if (opGen !== diagOpGen) return;
-      setState({
+      updateTab(tabId, {
         storedDtcs: result.filter((d) => d.isConfirmed),
         pendingDtcs: result.filter((d) => d.isPending),
         isScanning: false,
       });
-      touchResponse();
-      refreshSessionInfoSoon();
+      touchResponse(tabId);
+      refreshSessionInfoSoon(tabId);
     } catch (err) {
       if (opGen !== diagOpGen) return;
-      setState({ isScanning: false });
-      handleCommandError(err);
+      updateTab(tabId, { isScanning: false });
+      handleCommandError(tabId, err);
     }
   },
 
   /** ClearDiagnosticInformation (0x14, all groups) via raw UDS; lists are cleared only on a positive response. */
   async clearDtcs(): Promise<void> {
-    const ex = await diagnosticsStore.sendUds(0x14, null, [0xff, 0xff, 0xff], 'physical', 'dtc');
+    const tabId = raw.activeTabId;
+    const ex = await sendUdsOn(tabId, 0x14, null, [0xff, 0xff, 0xff], 'physical', 'dtc');
     if (!ex || !ex.response) return;
     if (ex.response.positive) {
-      setState({ storedDtcs: [], pendingDtcs: [] });
+      updateTab(tabId, { storedDtcs: [], pendingDtcs: [] });
     } else {
-      setState({ lastError: { code: 'negative_response', message: nrcText(ex.response) } });
+      updateTab(tabId, { lastError: { code: 'negative_response', message: nrcText(ex.response) } });
     }
   },
 
   togglePid(pid: number): void {
-    const next = new Set(currentState.activePids);
+    const next = new Set(raw.activePids);
     if (next.has(pid)) next.delete(pid);
     else next.add(pid);
-    setState({ activePids: next });
+    setGlobal({ activePids: next });
   },
 
   setActivePids(pids: Set<number>): void {
-    setState({ activePids: pids });
+    setGlobal({ activePids: pids });
   },
 
   setPidPollingMs(ms: number): void {
-    const restartDemo = currentState.isPolling && currentState.mockMode;
+    const active = activeTabOf(raw);
+    const restartDemo = active.isPolling && raw.mockMode;
     if (restartDemo) stopPollingInternal();
-    setState({ pidPollingMs: ms }); // real loop reads the interval each round
-    if (restartDemo) startPollingInternal();
+    setGlobal({ pidPollingMs: ms }); // real loop reads the interval each round
+    if (restartDemo) startPollingInternal(active.id);
   },
 
-  /** Demo: synthetic timer. Real: sequential OBD-II 0x01 round-robin on the open session. */
+  /** Demo: synthetic timer. Real: sequential OBD-II 0x01 round-robin on the active tab's open session. */
   startPolling(): void {
-    if (currentState.isPolling) return;
-    if (currentState.mockMode) {
-      setState({ isPolling: true });
-      startPollingInternal();
+    const tab = activeTabOf(raw);
+    if (tab.isPolling) return;
+    if (raw.mockMode) {
+      updateTab(tab.id, { isPolling: true });
+      startPollingInternal(tab.id);
       return;
     }
-    if (!currentState.session.connected) {
-      setState({ lastError: NOT_CONNECTED });
+    if (!tab.session.connected) {
+      updateTab(tab.id, { lastError: NOT_CONNECTED });
       return;
     }
     stopRealPidLoop();
-    setState({ isPolling: true, livePidErrors: new Map() });
-    void realPidLoop(pidGen);
+    updateTab(tab.id, { isPolling: true, livePidErrors: new Map() });
+    void realPidLoop(tab.id, pidGen);
   },
 
   stopPolling(): void {
     haltPidPolling();
-    if (currentState.isPolling) setState({ isPolling: false });
   },
 
   async readDid(did: number): Promise<void> {
-    if (!currentState.session.connected) {
-      setState({ lastError: NOT_CONNECTED });
-      return;
-    }
-
-    if (currentState.mockMode) {
-      const reqBytes = [0x22, (did >> 8) & 0xff, did & 0xff];
-      const reqTs = Date.now() * 1000;
-      const reqSeq = demoEvent('request', { sid: 0x22, bytes: reqBytes, origin: 'did', timestampUs: reqTs });
-      await new Promise<void>((r) => setTimeout(r, 80));
-      const entry = makeMockDidValue(did);
-      const nextDidValues = new Map(currentState.didValues);
-      nextDidValues.set(did, entry);
-      setState({ didValues: nextDidValues, session: { ...currentState.session, lastResponseMs: Date.now() } });
-      const rspBytes = [0x62, (did >> 8) & 0xff, did & 0xff, ...entry.raw];
-      const rspTs = Date.now() * 1000;
-      demoIsoTpExchange(reqSeq, reqBytes, rspBytes, reqTs, rspTs);
-      demoEvent('response', {
-        sid: 0x62,
-        bytes: rspBytes,
-        requestSeq: reqSeq,
-        elapsedUs: rspTs - reqTs,
-        origin: 'did',
-        timestampUs: rspTs,
-      });
-      return;
-    }
-
-    try {
-      const result = await diagInvoke('cmd_diag_read_did', { config: currentDto(), did, origin: 'did' });
-      // Same decoder as the UDS Console (`interpretUdsResponse`): never trust a second, divergent decode.
-      const entry: DidValueEntry = {
-        did,
-        raw: result.raw,
-        decoded: decodeDidValue(did, result.raw),
-        timestampMs: Date.now(),
-      };
-      const nextDidValues = new Map(currentState.didValues);
-      nextDidValues.set(did, entry);
-      const nextErrors = new Map(currentState.didErrors);
-      nextErrors.delete(did);
-      setState({ didValues: nextDidValues, didErrors: nextErrors });
-      touchResponse();
-    } catch (err) {
-      const e = handleCommandError(err);
-      const nextErrors = new Map(currentState.didErrors);
-      nextErrors.set(did, e);
-      setState({ didErrors: nextErrors });
-    }
+    await readDidOn(raw.activeTabId, did);
   },
 
   async readAllDids(): Promise<void> {
+    const tabId = raw.activeTabId; // the whole sweep stays on this tab even if the user switches
     for (const def of DID_CATALOG) {
-      if (!currentState.session.connected) break;
-      await diagnosticsStore.readDid(def.did);
+      if (!getTab(tabId)?.session.connected) break;
+      await readDidOn(tabId, def.did);
     }
   },
 
@@ -1295,82 +1643,28 @@ export const diagnosticsStore = {
     origin: DiagOrigin = 'console',
     retry: BusyRetryOptions | null = null,
   ): Promise<UdsExchange | null> {
-    if (!currentState.session.connected) {
-      setState({ lastError: NOT_CONNECTED });
-      return null;
-    }
-    const requestBytes = [sid, ...(subFn !== null ? [subFn] : []), ...data];
-
-    if (currentState.mockMode) {
-      const reqTs = Date.now() * 1000;
-      const reqSeq = demoEvent('request', { sid, bytes: requestBytes, addressing, origin, timestampUs: reqTs });
-      await new Promise<void>((r) => setTimeout(r, 65));
-      const responseSid = (sid + 0x40) & 0xff;
-      const raw = [responseSid, ...(subFn !== null ? [subFn & 0x7f] : []), 0x00];
-      const rspTs = Date.now() * 1000;
-      const response: UdsResponseDto = {
-        raw,
-        positive: true,
-        suppressed: false,
-        nrc: null,
-        nrcName: null,
-        responsePendingCount: 0,
-        elapsedUs: rspTs - reqTs,
-        transactionSeq: reqSeq,
-      };
-      demoIsoTpExchange(reqSeq, requestBytes, raw, reqTs, rspTs);
-      demoEvent('response', {
-        sid: responseSid,
-        bytes: raw,
-        requestSeq: reqSeq,
-        elapsedUs: rspTs - reqTs,
-        addressing,
-        origin,
-        timestampUs: rspTs,
-      });
-      const exchange: UdsExchange = { id: ++exchangeSeq, atMs: Date.now(), requestBytes, addressing, response, error: null };
-      setState({ lastUds: exchange, session: { ...currentState.session, lastResponseMs: Date.now() } });
-      return exchange;
-    }
-
-    try {
-      const response = await diagInvoke('cmd_diag_send_uds', {
-        config: currentDto(),
-        sid,
-        subFunction: subFn,
-        data: [...data],
-        options: { addressing, timeoutMs: null, origin, ...busyRetryFields(retry) },
-      });
-      const exchange: UdsExchange = { id: ++exchangeSeq, atMs: Date.now(), requestBytes, addressing, response, error: null };
-      setState({ lastUds: exchange, lastError: null });
-      touchResponse();
-      refreshSessionInfoSoon();
-      return exchange;
-    } catch (err) {
-      const e = handleCommandError(err);
-      const exchange: UdsExchange = { id: ++exchangeSeq, atMs: Date.now(), requestBytes, addressing, response: null, error: e };
-      setState({ lastUds: exchange });
-      return exchange;
-    }
+    return sendUdsOn(raw.activeTabId, sid, subFn, data, addressing, origin, retry);
   },
 
   /**
    * Honest ReadDataByIdentifier: never falls back to demo data. Throws UdsTransportError.
    * Returns the DID data record ONLY (contract: `DidReadResultDto.raw` excludes 0x62 and the DID echo).
+   * `tabId` pins the request to one session (default: the active tab at call time).
    */
-  async readDidStrict(did: number, origin: DiagOrigin = 'other'): Promise<number[]> {
-    if (!currentState.session.connected || currentState.mockMode) {
+  async readDidStrict(did: number, origin: DiagOrigin = 'other', tabId: string = raw.activeTabId): Promise<number[]> {
+    const tab = getTab(tabId);
+    if (!tab || !tab.session.connected || raw.mockMode) {
       throw new UdsTransportError('notConnected', formatDiagError(t, NOT_CONNECTED), NOT_CONNECTED);
     }
     try {
-      const result = await diagInvoke('cmd_diag_read_did', { config: currentDto(), did, origin });
+      const result = await diagInvoke('cmd_diag_read_did', { config: toDiagDto(tab.session.config), did, origin });
       if (!result || !Array.isArray(result.raw)) {
         throw new UdsTransportError('failed', 'Malformed cmd_diag_read_did response');
       }
-      touchResponse();
+      touchResponse(tabId);
       return result.raw;
     } catch (err) {
-      throw err instanceof UdsTransportError ? err : strictError(err);
+      throw err instanceof UdsTransportError ? err : strictError(tabId, err);
     }
   },
 
@@ -1379,65 +1673,231 @@ export const diagnosticsStore = {
    * negative responses). Returns the positive response payload AFTER the SID echo (e.g. the data
    * record of `0x63` ReadMemoryByAddress); empty for suppressed responses.
    * Conversation logging is done by the backend; `options.record` is kept for API compatibility only;
-   * `options.origin` tags the transaction (default 'other').
+   * `options.origin` tags the transaction (default 'other'); `options.tabId` pins one session.
+   *
+   * Per-request options (all optional, absent = the previous behaviour: physical, backend P2 timing,
+   * no busy retry):
+   * - `addressing: 'functional'` uses the tab config's `functionalId` (e.g. 0x7DF). Without one the
+   *   call THROWS before anything is sent (never a silent physical fallback). Functional requests
+   *   must fit one single frame; the backend returns the FIRST matching response (the first ECU to
+   *   answer), and never applies a 0x21 busy retry (it would re-broadcast to every ECU).
+   * - Suppressed positive response (SPR bit set in the sub-function byte by the caller): the backend
+   *   listens for P2 only for a possible negative response; on silence it resolves with
+   *   `suppressed: true, raw: []`, so this returns `[]`.
+   * - `timeoutMs`: whole-exchange budget (e.g. 30000 for an erase routine), `null` = backend P2/P2*.
+   * - `busyRetry`: NRC 0x21 busyRepeatRequest retries (physical only).
    */
   async sendUdsStrict(
     sid: number,
     data: readonly number[],
-    options: { record: boolean; origin?: DiagOrigin } = { record: true },
+    options: {
+      record: boolean;
+      origin?: DiagOrigin;
+      tabId?: string;
+      addressing?: UdsAddressing;
+      timeoutMs?: number | null;
+      busyRetry?: BusyRetryOptions | null;
+    } = { record: true },
   ): Promise<number[]> {
-    if (!currentState.session.connected || currentState.mockMode) {
+    const tabId = options.tabId ?? raw.activeTabId;
+    const tab = getTab(tabId);
+    if (!tab || !tab.session.connected || raw.mockMode) {
       throw new UdsTransportError('notConnected', formatDiagError(t, NOT_CONNECTED), NOT_CONNECTED);
     }
+    const addressing: UdsAddressing = options.addressing ?? 'physical';
+    if (addressing === 'functional' && (tab.session.config.functionalId ?? null) === null) {
+      throw new UdsTransportError('failed', t('udsFlow.err.noFunctionalId'));
+    }
+    const timeoutMs = options.timeoutMs !== undefined && options.timeoutMs !== null && options.timeoutMs > 0
+      ? Math.round(options.timeoutMs)
+      : null;
     try {
       const r = await diagInvoke('cmd_diag_send_uds', {
-        config: currentDto(),
+        config: toDiagDto(tab.session.config),
         sid,
         subFunction: null,
         data: [...data],
-        options: { addressing: 'physical', timeoutMs: null, origin: options.origin ?? 'other' },
+        options: {
+          addressing,
+          timeoutMs,
+          origin: options.origin ?? 'other',
+          ...busyRetryFields(addressing === 'physical' ? (options.busyRetry ?? null) : null),
+        },
       });
       if (!r || !Array.isArray(r.raw)) {
         throw new UdsTransportError('failed', 'Malformed cmd_diag_send_uds response');
       }
-      touchResponse();
+      touchResponse(tabId);
       if (!r.positive) {
         const diag: DiagUiError = { code: 'negative_response', message: nrcText(r) };
         throw new UdsTransportError('failed', formatDiagError(t, diag), diag);
       }
       return r.raw.slice(1);
     } catch (err) {
-      throw err instanceof UdsTransportError ? err : strictError(err);
+      throw err instanceof UdsTransportError ? err : strictError(tabId, err);
     }
   },
 
   clearConversation(): void {
-    setState({ conversation: [] });
+    updateTab(raw.activeTabId, { conversation: [] });
   },
 
   /** Clears both the conversation log and the ISO-TP frame tap (Traffic Dock "Clear"). */
   clearTraffic(): void {
-    isotpReassembler.reset();
-    setState({ conversation: [], isotpFrames: [] });
+    const tabId = raw.activeTabId;
+    rtOf(tabId).isotpReassembler.reset();
+    updateTab(tabId, { conversation: [], isotpFrames: [] });
   },
 
   /** "Resend in Console": queue a composer prefill; `UdsConsole` applies it once (on mount or change). */
   setConsoleDraft(draft: Omit<ConsoleDraft, 'nonce'>): void {
-    setState({ consoleDraft: { ...draft, nonce: ++consoleDraftNonce } });
+    updateTab(raw.activeTabId, { consoleDraft: { ...draft, nonce: ++consoleDraftNonce } });
   },
 
   clearConsoleDraft(): void {
-    if (currentState.consoleDraft !== null) setState({ consoleDraft: null });
+    const tab = activeTabOf(raw);
+    if (tab.consoleDraft !== null) updateTab(tab.id, { consoleDraft: null });
   },
 
   clearIsoTpFrames(): void {
-    isotpReassembler.reset();
-    setState({ isotpFrames: [] });
+    const tabId = raw.activeTabId;
+    rtOf(tabId).isotpReassembler.reset();
+    updateTab(tabId, { isotpFrames: [] });
   },
 };
 
-function strictError(err: unknown): UdsTransportError {
-  const e = handleCommandError(err);
+// ─── Tab-pinned command implementations (capture `tabId` at call start, write back to THAT tab) ──
+
+async function readDidOn(tabId: string, did: number): Promise<void> {
+  const tab = getTab(tabId);
+  if (!tab || !tab.session.connected) {
+    updateTab(tabId, { lastError: NOT_CONNECTED });
+    return;
+  }
+
+  if (raw.mockMode) {
+    const reqBytes = [0x22, (did >> 8) & 0xff, did & 0xff];
+    const reqTs = Date.now() * 1000;
+    const reqSeq = demoEvent(tabId, 'request', { sid: 0x22, bytes: reqBytes, origin: 'did', timestampUs: reqTs });
+    await new Promise<void>((r) => setTimeout(r, 80));
+    const entry = makeMockDidValue(did);
+    updateTab(tabId, (cur) => {
+      const nextDidValues = new Map(cur.didValues);
+      nextDidValues.set(did, entry);
+      return { didValues: nextDidValues, session: { ...cur.session, lastResponseMs: Date.now() } };
+    });
+    const rspBytes = [0x62, (did >> 8) & 0xff, did & 0xff, ...entry.raw];
+    const rspTs = Date.now() * 1000;
+    demoIsoTpExchange(tabId, reqSeq, reqBytes, rspBytes, reqTs, rspTs);
+    demoEvent(tabId, 'response', {
+      sid: 0x62,
+      bytes: rspBytes,
+      requestSeq: reqSeq,
+      elapsedUs: rspTs - reqTs,
+      origin: 'did',
+      timestampUs: rspTs,
+    });
+    return;
+  }
+
+  try {
+    const result = await diagInvoke('cmd_diag_read_did', { config: toDiagDto(tab.session.config), did, origin: 'did' });
+    // Same decoder as the UDS Console (`interpretUdsResponse`): never trust a second, divergent decode.
+    const entry: DidValueEntry = {
+      did,
+      raw: result.raw,
+      decoded: decodeDidValue(did, result.raw),
+      timestampMs: Date.now(),
+    };
+    updateTab(tabId, (cur) => {
+      const nextDidValues = new Map(cur.didValues);
+      nextDidValues.set(did, entry);
+      const nextErrors = new Map(cur.didErrors);
+      nextErrors.delete(did);
+      return { didValues: nextDidValues, didErrors: nextErrors };
+    });
+    touchResponse(tabId);
+  } catch (err) {
+    const e = handleCommandError(tabId, err);
+    updateTab(tabId, (cur) => {
+      const nextErrors = new Map(cur.didErrors);
+      nextErrors.set(did, e);
+      return { didErrors: nextErrors };
+    });
+  }
+}
+
+async function sendUdsOn(
+  tabId: string,
+  sid: number,
+  subFn: number | null,
+  data: readonly number[],
+  addressing: UdsAddressing,
+  origin: DiagOrigin,
+  retry: BusyRetryOptions | null = null,
+): Promise<UdsExchange | null> {
+  const tab = getTab(tabId);
+  if (!tab || !tab.session.connected) {
+    updateTab(tabId, { lastError: NOT_CONNECTED });
+    return null;
+  }
+  const requestBytes = [sid, ...(subFn !== null ? [subFn] : []), ...data];
+
+  if (raw.mockMode) {
+    const reqTs = Date.now() * 1000;
+    const reqSeq = demoEvent(tabId, 'request', { sid, bytes: requestBytes, addressing, origin, timestampUs: reqTs });
+    await new Promise<void>((r) => setTimeout(r, 65));
+    const responseSid = (sid + 0x40) & 0xff;
+    const rawBytes = [responseSid, ...(subFn !== null ? [subFn & 0x7f] : []), 0x00];
+    const rspTs = Date.now() * 1000;
+    const response: UdsResponseDto = {
+      raw: rawBytes,
+      positive: true,
+      suppressed: false,
+      nrc: null,
+      nrcName: null,
+      responsePendingCount: 0,
+      elapsedUs: rspTs - reqTs,
+      transactionSeq: reqSeq,
+    };
+    demoIsoTpExchange(tabId, reqSeq, requestBytes, rawBytes, reqTs, rspTs);
+    demoEvent(tabId, 'response', {
+      sid: responseSid,
+      bytes: rawBytes,
+      requestSeq: reqSeq,
+      elapsedUs: rspTs - reqTs,
+      addressing,
+      origin,
+      timestampUs: rspTs,
+    });
+    const exchange: UdsExchange = { id: ++exchangeSeq, atMs: Date.now(), requestBytes, addressing, response, error: null };
+    updateTab(tabId, (cur) => ({ lastUds: exchange, session: { ...cur.session, lastResponseMs: Date.now() } }));
+    return exchange;
+  }
+
+  try {
+    const response = await diagInvoke('cmd_diag_send_uds', {
+      config: toDiagDto(tab.session.config),
+      sid,
+      subFunction: subFn,
+      data: [...data],
+      options: { addressing, timeoutMs: null, origin, ...busyRetryFields(retry) },
+    });
+    const exchange: UdsExchange = { id: ++exchangeSeq, atMs: Date.now(), requestBytes, addressing, response, error: null };
+    updateTab(tabId, { lastUds: exchange, lastError: null });
+    touchResponse(tabId);
+    refreshSessionInfoSoon(tabId);
+    return exchange;
+  } catch (err) {
+    const e = handleCommandError(tabId, err);
+    const exchange: UdsExchange = { id: ++exchangeSeq, atMs: Date.now(), requestBytes, addressing, response: null, error: e };
+    updateTab(tabId, { lastUds: exchange });
+    return exchange;
+  }
+}
+
+function strictError(tabId: string, err: unknown): UdsTransportError {
+  const e = handleCommandError(tabId, err);
   const kind: UdsTransportErrorKind = e.code === 'backend_missing' ? 'backendMissing' : 'failed';
   return new UdsTransportError(kind, formatDiagError(t, e), e);
 }
@@ -1454,34 +1914,39 @@ export function useDiagnosticsStore(): DiagnosticsState {
 export function useDiagnosticsSelector<T>(selector: (state: DiagnosticsState) => T): T {
   return useSyncExternalStore(
     diagnosticsStore.subscribe,
-    () => selector(currentState),
-    () => selector(currentState),
+    () => selector(view()),
+    () => selector(view()),
   );
 }
 
 /**
  * Panic Stop (TX source registry): halts OBD-II PID polling, abandons in-flight discovery / DTC
- * scans (their late results are dropped) and switches the TesterPresent keep-alive off. Synchronous;
- * the backend call to disable TesterPresent is fire-and-forget (the backend panic also disarms).
+ * scans (their late results are dropped) and switches the TesterPresent keep-alive off on EVERY tab.
+ * Synchronous; the backend calls to disable TesterPresent are fire-and-forget (the backend panic also
+ * disarms). Sessions stay "connected" in the HMI: the next command reports `panic_latched` and
+ * `markLost` then drops every tab on that bus.
  */
 function stopDiagnosticsTx(): void {
   haltPidPolling();
   diagOpGen += 1;
-  const patch: Partial<DiagnosticsState> = {};
-  if (currentState.discovering) patch.discovering = false;
-  if (currentState.isScanning) patch.isScanning = false;
-  if (currentState.dtcReportBusy) patch.dtcReportBusy = false;
-  if (currentState.session.testerPresentActive) {
-    patch.session = { ...currentState.session, testerPresentActive: false };
-    if (!currentState.mockMode && currentState.session.connected) {
-      diagInvoke('cmd_diag_set_tester_present', {
-        config: currentDto(),
-        enabled: false,
-        intervalMs: null,
-      }).catch(() => undefined);
+  const stopTp: DiagSessionConfigDto[] = [];
+  const tabs = raw.tabs.map((tab) => {
+    const patch: Partial<DiagSessionTab> = {};
+    if (tab.isScanning) patch.isScanning = false;
+    if (tab.dtcReportBusy) patch.dtcReportBusy = false;
+    if (tab.session.testerPresentActive) {
+      patch.session = { ...tab.session, testerPresentActive: false };
+      if (!raw.mockMode && tab.session.connected) stopTp.push(toDiagDto(tab.session.config));
     }
+    return Object.keys(patch).length > 0 ? { ...tab, ...patch } : tab;
+  });
+  const changed = tabs.some((tab, i) => tab !== raw.tabs[i]);
+  if (changed || raw.discovering) {
+    setRaw({ ...raw, tabs, discovering: false });
   }
-  if (Object.keys(patch).length > 0) setState(patch);
+  for (const config of stopTp) {
+    diagInvoke('cmd_diag_set_tester_present', { config, enabled: false, intervalMs: null }).catch(() => undefined);
+  }
 }
 
 registerTxSource('diagnostics', stopDiagnosticsTx);

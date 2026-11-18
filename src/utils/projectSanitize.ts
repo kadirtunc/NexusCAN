@@ -12,6 +12,8 @@ import type { NexusProjectFileV1 } from '../store/projectStore';
 import type { SavedConnectionProfile } from '../store/connectionStore';
 import type { DriverFamilyId } from '../types/hal';
 import type { CloudProjectBindingV1 } from './workspaceDiff';
+import { sanitizeDiagnostics } from '../components/diagnostics/workspace/diagnosticsSanitize';
+import { newId } from '../components/diagnostics/workspace/ecuDefaults';
 
 export const MAX_PROFILES = 64;
 export const MAX_DB_FILES = 64;
@@ -34,6 +36,10 @@ export interface SanitizedProject {
   connectCandidates: SavedConnectionProfile[];
   /** Withheld until the user confirms (external mode). */
   pendingCloudBinding: CloudProjectBindingV1 | null;
+  /** Problems found in the `diagnostics` block (malformed entries were dropped, the rest of the project loads). */
+  diagnosticsProblems: string[];
+  /** `projectId` was missing / invalid and a fresh uuid was generated (the project must be saved again). */
+  projectIdGenerated: boolean;
 }
 
 const FORBIDDEN_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
@@ -159,8 +165,15 @@ export function sanitizeProject(raw: unknown, mode: 'external' | 'own'): Sanitiz
 
   const binding = sanitizeBinding(cleaned['cloudBinding']);
 
+  const diag = sanitizeDiagnostics(cleaned['diagnostics']);
+  const rawProjectId = cleaned['projectId'];
+  const hasProjectId = typeof rawProjectId === 'string' && /^[A-Za-z0-9_-]{8,128}$/.test(rawProjectId);
+  const projectId = hasProjectId ? rawProjectId : newId();
+
   const project = {
     ...cleaned,
+    projectId,
+    diagnostics: diag.value,
     version: 1,
     name: str(cleaned['name'], 'Imported Project', 256),
     fileStem: str(cleaned['fileStem'], '', 128),
@@ -188,5 +201,7 @@ export function sanitizeProject(raw: unknown, mode: 'external' | 'own'): Sanitiz
     project,
     connectCandidates: ownMode ? [] : wantsConnect,
     pendingCloudBinding: ownMode ? null : binding,
+    diagnosticsProblems: diag.problems,
+    projectIdGenerated: !hasProjectId,
   };
 }

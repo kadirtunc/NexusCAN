@@ -27,6 +27,7 @@ import {
 } from './diagUi';
 import { sessionLabel, toHex } from './diagFormat';
 import { EcuDiscoveryPanel } from './EcuDiscoveryPanel';
+import { suggestResponseId, validateSessionIds, type IdFieldError } from './sessionValidation';
 
 const PRESETS: Array<{ labelKey: string; config: Partial<DiagSessionConfig> }> = [
   {
@@ -49,6 +50,8 @@ function parseHexInput(s: string): number | null {
   return isNaN(n) ? null : n;
 }
 
+const WARN_TEXT = 'text-[11.5px] text-[color:var(--status-warn)]';
+
 const SESSION_TONE: Record<string, DiagTone> = {
   default: 'neutral',
   extended: 'warn',
@@ -59,7 +62,8 @@ export const DiagSessionSetup: React.FC = () => {
   const { t } = useI18n();
   const state = useDiagnosticsStore();
   const header = useTelemetryHeader();
-  const { session, mockMode, sessionInfo, connecting, lastError } = state;
+  const { session, mockMode, sessionInfo, connecting, lastError, duplicateOfTabId, tabs } = state;
+  const duplicateTab = duplicateOfTabId === null ? null : (tabs.find((tb) => tb.id === duplicateOfTabId) ?? null);
   const { config } = session;
   const locked = session.connected || connecting;
 
@@ -76,6 +80,13 @@ export const DiagSessionSetup: React.FC = () => {
   const [paddingInput, setPaddingInput] = useState(toHex(config.padding ?? 0xaa));
   const [p2MarginInput, setP2MarginInput] = useState(String(config.p2MarginMs ?? 100));
   const [tpIntervalInput, setTpIntervalInput] = useState('2000');
+  // The response id is auto-filled (request + 8) only while the user has not edited it.
+  const [rxTouched, setRxTouched] = useState(
+    config.responseId !== config.requestId + 8 || suggestResponseId(config.requestId, config.isExtendedId) === null,
+  );
+
+  const ids = validateSessionIds(txIdInput, rxIdInput, isExtended);
+  const suggestedResponse = suggestResponseId(ids.requestValue, isExtended);
 
   // Real mode: only connected buses are selectable (Demo: any bus when none is connected).
   const connectedBuses = header.buses.filter((b) => b.connected);
@@ -92,13 +103,38 @@ export const DiagSessionSetup: React.FC = () => {
     setBusId(busOptions[0]);
   }, [locked, busOptions, busId]);
 
+  function idErrorText(err: IdFieldError | null, fieldLabel: string): string | null {
+    if (err === null) return null;
+    if (err === 'badHex') return t('diagTabs.val.badHex', { field: fieldLabel });
+    return err === 'range11'
+      ? t('diagTabs.val.range11', { field: fieldLabel })
+      : t('diagTabs.val.range29', { field: fieldLabel });
+  }
+  const reqLabel = t('diag.session.requestId');
+  const respLabel = t('diag.session.responseId');
+  const requestErrorText = idErrorText(ids.requestError, reqLabel);
+  const responseErrorText =
+    idErrorText(ids.responseError, respLabel) ?? (ids.sameIds ? t('diagTabs.val.sameIds') : null);
+
+  function handleRequestChange(value: string) {
+    setTxIdInput(value);
+    if (rxTouched) return;
+    const sug = suggestResponseId(validateSessionIds(value, '0', isExtended).requestValue, isExtended);
+    if (sug !== null) setRxIdInput(hexInput(sug));
+  }
+
+  function handleResponseChange(value: string) {
+    setRxTouched(true);
+    setRxIdInput(value);
+  }
+
   function buildConfig(): DiagSessionConfig {
     const funcRaw = funcIdInput.trim();
     const padParsed = parseHexInput(paddingInput);
     const margin = parseInt(p2MarginInput, 10);
     return {
-      requestId: parseHexInput(txIdInput) ?? config.requestId,
-      responseId: parseHexInput(rxIdInput) ?? config.responseId,
+      requestId: ids.requestValue ?? config.requestId,
+      responseId: ids.responseValue ?? config.responseId,
       busId,
       isExtendedId: isExtended,
       protocol,
@@ -106,8 +142,21 @@ export const DiagSessionSetup: React.FC = () => {
       useFd,
       padding: paddingOn ? (padParsed !== null ? padParsed & 0xff : 0xaa) : null,
       p2MarginMs: Number.isFinite(margin) && margin >= 0 ? margin : 100,
+      // Not editable in this form: carried over (e.g. from an ECU registry record) so the form never drops them.
+      addressFormat: config.addressFormat,
+      targetAddress: config.targetAddress,
+      responseAddress: config.responseAddress,
     };
   }
+
+  // Keep the (not yet connected) form in the tab so switching tabs never loses edits and the tab strip
+  // shows the pending addressing. The store ignores this while connected / connecting.
+  const formSig = [txIdInput, rxIdInput, busId, protocol, isExtended, funcIdInput, useFd, paddingOn, paddingInput, p2MarginInput].join('|');
+  useEffect(() => {
+    if (locked || ids.hasError) return;
+    diagnosticsStore.updateConfig(buildConfig());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formSig, locked]);
 
   function handleConnect() {
     void diagnosticsStore.connect(buildConfig());
@@ -124,7 +173,10 @@ export const DiagSessionSetup: React.FC = () => {
 
   function applyPreset(partial: Partial<DiagSessionConfig>) {
     if (partial.requestId !== undefined) setTxIdInput(hexInput(partial.requestId));
-    if (partial.responseId !== undefined) setRxIdInput(hexInput(partial.responseId));
+    if (partial.responseId !== undefined) {
+      setRxIdInput(hexInput(partial.responseId));
+      setRxTouched(true);
+    }
     if (partial.isExtendedId !== undefined) setIsExtended(partial.isExtendedId);
     if (partial.protocol !== undefined) setProtocol(partial.protocol);
   }
@@ -157,7 +209,8 @@ export const DiagSessionSetup: React.FC = () => {
           <button
             type="button"
             onClick={handleConnect}
-            disabled={connecting || noBus}
+            disabled={connecting || noBus || ids.hasError}
+            title={ids.hasError ? (requestErrorText ?? responseErrorText ?? undefined) : undefined}
             className={DIAG_BTN_PRIMARY}
           >
             <Wifi className="h-3.5 w-3.5" aria-hidden="true" />
@@ -168,8 +221,25 @@ export const DiagSessionSetup: React.FC = () => {
 
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <div className="mx-auto max-w-3xl space-y-3">
-          {lastError && (
+          {lastError && duplicateTab === null && (
             <DiagErrorNotice error={lastError} onDismiss={() => diagnosticsStore.clearError()} />
+          )}
+          {lastError && duplicateTab !== null && (
+            <DiagNotice tone="critical" icon={<Info className="h-4 w-4 shrink-0" aria-hidden="true" />}>
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 break-words">{t('diagTabs.err.duplicate', { detail: duplicateTab.label })}</span>
+                <button
+                  type="button"
+                  onClick={() => diagnosticsStore.setActiveTab(duplicateTab.id)}
+                  className={DIAG_BTN_SM}
+                >
+                  {t('diagTabs.dup.switch')}
+                </button>
+                <button type="button" onClick={() => diagnosticsStore.clearError()} className={DIAG_BTN_SM}>
+                  {t('diagReal.error.dismiss')}
+                </button>
+              </div>
+            </DiagNotice>
           )}
           {noBus && (
             <DiagNotice tone="warn" icon={<Info className="h-4 w-4 shrink-0" aria-hidden="true" />}>
@@ -184,30 +254,55 @@ export const DiagSessionSetup: React.FC = () => {
 
           {/* Config grid */}
           <div className={`${DIAG_PANEL} grid grid-cols-2 gap-3.5 p-4`}>
-            {/* TX ID */}
+            {/* Request ID (Tester -> ECU) */}
             <label className="flex flex-col gap-1">
-              <span className={DIAG_LABEL}>{t('diag.session.requestId')}</span>
+              <span className={DIAG_LABEL}>{reqLabel}</span>
               <input
                 type="text"
                 value={txIdInput}
-                onChange={(e) => setTxIdInput(e.target.value)}
+                onChange={(e) => handleRequestChange(e.target.value)}
                 disabled={locked}
-                className={DIAG_INPUT}
+                aria-invalid={requestErrorText !== null}
+                className={`${DIAG_INPUT} ${requestErrorText ? '!border-[color:var(--status-warn)]' : ''}`}
                 placeholder="0x7E0"
               />
+              {requestErrorText && <span className={WARN_TEXT}>{requestErrorText}</span>}
             </label>
 
-            {/* RX ID */}
+            {/* Response ID (ECU -> Tester) */}
             <label className="flex flex-col gap-1">
-              <span className={DIAG_LABEL}>{t('diag.session.responseId')}</span>
+              <span className={DIAG_LABEL}>{respLabel}</span>
               <input
                 type="text"
                 value={rxIdInput}
-                onChange={(e) => setRxIdInput(e.target.value)}
+                onChange={(e) => handleResponseChange(e.target.value)}
                 disabled={locked}
-                className={DIAG_INPUT}
+                aria-invalid={responseErrorText !== null}
+                className={`${DIAG_INPUT} ${responseErrorText ? '!border-[color:var(--status-warn)]' : ''}`}
                 placeholder="0x7E8"
               />
+              {responseErrorText && <span className={WARN_TEXT}>{responseErrorText}</span>}
+              {!responseErrorText && suggestedResponse !== null && !locked && (
+                <span className="flex items-center gap-2 text-[11.5px] text-muted">
+                  {rxTouched && ids.responseValue !== suggestedResponse ? (
+                    <>
+                      <span>{t('diagTabs.val.suggest', { id: hexInput(suggestedResponse) })}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRxTouched(false);
+                          setRxIdInput(hexInput(suggestedResponse));
+                        }}
+                        className={DIAG_BTN_SM}
+                      >
+                        {t('diagTabs.val.apply')}
+                      </button>
+                    </>
+                  ) : (
+                    !rxTouched && <span>{t('diagTabs.val.autoFilled')}</span>
+                  )}
+                </span>
+              )}
             </label>
 
             {/* Bus ID */}
@@ -341,6 +436,7 @@ export const DiagSessionSetup: React.FC = () => {
             onUse={(requestId, responseId, ext) => {
               if (requestId !== null) setTxIdInput(hexInput(requestId));
               setRxIdInput(hexInput(responseId));
+              setRxTouched(true);
               setIsExtended(ext);
             }}
           />
@@ -385,8 +481,8 @@ export const DiagSessionSetup: React.FC = () => {
               <div className="flex flex-wrap items-center gap-3">
                 <span className="font-semibold">{t('diag.session.connected')}</span>
                 <span className="font-mono tabular-nums text-muted">
-                  TX 0x{config.requestId.toString(16).toUpperCase()} → RX 0x
-                  {config.responseId.toString(16).toUpperCase()}
+                  {t('diagTabs.reqShort')} 0x{config.requestId.toString(16).toUpperCase()} →{' '}
+                  {t('diagTabs.respShort')} 0x{config.responseId.toString(16).toUpperCase()}
                 </span>
                 {session.testerPresentActive && (
                   <DiagBadge tone="focus">

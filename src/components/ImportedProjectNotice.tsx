@@ -10,7 +10,8 @@ export const ImportedProjectNotice: React.FC = () => {
   const notice = proj.importNotice;
   if (notice === null) return null;
   const count = notice.profileIds.length;
-  if (count === 0 && notice.cloudBinding === null) return null;
+  const problems = notice.diagnosticsProblems;
+  if (count === 0 && notice.cloudBinding === null && problems.length === 0) return null;
 
   const btn =
     'h-[24px] px-2 border text-[11px] font-bold cursor-pointer rounded-[3px] disabled:opacity-40';
@@ -46,6 +47,11 @@ export const ImportedProjectNotice: React.FC = () => {
             {t('sec.import.cloudAdopt')}
           </button>
         </>
+      )}
+      {problems.length > 0 && (
+        <span className="font-mono tabular-nums" title={problems.join('\n')}>
+          {t('diagWs.import.problems', { count: problems.length })}
+        </span>
       )}
       <button
         type="button"

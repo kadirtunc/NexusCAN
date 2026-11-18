@@ -49,6 +49,9 @@ import {
 import type { CloudProjectBindingV1 } from '../utils/workspaceDiff';
 import { describeTxError } from './busTxControl';
 import { sanitizeProject } from '../utils/projectSanitize';
+import type { DiagnosticsProjectV1 } from '../types/diagWorkspace';
+import { diagWorkspaceStore } from '../components/diagnostics/workspace/diagWorkspaceStore';
+import { newId } from '../components/diagnostics/workspace/ecuDefaults';
 
 export interface QuickBarConnectionState {
   selectedDeviceId: string;
@@ -86,12 +89,18 @@ export interface NexusProjectFileV1 {
     enabledToolpacks?: EngineeringToolpackId[];
   };
   cloudBinding?: CloudProjectBindingV1 | null;
+  /** Stable project uuid (run store key, cloud). Generated on load when missing, then saved. */
+  projectId?: string;
+  /** ECU registry: vehicles -> groups -> ECU records (diag-workspace-v1). */
+  diagnostics?: DiagnosticsProjectV1;
 }
 
 export interface ProjectStoreState {
   hasActiveWorkspace: boolean;
   currentName: string;
   currentFileStem: string;
+  /** Stable project uuid; `null` while no workspace is open. */
+  projectId: string | null;
   createdAt: string;
   updatedAt: string | null;
   notes: string;
@@ -111,6 +120,8 @@ export interface ImportNotice {
   profileIds: readonly string[];
   /** Withheld until the user confirms. */
   cloudBinding: CloudProjectBindingV1 | null;
+  /** Malformed entries dropped from the ECU registry (`diagnostics`) of the opened file. */
+  diagnosticsProblems: readonly string[];
 }
 
 export function sanitizeProjectFileStem(input: string): string {
@@ -128,6 +139,7 @@ let currentState: ProjectStoreState = {
   hasActiveWorkspace: Boolean(initialMeta?.isOpen),
   currentName: initialMeta?.isOpen ? initialMeta.name : 'No Project',
   currentFileStem: initialMeta?.isOpen ? initialMeta.fileStem : 'no-project',
+  projectId: null,
   createdAt: initialMeta?.isOpen ? initialMeta.updatedAt : new Date().toISOString(),
   updatedAt: initialMeta?.isOpen ? initialMeta.updatedAt : null,
   notes: '',
@@ -144,6 +156,8 @@ let currentState: ProjectStoreState = {
 const listeners = new Set<() => void>();
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let isRestoring = false;
+/** Last quick-bar state passed to an auto-save (store-driven saves have no UI access to it). */
+let lastQuickBarState: QuickBarConnectionState | undefined;
 
 function emitChange(): void {
   for (const fn of listeners) {
@@ -303,6 +317,7 @@ export const projectStore = {
     const name = (overrideName ?? currentState.currentName).trim() || 'Untitled Project';
     const fileStem = sanitizeProjectFileStem(name);
     const nowIso = new Date().toISOString();
+    if (currentState.projectId === null) currentState = { ...currentState, projectId: newId() };
 
     const connectedBusSet = new Set<number>(
       header.buses.filter((b) => b.connected).map((b) => b.busId),
@@ -323,6 +338,7 @@ export const projectStore = {
 
     return {
       version: 1,
+      projectId: currentState.projectId ?? undefined,
       name,
       fileStem,
       createdAt: currentState.createdAt,
@@ -361,7 +377,17 @@ export const projectStore = {
         enabledToolpacks: normalizeEnabledToolpacks(currentState.enabledToolpacks),
       },
       cloudBinding: currentState.cloudBinding ?? null,
+      diagnostics: diagWorkspaceStore.getState(),
     };
+  },
+
+  /** Marks the project as changed and schedules the debounced auto-save (store-driven edits). */
+  markDirty(): void {
+    if (!currentState.dirty) {
+      currentState = { ...currentState, dirty: true };
+      emitChange();
+    }
+    if (currentState.hasActiveWorkspace) projectStore.scheduleAutoSave(lastQuickBarState);
   },
 
   /**
@@ -371,6 +397,7 @@ export const projectStore = {
    */
   scheduleAutoSave(quickBarState?: QuickBarConnectionState): void {
     if (!currentState.hasActiveWorkspace || isRestoring) return;
+    if (quickBarState) lastQuickBarState = quickBarState;
 
     if (autoSaveTimer !== null) {
       clearTimeout(autoSaveTimer);
@@ -535,7 +562,10 @@ export const projectStore = {
     }
     currentState = {
       ...currentState,
-      importNotice: notice.cloudBinding !== null ? { profileIds: [], cloudBinding: notice.cloudBinding } : null,
+      importNotice:
+        notice.cloudBinding !== null || notice.diagnosticsProblems.length > 0
+          ? { profileIds: [], cloudBinding: notice.cloudBinding, diagnosticsProblems: notice.diagnosticsProblems }
+          : null,
     };
     emitChange();
     return { connected, warnings };
@@ -625,6 +655,11 @@ export const projectStore = {
       }
 
       databaseStore.setDatabasesCatalog(catalogEntries);
+
+      // ECU registry (already sanitized: malformed entries dropped, never throws)
+      diagWorkspaceStore.load(
+        project.diagnostics ?? { schemaVersion: 1, vehicles: [], activeVehicleId: null },
+      );
 
       // 2. Restore Connections with Legacy Migration for databaseIds
       const allCatalogIds = catalogEntries.map((d) => d.id);
@@ -751,18 +786,23 @@ export const projectStore = {
         currentName: project.name || 'Loaded Project',
         currentFileStem:
           project.fileStem || sanitizeProjectFileStem(project.name || 'project'),
+        projectId: project.projectId ?? newId(),
         createdAt: project.createdAt || new Date().toISOString(),
         updatedAt: project.updatedAt || new Date().toISOString(),
         notes: project.notes ?? '',
-        dirty: false,
+        // A freshly generated projectId must be written back to the file.
+        dirty: sanitized.projectIdGenerated,
         enabledToolpacks: normalizedToolpacks,
         cloudBinding: project.cloudBinding ?? null,
         importNotice:
           !isReload &&
-          (sanitized.connectCandidates.length > 0 || sanitized.pendingCloudBinding !== null)
+          (sanitized.connectCandidates.length > 0 ||
+            sanitized.pendingCloudBinding !== null ||
+            sanitized.diagnosticsProblems.length > 0)
             ? {
                 profileIds: sanitized.connectCandidates.map((p) => p.id),
                 cloudBinding: sanitized.pendingCloudBinding,
+                diagnosticsProblems: sanitized.diagnosticsProblems,
               }
             : null,
       };
@@ -777,6 +817,11 @@ export const projectStore = {
       });
       void saveActiveProjectToLocalDb(project);
       emitChange();
+
+      if (sanitized.projectIdGenerated) {
+        // `isRestoring` is released in `finally`; the deferred call then passes the guard.
+        setTimeout(() => projectStore.scheduleAutoSave(lastQuickBarState), 0);
+      }
 
       return { reconnectedCount, connectionWarnings };
     } finally {
@@ -855,6 +900,7 @@ export const projectStore = {
     transmitStore.clearAll();
     plotStore.clearAllSeries();
     simulationPanelStore.clearAll();
+    diagWorkspaceStore.reset();
 
     const defaultQb: QuickBarConnectionState = {
       selectedDeviceId: '',
@@ -876,6 +922,7 @@ export const projectStore = {
       hasActiveWorkspace: true,
       currentName: cleanName,
       currentFileStem: fileStem,
+      projectId: newId(),
       createdAt: nowIso,
       updatedAt: nowIso,
       notes: '',
@@ -931,6 +978,7 @@ export const projectStore = {
     plotStore.clearAllSeries();
     simulationPanelStore.clearAll();
     plotStore.clearBuffers();
+    diagWorkspaceStore.reset();
 
     if (onApplyQuickBar) {
       onApplyQuickBar({
@@ -946,6 +994,7 @@ export const projectStore = {
       hasActiveWorkspace: false,
       currentName: 'No Project',
       currentFileStem: 'no-project',
+      projectId: null,
       createdAt: new Date().toISOString(),
       updatedAt: null,
       notes: '',
@@ -970,6 +1019,9 @@ export const projectStore = {
     }
   },
 };
+
+// ECU registry edits mark the project dirty and schedule the auto-save (same lifecycle as other project edits).
+diagWorkspaceStore.onMutation(() => projectStore.markDirty());
 
 export function useProjectStore(): ProjectStoreState {
   return useSyncExternalStore(
