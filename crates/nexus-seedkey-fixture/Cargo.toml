@@ -1,0 +1,20 @@
+[package]
+name = "nexus-seedkey-fixture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "TEST FIXTURE ONLY: Vector-style GenerateKeyEx / GenerateKeyExOpt cdylib used by nexus-seedkey-native end-to-end tests (includes deliberate crash / hang levels). Never ship."
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# x86 only: export with __stdcall instead of __cdecl (tests the helper's x86 call trampoline).
+stdcall = []

@@ -1,21 +1,79 @@
 //! WP-2 (CRIT-03): UDS SecurityAccess seed/key computation for the HMI over IPC.
 //!
-//! Replaces the frontend's `new Function` custom algorithm: keys are computed in the backend by
-//! the portable providers of `nexus_protocols::uds::security` (`builtin`, `table`, sandboxed
-//! Rhai `script`). Native providers (`library`, `external_process`, `http`) are NOT available
-//! in v0.1 and are refused on every transport (Tauri and bridge).
+//! Keys are computed in the backend. Portable providers (`builtin`, `table`, sandboxed Rhai
+//! `script`) come from `nexus_protocols::uds::security`; native providers (`library`,
+//! `external_process`) come from `nexus-seedkey-native` and are gated by [`SeedKeyPolicy`]
+//! (contract `planning/contracts/seedkey-v1.md` §4):
+//! * Tauri desktop → native allowed.
+//! * Bridge → native only for loopback peers AND `NEXUS_BRIDGE_ALLOW_NATIVE_SEEDKEY=1`.
 //!
-//! Contract: `planning/contracts/seedkey-v1.md` §2 (`cmd_seedkey_capabilities`,
-//! `cmd_seedkey_compute_adhoc`). Errors use `SeedKeyError::to_ipc_string`
-//! (`"[seedkey:<code>] <message>"`). Calls can run up to the provider timeout, so transports
-//! must invoke [`compute_adhoc`] on a blocking worker.
+//! `library` never loads the vendor DLL into this process: it runs in the isolated
+//! `nexus-seedkey-host32/64` helper (crash / hang isolation, 32-bit DLL support).
+//! `http` is not implemented yet (`unsupported`).
+//!
+//! Errors use `SeedKeyError::to_ipc_string` (`"[seedkey:<code>] <message>"`). Calls can run
+//! up to the provider timeout, so transports must call [`compute_adhoc`] / [`probe_library`]
+//! on a blocking worker. Key bytes are never logged here.
 
 use nexus_protocols::uds::security::{
     build_portable_provider, is_valid_request_seed_level, parse_hex, to_hex, ComputeKeyResultDto,
-    KeyProviderSpecDto, SeedKeyCapabilitiesDto, SeedKeyError, SeedKeyRequest, MAX_SEED_LEN,
+    KeyProviderSpecDto, SeedKeyCapabilitiesDto, SeedKeyError, SeedKeyLibraryInfoDto,
+    SeedKeyRequest, MAX_SEED_LEN,
 };
+use nexus_seedkey_native::{NativeProviderFactory, NATIVE_KINDS_AVAILABLE};
 use std::sync::OnceLock;
 use std::time::Instant;
+
+/// Env switch that lets the dev bridge use native providers (loopback peers only).
+pub const BRIDGE_ALLOW_NATIVE_ENV: &str = "NEXUS_BRIDGE_ALLOW_NATIVE_SEEDKEY";
+
+/// Per-caller permission to use native seed/key providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeedKeyPolicy {
+    pub native_allowed: bool,
+}
+
+impl SeedKeyPolicy {
+    /// Tauri desktop webview: native providers allowed.
+    pub fn desktop() -> Self {
+        Self {
+            native_allowed: true,
+        }
+    }
+
+    /// Never allows native providers.
+    pub fn portable_only() -> Self {
+        Self {
+            native_allowed: false,
+        }
+    }
+
+    /// Dev bridge: allowed only when the peer is loopback AND the env switch is `1`.
+    /// `peer_is_loopback` must come from the TCP peer address (unknown peer => `false`).
+    pub fn bridge(peer_is_loopback: bool) -> Self {
+        let switch = std::env::var(BRIDGE_ALLOW_NATIVE_ENV).is_ok_and(|v| v.trim() == "1");
+        Self {
+            native_allowed: peer_is_loopback && switch,
+        }
+    }
+
+    fn check(self, spec: &KeyProviderSpecDto) -> Result<(), SeedKeyError> {
+        if spec.is_native() && !self.native_allowed {
+            return Err(SeedKeyError::NativeNotAllowed(format!(
+                "'{}' providers are disabled for this connection",
+                spec.kind()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Process-wide native factory (helper lookup: next to the executable, then
+/// `$NEXUS_SEEDKEY_HOST_DIR`).
+fn native_factory() -> &'static NativeProviderFactory {
+    static FACTORY: OnceLock<NativeProviderFactory> = OnceLock::new();
+    FACTORY.get_or_init(NativeProviderFactory::from_env)
+}
 
 /// Whether the Rhai `script` provider is compiled into `nexus-protocols`.
 fn script_available() -> bool {
@@ -32,30 +90,34 @@ fn script_available() -> bool {
     })
 }
 
-/// `cmd_seedkey_capabilities`: native providers are never allowed in v0.1.
-pub fn capabilities() -> SeedKeyCapabilitiesDto {
+/// `cmd_seedkey_capabilities`. Helper discovery touches the file system (cheap, not cached so
+/// a freshly installed helper is picked up without restart).
+pub fn capabilities(policy: SeedKeyPolicy) -> SeedKeyCapabilitiesDto {
+    let hosts = native_factory().host_status();
     SeedKeyCapabilitiesDto {
-        native_providers_allowed: false,
+        native_providers_allowed: policy.native_allowed,
         script_available: script_available(),
         host_os: std::env::consts::OS.to_string(),
         host_arch: std::env::consts::ARCH.to_string(),
+        native_kinds_available: NATIVE_KINDS_AVAILABLE
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect(),
+        library_host32_found: hosts.host32.is_some(),
+        library_host64_found: hosts.host64.is_some(),
     }
 }
 
 /// `cmd_seedkey_compute_adhoc`: computes a key with an unsaved provider spec.
 ///
-/// Blocking (script providers run up to their `timeoutMs`).
+/// Blocking (scripts / helper processes run up to their timeout).
 pub fn compute_adhoc(
+    policy: SeedKeyPolicy,
     provider: &KeyProviderSpecDto,
     level: u8,
     seed_hex: &str,
 ) -> Result<ComputeKeyResultDto, SeedKeyError> {
-    if provider.is_native() {
-        return Err(SeedKeyError::Unsupported(format!(
-            "'{}' seed/key provider is not available in v0.1",
-            provider.kind()
-        )));
-    }
+    policy.check(provider)?;
     if !is_valid_request_seed_level(level) {
         return Err(SeedKeyError::InvalidInput(format!(
             "level 0x{level:02X} is not a requestSeed level (odd, 0x01..=0x7D)"
@@ -69,13 +131,32 @@ pub fn compute_adhoc(
         )));
     }
     let started = Instant::now();
-    let key_provider = build_portable_provider(provider)?;
+    let key_provider = if provider.is_native() {
+        native_factory().build(provider)?
+    } else {
+        build_portable_provider(provider)?
+    };
     let key = key_provider.compute_key(&SeedKeyRequest { seed: &seed, level })?;
     Ok(ComputeKeyResultDto {
         key_hex: to_hex(&key),
         provider_kind: provider.kind().to_string(),
         elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
     })
+}
+
+/// `cmd_seedkey_probe_library`: header inspection in-process (never loads the file); export
+/// detection in the isolated helper. Native policy applies (it starts a helper process).
+pub fn probe_library(
+    policy: SeedKeyPolicy,
+    path: &str,
+) -> Result<SeedKeyLibraryInfoDto, SeedKeyError> {
+    policy.check(&KeyProviderSpecDto::Library {
+        path: String::new(),
+        variant: None,
+        options: None,
+        max_key_len: 1,
+    })?;
+    native_factory().probe_library(path)
 }
 
 #[cfg(test)]
@@ -97,7 +178,8 @@ mod tests {
             source: XOR_A5_SCRIPT.to_string(),
             timeout_ms: 1_000,
         };
-        let res = compute_adhoc(&spec, 0x01, "11 22 33 44").expect("script key");
+        let res = compute_adhoc(SeedKeyPolicy::portable_only(), &spec, 0x01, "11 22 33 44")
+            .expect("script key");
         assert_eq!(res.key_hex, "B48796E1");
         assert_eq!(res.provider_kind, "script");
         let json = serde_json::to_value(&res).expect("json");
@@ -112,20 +194,24 @@ mod tests {
             algorithm: BuiltinAlgorithm::XorFf,
             constant_hex: None,
         };
-        let res = compute_adhoc(&spec, 0x01, "0x00FF").expect("builtin");
+        let res = compute_adhoc(SeedKeyPolicy::desktop(), &spec, 0x01, "0x00FF").expect("builtin");
         assert_eq!(res.key_hex.len(), 4);
 
-        let caps = capabilities();
+        let caps = capabilities(SeedKeyPolicy::portable_only());
         assert!(!caps.native_providers_allowed);
         assert!(caps.script_available);
+        assert_eq!(caps.native_kinds_available, ["library", "external_process"]);
         let json = serde_json::to_value(&caps).expect("json");
         assert_eq!(json["nativeProvidersAllowed"], false);
         assert_eq!(json["scriptAvailable"], true);
+        assert!(json["nativeKindsAvailable"].is_array());
+        assert!(json["libraryHost32Found"].is_boolean());
+        assert!(json["libraryHost64Found"].is_boolean());
+        assert!(capabilities(SeedKeyPolicy::desktop()).native_providers_allowed);
     }
 
-    #[test]
-    fn native_providers_and_bad_input_are_refused() {
-        let native = [
+    fn native_specs() -> [KeyProviderSpecDto; 3] {
+        [
             KeyProviderSpecDto::Library {
                 path: "/tmp/x.so".into(),
                 variant: None,
@@ -142,26 +228,76 @@ mod tests {
                 headers: vec![],
                 timeout_ms: 100,
             },
-        ];
-        for spec in &native {
-            let err = compute_adhoc(spec, 0x01, "11223344").expect_err("native refused");
-            assert_eq!(err.code(), SeedKeyErrorCode::Unsupported);
-            let wire = err.to_ipc_string();
-            assert!(wire.starts_with("[seedkey:unsupported] "), "{wire}");
-            assert!(wire.contains("not available in v0.1"), "{wire}");
-        }
+        ]
+    }
 
+    #[test]
+    fn native_providers_need_policy() {
+        for spec in &native_specs() {
+            let err = compute_adhoc(SeedKeyPolicy::portable_only(), spec, 0x01, "11223344")
+                .expect_err("native refused");
+            assert_eq!(err.code(), SeedKeyErrorCode::NativeNotAllowed);
+            let wire = err.to_ipc_string();
+            assert!(wire.starts_with("[seedkey:native_not_allowed] "), "{wire}");
+        }
+        let err = probe_library(SeedKeyPolicy::portable_only(), "/tmp/x.so").unwrap_err();
+        assert_eq!(err.code(), SeedKeyErrorCode::NativeNotAllowed);
+    }
+
+    #[test]
+    fn native_providers_with_policy() {
+        let [library, _, http] = native_specs();
+        let desktop = SeedKeyPolicy::desktop();
+        // Library pre-flight: file does not exist (never loaded in-process).
+        let err = compute_adhoc(desktop, &library, 0x01, "11").unwrap_err();
+        assert!(
+            matches!(
+                err.code(),
+                SeedKeyErrorCode::LibraryLoad | SeedKeyErrorCode::InvalidInput
+            ),
+            "{err}"
+        );
+        let err = compute_adhoc(desktop, &http, 0x01, "11").unwrap_err();
+        assert_eq!(err.code(), SeedKeyErrorCode::Unsupported);
+        let err = probe_library(desktop, "relative.dll").unwrap_err();
+        assert_eq!(err.code(), SeedKeyErrorCode::InvalidInput);
+
+        #[cfg(unix)]
+        {
+            let echo = KeyProviderSpecDto::ExternalProcess {
+                program: "sh".into(),
+                args: vec!["-c".into(), "echo {seed}".into()],
+                timeout_ms: 5_000,
+            };
+            let res = compute_adhoc(desktop, &echo, 0x01, "A1B2").expect("external process");
+            assert_eq!(res.key_hex, "A1B2");
+            assert_eq!(res.provider_kind, "external_process");
+        }
+    }
+
+    #[test]
+    fn bridge_policy_requires_loopback_and_switch() {
+        // The env switch is not set in the test environment.
+        if std::env::var(BRIDGE_ALLOW_NATIVE_ENV).is_err() {
+            assert!(!SeedKeyPolicy::bridge(true).native_allowed);
+        }
+        assert!(!SeedKeyPolicy::bridge(false).native_allowed);
+    }
+
+    #[test]
+    fn bad_input_is_refused() {
         let xor = KeyProviderSpecDto::Builtin {
             algorithm: BuiltinAlgorithm::XorFf,
             constant_hex: None,
         };
-        let err = compute_adhoc(&xor, 0x02, "11").expect_err("even level");
+        let p = SeedKeyPolicy::desktop();
+        let err = compute_adhoc(p, &xor, 0x02, "11").expect_err("even level");
         assert_eq!(err.code(), SeedKeyErrorCode::InvalidInput);
-        let err = compute_adhoc(&xor, 0x01, "1G").expect_err("bad hex");
+        let err = compute_adhoc(p, &xor, 0x01, "1G").expect_err("bad hex");
         assert_eq!(err.code(), SeedKeyErrorCode::InvalidInput);
-        let err = compute_adhoc(&xor, 0x01, "").expect_err("empty seed");
+        let err = compute_adhoc(p, &xor, 0x01, "").expect_err("empty seed");
         assert_eq!(err.code(), SeedKeyErrorCode::InvalidInput);
-        let err = compute_adhoc(&KeyProviderSpecDto::Manual, 0x01, "11").expect_err("manual");
+        let err = compute_adhoc(p, &KeyProviderSpecDto::Manual, 0x01, "11").expect_err("manual");
         assert_eq!(err.code(), SeedKeyErrorCode::ManualRequired);
 
         // Runaway script is stopped by the sandbox (timeout or operation limit).
@@ -169,7 +305,7 @@ mod tests {
             source: "fn calculate_key(seed, level) { loop { } }".into(),
             timeout_ms: 50,
         };
-        let err = compute_adhoc(&spin, 0x01, "11").expect_err("runaway");
+        let err = compute_adhoc(p, &spin, 0x01, "11").expect_err("runaway");
         assert!(
             matches!(
                 err.code(),

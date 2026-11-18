@@ -132,6 +132,12 @@ export interface SeedKeyCapabilitiesDto {
   scriptAvailable: boolean;
   hostOs: string;
   hostArch: string;
+  /** Native provider kinds the backend can run (currently `library`, `external_process`). */
+  nativeKindsAvailable: KeyProviderKind[];
+  /** Out-of-process helper for 32-bit vendor DLLs (`nexus-seedkey-host32`) was found. */
+  libraryHost32Found: boolean;
+  /** Out-of-process helper for 64-bit vendor libraries (`nexus-seedkey-host64`) was found. */
+  libraryHost64Found: boolean;
 }
 
 /**

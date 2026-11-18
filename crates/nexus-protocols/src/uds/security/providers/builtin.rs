@@ -1,5 +1,5 @@
 //! `builtin` demo algorithms, bit-exact with the legacy TypeScript
-//! `calculateKey` in `src/components/diagnostics/uds-flow/FlowEngine.ts`.
+//! `calculateKey` in `src/components/flow/FlowEngine.ts`.
 //!
 //! All quirks of the legacy implementation are reproduced on purpose so that
 //! flows migrated from the JS engine keep producing identical keys:

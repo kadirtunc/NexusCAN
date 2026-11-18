@@ -31,7 +31,7 @@ pub const MAX_KEY_LEN: usize = 256;
 
 /// Built-in example algorithms. They are demo/training algorithms only and are
 /// bit-exact with the legacy TypeScript `calculateKey` in
-/// `src/components/diagnostics/uds-flow/FlowEngine.ts`.
+/// `src/components/flow/FlowEngine.ts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuiltinAlgorithm {
@@ -112,7 +112,12 @@ pub enum KeyProviderSpecDto {
     },
     /// Native seed/key DLL / .so / .dylib exporting the Vector-style
     /// `GenerateKeyEx` (or `GenerateKeyExOpt` when `options` is set).
+    ///
+    /// Executed out-of-process by `nexus-seedkey-native` (never loaded into the app).
     Library {
+        /// Absolute local file-system path. LOCAL-ONLY DATA: it reveals the operator's
+        /// machine layout and OEM tooling, so it must never be included in cloud sync
+        /// payloads, telemetry or info-level logs.
         path: String,
         #[serde(default)]
         variant: Option<String>,
@@ -270,6 +275,18 @@ pub struct SeedKeyCapabilitiesDto {
     pub script_available: bool,
     pub host_os: String,
     pub host_arch: String,
+    /// Native kinds this build can execute (`"library"`, `"external_process"`, later `"http"`),
+    /// independent of `native_providers_allowed` (the per-caller policy).
+    #[serde(default)]
+    pub native_kinds_available: Vec<String>,
+    /// The 32-bit out-of-process seed/key helper (`nexus-seedkey-host32`) was found. Needed for
+    /// 32-bit (x86) Windows DLLs on a 64-bit host.
+    #[serde(default)]
+    pub library_host32_found: bool,
+    /// The 64-bit (host-native) seed/key helper (`nexus-seedkey-host64`, or the unsuffixed
+    /// development build `nexus-seedkey-host`) was found.
+    #[serde(default)]
+    pub library_host64_found: bool,
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -339,6 +356,11 @@ pub enum SeedKeyError {
     LibraryLoad(String),
     #[error("library GenerateKeyEx returned error code {code}")]
     LibraryCall { code: i64 },
+    /// The library call failed without a GenerateKeyEx return code: the library crashed (its
+    /// isolated helper process died), returned an invalid key length, or the helper answered
+    /// garbage. Wire code is `library_call` (no new code on the IPC contract).
+    #[error("library call failed: {0}")]
+    LibraryFault(String),
     #[error("script error: {0}")]
     Script(String),
     #[error("external process error: {0}")]
@@ -360,7 +382,7 @@ impl SeedKeyError {
             Self::NativeNotAllowed(_) => SeedKeyErrorCode::NativeNotAllowed,
             Self::BitnessMismatch { .. } => SeedKeyErrorCode::BitnessMismatch,
             Self::LibraryLoad(_) => SeedKeyErrorCode::LibraryLoad,
-            Self::LibraryCall { .. } => SeedKeyErrorCode::LibraryCall,
+            Self::LibraryCall { .. } | Self::LibraryFault(_) => SeedKeyErrorCode::LibraryCall,
             Self::Script(_) => SeedKeyErrorCode::Script,
             Self::Process(_) => SeedKeyErrorCode::Process,
             Self::Http(_) => SeedKeyErrorCode::Http,

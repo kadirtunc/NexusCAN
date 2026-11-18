@@ -1,0 +1,29 @@
+[package]
+name = "nexus-seedkey-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Out-of-process helper that loads Vector-style GenerateKeyEx seed/key DLLs for NexusCAN (one request per process)"
+
+# The library part (wire protocol + PE/ELF/Mach-O header sniffing) is shared with
+# `nexus-seedkey-native`; it has no native-code loading and is safe to link into the app.
+[lib]
+name = "nexus_seedkey_host"
+path = "src/lib.rs"
+
+# Packaging: cargo produces `nexus-seedkey-host[.exe]` for the build target. Installers ship it
+# as `nexus-seedkey-host64[.exe]` (host-native 64-bit build) and `nexus-seedkey-host32[.exe]`
+# (i686 build, e.g. `--target i686-pc-windows-msvc`) next to the NexusCAN executable.
+[[bin]]
+name = "nexus-seedkey-host"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+libloading = { workspace = true }
+
+[lints]
+workspace = true

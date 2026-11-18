@@ -1,0 +1,16 @@
+[package]
+name = "nexus-seedkey-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Native UDS 0x27 seed/key providers for NexusCAN: out-of-process GenerateKeyEx libraries (32/64-bit helper) and external programs"
+
+[dependencies]
+nexus-protocols = { workspace = true }
+nexus-seedkey-host = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
