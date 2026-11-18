@@ -25,6 +25,11 @@
 /captures/
 /traces/
 /projects/
+/logs/
+/flowlib/
+/runs/
+/flash_image.json
+/skills-export/
 
 # OS & Editor
 .DS_Store
