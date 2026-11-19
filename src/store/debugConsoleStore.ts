@@ -61,7 +61,6 @@ function loadPersistedLayout(): {
   }
 
   try {
-    const rawOpen = localStorage.getItem(`${STORAGE_PREFIX}:dockOpen`);
     const rawLayout = localStorage.getItem(`${STORAGE_PREFIX}:dockLayout`);
     const rawHeight = localStorage.getItem(`${STORAGE_PREFIX}:bottomHeight`);
     const rawWidth = localStorage.getItem(`${STORAGE_PREFIX}:rightWidth`);
@@ -95,7 +94,9 @@ function loadPersistedLayout(): {
     }
 
     return {
-      dockOpen: rawOpen === 'true',
+      // Panel visibility is never restored: the console always starts closed and opens only
+      // through the user's toggle/hotkey (a stale persisted `dockOpen=true` used to reopen it).
+      dockOpen: false,
       dockLayout,
       bottomHeightPx,
       rightWidthPx,

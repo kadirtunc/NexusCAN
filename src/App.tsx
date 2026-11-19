@@ -144,6 +144,9 @@ export const App: React.FC = () => {
         if (!restored) {
           // Fresh start: reset WITHOUT latching panic (legacy fallback inside).
           await resetSessionCompat();
+          // Profiles are project-scoped: with no workspace restored, drop any stale profiles
+          // left in localStorage by an earlier build/session so the app opens with zero buses.
+          connectionStore.resetToDefaults();
           await apiClearDatabase().catch(() => undefined);
           await apiResetTelemetry().catch(() => undefined);
           telemetryStore.clearAllBuses();
