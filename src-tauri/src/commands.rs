@@ -8,6 +8,15 @@ use nexus_hal::flowlib::{FlowLibEntryDto, FlowLibError, FlowLibRevisionDto};
 use nexus_hal::pipeline::diag_flash::{
     flash_error_to_ipc, resolve_download_config, FlashImageHandleDto, FlashLoadFormat,
 };
+use nexus_hal::pipeline::re_analyzer::{re_dbc_generate, ReDbcBaseDto};
+use nexus_hal::pipeline::re_analyzer::{
+    ReCandidateDto, ReClassificationDto, ReCorrelateRequest, ReCorrelationResultDto,
+    ReFocusStatusDto, ReMarkerDto, RePhase, ReReferenceDto, ReRowDetailDto, ReSearchDto,
+    ReSeriesRequest, ReStatusDto, ReTargetDto,
+};
+use nexus_hal::pipeline::re_analyzer::{
+    ReScanFirstSpec, ReScanNextOp, ReScanResultsDto, ReScanSort, ReScanStatusDto,
+};
 use nexus_hal::pipeline::PipelineEngine;
 use nexus_hal::runstore::{RunQueryFilterDto, RunRecordV1, RunStoreError};
 use nexus_hal::seedkey::SeedKeyPolicy;
@@ -23,6 +32,7 @@ use nexus_hal::{
     },
     error::HalError,
 };
+use nexus_netdb::re_export::{ReDbcGenerateResult, ReSignalDraft};
 use nexus_netdb::DatabaseSchemaDto;
 use nexus_protocols::uds::dto::{
     ConversationPageDto, DiagError, DiagErrorCode, DiagOrigin, DiagSessionConfigDto,
@@ -38,7 +48,10 @@ use nexus_protocols::uds::security::{
 };
 use serde::Serialize;
 use std::sync::Arc;
-use tauri::{ipc::Channel, Manager, State};
+use tauri::{
+    ipc::{Channel, InvokeResponseBody},
+    Manager, State,
+};
 use thiserror::Error;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -1101,4 +1114,236 @@ pub async fn cmd_run_latest(
     project_id: String,
 ) -> Result<Vec<RunRecordV1>, String> {
     run_runstore(state, move |e| e.cmd_run_latest(&project_id)).await
+}
+
+// ─── RE Toolkit R1 (planning/contracts/re-toolkit-v1.md §2.1) — passive only ─────────────────
+// RE ingest runs in the aggregator thread; these commands only toggle / read the shared
+// analyzer. `cmd_re_subscribe` streams 10 Hz binary snapshots (§2.2) as raw `ArrayBuffer`
+// (`InvokeResponseBody::Raw`) until `cmd_re_stop` or a newer subscription.
+
+#[tauri::command]
+pub async fn cmd_re_start(
+    state: State<'_, AppState>,
+    buses: Option<Vec<u8>>,
+) -> Result<ReStatusDto, AppError> {
+    run_blocking(state, "cmd_re_start", move |e| Ok(e.cmd_re_start(buses))).await
+}
+
+#[tauri::command]
+pub async fn cmd_re_stop(state: State<'_, AppState>) -> Result<ReStatusDto, AppError> {
+    run_blocking(state, "cmd_re_stop", move |e| Ok(e.cmd_re_stop())).await
+}
+
+#[tauri::command]
+pub async fn cmd_re_reset(state: State<'_, AppState>) -> Result<ReStatusDto, AppError> {
+    run_blocking(state, "cmd_re_reset", move |e| Ok(e.cmd_re_reset())).await
+}
+
+#[tauri::command]
+pub async fn cmd_re_set_phase(
+    state: State<'_, AppState>,
+    phase: RePhase,
+) -> Result<ReStatusDto, AppError> {
+    run_blocking(state, "cmd_re_set_phase", move |e| {
+        e.cmd_re_set_phase(phase)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_re_mark(
+    state: State<'_, AppState>,
+    label: String,
+) -> Result<ReMarkerDto, AppError> {
+    run_blocking(state, "cmd_re_mark", move |e| Ok(e.cmd_re_mark(&label))).await
+}
+
+#[tauri::command]
+pub async fn cmd_re_markers(state: State<'_, AppState>) -> Result<Vec<ReMarkerDto>, AppError> {
+    run_blocking(state, "cmd_re_markers", move |e| Ok(e.cmd_re_markers())).await
+}
+
+#[tauri::command]
+pub async fn cmd_re_subscribe(
+    state: State<'_, AppState>,
+    on_snapshot: Channel<InvokeResponseBody>,
+) -> Result<(), AppError> {
+    run_blocking(state, "cmd_re_subscribe", move |e| {
+        // One copy per 10 Hz tick at the IPC hand-off (Tauri takes ownership of the body);
+        // the encoder itself writes into a buffer reserved once by the snapshot thread.
+        e.cmd_re_subscribe(Box::new(move |bytes: &[u8]| {
+            on_snapshot
+                .send(InvokeResponseBody::Raw(bytes.to_vec()))
+                .is_ok()
+        }))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_re_row_detail(
+    state: State<'_, AppState>,
+    bus: u8,
+    arb_id: u32,
+    is_extended: bool,
+) -> Result<ReRowDetailDto, AppError> {
+    run_blocking(state, "cmd_re_row_detail", move |e| {
+        e.cmd_re_row_detail(bus, arb_id, is_extended)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_re_classify(
+    state: State<'_, AppState>,
+    bus: u8,
+    arb_id: u32,
+    is_extended: bool,
+) -> Result<ReClassificationDto, AppError> {
+    run_blocking(state, "cmd_re_classify", move |e| {
+        e.cmd_re_classify(bus, arb_id, is_extended)
+    })
+    .await
+}
+
+// ─── RE Toolkit R2a — Signal Inspector (re-toolkit-v1 §6), passive only ──────────────────────
+// Errors keep the `"[re:<code>] message"` text (invalid | focus_full | no_reference | not_started).
+
+#[tauri::command]
+pub async fn cmd_re_focus_set(
+    state: State<'_, AppState>,
+    targets: Vec<ReTargetDto>,
+) -> Result<ReFocusStatusDto, AppError> {
+    run_blocking(state, "cmd_re_focus_set", move |e| {
+        e.cmd_re_focus_set(targets)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_re_focus_status(state: State<'_, AppState>) -> Result<ReFocusStatusDto, AppError> {
+    run_blocking(state, "cmd_re_focus_status", move |e| {
+        Ok(e.cmd_re_focus_status())
+    })
+    .await
+}
+
+/// §6.3 series as a raw binary body (`ArrayBuffer` on the JS side, decoded by `reSeriesCodec.ts`).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_re_series(
+    state: State<'_, AppState>,
+    target: ReTargetDto,
+    candidates: Vec<ReCandidateDto>,
+    reference: Option<ReReferenceDto>,
+    from_us: Option<u64>,
+    to_us: Option<u64>,
+    max_points: u16,
+) -> Result<tauri::ipc::Response, AppError> {
+    let req = ReSeriesRequest {
+        target,
+        candidates,
+        reference,
+        from_us,
+        to_us,
+        max_points,
+    };
+    run_blocking(state, "cmd_re_series", move |e| e.cmd_re_series(req))
+        .await
+        .map(tauri::ipc::Response::new)
+}
+
+/// Runs on a Tauri blocking worker (never the aggregator); the analyzer lock is held only for
+/// the bounded window copy, the ≤ 2 s sweep runs without it; a newer call cancels an older one.
+#[tauri::command]
+pub async fn cmd_re_correlate(
+    state: State<'_, AppState>,
+    target: ReTargetDto,
+    reference: ReReferenceDto,
+    from_us: Option<u64>,
+    to_us: Option<u64>,
+    search: ReSearchDto,
+    top_n: u8,
+) -> Result<ReCorrelationResultDto, AppError> {
+    let req = ReCorrelateRequest {
+        target,
+        reference,
+        from_us,
+        to_us,
+        search,
+        top_n,
+    };
+    run_blocking(state, "cmd_re_correlate", move |e| e.cmd_re_correlate(req)).await
+}
+
+// ─── RE Toolkit R2c — Value Scan (re-toolkit-v1 §8.3) ──────────────────────────────────
+// Every scan command runs on a Tauri blocking worker (never the aggregator, never the async
+// runtime): first / next / results are CPU-bound (≤ 2 s budget, analyzer lock only for the row
+// copy). Errors keep the "[re:<code>] …" text.
+
+#[tauri::command]
+pub async fn cmd_re_scan_first(
+    state: State<'_, AppState>,
+    spec: ReScanFirstSpec,
+) -> Result<ReScanStatusDto, AppError> {
+    run_blocking(state, "cmd_re_scan_first", move |e| {
+        e.cmd_re_scan_first(spec)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cmd_re_scan_next(
+    state: State<'_, AppState>,
+    op: ReScanNextOp,
+) -> Result<ReScanStatusDto, AppError> {
+    run_blocking(state, "cmd_re_scan_next", move |e| e.cmd_re_scan_next(op)).await
+}
+
+#[tauri::command]
+pub async fn cmd_re_scan_undo(state: State<'_, AppState>) -> Result<ReScanStatusDto, AppError> {
+    run_blocking(state, "cmd_re_scan_undo", |e| e.cmd_re_scan_undo()).await
+}
+
+#[tauri::command]
+pub async fn cmd_re_scan_reset(state: State<'_, AppState>) -> Result<ReScanStatusDto, AppError> {
+    run_blocking(state, "cmd_re_scan_reset", |e| Ok(e.cmd_re_scan_reset())).await
+}
+
+#[tauri::command]
+pub async fn cmd_re_scan_status(state: State<'_, AppState>) -> Result<ReScanStatusDto, AppError> {
+    run_blocking(state, "cmd_re_scan_status", |e| Ok(e.cmd_re_scan_status())).await
+}
+
+#[tauri::command]
+pub async fn cmd_re_scan_results(
+    state: State<'_, AppState>,
+    offset: u32,
+    limit: u32,
+    sort: ReScanSort,
+) -> Result<ReScanResultsDto, AppError> {
+    run_blocking(state, "cmd_re_scan_results", move |e| {
+        e.cmd_re_scan_results(offset, limit, sort)
+    })
+    .await
+}
+
+/// R2b (§7.3): DBC text for RE signal drafts, standalone or merged into `base` (`.dbc` / `.kcd`,
+/// base64). Pure generator on a Tauri blocking worker: no engine state, no file system writes
+/// (saving stays on the frontend's save / download path). Input / base errors are
+/// `"[re:invalid] …"`; generator findings are diagnostics in the result. `drafts: []` with
+/// `base: null` is the frontend's reachability probe.
+#[tauri::command]
+pub async fn cmd_re_dbc_generate(
+    drafts: Vec<ReSignalDraft>,
+    base: Option<ReDbcBaseDto>,
+) -> Result<ReDbcGenerateResult, AppError> {
+    match tauri::async_runtime::spawn_blocking(move || re_dbc_generate(&drafts, base.as_ref()))
+        .await
+    {
+        Ok(res) => res.map_err(|e| AppError::Hal(HalError::InvalidInput(e.to_string()))),
+        Err(join_err) => Err(AppError::Ipc(format!(
+            "cmd_re_dbc_generate worker failed: {join_err}"
+        ))),
+    }
 }

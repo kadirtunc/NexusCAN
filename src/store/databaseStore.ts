@@ -87,8 +87,11 @@ export function buildBusSchemaLookup(schema: DatabaseSchemaDto): BusSchemaLookup
 }
 
 const initialMeta = typeof window !== 'undefined' ? readActiveSessionMetaSync() : null;
+const KNOWN_DOC_TABS: readonly ActiveDocumentTab[] = [
+  'start', 'rxtx', 'connections', 'plotter', 'trace', 'symbols', 'panels', 'cloud', 'diagnostics', 're',
+];
 const initialTab: ActiveDocumentTab =
-  initialMeta && initialMeta.isOpen && initialMeta.activeDocTab
+  initialMeta && initialMeta.isOpen && KNOWN_DOC_TABS.includes(initialMeta.activeDocTab)
     ? initialMeta.activeDocTab
     : 'start';
 const initialTheme: UiTheme =

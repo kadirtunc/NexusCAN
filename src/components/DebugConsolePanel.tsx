@@ -45,6 +45,7 @@ const CATEGORIES: readonly (DebugCategory | 'ALL')[] = [
   'BUS_ERR',
   'DIAG',
   'WORKBENCH',
+  'RE',
 ];
 
 /** Newest-first display cap; the store keeps up to 5000, DOM keeps the newest N. */

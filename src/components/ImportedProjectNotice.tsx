@@ -11,7 +11,8 @@ export const ImportedProjectNotice: React.FC = () => {
   if (notice === null) return null;
   const count = notice.profileIds.length;
   const problems = notice.diagnosticsProblems;
-  if (count === 0 && notice.cloudBinding === null && problems.length === 0) return null;
+  const reDropped = notice.reDraftsDropped;
+  if (count === 0 && notice.cloudBinding === null && problems.length === 0 && reDropped === 0) return null;
 
   const btn =
     'h-[24px] px-2 border text-[11px] font-bold cursor-pointer rounded-[3px] disabled:opacity-40';
@@ -53,6 +54,7 @@ export const ImportedProjectNotice: React.FC = () => {
           {t('diagWs.import.problems', { count: problems.length })}
         </span>
       )}
+      {reDropped > 0 && <span className="font-mono tabular-nums">{t('re.draft.import.dropped', { count: reDropped })}</span>}
       <button
         type="button"
         onClick={() => projectStore.dismissImportNotice()}

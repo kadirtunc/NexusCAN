@@ -30,6 +30,7 @@ import { connectionStore, useConnectionStore } from './store/connectionStore';
 import { cloudBridgeStore, useCloudBridgeHeader } from './store/cloudBridgeStore';
 import { isExperimentalCloudEnabled, useExperimentalCloud } from './store/experimentalStore';
 import { databaseStore, useDatabaseStore, type ActiveDocumentTab } from './store/databaseStore';
+import { ReSnifferView } from './components/re/ReSnifferView';
 import { plotStore, usePlotStore } from './store/plotStore';
 import { useSimulationPanelStore } from './store/simulationPanelStore';
 import {
@@ -53,6 +54,7 @@ import {
 import type { DeviceDescriptorDto } from './types/hal';
 import { installBusDatabaseAutoSync } from './utils/busDatabaseSync';
 import { Plus, X } from 'lucide-react';
+import { FlowPromptHost } from './components/flow/FlowPromptHost';
 
 installBusDatabaseAutoSync();
 
@@ -528,6 +530,8 @@ export const App: React.FC = () => {
         );
       case 'diagnostics':
         return <DiagnosticsView />;
+      case 're':
+        return <ReSnifferView />;
       default:
         return null;
     }
@@ -555,6 +559,8 @@ export const App: React.FC = () => {
         return t('shell.tab.cloud');
       case 'diagnostics':
         return t('shell.tab.diagnostics');
+      case 're':
+        return t('re.tab.title');
       case 'start':
         return t('shell.tab.workspace');
     }
@@ -840,6 +846,23 @@ export const App: React.FC = () => {
                   {t('shell.tab.diagnostics')}
                 </button>
               )}
+
+              {/* 8b. Reverse Engineering (passive sniffer, always available) */}
+              <button
+                type="button"
+                onClick={() => databaseStore.setActiveDocTab('re')}
+                style={{
+                  backgroundColor: dbState.activeDocTab === 're' ? 'var(--bg-panel)' : 'transparent',
+                  borderColor: dbState.activeDocTab === 're' ? 'var(--border-strong)' : 'transparent',
+                  color: dbState.activeDocTab === 're' ? '#34D399' : 'var(--text-secondary)',
+                  borderBottomColor: dbState.activeDocTab === 're' ? 'var(--bg-panel)' : 'transparent',
+                }}
+                className={`h-full px-3.5 xl:px-4 text-[13px] font-sans border-t border-l border-r cursor-pointer shrink-0 rounded-t-[3px] transition-colors ${
+                  dbState.activeDocTab === 're' ? 'font-semibold' : 'hover:text-[var(--text-primary)]'
+                }`}
+              >
+                {t('re.tab.title')}
+              </button>
 
               {/* 9. Cloud (experimental, default OFF) */}
               {cloudOn && (
@@ -1232,6 +1255,9 @@ export const App: React.FC = () => {
       />
 
       <AcknowledgmentsModal />
+
+      {/* Operator prompts of any flow run (Flow Editor / Diagnostics Workbench): one host for every tab. */}
+      <FlowPromptHost />
     </div>
   );
 };

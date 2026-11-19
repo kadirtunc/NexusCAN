@@ -527,6 +527,7 @@ fn normalize_category(raw: &str) -> &'static str {
         "BUS_ERR" => "BUS_ERR",
         "DIAG" => "DIAG",
         "WORKBENCH" => "WORKBENCH",
+        "RE" => "RE",
         _ => "WORKBENCH",
     }
 }

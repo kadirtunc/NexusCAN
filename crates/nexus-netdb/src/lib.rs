@@ -14,6 +14,7 @@ pub mod compiler;
 pub mod error;
 pub mod formats;
 pub mod ir;
+pub mod re_export;
 pub mod ui_dto;
 
 pub use codec::{DecodeSummary, DecodedSignalSample};

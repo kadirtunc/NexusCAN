@@ -16,11 +16,13 @@ import { flowIfaceEn, flowIfaceTr } from './shards/flowInterface';
 import { flowRegEn, flowRegTr } from './shards/flowRegistry';
 import { hardwareNetdbEn, hardwareNetdbTr } from './shards/hardwareNetdb';
 import { plotterModalsEn, plotterModalsTr } from './shards/plotterModals';
+import { reEn, reTr } from './shards/re';
 import { rxtxTraceEn, rxtxTraceTr } from './shards/rxtxTrace';
 import { securityEn, securityTr } from './shards/security';
 import { shellEn, shellTr } from './shards/shell';
 import { simInspectorPaletteEn, simInspectorPaletteTr } from './shards/simInspectorPalette';
 import { simWidgetsCanvasEn, simWidgetsCanvasTr } from './shards/simWidgetsCanvas';
+import { workbenchEn, workbenchTr } from './shards/workbench';
 
 export type { Locale };
 export { getLocale, setLocale, subscribeLocale, SUPPORTED_LOCALES, toggleLocale };
@@ -40,6 +42,8 @@ export const trDictionary = {
   ...diagWorkspaceTr,
   ...diagWorkspaceNoticeTr,
   ...securityTr,
+  ...workbenchTr,
+  ...reTr,
 } as const;
 
 export type TranslationKey = keyof typeof trDictionary;
@@ -59,6 +63,8 @@ export const enDictionary: Record<TranslationKey, string> = {
   ...diagWorkspaceEn,
   ...diagWorkspaceNoticeEn,
   ...securityEn,
+  ...workbenchEn,
+  ...reEn,
 };
 
 export function translateForLocale(

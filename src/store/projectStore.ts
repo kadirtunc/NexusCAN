@@ -29,9 +29,12 @@ import {
 import { syncAllBusDatabasesWithBackend } from '../utils/busDatabaseSync';
 import { type PlotProjectState, plotStore } from './plotStore';
 import { simulationPanelStore } from './simulationPanelStore';
+import { udsPanelStore } from '../components/diagnostics/uds-panel/udsInstrumentStore';
+import { sanitizeUdsPanels } from '../components/diagnostics/uds-panel/udsPanelSanitize';
 import { DEFAULT_CHRONO_BUFFER_ROWS, telemetryStore } from './telemetryStore';
 import { type TxListEntry, transmitStore } from './transmitStore';
 import type { SimulationPanelDto } from '../types/simulation';
+import type { UdsPanelDto } from '../types/uds';
 import {
   type EngineeringToolpackId,
   DEFAULT_ENABLED_TOOLPACKS,
@@ -52,6 +55,10 @@ import { sanitizeProject } from '../utils/projectSanitize';
 import type { DiagnosticsProjectV1 } from '../types/diagWorkspace';
 import { diagWorkspaceStore } from '../components/diagnostics/workspace/diagWorkspaceStore';
 import { newId } from '../components/diagnostics/workspace/ecuDefaults';
+import type { ReSignalDraftDto } from '../types/reDraft';
+import { sanitizeReDrafts } from '../components/re/reDraftSanitize';
+import { reDraftStore } from './reDraftStore';
+import { reDebugLogger } from './reDebugLog';
 
 export interface QuickBarConnectionState {
   selectedDeviceId: string;
@@ -81,6 +88,8 @@ export interface NexusProjectFileV1 {
   };
   plotter: PlotProjectState;
   simulationPanels?: SimulationPanelDto[];
+  /** Diagnostic Simulation panels (diag-simulation-v1, additive; missing = none). */
+  diagnosticPanels?: UdsPanelDto[];
   workspace: {
     traceMaxBufferRows: number;
     activeDocTab: ActiveDocumentTab;
@@ -93,6 +102,8 @@ export interface NexusProjectFileV1 {
   projectId?: string;
   /** ECU registry: vehicles -> groups -> ECU records (diag-workspace-v1). */
   diagnostics?: DiagnosticsProjectV1;
+  /** RE Toolkit R2b found-signal drafts (additive, version stays 1; missing = none). */
+  reSignals?: ReSignalDraftDto[];
 }
 
 export interface ProjectStoreState {
@@ -122,6 +133,8 @@ export interface ImportNotice {
   cloudBinding: CloudProjectBindingV1 | null;
   /** Malformed entries dropped from the ECU registry (`diagnostics`) of the opened file. */
   diagnosticsProblems: readonly string[];
+  /** Malformed RE signal drafts (`reSignals`) dropped from the opened project. */
+  reDraftsDropped: number;
 }
 
 export function sanitizeProjectFileStem(input: string): string {
@@ -369,6 +382,7 @@ export const projectStore = {
       },
       plotter: plotStore.exportProjectState(),
       simulationPanels: simulationPanelStore.exportForProject(),
+      diagnosticPanels: udsPanelStore.exportForProject(),
       workspace: {
         traceMaxBufferRows: chrono.maxBufferRows,
         activeDocTab: db.activeDocTab,
@@ -378,6 +392,11 @@ export const projectStore = {
       },
       cloudBinding: currentState.cloudBinding ?? null,
       diagnostics: diagWorkspaceStore.getState(),
+      reSignals: reDraftStore.getState().drafts.map((d) => ({
+        ...d,
+        provenance: { ...d.provenance },
+        valueTable: d.valueTable.map((e) => ({ ...e })),
+      })),
     };
   },
 
@@ -418,6 +437,7 @@ export const projectStore = {
           updatedAt: snapshot.updatedAt,
         });
         void saveActiveProjectToLocalDb(snapshot);
+        udsPanelStore.markSaved(snapshot.diagnosticPanels ?? []);
         void apiSaveProject(
           snapshot.fileStem,
           JSON.stringify(snapshot, null, 2),
@@ -446,6 +466,7 @@ export const projectStore = {
       updatedAt: snapshot.updatedAt,
     });
     await saveActiveProjectToLocalDb(snapshot);
+    udsPanelStore.markSaved(snapshot.diagnosticPanels ?? []);
     await apiSaveProject(
       snapshot.fileStem,
       JSON.stringify(snapshot, null, 2),
@@ -473,6 +494,7 @@ export const projectStore = {
       updatedAt: snapshot.updatedAt,
     });
     await saveActiveProjectToLocalDb(snapshot);
+    udsPanelStore.markSaved(snapshot.diagnosticPanels ?? []);
 
     try {
       await apiSaveProject(snapshot.fileStem, json);
@@ -563,8 +585,13 @@ export const projectStore = {
     currentState = {
       ...currentState,
       importNotice:
-        notice.cloudBinding !== null || notice.diagnosticsProblems.length > 0
-          ? { profileIds: [], cloudBinding: notice.cloudBinding, diagnosticsProblems: notice.diagnosticsProblems }
+        notice.cloudBinding !== null || notice.diagnosticsProblems.length > 0 || notice.reDraftsDropped > 0
+          ? {
+              profileIds: [],
+              cloudBinding: notice.cloudBinding,
+              diagnosticsProblems: notice.diagnosticsProblems,
+              reDraftsDropped: notice.reDraftsDropped,
+            }
           : null,
     };
     emitChange();
@@ -588,6 +615,7 @@ export const projectStore = {
     const sanitized = sanitizeProject(projectIn, isReload ? 'own' : 'external');
     const project = sanitized.project;
     isRestoring = true;
+    let reDraftsDropped = 0;
 
     try {
       if (!isReload) {
@@ -700,6 +728,27 @@ export const projectStore = {
 
       simulationPanelStore.restoreFromProject(project.simulationPanels ?? []);
 
+      // RE found-signal drafts: structurally malformed entries are dropped with a visible notice + Debug console.
+      const reDrafts = sanitizeReDrafts(project.reSignals);
+      reDraftStore.load(reDrafts.drafts);
+      reDraftsDropped = reDrafts.dropped;
+      if (reDrafts.dropped > 0) {
+        reDebugLogger.error(
+          're.drafts_load',
+          `RE found signals: ${reDrafts.dropped} malformed entr${reDrafts.dropped === 1 ? 'y' : 'ies'} dropped on project load`,
+          new Error(`kept ${reDrafts.drafts.length}, dropped ${reDrafts.dropped}`),
+        );
+      }
+
+      // Diagnostic Simulation panels: sanitized, restored in Design mode on the list (never polls / writes on load).
+      const diagPanels = sanitizeUdsPanels(project.diagnosticPanels);
+      udsPanelStore.restoreFromProject(diagPanels.panels);
+      if (diagPanels.droppedWidgets + diagPanels.droppedPanels > 0) {
+        udsPanelStore.notify('warning', 'udsPanel.notice.projectDropped', {
+          count: diagPanels.droppedWidgets + diagPanels.droppedPanels,
+        });
+      }
+
       const ws = project.workspace;
       const normalizedToolpacks = normalizeEnabledToolpacks(ws?.enabledToolpacks);
       const isSimEnabled = isToolpackEnabled(normalizedToolpacks, 'simulation_replay');
@@ -727,6 +776,8 @@ export const projectStore = {
           'symbols',
           'panels',
           'cloud',
+          'diagnostics',
+          're',
         ];
         let targetTab = ws.activeDocTab;
         if (!validTabs.includes(targetTab)) {
@@ -795,14 +846,16 @@ export const projectStore = {
         enabledToolpacks: normalizedToolpacks,
         cloudBinding: project.cloudBinding ?? null,
         importNotice:
-          !isReload &&
-          (sanitized.connectCandidates.length > 0 ||
-            sanitized.pendingCloudBinding !== null ||
-            sanitized.diagnosticsProblems.length > 0)
+          (!isReload &&
+            (sanitized.connectCandidates.length > 0 ||
+              sanitized.pendingCloudBinding !== null ||
+              sanitized.diagnosticsProblems.length > 0)) ||
+          reDraftsDropped > 0
             ? {
                 profileIds: sanitized.connectCandidates.map((p) => p.id),
                 cloudBinding: sanitized.pendingCloudBinding,
                 diagnosticsProblems: sanitized.diagnosticsProblems,
+                reDraftsDropped,
               }
             : null,
       };
@@ -900,7 +953,9 @@ export const projectStore = {
     transmitStore.clearAll();
     plotStore.clearAllSeries();
     simulationPanelStore.clearAll();
+    udsPanelStore.clearAll();
     diagWorkspaceStore.reset();
+    reDraftStore.reset();
 
     const defaultQb: QuickBarConnectionState = {
       selectedDeviceId: '',
@@ -942,6 +997,7 @@ export const projectStore = {
       updatedAt: snapshot.updatedAt,
     });
     await saveActiveProjectToLocalDb(snapshot);
+    udsPanelStore.markSaved(snapshot.diagnosticPanels ?? []);
     void apiSaveProject(snapshot.fileStem, JSON.stringify(snapshot, null, 2))
       .then(() => projectStore.refreshSavedProjects())
       .catch(() => undefined);
@@ -977,6 +1033,7 @@ export const projectStore = {
     transmitStore.clearAll();
     plotStore.clearAllSeries();
     simulationPanelStore.clearAll();
+    udsPanelStore.clearAll();
     plotStore.clearBuffers();
     diagWorkspaceStore.reset();
 
@@ -1022,6 +1079,10 @@ export const projectStore = {
 
 // ECU registry edits mark the project dirty and schedule the auto-save (same lifecycle as other project edits).
 diagWorkspaceStore.onMutation(() => projectStore.markDirty());
+// Diagnostic Simulation panel edits: same lifecycle (dirty + debounced auto-save).
+udsPanelStore.onMutation(() => projectStore.markDirty());
+// RE found-signal draft edits: same lifecycle.
+reDraftStore.onMutation(() => projectStore.markDirty());
 
 export function useProjectStore(): ProjectStoreState {
   return useSyncExternalStore(

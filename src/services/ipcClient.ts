@@ -122,6 +122,37 @@ async function postBridge(
   });
 }
 
+async function bridgeErrorText(response: Response): Promise<string> {
+  let errText = `${response.status} ${response.statusText}`;
+  try {
+    const payload = (await response.json()) as BridgeErrorPayload;
+    if (typeof payload.error === 'string' && payload.error.length > 0) {
+      errText = payload.error;
+    } else if (typeof payload.message === 'string' && payload.message.length > 0) {
+      errText = payload.message;
+    }
+  } catch {
+    const rawText = await response.text().catch(() => '');
+    if (rawText.trim().length > 0) {
+      errText = rawText.trim();
+    }
+  }
+  return errText;
+}
+
+/**
+ * Browser-bridge command whose success body is raw bytes (`application/octet-stream`, e.g. `cmd_re_series`).
+ * Same bearer token + refetch-once-on-401 rule as `invokeCmd`. Browser mode only (Tauri uses `invoke` directly).
+ */
+export async function invokeCmdRaw(cmd: string, args?: Record<string, unknown>): Promise<ArrayBuffer> {
+  let response = await postBridge(cmd, args, await getBridgeToken());
+  if (response.status === 401) {
+    response = await postBridge(cmd, args, await getBridgeToken(true));
+  }
+  if (!response.ok) throw new Error(await bridgeErrorText(response));
+  return response.arrayBuffer();
+}
+
 /**
  * Dual-transport command invocation:
  * - Native Tauri v2 Desktop WebView: `@tauri-apps/api/core` `invoke<T>`
@@ -141,23 +172,7 @@ export async function invokeCmd<T>(
     response = await postBridge(cmd, args, await getBridgeToken(true));
   }
 
-  if (!response.ok) {
-    let errText = `${response.status} ${response.statusText}`;
-    try {
-      const payload = (await response.json()) as BridgeErrorPayload;
-      if (typeof payload.error === 'string' && payload.error.length > 0) {
-        errText = payload.error;
-      } else if (typeof payload.message === 'string' && payload.message.length > 0) {
-        errText = payload.message;
-      }
-    } catch {
-      const rawText = await response.text().catch(() => '');
-      if (rawText.trim().length > 0) {
-        errText = rawText.trim();
-      }
-    }
-    throw new Error(errText);
-  }
+  if (!response.ok) throw new Error(await bridgeErrorText(response));
 
   const text = await response.text();
   if (text.trim().length === 0) {

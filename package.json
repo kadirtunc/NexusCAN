@@ -22,7 +22,19 @@
     "test:terminals": "esbuild src/components/flow/flowTerminals.test.ts --bundle --platform=node --format=esm | node --input-type=module",
     "test:diagws": "esbuild src/components/diagnostics/workspace/diagWorkspace.test.ts --bundle --platform=node --format=esm | node --input-type=module",
     "test:flowiface": "esbuild src/components/flow/flowInterfaceV2.test.ts --bundle --platform=node --format=esm | node --input-type=module",
-    "test:flowiface-qa": "esbuild src/components/flow/flowInterfaceV2.qa.test.ts --bundle --platform=node --format=esm | node --input-type=module"
+    "test:flowiface-qa": "esbuild src/components/flow/flowInterfaceV2.qa.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:workbench": "esbuild src/components/diagnostics/workbench/workbench.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:workbench-qa": "esbuild src/components/diagnostics/workbench/workbench.qa.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:diagsim": "esbuild src/components/diagnostics/uds-panel/diagSim.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:re": "esbuild src/components/re/re.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:re-r2a": "esbuild src/components/re/re.r2a.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:re-qa": "esbuild src/components/re/re.qa.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:re-r2a-qa": "esbuild src/components/re/re.r2a.qa.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:re-r2b": "esbuild src/components/re/re.r2b.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:re-r2b-qa": "esbuild src/components/re/re.r2b.qa.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:re-r2c": "esbuild src/components/re/re.r2c.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:re-r2c-qa": "esbuild src/components/re/re.r2c.qa.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:re-hardening": "esbuild src/components/re/re.hardening.test.ts --bundle --platform=node --format=esm | node --input-type=module"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.2.0",

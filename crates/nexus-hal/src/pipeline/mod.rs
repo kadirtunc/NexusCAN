@@ -11,6 +11,7 @@ pub mod diag_session;
 pub mod diag_sweep;
 pub mod diag_tap;
 pub mod diag_workspace;
+pub mod re_analyzer;
 pub mod replay;
 pub mod state_table;
 pub mod tx_scheduler;
@@ -46,6 +47,12 @@ use nexus_netdb::{
 use nexus_protocols::uds::dto::{DiagError, DiagErrorCode};
 use nexus_protocols::uds::port::{DiagPortEvent, DiagTapFilter, DiagTxReject};
 use parking_lot::{Mutex, RwLock};
+use re_analyzer::{
+    ReClassificationDto, ReCorrelateRequest, ReCorrelationResultDto, ReError, ReFocusStatusDto,
+    ReMarkerDto, RePhase, ReRowDetailDto, ReScanFirstSpec, ReScanNextOp, ReScanResultsDto,
+    ReScanSort, ReScanStatusDto, ReSeriesRequest, ReShared, ReStatusDto, ReTargetDto,
+    RE_SNAPSHOT_MAX_BYTES,
+};
 use replay::{
     compile_chronological_frames, delete_trace_file, list_trace_files, load_trace_file_cached,
     parse_trace_bytes, parse_trace_entries_from_bytes, read_trace_file_bytes,
@@ -269,6 +276,10 @@ pub struct PipelineEngine {
     flowlib: crate::flowlib::FlowLibrary,
     /// Append-only run store (`<data_root>/runs`), see [`diag_workspace`].
     runstore: crate::runstore::RunStore,
+    /// RE Toolkit R1 sniffer state (ingested by the aggregator thread), see [`re_analyzer`].
+    re: Arc<ReShared>,
+    /// Active 10 Hz RE binary snapshot subscription (single subscriber, latest wins).
+    re_sub: Mutex<Option<ReSubscription>>,
 }
 
 impl Default for PipelineEngine {
@@ -361,6 +372,8 @@ impl PipelineEngine {
         let agg_bcast = snapshot_bcast_tx.clone();
         let agg_latest = Arc::clone(&latest_snapshot);
         let agg_debug = Arc::clone(&debug_hub);
+        let re = Arc::new(ReShared::new());
+        let agg_re = Arc::clone(&re);
 
         let aggregator_handle = thread::Builder::new()
             .name("nexus-aggregator-60hz".to_string())
@@ -376,6 +389,7 @@ impl PipelineEngine {
                     agg_bcast,
                     agg_latest,
                     agg_debug,
+                    agg_re,
                 );
             })
             .expect("failed to spawn nexus-aggregator-60hz thread");
@@ -435,6 +449,8 @@ impl PipelineEngine {
             flowlib: crate::flowlib::FlowLibrary::new(data_root.flowlib_dir()),
             runstore: crate::runstore::RunStore::new(data_root.runs_dir()),
             data_root,
+            re,
+            re_sub: Mutex::new(None),
         }
     }
 
@@ -2603,11 +2619,292 @@ impl PipelineEngine {
     }
 }
 
+// ─── RE Toolkit R1 (re-toolkit-v1 §2.1) ─────────────────────────────────────
+
+/// 10 Hz RE binary snapshot period.
+pub const RE_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
+
+enum ReSubCtl {
+    /// Next tick is a full resync (after `cmd_re_reset`).
+    ForceFull,
+    /// Ends the subscription, optionally after one final snapshot.
+    Stop { final_snapshot: bool },
+}
+
+/// Handle of the RE snapshot thread (`nexus-re-snapshot-10hz`).
+struct ReSubscription {
+    ctl: Sender<ReSubCtl>,
+    join: JoinHandle<()>,
+}
+
+/// Snapshot sink: receives each encoded snapshot; returns `false` when the subscriber is gone.
+pub type ReSnapshotSink = Box<dyn FnMut(&[u8]) -> bool + Send + 'static>;
+
+fn run_re_snapshot_loop(
+    re: Arc<ReShared>,
+    ctl: Receiver<ReSubCtl>,
+    mut sink: ReSnapshotSink,
+    resync: Arc<AtomicBool>,
+) {
+    // Reserved once for the worst case (2048 rows x 64-byte payloads): never grows.
+    let mut buf: Vec<u8> = Vec::with_capacity(RE_SNAPSHOT_MAX_BYTES);
+    let mut full = true; // first tick after subscribe = full resync
+    let mut next = Instant::now();
+    loop {
+        let wait = next.saturating_duration_since(Instant::now());
+        let mut final_tick = false;
+        match ctl.recv_timeout(wait) {
+            Ok(ReSubCtl::ForceFull) => {
+                full = true;
+                continue;
+            }
+            Ok(ReSubCtl::Stop { final_snapshot }) => {
+                if !final_snapshot {
+                    return;
+                }
+                final_tick = true;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+        }
+        // A subscriber that dropped a snapshot (bounded queue full) asks for a full resync so
+        // no dirty row is lost (re-toolkit-v1 amendment 14).
+        full |= resync.swap(false, Ordering::AcqRel);
+        re.lock().encode_snapshot(&mut buf, full);
+        full = false;
+        if !sink(&buf) || final_tick {
+            return;
+        }
+        next += RE_SNAPSHOT_INTERVAL;
+        let now = Instant::now();
+        if next <= now {
+            next = now + RE_SNAPSHOT_INTERVAL;
+        }
+    }
+}
+
+impl PipelineEngine {
+    /// Shared RE state (tests / embedding).
+    pub fn re_shared(&self) -> &Arc<ReShared> {
+        &self.re
+    }
+
+    fn re_stop_subscription(&self, final_snapshot: bool) {
+        let sub = self.re_sub.lock().take();
+        if let Some(sub) = sub {
+            let _ = sub.ctl.send(ReSubCtl::Stop { final_snapshot });
+            let _ = sub.join.join();
+        }
+    }
+
+    /// `cmd_re_start`: enables RE ingest on `buses` (`None` = all buses).
+    pub fn cmd_re_start(&self, buses: Option<Vec<u8>>) -> ReStatusDto {
+        let mut a = self.re.lock();
+        a.start(buses.as_deref());
+        self.re.sync_enabled(&a);
+        a.status()
+    }
+
+    /// `cmd_re_stop`: pauses ingest (state kept); the subscription gets one final snapshot
+    /// and then ends.
+    pub fn cmd_re_stop(&self) -> ReStatusDto {
+        let status = {
+            let mut a = self.re.lock();
+            a.stop();
+            self.re.sync_enabled(&a);
+            a.status()
+        };
+        self.re_stop_subscription(true);
+        status
+    }
+
+    /// `cmd_re_reset`: clears all rows and markers; the next snapshot is a full resync.
+    pub fn cmd_re_reset(&self) -> ReStatusDto {
+        let status = {
+            let mut a = self.re.lock();
+            a.reset();
+            a.status()
+        };
+        if let Some(sub) = self.re_sub.lock().as_ref() {
+            let _ = sub.ctl.send(ReSubCtl::ForceFull);
+        }
+        status
+    }
+
+    /// `cmd_re_set_phase`: `free | baseline | action` (`idle` is rejected).
+    pub fn cmd_re_set_phase(&self, phase: RePhase) -> Result<ReStatusDto, HalError> {
+        if phase == RePhase::Idle {
+            return Err(HalError::InvalidInput(
+                "RE phase must be 'free', 'baseline' or 'action'".to_string(),
+            ));
+        }
+        let mut a = self.re.lock();
+        a.set_phase(phase);
+        Ok(a.status())
+    }
+
+    /// `cmd_re_mark`: adds an event marker (label truncated to 64 chars, never fails).
+    pub fn cmd_re_mark(&self, label: &str) -> ReMarkerDto {
+        self.re.lock().mark(label)
+    }
+
+    /// `cmd_re_markers`: all markers, oldest first (≤ 1024).
+    pub fn cmd_re_markers(&self) -> Vec<ReMarkerDto> {
+        self.re.lock().markers()
+    }
+
+    /// `cmd_re_status`-style accessor (not an IPC command).
+    pub fn re_status(&self) -> ReStatusDto {
+        self.re.lock().status()
+    }
+
+    /// `cmd_re_subscribe`: starts the 10 Hz binary snapshot thread feeding `sink` (replaces
+    /// any previous subscription). The first snapshot is a full resync.
+    pub fn cmd_re_subscribe(&self, sink: ReSnapshotSink) -> Result<(), HalError> {
+        self.cmd_re_subscribe_with_resync(sink, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Like [`Self::cmd_re_subscribe`], plus a lock-free resync request flag: setting `resync`
+    /// (e.g. from the sink after it had to drop a snapshot) makes the next snapshot a full
+    /// resync. Used by the browser bridge's bounded `/ws/re` queue.
+    pub fn cmd_re_subscribe_with_resync(
+        &self,
+        sink: ReSnapshotSink,
+        resync: Arc<AtomicBool>,
+    ) -> Result<(), HalError> {
+        self.re_stop_subscription(false);
+        let (ctl_tx, ctl_rx) = bounded::<ReSubCtl>(8);
+        let re = Arc::clone(&self.re);
+        let join = thread::Builder::new()
+            .name("nexus-re-snapshot-10hz".to_string())
+            .spawn(move || run_re_snapshot_loop(re, ctl_rx, sink, resync))
+            .map_err(|e| {
+                HalError::InvalidInput(format!("failed to spawn RE snapshot thread: {e}"))
+            })?;
+        *self.re_sub.lock() = Some(ReSubscription { ctl: ctl_tx, join });
+        Ok(())
+    }
+
+    /// `cmd_re_row_detail`.
+    pub fn cmd_re_row_detail(
+        &self,
+        bus: u8,
+        arb_id: u32,
+        is_extended: bool,
+    ) -> Result<ReRowDetailDto, HalError> {
+        self.re
+            .lock()
+            .row_detail(bus, arb_id, is_extended)
+            .ok_or_else(|| re_row_not_found(bus, arb_id, is_extended))
+    }
+
+    /// `cmd_re_classify`: copies the row history under the lock, classifies outside it.
+    pub fn cmd_re_classify(
+        &self,
+        bus: u8,
+        arb_id: u32,
+        is_extended: bool,
+    ) -> Result<ReClassificationDto, HalError> {
+        let hist = self
+            .re
+            .lock()
+            .row_history(bus, arb_id, is_extended)
+            .ok_or_else(|| re_row_not_found(bus, arb_id, is_extended))?;
+        Ok(hist.classify())
+    }
+
+    // ─── RE Toolkit R2a — Signal Inspector (re-toolkit-v1 §6) ───────────────────────────
+
+    /// `cmd_re_focus_set`: replaces the focus set (≤ 8 targets; kept targets keep their ring).
+    pub fn cmd_re_focus_set(
+        &self,
+        targets: Vec<ReTargetDto>,
+    ) -> Result<ReFocusStatusDto, HalError> {
+        self.re.lock().focus_set(&targets).map_err(re_err)
+    }
+
+    /// `cmd_re_focus_status`.
+    pub fn cmd_re_focus_status(&self) -> ReFocusStatusDto {
+        self.re.lock().focus_status()
+    }
+
+    /// `cmd_re_series`: §6.3 binary series. Runs under the analyzer lock (bounded: ≤ 5 series
+    /// x 16384 samples, sub-millisecond in release); the buffer is handed to IPC as is.
+    pub fn cmd_re_series(&self, req: ReSeriesRequest) -> Result<Vec<u8>, HalError> {
+        let mut out = Vec::new();
+        self.re.lock().series(&req, &mut out).map_err(re_err)?;
+        Ok(out)
+    }
+
+    /// `cmd_re_correlate`: the ring windows are copied out under the lock, the sweep runs on
+    /// the calling worker thread (Tauri `spawn_blocking`, never the aggregator) without the
+    /// lock, bounded to 2 s; a newer call cancels an older running sweep.
+    pub fn cmd_re_correlate(
+        &self,
+        req: ReCorrelateRequest,
+    ) -> Result<ReCorrelationResultDto, HalError> {
+        self.re.correlate(&req).map_err(re_err)
+    }
+
+    // ─── RE Toolkit R2c — Value Scan (re-toolkit-v1 §8) ─────────────────────────────────
+    // Call from a blocking worker (Tauri `spawn_blocking` / bridge blocking pool), never the
+    // aggregator: first / next / results run synchronously (≤ 2 s budget) and hold the analyzer
+    // lock only for the row copy.
+
+    /// `cmd_re_scan_first`.
+    pub fn cmd_re_scan_first(&self, spec: ReScanFirstSpec) -> Result<ReScanStatusDto, HalError> {
+        self.re.scan_first(&spec).map_err(re_err)
+    }
+
+    /// `cmd_re_scan_next`.
+    pub fn cmd_re_scan_next(&self, op: ReScanNextOp) -> Result<ReScanStatusDto, HalError> {
+        self.re.scan_next(&op).map_err(re_err)
+    }
+
+    /// `cmd_re_scan_undo`.
+    pub fn cmd_re_scan_undo(&self) -> Result<ReScanStatusDto, HalError> {
+        self.re.scan_undo().map_err(re_err)
+    }
+
+    /// `cmd_re_scan_reset` (never fails).
+    pub fn cmd_re_scan_reset(&self) -> ReScanStatusDto {
+        self.re.scan_reset()
+    }
+
+    /// `cmd_re_scan_status` (never fails).
+    pub fn cmd_re_scan_status(&self) -> ReScanStatusDto {
+        self.re.scan_status()
+    }
+
+    /// `cmd_re_scan_results` (`limit` 1..=500).
+    pub fn cmd_re_scan_results(
+        &self,
+        offset: u32,
+        limit: u32,
+        sort: ReScanSort,
+    ) -> Result<ReScanResultsDto, HalError> {
+        self.re.scan_results(offset, limit, sort).map_err(re_err)
+    }
+}
+
+/// R2a errors keep their `"[re:<code>] message"` text across IPC.
+fn re_err(e: ReError) -> HalError {
+    HalError::InvalidInput(e.to_string())
+}
+
+fn re_row_not_found(bus: u8, arb_id: u32, is_extended: bool) -> HalError {
+    HalError::InvalidInput(format!(
+        "RE row not found: bus {bus}, id 0x{arb_id:X}{}",
+        if is_extended { " (extended)" } else { "" }
+    ))
+}
+
 impl Drop for PipelineEngine {
     fn drop(&mut self) {
         // Stop UDS sessions (keepalive threads) and passive scans before their buses go away.
         self.diag_sessions.clear();
         self.diag_passive.stop_all();
+        self.re_stop_subscription(false);
         self.engine_stop.store(true, Ordering::Release);
         self.hw_watch_shutdown.signal();
         let _ = self.hw_stop_tx.try_send(());
@@ -2933,6 +3230,7 @@ fn run_aggregator_loop(
     snapshot_bcast_tx: broadcast::Sender<TelemetrySnapshotDto>,
     latest_snapshot: Arc<RwLock<Option<TelemetrySnapshotDto>>>,
     debug_hub: Arc<DebugEventHub>,
+    re: Arc<ReShared>,
 ) {
     let mut state_table = StateTable::new();
     let tick_duration = Duration::from_micros(SNAPSHOT_INTERVAL_US);
@@ -2972,9 +3270,14 @@ fn run_aggregator_loop(
                     );
                 }
                 AggregatorControl::FlushSnapshot(reply_tx) => {
+                    let mut re_batch = re.batch();
                     while let Ok(f) = frame_rx.try_recv() {
                         state_table.ingest_frame(&f);
+                        if let Some(a) = re_batch.as_mut() {
+                            a.ingest(&f);
+                        }
                     }
+                    drop(re_batch);
                     check_bus_err_health(
                         &state_table,
                         &buses,
@@ -2999,23 +3302,34 @@ fn run_aggregator_loop(
         }
 
         // 2. Burst-drain bounded frame channel into StateTable
+        // RE Toolkit: one relaxed atomic load per batch when off; analyzer lock held per batch.
         let mut drained = 0usize;
+        let mut re_batch = re.batch();
         while drained < 16_384 {
             match frame_rx.try_recv() {
                 Ok(frame) => {
                     state_table.ingest_frame(&frame);
+                    if let Some(a) = re_batch.as_mut() {
+                        a.ingest(&frame);
+                    }
                     drained += 1;
                 }
                 Err(_) => break,
             }
         }
+        drop(re_batch);
 
         // 3. Check 60Hz (16.667ms) snapshot deadline
         let now = Instant::now();
         if now >= next_tick {
+            let mut re_batch = re.batch();
             while let Ok(frame) = frame_rx.try_recv() {
                 state_table.ingest_frame(&frame);
+                if let Some(a) = re_batch.as_mut() {
+                    a.ingest(&frame);
+                }
             }
+            drop(re_batch);
 
             health_tick = health_tick.wrapping_add(1);
             if health_tick.is_multiple_of(30) {
@@ -3048,6 +3362,9 @@ fn run_aggregator_loop(
             let wait = (next_tick - now).min(Duration::from_millis(2));
             if let Ok(frame) = frame_rx.recv_timeout(wait) {
                 state_table.ingest_frame(&frame);
+                if let Some(mut a) = re.batch() {
+                    a.ingest(&frame);
+                }
             }
         }
     }

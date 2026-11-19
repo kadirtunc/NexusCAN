@@ -151,10 +151,10 @@ impl<'a> DbcWriter<'a> {
                     sig.bit_len,
                     bo_char,
                     vt_char,
-                    sig.factor,
-                    sig.offset,
-                    sig.min,
-                    sig.max,
+                    num(sig.factor),
+                    num(sig.offset),
+                    num(sig.min),
+                    num(sig.max),
                     esc(&sig.unit),
                     receivers
                 )
@@ -201,10 +201,10 @@ impl<'a> DbcWriter<'a> {
                     sig.bit_len,
                     bo_char,
                     vt_char,
-                    sig.factor,
-                    sig.offset,
-                    sig.min,
-                    sig.max,
+                    num(sig.factor),
+                    num(sig.offset),
+                    num(sig.min),
+                    num(sig.max),
                     esc(&sig.unit),
                     receivers
                 )
@@ -403,6 +403,27 @@ impl<'a> DbcWriter<'a> {
         // 14. SG_MUL_VAL_ (multi-range or extended multiplexers)
         for msg in self.db.messages.values() {
             let raw_id = msg.can_id.to_dbc_raw_id();
+            // Without SG_MUL_VAL_ a reader binds `mN` to the single `M` signal only. As soon as the
+            // message uses extended multiplexing (sub-switches, several masters, or a switch that is not
+            // the master), every multiplexed signal needs an explicit SG_MUL_VAL_ — even single-value
+            // ones — or the cascade is silently re-attached to the wrong switch on re-import.
+            let mut masters = msg
+                .signals
+                .iter()
+                .filter(|s| s.mux_role == MuxRole::MasterSwitch);
+            let sole_master = match (masters.next(), masters.next()) {
+                (Some(m), None) => Some(m.name.as_str()),
+                _ => None,
+            };
+            let extended_mux = msg.signals.iter().any(|s| {
+                matches!(
+                    s.mux_role,
+                    MuxRole::Multiplexed {
+                        is_sub_switch: true,
+                        ..
+                    }
+                )
+            });
             for sig in &msg.signals {
                 if let MuxRole::Multiplexed {
                     ref switch_signal_name,
@@ -410,7 +431,11 @@ impl<'a> DbcWriter<'a> {
                     ..
                 } = sig.mux_role
                 {
-                    if ranges.len() > 1 || (ranges.len() == 1 && ranges[0].start != ranges[0].end) {
+                    let implicit_ok = !extended_mux
+                        && sole_master == Some(switch_signal_name.as_str())
+                        && ranges.len() == 1
+                        && ranges[0].start == ranges[0].end;
+                    if !implicit_ok && !ranges.is_empty() {
                         let range_strs = ranges
                             .iter()
                             .map(|r: &MuxRange| format!("{}-{}", r.start, r.end))
@@ -452,6 +477,20 @@ impl<'a> DbcWriter<'a> {
         }
 
         Ok(self.out)
+    }
+}
+
+/// Formats an `f64` for DBC numeric fields losslessly (re-parses to the identical bit pattern).
+///
+/// Rust's `Display` / `LowerExp` both emit the shortest representation that round-trips exactly; plain
+/// decimal is used for ordinary magnitudes (what every DBC tool expects) and exponent form only for
+/// extreme magnitudes, where plain decimal would be hundreds of digits long.
+fn num(v: f64) -> String {
+    let a = v.abs();
+    if a != 0.0 && a.is_finite() && !(1e-6..1e16).contains(&a) {
+        format!("{v:e}")
+    } else {
+        v.to_string()
     }
 }
 

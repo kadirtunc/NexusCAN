@@ -15,6 +15,9 @@
 //!   in the allowlist (403). CORS is allowlist-only.
 //! * `/ws/telemetry`: Host/Origin checked at upgrade; the first client message must be
 //!   `{"type":"auth","token":"<token>"}` within 3 s, else the socket is closed with code 4401.
+//! * `/ws/re` (re-toolkit-v1 amendment 14): same Host/Origin + first-message auth, then the
+//!   10 Hz RE binary snapshots (`"NRE2"`) as one binary message each; closed with 1000 when
+//!   the backend ends the subscription (`cmd_re_stop` or a newer subscriber).
 //! * Native seed/key providers (`library`, `external_process`) run only for loopback TCP peers
 //!   AND `NEXUS_BRIDGE_ALLOW_NATIVE_SEEDKEY=1`; otherwise `[seedkey:native_not_allowed]`.
 
@@ -37,9 +40,14 @@ use nexus_hal::{
     },
     flowlib::FlowLibError,
     pipeline::diag_flash::{flash_error_to_ipc, resolve_download_config, FlashLoadFormat},
+    pipeline::re_analyzer::{
+        re_dbc_generate, ReCorrelateRequest, ReDbcGenerateRequest, ReError, RePhase,
+        ReScanFirstSpec, ReScanNextOp, ReScanSort, ReSeriesRequest, ReTargetDto,
+    },
     pipeline::PipelineEngine,
     runstore::{RunQueryFilterDto, RunRecordV1, RunStoreError},
     seedkey::SeedKeyPolicy,
+    HalError,
 };
 use nexus_protocols::uds::dto::{
     DiagError, DiagErrorCode, DiagOrigin, DiagSessionConfigDto, EcuDiscoveryRequestDto,
@@ -52,10 +60,14 @@ use serde_json::{json, Value};
 use std::{
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::mpsc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 // ─── WP-1 security configuration ────────────────────────────────────────────
@@ -946,6 +958,228 @@ async fn handle_diag_invoke(
     Some(resp)
 }
 
+// ─── RE Toolkit (re-toolkit-v1 §2.1 / §6, amendment 14) ──────────────────────────────────────
+// Same camelCase args / JSON results as the Tauri commands in `src-tauri/src/commands.rs`;
+// errors are the engine text (`"[re:<code>] …"` for R2a errors) in the regular 400
+// `{"error": …}` body. Every engine call runs on the blocking pool (as `run_blocking` does in
+// Tauri); `cmd_re_correlate` / `cmd_re_classify` / `cmd_re_dbc_generate` never run on the
+// async workers.
+
+/// Bounded `/ws/re` queue (snapshots); full -> drop + force a full resync.
+const RE_WS_QUEUE: usize = 16;
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ReStartArgs {
+    #[serde(default)]
+    buses: Option<Vec<u8>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RePhaseArgs {
+    phase: RePhase,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReMarkArgs {
+    label: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReRowArgs {
+    bus: u8,
+    arb_id: u32,
+    is_extended: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReFocusSetArgs {
+    targets: Vec<ReTargetDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReScanFirstArgs {
+    spec: ReScanFirstSpec,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReScanNextArgs {
+    op: ReScanNextOp,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReScanResultsArgs {
+    offset: u32,
+    limit: u32,
+    sort: ReScanSort,
+}
+
+fn re_bad_args(cmd: &str, e: serde_json::Error) -> Response {
+    bad_request(ReError::Invalid(format!("invalid arguments for {cmd}: {e}")).to_string())
+}
+
+async fn run_re_blocking<T, F>(
+    engine: Arc<PipelineEngine>,
+    cmd: &'static str,
+    f: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&PipelineEngine) -> Result<T, HalError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(move || f(&engine)).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(join_err) => Err(format!("{cmd} worker failed: {join_err}")),
+    }
+}
+
+async fn run_re<T, F>(engine: Arc<PipelineEngine>, cmd: &'static str, f: F) -> Response
+where
+    T: serde::Serialize + Send + 'static,
+    F: FnOnce(&PipelineEngine) -> Result<T, HalError> + Send + 'static,
+{
+    match run_re_blocking(engine, cmd, f).await {
+        Ok(v) => ok_json(v),
+        Err(msg) => bad_request(msg),
+    }
+}
+
+/// RE router. `None` = not an RE invoke command.
+async fn handle_re_invoke(
+    cmd: &str,
+    payload: Value,
+    engine: &Arc<PipelineEngine>,
+) -> Option<Response> {
+    macro_rules! args {
+        ($ty:ty, $name:literal) => {
+            match serde_json::from_value::<$ty>(payload) {
+                Ok(a) => a,
+                Err(e) => return Some(re_bad_args($name, e)),
+            }
+        };
+    }
+    let engine = Arc::clone(engine);
+    let resp = match cmd {
+        "cmd_re_start" => {
+            let a = args!(ReStartArgs, "cmd_re_start");
+            run_re(engine, "cmd_re_start", move |e| Ok(e.cmd_re_start(a.buses))).await
+        }
+        "cmd_re_stop" => run_re(engine, "cmd_re_stop", |e| Ok(e.cmd_re_stop())).await,
+        "cmd_re_reset" => run_re(engine, "cmd_re_reset", |e| Ok(e.cmd_re_reset())).await,
+        "cmd_re_set_phase" => {
+            let a = args!(RePhaseArgs, "cmd_re_set_phase");
+            run_re(engine, "cmd_re_set_phase", move |e| {
+                e.cmd_re_set_phase(a.phase)
+            })
+            .await
+        }
+        "cmd_re_mark" => {
+            let a = args!(ReMarkArgs, "cmd_re_mark");
+            run_re(engine, "cmd_re_mark", move |e| Ok(e.cmd_re_mark(&a.label))).await
+        }
+        "cmd_re_markers" => run_re(engine, "cmd_re_markers", |e| Ok(e.cmd_re_markers())).await,
+        "cmd_re_row_detail" => {
+            let a = args!(ReRowArgs, "cmd_re_row_detail");
+            run_re(engine, "cmd_re_row_detail", move |e| {
+                e.cmd_re_row_detail(a.bus, a.arb_id, a.is_extended)
+            })
+            .await
+        }
+        "cmd_re_classify" => {
+            let a = args!(ReRowArgs, "cmd_re_classify");
+            run_re(engine, "cmd_re_classify", move |e| {
+                e.cmd_re_classify(a.bus, a.arb_id, a.is_extended)
+            })
+            .await
+        }
+        "cmd_re_focus_set" => {
+            let a = args!(ReFocusSetArgs, "cmd_re_focus_set");
+            run_re(engine, "cmd_re_focus_set", move |e| {
+                e.cmd_re_focus_set(a.targets)
+            })
+            .await
+        }
+        "cmd_re_focus_status" => {
+            run_re(engine, "cmd_re_focus_status", |e| {
+                Ok(e.cmd_re_focus_status())
+            })
+            .await
+        }
+        "cmd_re_series" => {
+            let req = args!(ReSeriesRequest, "cmd_re_series");
+            match run_re_blocking(engine, "cmd_re_series", move |e| e.cmd_re_series(req)).await {
+                // Same NRS1 bytes as the Tauri raw `Response` body.
+                Ok(bytes) => (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "application/octet-stream")],
+                    bytes,
+                )
+                    .into_response(),
+                Err(msg) => bad_request(msg),
+            }
+        }
+        "cmd_re_correlate" => {
+            let req = args!(ReCorrelateRequest, "cmd_re_correlate");
+            run_re(engine, "cmd_re_correlate", move |e| e.cmd_re_correlate(req)).await
+        }
+        // R2c (§8.3): value scan. first / next / results are CPU-bound (≤ 2 s budget) and run
+        // on the blocking pool like every other RE call (`run_re` = spawn_blocking).
+        "cmd_re_scan_first" => {
+            let a = args!(ReScanFirstArgs, "cmd_re_scan_first");
+            run_re(engine, "cmd_re_scan_first", move |e| {
+                e.cmd_re_scan_first(a.spec)
+            })
+            .await
+        }
+        "cmd_re_scan_next" => {
+            let a = args!(ReScanNextArgs, "cmd_re_scan_next");
+            run_re(engine, "cmd_re_scan_next", move |e| {
+                e.cmd_re_scan_next(a.op)
+            })
+            .await
+        }
+        "cmd_re_scan_undo" => run_re(engine, "cmd_re_scan_undo", |e| e.cmd_re_scan_undo()).await,
+        "cmd_re_scan_reset" => {
+            run_re(engine, "cmd_re_scan_reset", |e| Ok(e.cmd_re_scan_reset())).await
+        }
+        "cmd_re_scan_status" => {
+            run_re(engine, "cmd_re_scan_status", |e| Ok(e.cmd_re_scan_status())).await
+        }
+        "cmd_re_scan_results" => {
+            let a = args!(ReScanResultsArgs, "cmd_re_scan_results");
+            run_re(engine, "cmd_re_scan_results", move |e| {
+                e.cmd_re_scan_results(a.offset, a.limit, a.sort)
+            })
+            .await
+        }
+        // R2b (§7.3): pure generator, no engine state, no file system; blocking pool.
+        "cmd_re_dbc_generate" => {
+            let req = args!(ReDbcGenerateRequest, "cmd_re_dbc_generate");
+            match tokio::task::spawn_blocking(move || {
+                re_dbc_generate(&req.drafts, req.base.as_ref())
+            })
+            .await
+            {
+                Ok(Ok(v)) => ok_json(v),
+                Ok(Err(e)) => bad_request(e.to_string()),
+                Err(join_err) => {
+                    bad_request(format!("cmd_re_dbc_generate worker failed: {join_err}"))
+                }
+            }
+        }
+        _ => return None,
+    };
+    Some(resp)
+}
+
 fn build_router(engine: Arc<PipelineEngine>, security: Arc<BridgeSecurity>) -> Router {
     let state = BridgeState {
         engine,
@@ -959,6 +1193,7 @@ fn build_router(engine: Arc<PipelineEngine>, security: Arc<BridgeSecurity>) -> R
         .route("/ws/telemetry", get(handle_ws_upgrade))
         .route("/ws/hardware", get(handle_hw_ws_upgrade))
         .route("/ws/debug", get(handle_debug_ws_upgrade))
+        .route("/ws/re", get(handle_re_ws_upgrade))
         // Flash images arrive base64-encoded (≤ 64 MiB decoded ≈ 85.4 MiB of base64); axum's
         // default 2 MB body limit would reject them. Auth / Host guards run before the body.
         .route(
@@ -1113,6 +1348,101 @@ async fn ws_authenticate_then_stream_hardware(mut socket: WebSocket, state: Brid
         return;
     }
     stream_hardware_ws(socket, state.engine).await;
+}
+
+async fn handle_re_ws_upgrade(ws: WebSocketUpgrade, State(state): State<BridgeState>) -> Response {
+    ws.max_message_size(WS_MAX_CLIENT_MESSAGE)
+        .max_frame_size(WS_MAX_CLIENT_MESSAGE)
+        .on_upgrade(move |socket| ws_authenticate_then_stream_re(socket, state))
+}
+
+async fn ws_authenticate_then_stream_re(mut socket: WebSocket, state: BridgeState) {
+    let authed = match tokio::time::timeout(WS_AUTH_TIMEOUT, socket.recv()).await {
+        Ok(Some(Ok(msg))) => ws_auth_message_ok(&msg, &state.security),
+        _ => false,
+    };
+    if !authed {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: WS_CLOSE_UNAUTHORIZED,
+                reason: "unauthorized".into(),
+            })))
+            .await;
+        return;
+    }
+    stream_re_ws(socket, state.engine).await;
+}
+
+/// `/ws/re`: subscribes the RE snapshot thread (replacing any older subscriber, Tauri or WS)
+/// and forwards each snapshot as one binary message. The sink never blocks the snapshot
+/// thread: queue full -> drop + full resync next tick; client gone -> `false` ends it.
+async fn stream_re_ws(mut socket: WebSocket, engine: Arc<PipelineEngine>) {
+    let (tx, mut rx) = mpsc::channel::<Bytes>(RE_WS_QUEUE);
+    let resync = Arc::new(AtomicBool::new(false));
+    let sink_resync = Arc::clone(&resync);
+    let sink: nexus_hal::pipeline::ReSnapshotSink =
+        Box::new(
+            move |bytes: &[u8]| match tx.try_send(Bytes::copy_from_slice(bytes)) {
+                Ok(()) => true,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    sink_resync.store(true, Ordering::Release);
+                    true
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            },
+        );
+    let eng = Arc::clone(&engine);
+    let subscribed =
+        tokio::task::spawn_blocking(move || eng.cmd_re_subscribe_with_resync(sink, resync)).await;
+    match subscribed {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: 1011,
+                    reason: e.to_string().chars().take(100).collect::<String>().into(),
+                })))
+                .await;
+            return;
+        }
+        Err(_) => return,
+    }
+
+    loop {
+        tokio::select! {
+            snap = rx.recv() => {
+                match snap {
+                    Some(bytes) => {
+                        if socket.send(Message::Binary(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => {
+                        // Backend ended the subscription (cmd_re_stop / newer subscriber).
+                        let _ = socket
+                            .send(Message::Close(Some(CloseFrame {
+                                code: 1000,
+                                reason: "re subscription ended".into(),
+                            })))
+                            .await;
+                        break;
+                    }
+                }
+            }
+            client_msg = socket.recv() => {
+                match client_msg {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    // Dropping `rx` makes the sink return false on its next tick, ending the subscription.
 }
 
 async fn ws_authenticate_then_stream_debug(mut socket: WebSocket, state: BridgeState) {
@@ -1290,6 +1620,11 @@ async fn handle_invoke(
 
     if cmd.starts_with("cmd_diag_") {
         if let Some(resp) = handle_diag_invoke(&cmd, payload.clone(), &engine).await {
+            return resp;
+        }
+    }
+    if cmd.starts_with("cmd_re_") {
+        if let Some(resp) = handle_re_invoke(&cmd, payload.clone(), &engine).await {
             return resp;
         }
     }
@@ -2194,8 +2529,16 @@ mod tests {
     }
 
     async fn ws_connect(addr: SocketAddr, extra: &[(&str, String)]) -> (u16, TcpStream) {
+        ws_connect_path(addr, "/ws/telemetry", extra).await
+    }
+
+    async fn ws_connect_path(
+        addr: SocketAddr,
+        path: &str,
+        extra: &[(&str, String)],
+    ) -> (u16, TcpStream) {
         let mut req = format!(
-            "GET /ws/telemetry HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n",
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n",
             addr.port()
         );
         for (k, v) in extra {
@@ -3249,5 +3592,386 @@ mod tests {
         assert_eq!(st_t_del, StatusCode::OK);
 
         let _ = std::fs::remove_dir_all(&tmp_root);
+    }
+
+    // ─── RE Toolkit bridge routes (re-toolkit-v1 amendment 14) ─────────────────────────
+
+    /// Like [`call_invoke`] but returns the raw body and its content type.
+    async fn call_invoke_raw(
+        engine: &Arc<PipelineEngine>,
+        cmd: &str,
+        body_str: &str,
+    ) -> (StatusCode, String, Vec<u8>) {
+        let resp = handle_invoke(
+            Path(cmd.to_string()),
+            State(Arc::clone(engine)),
+            Extensions::new(),
+            Bytes::from(body_str.to_string()),
+        )
+        .await;
+        let status = resp.status();
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let bytes = to_bytes(resp.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("read response body")
+            .to_vec();
+        (status, ct, bytes)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_re_invoke_routes_need_token() {
+        let addr = spawn_server().await;
+        let host = ("Host", format!("127.0.0.1:{}", addr.port()));
+        let auth = ("Authorization", format!("Bearer {TEST_TOKEN}"));
+        let ct = ("Content-Type", "application/json".to_string());
+        for cmd in [
+            "cmd_re_start",
+            "cmd_re_series",
+            "cmd_re_correlate",
+            "cmd_re_focus_status",
+            "cmd_re_dbc_generate",
+            "cmd_re_scan_first",
+            "cmd_re_scan_next",
+            "cmd_re_scan_undo",
+            "cmd_re_scan_reset",
+            "cmd_re_scan_status",
+            "cmd_re_scan_results",
+        ] {
+            let path = format!("/api/invoke/{cmd}");
+            let (st, body) = raw_http(addr, "POST", &path, &[host.clone(), ct.clone()], "{}").await;
+            assert_eq!(st, 401, "{cmd} without token: {body}");
+        }
+        let (st, body) = raw_http(
+            addr,
+            "POST",
+            "/api/invoke/cmd_re_start",
+            &[host.clone(), auth.clone(), ct.clone()],
+            "{}",
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+        assert!(body.contains(r#""phase":"free""#), "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_re_commands_round_trip_and_error_wire_format() {
+        let engine = Arc::new(PipelineEngine::new());
+        let target = r#"{"bus":0,"arbId":291,"isExtended":false}"#;
+        let series_body =
+            format!(r#"{{"target":{target},"candidates":[],"reference":null,"maxPoints":64}}"#);
+
+        // Before start: R2a errors keep the "[re:<code>] …" text in the 400 body.
+        let (st, _, body) = call_invoke_raw(&engine, "cmd_re_series", &series_body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let v: Value = serde_json::from_slice(&body).expect("json error");
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("[re:not_started] "),
+            "{v}"
+        );
+
+        // start / status round trip (same JSON as the Tauri ReStatusDto).
+        let (st, v) = call_invoke(&engine, "cmd_re_start", r#"{"buses":[0]}"#).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["phase"], "free");
+        let status = serde_json::to_value(engine.re_status()).unwrap();
+        assert_eq!(v, status);
+
+        let (st, v) = call_invoke(&engine, "cmd_re_set_phase", r#"{"phase":"baseline"}"#).await;
+        assert_eq!(
+            (st, v["phase"].as_str()),
+            (StatusCode::OK, Some("baseline"))
+        );
+        let (st, v) = call_invoke(&engine, "cmd_re_set_phase", r#"{"phase":"idle"}"#).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"].as_str().unwrap().contains("RE phase must be"),
+            "{v}"
+        );
+        let (st, v) = call_invoke(&engine, "cmd_re_set_phase", r#"{"phase":"bogus"}"#).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("[re:invalid] invalid arguments for cmd_re_set_phase"),
+            "{v}"
+        );
+
+        let (st, v) = call_invoke(&engine, "cmd_re_mark", r#"{"label":"door open"}"#).await;
+        assert_eq!(
+            (st, v["label"].as_str()),
+            (StatusCode::OK, Some("door open")),
+            "{v}"
+        );
+        let (st, v) = call_invoke(&engine, "cmd_re_markers", "").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(v.as_array().map(Vec::len), Some(1));
+
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_re_row_detail",
+            r#"{"bus":0,"arbId":291,"isExtended":false}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"].as_str().unwrap().contains("RE row not found"),
+            "{v}"
+        );
+        let (st, _) = call_invoke(
+            &engine,
+            "cmd_re_classify",
+            r#"{"bus":0,"arbId":291,"isExtended":false}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+
+        // focus_set -> series = 200 octet-stream NRS1 (empty window).
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_re_focus_set",
+            &format!(r#"{{"targets":[{target}]}}"#),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (st, v) = call_invoke(&engine, "cmd_re_focus_status", "").await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (st, ct, body) = call_invoke_raw(&engine, "cmd_re_series", &series_body).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(ct, "application/octet-stream");
+        assert_eq!(&body[..4], b"NRS1");
+
+        // correlate: invalid search -> [re:…] error, never a panic / hang.
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_re_correlate",
+            &format!(
+                r#"{{"target":{target},"reference":{{"kind":"markers","points":[]}},"search":{{"bitFrom":0,"bitTo":63,"lengths":[0,99],"byteOrders":[],"signed":[]}},"topN":5}}"#
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(v["error"].as_str().unwrap().starts_with("[re:"), "{v}");
+
+        // R2c value scan: status / no_scan / first / results / undo / reset wire format.
+        let (st, v) = call_invoke(&engine, "cmd_re_scan_status", "").await;
+        assert_eq!(
+            (st, &v["active"]),
+            (StatusCode::OK, &Value::Bool(false)),
+            "{v}"
+        );
+        let (st, v) = call_invoke(&engine, "cmd_re_scan_next", r#"{"op":{"op":"changed"}}"#).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"].as_str().unwrap().starts_with("[re:no_scan] "),
+            "{v}"
+        );
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_re_scan_first",
+            r#"{"spec":{"kind":"unknown","options":{"lengths":[8]}}}"#,
+        )
+        .await;
+        assert_eq!(
+            (st, &v["active"]),
+            (StatusCode::OK, &Value::Bool(true)),
+            "{v}"
+        );
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_re_scan_results",
+            r#"{"offset":0,"limit":10,"sort":"id"}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(v["rows"].is_array(), "{v}");
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_re_scan_results",
+            r#"{"offset":0,"limit":501,"sort":"id"}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"].as_str().unwrap().starts_with("[re:invalid] "),
+            "{v}"
+        );
+        let (st, v) = call_invoke(&engine, "cmd_re_scan_undo", "").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            v["error"].as_str().unwrap().starts_with("[re:invalid] "),
+            "{v}"
+        );
+        let (st, v) = call_invoke(&engine, "cmd_re_scan_reset", "").await;
+        assert_eq!(
+            (st, &v["active"]),
+            (StatusCode::OK, &Value::Bool(false)),
+            "{v}"
+        );
+
+        let (st, v) = call_invoke(&engine, "cmd_re_reset", "").await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (st, v) = call_invoke(&engine, "cmd_re_stop", "").await;
+        assert_eq!(
+            (st, v["enabled"].as_bool()),
+            (StatusCode::OK, Some(false)),
+            "{v}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_re_dbc_generate_round_trip_and_error_wire_format() {
+        use base64::engine::general_purpose::STANDARD as BASE64_STD;
+        use base64::Engine as _;
+        let engine = Arc::new(PipelineEngine::new());
+
+        // Reachability probe: empty drafts, null base -> 200, counts 0, no diagnostics.
+        let (st, v) = call_invoke(
+            &engine,
+            "cmd_re_dbc_generate",
+            r#"{"drafts":[],"base":null}"#,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["messages"], 0);
+        assert_eq!(v["signals"], 0);
+        assert_eq!(v["diagnostics"], json!([]));
+        assert!(v["dbcText"].is_string(), "{v}");
+
+        // One standalone draft: same JSON as the shared function (= the Tauri command result).
+        let draft = json!({
+            "id": "d1", "bus": 0, "arbId": 0x6A0, "isExtended": false, "messageName": null,
+            "dlcBytes": 8, "name": "VehSpeed", "startBit": 7, "bitLength": 16,
+            "byteOrder": "motorola", "valueType": "unsigned", "factor": 0.25, "offset": -40.0,
+            "min": -40.0, "max": 16343.75, "unit": "km/h", "comment": "",
+            "provenance": { "r": 0.998, "lagMs": 120.0, "reference": "OBD 0x0D", "samples": 812,
+                            "createdAtMs": 0.0 },
+            "valueTable": []
+        });
+        let body = json!({ "drafts": [draft.clone()], "base": null });
+        let (st, v) = call_invoke(&engine, "cmd_re_dbc_generate", &body.to_string()).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let req: ReDbcGenerateRequest = serde_json::from_value(body).unwrap();
+        let direct = re_dbc_generate(&req.drafts, req.base.as_ref()).unwrap();
+        assert_eq!(v, serde_json::to_value(direct).unwrap());
+        assert_eq!(
+            (v["messages"].as_u64(), v["signals"].as_u64()),
+            (Some(1), Some(1))
+        );
+        assert!(
+            v["dbcText"].as_str().unwrap().contains("SG_ VehSpeed"),
+            "{v}"
+        );
+
+        // Base .kcd input through the bridge.
+        let kcd = include_bytes!("../../../../scripts/sample_bms.kcd");
+        let body = json!({
+            "drafts": [draft.clone()],
+            "base": { "fileName": "sample_bms.kcd", "contentBase64": BASE64_STD.encode(kcd) }
+        });
+        let (st, v) = call_invoke(&engine, "cmd_re_dbc_generate", &body.to_string()).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(
+            v["dbcText"]
+                .as_str()
+                .unwrap()
+                .contains("CMC_CellVoltagesMux"),
+            "{v}"
+        );
+
+        // Errors: 400 {"error": "[re:invalid] …"}.
+        for body in [
+            json!({ "drafts": [], "base": { "fileName": "x.dbc", "contentBase64": "@@ nope" } }),
+            json!({ "drafts": [], "base": { "fileName": "x.dbc",
+                                            "contentBase64": BASE64_STD.encode("garbage text") } }),
+            json!({ "base": null }),
+            json!({ "drafts": [{ "id": "broken" }], "base": null }),
+        ] {
+            let (st, v) = call_invoke(&engine, "cmd_re_dbc_generate", &body.to_string()).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{body}: {v}");
+            assert!(
+                v["error"].as_str().unwrap().starts_with("[re:invalid] "),
+                "{body}: {v}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_re_ws_requires_auth_and_streams_binary_nre2() {
+        let addr = spawn_server().await;
+        let origin = ("Origin", "http://localhost:5173".to_string());
+
+        let (st, _) =
+            ws_connect_path(addr, "/ws/re", &[("Origin", "http://evil.example".into())]).await;
+        assert_eq!(st, 403);
+
+        let (st, mut s) = ws_connect_path(addr, "/ws/re", std::slice::from_ref(&origin)).await;
+        assert_eq!(st, 101);
+        ws_send_text(&mut s, r#"{"type":"auth","token":"nope"}"#).await;
+        let (op, payload) = ws_read_frame(&mut s, Duration::from_secs(2))
+            .await
+            .expect("close frame");
+        assert_eq!((op, close_code(&payload)), (0x8, WS_CLOSE_UNAUTHORIZED));
+
+        let host = ("Host", format!("127.0.0.1:{}", addr.port()));
+        let auth = ("Authorization", format!("Bearer {TEST_TOKEN}"));
+        let ct = ("Content-Type", "application/json".to_string());
+        let (st, body) = raw_http(
+            addr,
+            "POST",
+            "/api/invoke/cmd_re_start",
+            &[host.clone(), auth.clone(), ct.clone()],
+            "{}",
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+
+        let (st, mut s) = ws_connect_path(addr, "/ws/re", std::slice::from_ref(&origin)).await;
+        assert_eq!(st, 101);
+        ws_send_text(
+            &mut s,
+            &format!(r#"{{"type":"auth","token":"{TEST_TOKEN}"}}"#),
+        )
+        .await;
+        let (op, payload) = ws_read_frame(&mut s, Duration::from_secs(3))
+            .await
+            .expect("first RE snapshot");
+        assert_eq!(op, 0x2, "RE snapshots are binary messages");
+        assert_eq!(&payload[..4], b"NRE2");
+        assert_eq!(
+            payload[17], 1,
+            "first snapshot after subscribe is a full resync"
+        );
+
+        // cmd_re_stop ends the subscription: final snapshot, then a normal close (1000).
+        let (st, body) = raw_http(
+            addr,
+            "POST",
+            "/api/invoke/cmd_re_stop",
+            &[host, auth, ct],
+            "{}",
+        )
+        .await;
+        assert_eq!(st, 200, "{body}");
+        let mut closed = None;
+        for _ in 0..8 {
+            match ws_read_frame(&mut s, Duration::from_secs(3)).await {
+                Some((0x2, p)) => assert_eq!(&p[..4], b"NRE2"),
+                Some((0x8, p)) => {
+                    closed = Some(close_code(&p));
+                    break;
+                }
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+        assert_eq!(closed, Some(1000));
     }
 }
