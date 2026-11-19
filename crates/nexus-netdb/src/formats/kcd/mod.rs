@@ -11,9 +11,11 @@ use crate::ir::{
 };
 use indexmap::IndexMap;
 use nexus_core::CanIdKey;
-use quick_xml::events::Event;
+use quick_xml::events::attributes::Attribute;
+use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 use smallvec::SmallVec;
+use std::collections::HashSet;
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct KcdFormat;
@@ -99,7 +101,11 @@ impl<'a> KcdParser<'a> {
 
     pub fn parse(mut self) -> Result<(NetworkDatabase, Vec<ParseDiagnostic>), DbParseError> {
         let mut reader = Reader::from_str(self.xml_text);
-        reader.config_mut().trim_text(true);
+        // Text trimming is done manually per character-data run (see `finish_text_run`):
+        // since quick-xml 0.38 `trim_text` would trim each fragment between entity
+        // references separately. A dangling `&` is passed through as text (as in
+        // quick-xml 0.37) and then fails unescaping like before, yielding an empty comment.
+        reader.config_mut().allow_dangling_amp = true;
 
         let mut node_id_map: IndexMap<String, String> = IndexMap::new();
         let mut current_msg: Option<MessageDef> = None;
@@ -107,19 +113,49 @@ impl<'a> KcdParser<'a> {
         let mut mux_stack: Vec<KcdMuxLevel> = Vec::new();
         let mut container_state = ContainerState::None;
         let mut text_target: Option<TextTarget> = None;
+        // Raw (escaped) character data of the current text run inside `<Notes>`.
+        let mut text_run = String::new();
 
         let mut buf = Vec::new();
 
         loop {
-            match reader.read_event_into(&mut buf) {
+            let event = reader.read_event_into(&mut buf);
+            if !matches!(event, Ok(Event::Text(_)) | Ok(Event::GeneralRef(_))) {
+                if let Some(target) = text_target {
+                    if let Some(text) = finish_text_run(&text_run) {
+                        match target {
+                            TextTarget::Message => {
+                                if let Some(ref mut msg) = current_msg {
+                                    msg.comment = Some(text);
+                                }
+                            }
+                            TextTarget::MuxSwitch => {
+                                if let Some(sw) = mux_stack
+                                    .last_mut()
+                                    .and_then(|lvl| lvl.pending_switch_sig.as_mut())
+                                {
+                                    sw.comment = Some(text);
+                                }
+                            }
+                            TextTarget::Signal => {
+                                if let Some(ref mut sig) = current_signal {
+                                    sig.comment = Some(text);
+                                }
+                            }
+                        }
+                    }
+                }
+                text_run.clear();
+            }
+            match event {
                 Ok(Event::Start(ref e)) => {
-                    let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    let tag_name = e.name().as_ref().to_string();
                     match tag_name.as_str() {
                         "NetworkDefinition" => {}
                         "Document" => {
-                            for attr in e.attributes().flatten() {
-                                let key = String::from_utf8_lossy(attr.key.as_ref());
-                                let val = String::from_utf8_lossy(&attr.value);
+                            for attr in unique_attributes(e) {
+                                let key = attr.key.as_ref();
+                                let val = attr.value.as_ref();
                                 if key == "name" {
                                     self.db.name = val.to_string();
                                 } else if key == "version" {
@@ -130,9 +166,9 @@ impl<'a> KcdParser<'a> {
                         "Node" => {
                             let mut node_id = String::new();
                             let mut node_name = String::new();
-                            for attr in e.attributes().flatten() {
-                                let key = String::from_utf8_lossy(attr.key.as_ref());
-                                let val = String::from_utf8_lossy(&attr.value);
+                            for attr in unique_attributes(e) {
+                                let key = attr.key.as_ref();
+                                let val = attr.value.as_ref();
                                 if key == "id" {
                                     node_id = val.to_string();
                                 } else if key == "name" {
@@ -181,9 +217,9 @@ impl<'a> KcdParser<'a> {
                             let mut offset: u16 = 0;
                             let mut length: u8 = 8;
                             let mut byte_order = ByteOrder::LittleEndian;
-                            for attr in e.attributes().flatten() {
-                                let key = String::from_utf8_lossy(attr.key.as_ref());
-                                let val = String::from_utf8_lossy(&attr.value);
+                            for attr in unique_attributes(e) {
+                                let key = attr.key.as_ref();
+                                let val = attr.value.as_ref();
                                 if key == "name" {
                                     m_name = val.to_string();
                                 } else if key == "offset" {
@@ -253,9 +289,9 @@ impl<'a> KcdParser<'a> {
                                         msg.signals.push(sw_sig);
                                     }
                                 }
-                                for attr in e.attributes().flatten() {
-                                    let key = String::from_utf8_lossy(attr.key.as_ref());
-                                    let val = String::from_utf8_lossy(&attr.value);
+                                for attr in unique_attributes(e) {
+                                    let key = attr.key.as_ref();
+                                    let val = attr.value.as_ref();
                                     if key == "count" {
                                         top.active_count = val.parse().ok();
                                     }
@@ -337,14 +373,14 @@ impl<'a> KcdParser<'a> {
                     }
                 }
                 Ok(Event::Empty(ref e)) => {
-                    let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    let tag_name = e.name().as_ref().to_string();
                     match tag_name.as_str() {
                         "Node" => {
                             let mut node_id = String::new();
                             let mut node_name = String::new();
-                            for attr in e.attributes().flatten() {
-                                let key = String::from_utf8_lossy(attr.key.as_ref());
-                                let val = String::from_utf8_lossy(&attr.value);
+                            for attr in unique_attributes(e) {
+                                let key = attr.key.as_ref();
+                                let val = attr.value.as_ref();
                                 if key == "id" {
                                     node_id = val.to_string();
                                 } else if key == "name" {
@@ -431,33 +467,24 @@ impl<'a> KcdParser<'a> {
                         _ => {}
                     }
                 }
+                // quick-xml >= 0.38 splits character data at entity references
+                // (`Event::GeneralRef`). Re-assemble the raw (still escaped) run here and
+                // flush it as one unit above, which reproduces the pre-0.38 single
+                // `Event::Text` semantics exactly (trim whole run, then unescape).
                 Ok(Event::Text(ref e)) => {
-                    if let Some(target) = text_target {
-                        let text = e.unescape().unwrap_or_default().to_string();
-                        match target {
-                            TextTarget::Message => {
-                                if let Some(ref mut msg) = current_msg {
-                                    msg.comment = Some(text);
-                                }
-                            }
-                            TextTarget::MuxSwitch => {
-                                if let Some(sw) = mux_stack
-                                    .last_mut()
-                                    .and_then(|lvl| lvl.pending_switch_sig.as_mut())
-                                {
-                                    sw.comment = Some(text);
-                                }
-                            }
-                            TextTarget::Signal => {
-                                if let Some(ref mut sig) = current_signal {
-                                    sig.comment = Some(text);
-                                }
-                            }
-                        }
+                    if text_target.is_some() {
+                        text_run.push_str(e);
+                    }
+                }
+                Ok(Event::GeneralRef(ref e)) => {
+                    if text_target.is_some() {
+                        text_run.push('&');
+                        text_run.push_str(e);
+                        text_run.push(';');
                     }
                 }
                 Ok(Event::End(ref e)) => {
-                    let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    let tag_name = e.name().as_ref().to_string();
                     match tag_name.as_str() {
                         "Message" => {
                             for mut lvl in mux_stack.drain(..) {
@@ -527,17 +554,17 @@ impl<'a> KcdParser<'a> {
         Ok((self.db, self.diagnostics))
     }
 
-    fn parse_message_start(&mut self, e: &quick_xml::events::BytesStart) -> Option<MessageDef> {
+    fn parse_message_start(&mut self, e: &BytesStart) -> Option<MessageDef> {
         let mut id_val: u32 = 0;
         let mut is_extended = false;
         let mut name = "UnknownMessage".to_string();
         let mut length: u8 = 8;
         let mut cycle_time: Option<u32> = None;
 
-        for attr in e.attributes().flatten() {
-            let key = String::from_utf8_lossy(attr.key.as_ref());
-            let val = String::from_utf8_lossy(&attr.value);
-            match key.as_ref() {
+        for attr in unique_attributes(e) {
+            let key = attr.key.as_ref();
+            let val = attr.value.as_ref();
+            match key {
                 "id" => {
                     if val.starts_with("0x") || val.starts_with("0X") {
                         id_val = u32::from_str_radix(&val[2..], 16).unwrap_or(0);
@@ -591,7 +618,7 @@ impl<'a> KcdParser<'a> {
 
     fn parse_signal_start(
         &self,
-        e: &quick_xml::events::BytesStart,
+        e: &BytesStart,
         active_mux_name: Option<&str>,
         active_mux_count: Option<i64>,
     ) -> Option<SignalDef> {
@@ -600,10 +627,10 @@ impl<'a> KcdParser<'a> {
         let mut length: u8 = 1;
         let mut byte_order = ByteOrder::LittleEndian;
 
-        for attr in e.attributes().flatten() {
-            let key = String::from_utf8_lossy(attr.key.as_ref());
-            let val = String::from_utf8_lossy(&attr.value);
-            match key.as_ref() {
+        for attr in unique_attributes(e) {
+            let key = attr.key.as_ref();
+            let val = attr.value.as_ref();
+            match key {
                 "name" => name = val.to_string(),
                 "offset" => offset = val.parse().unwrap_or(0),
                 "length" => length = val.parse().unwrap_or(1),
@@ -653,12 +680,12 @@ impl<'a> KcdParser<'a> {
         })
     }
 
-    fn apply_value_attrs(sig: &mut SignalDef, e: &quick_xml::events::BytesStart) {
-        for attr in e.attributes().flatten() {
-            let key = String::from_utf8_lossy(attr.key.as_ref());
-            let val = String::from_utf8_lossy(&attr.value);
-            match key.as_ref() {
-                "type" => match val.as_ref() {
+    fn apply_value_attrs(sig: &mut SignalDef, e: &BytesStart) {
+        for attr in unique_attributes(e) {
+            let key = attr.key.as_ref();
+            let val = attr.value.as_ref();
+            match key {
+                "type" => match val {
                     "signed" => sig.value_type = SignalValueType::Signed,
                     "single" => sig.value_type = SignalValueType::Float32,
                     "double" => sig.value_type = SignalValueType::Float64,
@@ -674,12 +701,12 @@ impl<'a> KcdParser<'a> {
         }
     }
 
-    fn apply_label_attrs(sig: &mut SignalDef, e: &quick_xml::events::BytesStart) {
+    fn apply_label_attrs(sig: &mut SignalDef, e: &BytesStart) {
         let mut name = String::new();
         let mut val: Option<i64> = None;
-        for attr in e.attributes().flatten() {
-            let key = String::from_utf8_lossy(attr.key.as_ref());
-            let v = String::from_utf8_lossy(&attr.value);
+        for attr in unique_attributes(e) {
+            let key = attr.key.as_ref();
+            let v = attr.value.as_ref();
             if key == "name" {
                 name = v.to_string();
             } else if key == "value" {
@@ -691,13 +718,13 @@ impl<'a> KcdParser<'a> {
         }
     }
 
-    fn apply_label_group_attrs(sig: &mut SignalDef, e: &quick_xml::events::BytesStart) {
+    fn apply_label_group_attrs(sig: &mut SignalDef, e: &BytesStart) {
         let mut name = String::new();
         let mut from: Option<i64> = None;
         let mut to: Option<i64> = None;
-        for attr in e.attributes().flatten() {
-            let key = String::from_utf8_lossy(attr.key.as_ref());
-            let v = String::from_utf8_lossy(&attr.value);
+        for attr in unique_attributes(e) {
+            let key = attr.key.as_ref();
+            let v = attr.value.as_ref();
             if key == "name" {
                 name = v.to_string();
             } else if key == "from" {
@@ -719,7 +746,7 @@ impl<'a> KcdParser<'a> {
     }
 
     fn handle_noderef(
-        e: &quick_xml::events::BytesStart,
+        e: &BytesStart,
         node_id_map: &IndexMap<String, String>,
         container_state: ContainerState,
         current_msg: &mut Option<MessageDef>,
@@ -727,9 +754,9 @@ impl<'a> KcdParser<'a> {
         pending_mux_switch: Option<&mut SignalDef>,
     ) {
         let mut node_ref_id = String::new();
-        for attr in e.attributes().flatten() {
-            if attr.key.as_ref() == b"id" {
-                node_ref_id = String::from_utf8_lossy(&attr.value).to_string();
+        for attr in unique_attributes(e) {
+            if attr.key.as_ref() == "id" {
+                node_ref_id = attr.value.as_ref().to_string();
             }
         }
         let node_name = node_id_map
@@ -773,4 +800,34 @@ enum TextTarget {
     Message,
     MuxSwitch,
     Signal,
+}
+
+/// Converts one raw (still escaped) character-data run into a comment string with the
+/// exact semantics of the previous quick-xml 0.37 `trim_text(true)` + `BytesText::unescape`
+/// pipeline: XML whitespace is trimmed from both ends of the whole run, an all-whitespace
+/// run yields `None` (no event was emitted), and an unescape failure yields an empty string.
+fn finish_text_run(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(
+        quick_xml::escape::unescape(trimmed)
+            .map(|s| s.into_owned())
+            .unwrap_or_default(),
+    )
+}
+
+/// Iterates the well-formed attributes of a tag with "first occurrence wins" semantics.
+///
+/// This is exactly what `e.attributes().flatten()` produced with quick-xml's built-in duplicate
+/// check (a repeated key yields `Err(Duplicated)`, which `flatten` drops), but in O(n): quick-xml's
+/// own check still falls back to a linear scan for every real duplicate, so a tag with tens of
+/// thousands of distinct attributes followed by tens of thousands of repeats of a late key is
+/// O(n*m) even after RUSTSEC-2026-0194. `HashSet` uses the DoS-resistant `RandomState` hasher.
+fn unique_attributes<'b>(e: &'b BytesStart<'_>) -> impl Iterator<Item = Attribute<'b>> + 'b {
+    let mut seen: HashSet<&'b str> = HashSet::new();
+    let mut attrs = e.attributes();
+    attrs.with_checks(false);
+    attrs.flatten().filter(move |a| seen.insert(a.key.0))
 }

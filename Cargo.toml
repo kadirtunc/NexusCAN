@@ -56,7 +56,7 @@ futures-lite = "2.6"
 # Network Database Parsing (.dbc / .kcd) & Character Transcoding
 winnow = "0.7"
 encoding_rs = "0.8"
-quick-xml = "0.37"
+quick-xml = "0.42"
 
 # UDS SecurityAccess seed/key providers (Rhai in nexus-protocols; libloading in the out-of-process
 # nexus-seedkey-host helper; ureq reserved for the future `http` provider)

@@ -601,3 +601,104 @@ fn hostile_many_messages_schema_generation_is_not_quadratic() {
         schema.messages[3_999].message_key
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml < 0.41): quadratic duplicate-attribute check and
+// unbounded namespace-declaration growth. The KCD frontend iterates every attribute of every tag, so
+// one start tag with tens of thousands of attributes must stay linear, and a document full of
+// namespace declarations must neither hang nor balloon. Outcome may be Ok or Err, never a panic.
+// ---------------------------------------------------------------------------------------------
+
+/// Release builds must finish well inside 2 s; debug builds get a generous budget.
+fn xml_dos_limit() -> Duration {
+    if cfg!(debug_assertions) {
+        Duration::from_secs(30)
+    } else {
+        Duration::from_secs(2)
+    }
+}
+
+#[test]
+fn rustsec_2026_0194_kcd_thousands_of_duplicate_attributes_is_linear() {
+    const N: usize = 50_000;
+    // Worst case for a linear-scan duplicate check: N distinct names (every new key is compared with
+    // all previous ones), followed by N exact duplicates of a meaningful attribute.
+    let mut attrs = String::with_capacity(N * 24);
+    for i in 0..N {
+        attrs.push_str(&format!(" a{i}=\"{i}\""));
+    }
+    for i in 0..N {
+        attrs.push_str(&format!(" name=\"Dup{i}\""));
+    }
+    let kcd = format!(
+        r#"<NetworkDefinition xmlns="http://kayak.2codeornot2code.org/1.0">
+<Document name="D" version="1"{attrs}/>
+<Node id="1" name="ECU"{attrs}/>
+<Bus name="B">
+<Message id="0x100" name="M" length="8"{attrs}>
+<Signal name="S" offset="0" length="8"{attrs}><Value slope="1"{attrs}/></Signal>
+</Message></Bus></NetworkDefinition>"#
+    );
+
+    for fault_tolerant in [true, false] {
+        let opts = ParseOptions {
+            fault_tolerant,
+            ..ParseOptions::default()
+        };
+        let res = within(xml_dos_limit(), "KCD duplicate attributes", || {
+            KcdFormat.parse(kcd.as_bytes(), &opts)
+        });
+        if let Ok(bundle) = res {
+            let db = bundle.database;
+            assert!(db.messages.len() <= 1, "unexpected message explosion");
+            // Duplicates are rejected attribute-by-attribute, so the first `name` must win.
+            if let Some(msg) = db.messages.values().next() {
+                assert_eq!(msg.name, "M");
+                assert!(msg.signals.iter().all(|s| s.name == "S"));
+            }
+        }
+    }
+}
+
+#[test]
+fn rustsec_2026_0195_kcd_huge_number_of_namespace_declarations_is_bounded() {
+    const N: usize = 50_000;
+    let mut decls = String::with_capacity(N * 32);
+    for i in 0..N {
+        decls.push_str(&format!(" xmlns:p{i}=\"urn:nexus:hostile:{i}\""));
+    }
+    // Namespace declarations on the root, re-declared default namespaces on many nested elements,
+    // and prefixed element names: everything a namespace resolver would have to track.
+    let mut kcd = format!(
+        r#"<NetworkDefinition xmlns="http://kayak.2codeornot2code.org/1.0"{decls}>
+<Bus name="B" xmlns="urn:a"{decls}>
+<Message id="0x100" name="M" length="8">
+"#
+    );
+    for i in 0..5_000 {
+        kcd.push_str(&format!(
+            "<p{i}:X xmlns=\"urn:x{i}\" xmlns:q{i}=\"urn:q{i}\"><q{i}:Y/></p{i}:X>\n"
+        ));
+    }
+    kcd.push_str(
+        r#"<Signal name="S" offset="0" length="8"/>
+</Message></Bus></NetworkDefinition>"#,
+    );
+
+    for fault_tolerant in [true, false] {
+        let opts = ParseOptions {
+            fault_tolerant,
+            ..ParseOptions::default()
+        };
+        let res = within(xml_dos_limit(), "KCD namespace declarations", || {
+            KcdFormat.parse(kcd.as_bytes(), &opts)
+        });
+        if let Ok(bundle) = res {
+            let db = bundle.database;
+            assert!(db.messages.len() <= 1, "unexpected message explosion");
+            if let Some(msg) = db.messages.values().next() {
+                assert!(msg.signals.len() <= 1);
+            }
+        }
+    }
+}
