@@ -46,3 +46,13 @@ Thumbs.db
 # Claude Code local state (machine-specific)
 .claude/settings.local.json
 .claude/worktrees/
+
+# Third-party agent skills: installed locally, not redistributed (licensing). Only NexusCAN's own skills are tracked.
+/.claude/skills/*
+!/.claude/skills/nexus-can/
+!/.claude/skills/nexuscan-*/
+/.agents/skills/*
+!/.agents/skills/nexus-can/
+!/.agents/skills/nexuscan-*/
+__pycache__/
+*.pyc
