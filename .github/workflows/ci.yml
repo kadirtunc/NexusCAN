@@ -72,7 +72,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test workspace
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
       - name: Test diag tap allocation (test-hooks feature)
         run: cargo test -p nexus-hal --features test-hooks --test diag_tap_alloc

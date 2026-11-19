@@ -1946,9 +1946,22 @@ mod tests {
     #[test]
     fn re_correlate_finds_planted_motorola16_and_dedupes() {
         let (mut a, r) = planted(4_000, 0);
+        let req = corr_req(r, search(0, 63, [1, 32]), 20);
+        // The 2 s budget is a release-build contract (§6.2). Unoptimized builds on small CI runners
+        // need ~2 s for this sweep, so correctness runs with a generous budget and the budget itself
+        // is asserted in release only.
+        if !cfg!(debug_assertions) {
+            let timed = a.correlate(&req).unwrap();
+            assert!(
+                !timed.truncated,
+                "release: full classic sweep must finish inside RE_CORRELATE_BUDGET ({:.1} ms)",
+                timed.elapsed_ms
+            );
+        }
         let res = a
-            .correlate(&corr_req(r, search(0, 63, [1, 32]), 20))
-            .unwrap();
+            .prepare_correlation(&req)
+            .unwrap()
+            .run(Duration::from_secs(120), &|| false);
         eprintln!(
             "re_correlate full classic sweep: {} candidates x {} reference samples in {:.1} ms",
             res.evaluated, res.reference_samples, res.elapsed_ms
