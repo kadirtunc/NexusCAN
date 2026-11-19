@@ -3043,8 +3043,14 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
             .expect("resume replay");
         assert_eq!(resumed.state, "playing");
 
-        thread::sleep(Duration::from_millis(25));
-        let snap_done = engine.flush_snapshot_now().expect("flush completed");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let snap_done = loop {
+            thread::sleep(Duration::from_millis(10));
+            let snap = engine.flush_snapshot_now().expect("flush completed");
+            if snap.replay.state == "completed" || std::time::Instant::now() >= deadline {
+                break snap;
+            }
+        };
         assert_eq!(snap_done.replay.state, "completed");
         assert_eq!(snap_done.replay.current_index, 5);
         assert_eq!(snap_done.replay.elapsed_us, 200_000);
@@ -3180,8 +3186,16 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
             })
             .expect("start replay from disk BLF");
         assert_eq!(replay_status.total_frames, 2);
-        thread::sleep(Duration::from_millis(20));
-        let snap = engine.flush_snapshot_now().expect("flush BLF replay");
+        // Poll instead of a fixed sleep: Windows timer granularity (~15.6 ms) and slow CI runners
+        // can leave a 2-frame replay still "playing" after 20 ms.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let snap = loop {
+            thread::sleep(Duration::from_millis(10));
+            let snap = engine.flush_snapshot_now().expect("flush BLF replay");
+            if snap.replay.state == "completed" || std::time::Instant::now() >= deadline {
+                break snap;
+            }
+        };
         assert_eq!(snap.replay.state, "completed");
         assert_eq!(snap.replay.dispatched_frames, 2);
 
@@ -3331,8 +3345,14 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
                 .transmit_to_hardware
         );
 
-        thread::sleep(Duration::from_millis(35));
-        let snap_end = engine.flush_snapshot_now().expect("flush end replay");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let snap_end = loop {
+            thread::sleep(Duration::from_millis(10));
+            let snap = engine.flush_snapshot_now().expect("flush end replay");
+            if snap.replay.state == "completed" || std::time::Instant::now() >= deadline {
+                break snap;
+            }
+        };
         assert_eq!(snap_end.replay.state, "completed");
         assert_eq!(snap_end.replay.dispatched_frames, 3); // #1, #3, and #4
         assert_eq!(snap_end.replay.filtered_out_frames, 3); // #2, #5, and #6

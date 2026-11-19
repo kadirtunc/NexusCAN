@@ -2096,12 +2096,18 @@ fn assert_result_wellformed(v: &Value, top_n: usize, bits: (u16, u16), lens: (u6
             }
         }
     }
-    // Dedupe: no row is a PROPER superset of a better-ranked row with |Δr| < 0.002.
+    // Dedupe: no row is a PROPER superset of a better-ranked row with |Δr| < 0.002, among rows
+    // evaluated on the same sample count (R2a amendment 1: a credited lag can change `samples`,
+    // and rank scores are only comparable on equal counts; wall-clock jitter on CI runners makes
+    // the credited lag, and therefore `samples`, differ between nested fields).
     for (i, better) in rs.iter().enumerate() {
         let bb = row_bits(better);
         for worse in &rs[i + 1..] {
             let wb = row_bits(worse);
-            if wb.len() > bb.len() && wb.is_superset(&bb) {
+            if num(worse, "samples") == num(better, "samples")
+                && wb.len() > bb.len()
+                && wb.is_superset(&bb)
+            {
                 let d = (fnum(worse, "r").abs() - fnum(better, "r").abs()).abs();
                 assert!(
                     d >= 0.002,

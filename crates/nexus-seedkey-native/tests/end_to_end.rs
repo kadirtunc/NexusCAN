@@ -30,13 +30,22 @@ fn workspace_manifest() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml")
 }
 
+/// `<target>/<profile>`, where cargo puts final artifacts (bins, cdylibs).
+///
+/// Not derived from `current_exe()`: since Cargo 1.100 test executables live under the build-dir
+/// (`<target>/<profile>/build/<pkg>/<hash>/out/`), not `<target>/<profile>/deps/`.
+/// `CARGO_TARGET_TMPDIR` is always `<target>/tmp` for integration tests.
 fn profile_dir() -> PathBuf {
-    // <target>/<profile>/deps/<test-exe>
-    let exe = std::env::current_exe().expect("current_exe");
-    exe.parent()
-        .and_then(Path::parent)
-        .expect("target/<profile> dir")
-        .to_path_buf()
+    let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .expect("CARGO_TARGET_TMPDIR has a parent (<target>)")
+        .to_path_buf();
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    target_dir.join(profile)
 }
 
 fn cargo_build(extra: &[&str], target_dir: &Path) {
