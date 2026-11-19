@@ -597,8 +597,10 @@ pub fn encode_slcan_frame(
     pos += 1;
 
     if !frame.is_rtr() {
+        // CAN-FD padding: bytes past the payload up to the DLC wire length are sent as 0x00.
+        let payload = &frame.data[..payload_len.min(frame.data.len())];
         for i in 0..wire_len {
-            let b = if i < payload_len { frame.data[i] } else { 0 };
+            let b = payload.get(i).copied().unwrap_or(0);
             out_buf[pos] = HEX_UPPER[usize::from(b >> 4)];
             out_buf[pos + 1] = HEX_UPPER[usize::from(b & 0xF)];
             pos += 2;
@@ -763,13 +765,13 @@ fn default_serial_os_hint(port_name: &str) -> Option<String> {
                     .to_string(),
             );
         }
-        return Some("macOS serial device".to_string());
+        Some("macOS serial device".to_string())
     }
     #[cfg(target_os = "windows")]
     {
-        return Some(format!(
+        Some(format!(
             "Windows Win32 COM port ({port_name}) via usbser.sys / FTDI VCP"
-        ));
+        ))
     }
     #[cfg(target_os = "linux")]
     {

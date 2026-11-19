@@ -153,21 +153,18 @@ impl MessageLiveState {
         let mut hi = 0u32;
         let active_len = usize::from(self.dlc.min(64));
 
-        for i in 0..active_len.min(32) {
-            let changed_at = self.byte_last_changed_us[i];
+        for (i, &changed_at) in self
+            .byte_last_changed_us
+            .iter()
+            .enumerate()
+            .take(active_len)
+        {
             if changed_at != NEVER_CHANGED_US
                 && now_us.saturating_sub(changed_at) <= BYTE_HIGHLIGHT_WINDOW_US
             {
-                lo |= 1u32 << i;
-            }
-        }
-
-        if active_len > 32 {
-            for i in 32..active_len {
-                let changed_at = self.byte_last_changed_us[i];
-                if changed_at != NEVER_CHANGED_US
-                    && now_us.saturating_sub(changed_at) <= BYTE_HIGHLIGHT_WINDOW_US
-                {
+                if i < 32 {
+                    lo |= 1u32 << i;
+                } else {
                     hi |= 1u32 << (i - 32);
                 }
             }
