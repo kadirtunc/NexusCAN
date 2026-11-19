@@ -345,10 +345,12 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
               <col style={{ width: '56px' }} />
               <col style={{ width: '150px' }} />
               <col />
-              <col style={{ width: '130px' }} />
-              <col style={{ width: '70px' }} />
-              <col style={{ width: '100px' }} />
-              <col style={{ width: '115px' }} />
+              <col style={{ width: '120px' }} />
+              {/* Databases / Mode / Status sized for their widest content (TR header "Veritabanları",
+                  "Switch to TX" button, "ERR-PASSIVE 128/127" badge) incl. the 2×8 px cell padding */}
+              <col style={{ width: '104px' }} />
+              <col style={{ width: '112px' }} />
+              <col style={{ width: '160px' }} />
               <col style={{ width: '50px' }} />
               <col style={{ width: '120px' }} />
             </colgroup>
@@ -472,7 +474,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
                     >
                       <div className="pcan-cell pcan-cell-center font-sans">
                         <span
-                          className={`px-1.5 py-0.2 rounded text-[10px] font-mono cursor-pointer hover:opacity-80 ${
+                          className={`px-1.5 rounded text-[10px] font-mono cursor-pointer whitespace-nowrap hover:opacity-80 ${
                             dbCount > 0
                               ? 'bg-sky-950/70 border border-sky-800/60 text-sky-300'
                               : 'bg-slate-900 border border-slate-700 text-slate-500'
@@ -498,7 +500,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
                                 borderColor: 'rgba(217, 155, 38, 0.50)',
                                 color: 'var(--status-warn)',
                               }}
-                              className="h-[18px] px-1.5 border text-[10px] font-semibold hover:border-amber-400 cursor-pointer rounded-[1px]"
+                              className="h-[18px] max-w-full truncate px-1.5 border text-[10px] font-semibold hover:border-amber-400 cursor-pointer rounded-[1px]"
                               title="Click to Switch to Active TX Armed"
                             >
                               {t('rxtx.dock.switchToTx')}
@@ -515,7 +517,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
                                 borderColor: bus.txArmed ? 'var(--status-warn)' : 'var(--border-strong)',
                                 color: bus.txArmed ? 'var(--status-warn)' : 'var(--text-muted)',
                               }}
-                              className="h-[18px] px-1.5 border text-[10px] font-semibold cursor-pointer rounded-[1px]"
+                              className="h-[18px] max-w-full truncate px-1.5 border text-[10px] font-semibold cursor-pointer rounded-[1px]"
                               title="Click to toggle TX Armed / Disarmed"
                             >
                               {bus.txArmed ? t('rxtx.dock.txArmed') : t('rxtx.dock.txDisarmed')}
@@ -540,6 +542,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
                             rxErrorCount={bus.rxErrorCount}
                             showTecRec
                             compact
+                            className="max-w-full min-w-0 overflow-hidden"
                           />
                         ) : (
                           <span className="text-[10px] text-[var(--text-muted)] font-mono">

@@ -19,6 +19,7 @@ import {
   buildFirstSpec,
   buildNextOp,
   formatScanCount,
+  formatScanRawHex,
   formatScanHistory,
   opNeedsRange,
   opNeedsStableMs,
@@ -76,6 +77,14 @@ function fmtPreset(row: ReScanResultRowDto): string {
 }
 
 const fmtVal = (v: number | null): string => (v === null ? '—' : formatSignalValue(v));
+const HEX_KEY = 'nexus.re.scan.hex';
+function loadHex(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(HEX_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
 const typeLabel = (c: ReScanCandidateDto): string => (c.valueType === 'unsigned' ? 'u' : c.valueType === 'signed' ? 's' : c.valueType);
 const orderLabel = (o: ReByteOrder): string => (o === 'intel' ? 'Intel' : 'Moto');
 
@@ -90,6 +99,8 @@ export function ReValueScanPanel({ onInspect, onHighlight }: ReValueScanPanelPro
   const re = useReState();
   const { form, ui, results } = sc;
   const [showOptions, setShowOptions] = useState(false);
+  const [hex, setHex] = useState(loadHex);
+  const fmtRaw = (v: number | null): string => (hex ? formatScanRawHex(v) : fmtVal(v));
   const [presetText, setPresetText] = useState('');
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [scrollTop, setScrollTop] = useState(0);
@@ -227,12 +238,12 @@ export function ReValueScanPanel({ onInspect, onHighlight }: ReValueScanPanelPro
             </option>
           ))}
         </select>
-        {kindNeedsValue && textField(form.valueText, (v) => reScanStore.setForm({ valueText: v }), 84, t('re.scan.value'))}
+        {kindNeedsValue && textField(form.valueText, (v) => reScanStore.setForm({ valueText: v }), 84, `${t('re.scan.value')}: 80 / 0x50`)}
         {kindNeedsValue && textField(form.tolText, (v) => reScanStore.setForm({ tolText: v }), 70, t('re.scan.toleranceAuto'), t('re.scan.tolerance'))}
         {form.kind === 'range' && (
           <>
-            {textField(form.rangeAText, (v) => reScanStore.setForm({ rangeAText: v }), 70, t('re.scan.rangeFrom'))}
-            {textField(form.rangeBText, (v) => reScanStore.setForm({ rangeBText: v }), 70, t('re.scan.rangeTo'))}
+            {textField(form.rangeAText, (v) => reScanStore.setForm({ rangeAText: v }), 70, `${t('re.scan.rangeFrom')} 0x00`)}
+            {textField(form.rangeBText, (v) => reScanStore.setForm({ rangeBText: v }), 70, `${t('re.scan.rangeTo')} 0xFF`)}
             {check(form.rangePhysical, t('re.scan.rangePhysical'), (v) => reScanStore.setForm({ rangePhysical: v }))}
           </>
         )}
@@ -247,10 +258,10 @@ export function ReValueScanPanel({ onInspect, onHighlight }: ReValueScanPanelPro
             </option>
           ))}
         </select>
-        {opNeedsValue(op) && textField(form.opValueText, (v) => reScanStore.setForm({ opValueText: v }), 84, t('re.scan.value'))}
+        {opNeedsValue(op) && textField(form.opValueText, (v) => reScanStore.setForm({ opValueText: v }), 84, `${t('re.scan.value')}: 80 / 0x50`)}
         {opNeedsValue(op) && textField(form.opTolText, (v) => reScanStore.setForm({ opTolText: v }), 70, t('re.scan.toleranceAuto'), t('re.scan.tolerance'))}
-        {opNeedsRange(op) && textField(form.opRangeAText, (v) => reScanStore.setForm({ opRangeAText: v }), 70, t('re.scan.rangeFrom'))}
-        {opNeedsRange(op) && textField(form.opRangeBText, (v) => reScanStore.setForm({ opRangeBText: v }), 70, t('re.scan.rangeTo'))}
+        {opNeedsRange(op) && textField(form.opRangeAText, (v) => reScanStore.setForm({ opRangeAText: v }), 70, `${t('re.scan.rangeFrom')} 0x00`)}
+        {opNeedsRange(op) && textField(form.opRangeBText, (v) => reScanStore.setForm({ opRangeBText: v }), 70, `${t('re.scan.rangeTo')} 0xFF`)}
         {opNeedsStableMs(op) && textField(form.opStableText, (v) => reScanStore.setForm({ opStableText: v }), 70, t('re.scan.stableMs'), t('re.scan.stableMs'))}
         {opSupportsPhysical(op) && check(form.opPhysical, t('re.scan.physical'), (v) => reScanStore.setForm({ opPhysical: v }))}
         <button type="button" disabled={!canNext} onClick={() => void reScanStore.next()} className={diagToneButtonClass('focus', true)} title={t('re.scan.nextTip')}>
@@ -262,7 +273,24 @@ export function ReValueScanPanel({ onInspect, onHighlight }: ReValueScanPanelPro
         <button type="button" disabled={ui.busy} onClick={() => void reScanStore.reset()} className={DIAG_BTN}>
           {t('re.scan.reset')}
         </button>
-        <button type="button" onClick={() => setShowOptions((v) => !v)} className={`${diagToneButtonClass('neutral', showOptions)} ml-auto`}>
+        <button
+          type="button"
+          aria-pressed={hex}
+          title={t('re.scan.hexTip')}
+          onClick={() => {
+            const next = !hex;
+            setHex(next);
+            try {
+              localStorage.setItem(HEX_KEY, next ? '1' : '0');
+            } catch {
+              /* non-persistent */
+            }
+          }}
+          className={`${diagToneButtonClass('neutral', hex)} ml-auto`}
+        >
+          {t('re.scan.hex')}
+        </button>
+        <button type="button" onClick={() => setShowOptions((v) => !v)} className={diagToneButtonClass('neutral', showOptions)}>
           {t('re.scan.options')}
         </button>
       </div>
@@ -458,9 +486,9 @@ export function ReValueScanPanel({ onInspect, onHighlight }: ReValueScanPanelPro
                       <span>{orderLabel(c.byteOrder)}</span>
                       <span>{typeLabel(c)}</span>
                       <span>{isMain ? fmtPreset(it.row) : ''}</span>
-                      <span className="text-right pr-2">{isMain ? fmtVal(it.row.currentRaw) : ''}</span>
+                      <span className="text-right pr-2">{isMain ? fmtRaw(it.row.currentRaw) : ''}</span>
                       <span className="text-right pr-2">{isMain ? fmtVal(it.row.currentPhysical) : ''}</span>
-                      <span className="text-right pr-2">{isMain ? fmtVal(it.row.previousRaw) : ''}</span>
+                      <span className="text-right pr-2">{isMain ? fmtRaw(it.row.previousRaw) : ''}</span>
                       <span className="text-right pr-2">{isMain ? it.row.changeCount : ''}</span>
                       <span>{isMain ? (it.row.kindHint ?? '') : ''}</span>
                       <span className="inline-flex items-center gap-1 font-sans">

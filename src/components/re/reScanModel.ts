@@ -237,6 +237,27 @@ export function parseNumText(text: string): number | null {
   return /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(s) ? Number(s) : Number.NaN;
 }
 
+/**
+ * Scan-form number: decimal (fraction / exponent) or integer hex `0x1F40` / `0X1f40` / `-0x10`. Empty -> null,
+ * anything else (`0x`, `0xZZ`, `0x1.8`) -> NaN so validation reports it. The wire stays a plain number.
+ */
+export function parseScanNumber(text: string): number | null {
+  const s = text.trim();
+  const m = /^([+-]?)0x([0-9a-f]+)$/i.exec(s);
+  if (m !== null) {
+    const v = Number.parseInt(m[2], 16);
+    return m[1] === '-' ? -v : v;
+  }
+  return parseNumText(s);
+}
+
+/** Raw value as `0x1F40` / `-0x10` (uppercase); null -> '—'; non-integers (float32) stay decimal. */
+export function formatScanRawHex(v: number | null): string {
+  if (v === null) return '—';
+  if (!Number.isFinite(v) || !Number.isInteger(v)) return String(v);
+  return `${v < 0 ? '-' : ''}0x${Math.abs(v).toString(16).toUpperCase()}`;
+}
+
 /** `[bus:]id[x]` tokens, e.g. `1A0, 0:0x18FF1234x`. No bus -> every known bus; id > 0x7FF or `x` suffix = extended. */
 export function parseIdFilter(text: string, knownBuses: readonly number[]): ReTargetDto[] | null {
   const tokens = text.split(/[\s,;]+/).filter((t) => t !== '');
@@ -319,8 +340,8 @@ export function defaultScanForm(): ReScanForm {
 }
 
 function rangeOf(a: string, b: string): [number, number] | null {
-  const lo = parseNumText(a);
-  const hi = parseNumText(b);
+  const lo = parseScanNumber(a);
+  const hi = parseScanNumber(b);
   return lo === null || hi === null ? null : [lo, hi];
 }
 
@@ -340,8 +361,8 @@ export function buildFirstSpec(form: ReScanForm, knownBuses: readonly number[]):
   const valued = form.kind === 'exact' || form.kind === 'physical';
   return {
     kind: form.kind,
-    value: valued ? parseNumText(form.valueText) : null,
-    tolerance: valued ? parseNumText(form.tolText) : null,
+    value: valued ? parseScanNumber(form.valueText) : null,
+    tolerance: valued ? parseScanNumber(form.tolText) : null,
     range: form.kind === 'range' ? rangeOf(form.rangeAText, form.rangeBText) : null,
     physical: form.kind === 'range' && form.rangePhysical,
     presets: null,
@@ -355,8 +376,8 @@ export function buildNextOp(form: ReScanForm): ReScanNextOp {
   const stable = parseNumText(form.opStableText);
   return {
     op,
-    value: opNeedsValue(op) ? parseNumText(form.opValueText) : null,
-    tolerance: opNeedsValue(op) ? parseNumText(form.opTolText) : null,
+    value: opNeedsValue(op) ? parseScanNumber(form.opValueText) : null,
+    tolerance: opNeedsValue(op) ? parseScanNumber(form.opTolText) : null,
     range: opNeedsRange(op) ? rangeOf(form.opRangeAText, form.opRangeBText) : null,
     stableMs: opNeedsStableMs(op) ? stable : null,
     physical: opSupportsPhysical(op) && form.opPhysical,

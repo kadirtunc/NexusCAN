@@ -312,6 +312,8 @@ export const reTr = {
   're.scan.demoNote': 'DEMO: yapay satırlar üzerinde tarama (gerçek hat verisi değil)',
   're.err.scan_too_large': 'Aday sayısı 4 milyonu aşıyor: hat/ID filtresi, uzunluk veya hizalamayı daraltın.',
   're.err.no_scan': 'Etkin tarama yok (analizör sıfırlanmış olabilir).',
+  're.scan.hex': 'Hex',
+  're.scan.hexTip': 'Ham değerleri onaltılık göster',
 } as const;
 
 export const reEn: Record<keyof typeof reTr, string> = {
@@ -627,4 +629,6 @@ export const reEn: Record<keyof typeof reTr, string> = {
   're.scan.demoNote': 'DEMO: scan over synthetic rows (not live bus data)',
   're.err.scan_too_large': 'More than 4 million candidates: narrow the bus/ID filter, lengths or alignment.',
   're.err.no_scan': 'No active scan (the analyzer may have been reset).',
+  're.scan.hex': 'Hex',
+  're.scan.hexTip': 'Show raw values in hexadecimal',
 };

@@ -5,7 +5,7 @@ import { reScanFirst, reScanNext, reScanResults } from '../../services/reClient'
 import { createReScanStore, type ReScanApi } from '../../store/reScanStore';
 import { createReLogger } from '../../store/reDebugLog';
 import {
-  buildFirstSpec, buildNextOp, defaultScanForm, parseBusFilter, parseIdFilter, parseNumText, parseUserPreset, scanCandidateKey,
+  buildFirstSpec, buildNextOp, defaultScanForm, formatScanRawHex, parseScanNumber, parseBusFilter, parseIdFilter, parseNumText, parseUserPreset, scanCandidateKey,
   validateFirstSpec, validateNextOp, virtualWindow,
 } from './reScanModel';
 import type { ReScanFirstSpec, ReScanNextOp, ReScanResultRowDto, ReScanResultsDto, ReScanSort, ReScanStatusDto } from '../../types/reScan';
@@ -19,6 +19,23 @@ function check(name: string, ok: boolean, detail?: string): void {
     failures += 1;
     console.log(`FAIL ${name}${detail ? ` -> ${detail}` : ''}`);
   }
+}
+
+// ---- hex input / display
+{
+  const v = (x: string): number | null => parseScanNumber(x);
+  check('parseScanNumber decimal', v('80') === 80 && v('1.5') === 1.5 && v('1e3') === 1000 && v('') === null && v('1,5') === 1.5);
+  check('parseScanNumber hex', v('0x50') === 80 && v('0X1f40') === 8000 && v('-0x10') === -16 && v(' 0xFF ') === 255);
+  check('parseScanNumber invalid -> NaN', Number.isNaN(v('0x') ?? 0) && Number.isNaN(v('0xZZ') ?? 0) && Number.isNaN(v('0x1.8') ?? 0) && v('0x') !== null);
+  const spec = buildFirstSpec({ ...defaultScanForm(), kind: 'exact', valueText: '0x1F40', tolText: '0x2' }, []);
+  check('buildFirstSpec hex value/tolerance', spec.value === 8000 && spec.tolerance === 2 && validateFirstSpec(spec).length === 0);
+  check('buildFirstSpec bad hex invalid', validateFirstSpec(buildFirstSpec({ ...defaultScanForm(), kind: 'exact', valueText: '0xZZ' }, [])).includes('value_not_finite'));
+  const r = buildFirstSpec({ ...defaultScanForm(), kind: 'range', rangeAText: '0x10', rangeBText: '0x20' }, []);
+  check('hex range', r.range?.[0] === 16 && r.range[1] === 32);
+  const op = buildNextOp({ ...defaultScanForm(), op: 'range', opRangeAText: '0x0', opRangeBText: '0xFF' });
+  check('hex next-op range', op.range?.[1] === 255 && validateNextOp(op).length === 0);
+  check('stableMs stays decimal-only', Number.isNaN(buildNextOp({ ...defaultScanForm(), op: 'stable', opStableText: '0x10' }).stableMs ?? 0));
+  check('formatScanRawHex', formatScanRawHex(8000) === '0x1F40' && formatScanRawHex(-16) === '-0x10' && formatScanRawHex(0) === '0x0' && formatScanRawHex(null) === '—' && formatScanRawHex(1.5) === '1.5');
 }
 
 // ---- pure form helpers
