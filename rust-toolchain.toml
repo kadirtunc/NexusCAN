@@ -1,0 +1,5 @@
+# Pinned so CI (all OSes) and local builds use the same compiler and clippy. New Rust releases add
+# clippy lints every 6 weeks; bump this deliberately (fix the new lints in the same commit).
+[toolchain]
+channel = "1.100"
+components = ["clippy", "rustfmt"]

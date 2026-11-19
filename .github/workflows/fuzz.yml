@@ -1,0 +1,68 @@
+# Weekly fuzz smoke (60 s per target, nightly). Not on every push: it rarely finds new crashes per
+# commit and costs ~10 min; run it on demand from the Actions tab (workflow_dispatch) when touching parsers.
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"   # Mondays 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz-smoke:
+    name: fuzz-smoke (nightly, 60 s/target)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/nexus-netdb/fuzz -> target
+            crates/nexus-hal/fuzz -> target
+          key: fuzz
+          cache-all-crates: true
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz nexus-netdb targets
+        working-directory: crates/nexus-netdb
+        run: |
+          set -euo pipefail
+          for t in $(cargo +nightly fuzz list); do
+            echo "::group::nexus-netdb/$t"
+            cargo +nightly fuzz run "$t" -- -max_total_time=60
+            echo "::endgroup::"
+          done
+
+      - name: Fuzz nexus-hal targets (if present)
+        run: |
+          set -euo pipefail
+          if [ -d crates/nexus-hal/fuzz ]; then
+            cd crates/nexus-hal
+            for t in $(cargo +nightly fuzz list); do
+              echo "::group::nexus-hal/$t"
+              cargo +nightly fuzz run "$t" -- -max_total_time=60
+              echo "::endgroup::"
+            done
+          else
+            echo "crates/nexus-hal/fuzz not present; skipping"
+          fi
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts
+          path: |
+            crates/nexus-netdb/fuzz/artifacts/
+            crates/nexus-hal/fuzz/artifacts/
+          if-no-files-found: ignore

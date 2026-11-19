@@ -33,9 +33,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      # Toolchain pinned in rust-toolchain.toml (channel + clippy/rustfmt); rustup installs it.
+      - name: Install Rust (rust-toolchain.toml)
+        shell: bash
+        run: rustup toolchain install && rustc --version && cargo clippy --version
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -100,7 +101,10 @@ jobs:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Toolchain pinned in rust-toolchain.toml (channel + clippy/rustfmt); rustup installs it.
+      - name: Install Rust (rust-toolchain.toml)
+        shell: bash
+        run: rustup toolchain install && rustc --version && cargo clippy --version
 
       # src-tauri is a separate cargo workspace with its own Cargo.lock; it depends on the
       # root crates by path, so both lockfiles feed the cache key.
@@ -134,10 +138,14 @@ jobs:
         run: cargo test
 
       # 3-OS package build (unsigned), using the @tauri-apps/cli devDependency from package-lock.
+      # Only on push to main (release path); PRs and development pushes stop after the checks above.
       - name: Package (tauri build)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: npm run tauri -- build --ci
 
-      - uses: actions/upload-artifact@v7
+      - name: Upload bundle
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
         with:
           name: nexuscan-bundle-${{ matrix.os }}
           path: src-tauri/target/release/bundle/
@@ -230,56 +238,3 @@ jobs:
             --title "NexusCAN ${VERSION} (build ${GITHUB_RUN_NUMBER})" \
             --notes-file notes.md \
             --latest
-
-  fuzz-smoke:
-    name: fuzz-smoke (nightly, 60 s/target)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@nightly
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            crates/nexus-netdb/fuzz -> target
-            crates/nexus-hal/fuzz -> target
-          key: fuzz
-          cache-all-crates: true
-
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
-
-      - name: Fuzz nexus-netdb targets
-        working-directory: crates/nexus-netdb
-        run: |
-          set -euo pipefail
-          for t in $(cargo +nightly fuzz list); do
-            echo "::group::nexus-netdb/$t"
-            cargo +nightly fuzz run "$t" -- -max_total_time=60
-            echo "::endgroup::"
-          done
-
-      - name: Fuzz nexus-hal targets (if present)
-        run: |
-          set -euo pipefail
-          if [ -d crates/nexus-hal/fuzz ]; then
-            cd crates/nexus-hal
-            for t in $(cargo +nightly fuzz list); do
-              echo "::group::nexus-hal/$t"
-              cargo +nightly fuzz run "$t" -- -max_total_time=60
-              echo "::endgroup::"
-            done
-          else
-            echo "crates/nexus-hal/fuzz not present; skipping"
-          fi
-
-      - name: Upload crash artifacts
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: fuzz-artifacts
-          path: |
-            crates/nexus-netdb/fuzz/artifacts/
-            crates/nexus-hal/fuzz/artifacts/
-          if-no-files-found: ignore
