@@ -17,6 +17,7 @@ interface CatMeta {
 }
 
 const CATEGORIES: CatMeta[] = [
+  { id: 'interface', labelKey: 'flowIface.cat.interface' },
   { id: 'core', labelKey: 'diagHmi.flow.cat.core' },
   { id: 'flow', labelKey: 'diagHmi.flow.cat.flow' },
   { id: 'uds',  labelKey: 'diagHmi.flow.cat.uds' },

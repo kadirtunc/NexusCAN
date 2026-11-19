@@ -1,10 +1,9 @@
 /** Real files chosen by the user for `io_file_input` blocks (kept in memory, never persisted with the diagram). */
 import { useSyncExternalStore } from 'react';
 
-export interface FlowFile {
-  name: string;
-  bytes: Uint8Array;
-}
+import type { FlowFileValue } from '../../types/flowLibrary';
+
+export type FlowFile = FlowFileValue;
 
 const files = new Map<string, FlowFile>();
 const listeners = new Set<() => void>();

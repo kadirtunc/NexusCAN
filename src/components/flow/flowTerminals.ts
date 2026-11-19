@@ -1,4 +1,5 @@
 import type { FlowBlock, FlowDiagram } from './types';
+import { FLOW_IN, FLOW_OUT } from './flowPorts';
 
 /**
  * Wireless jump points ("Goto / From"): a `flow_goto` block continues the run at the `flow_terminal`
@@ -40,9 +41,9 @@ export function gotoTargetId(block: FlowBlock): string {
   return String(block.config['target_terminal_id'] ?? '');
 }
 
-/** Compact "pill" blocks (no body, no port label rows). */
+/** Compact "pill" blocks (no body, no port label rows): terminal / goto and the `flow_in` / `flow_out` port blocks. */
 export function isCompactBlock(type: string): boolean {
-  return type === TERMINAL_TYPE || type === GOTO_TYPE;
+  return type === TERMINAL_TYPE || type === GOTO_TYPE || type === FLOW_IN || type === FLOW_OUT;
 }
 
 export function listTerminals(diagram: FlowDiagram): FlowBlock[] {

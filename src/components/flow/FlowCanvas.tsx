@@ -7,7 +7,8 @@ import { useFlowStore, flowStore } from './FlowStore';
 import { getBlockDef, getBlockDefFor, portsCompatible } from './blockDefs';
 import { isCallType } from './callIndex';
 import { flowRegistry } from './registry/flowRegistryStore';
-import { BlockNode, TerminalPill, PILL_WIDTH, PILL_HEIGHT, categoryAccentColor, getPortPosition, portColor } from './BlockNode';
+import { BlockNode, PortPill, TerminalPill, PILL_WIDTH, PILL_HEIGHT, categoryAccentColor, getPortPosition, portColor } from './BlockNode';
+import { FLOW_IN, FLOW_OUT } from './flowPorts';
 import { isCompactBlock, gotoTargetId, resolveGotoTarget, terminalColor, terminalName, terminalReferences, TERMINAL_COLOR_CSS } from './flowTerminals';
 import { useI18n } from '../../i18n';
 
@@ -487,6 +488,20 @@ export const FlowCanvas: React.FC = () => {
         {diagram.blocks.map((block) => {
           const def = getBlockDefFor(block);
           if (!def) return null;
+          if (block.type === FLOW_IN || block.type === FLOW_OUT) {
+            return (
+              <PortPill
+                key={block.id}
+                block={block}
+                selected={selectedBlockIds.includes(block.id)}
+                zoom={zoom}
+                panX={panX}
+                panY={panY}
+                onSelect={onBlockSelect(block.id)}
+                onDragStart={onBlockDragStart(block)}
+              />
+            );
+          }
           if (isCompactBlock(block.type)) {
             const isTerminal = block.type === 'flow_terminal';
             const target = isTerminal ? block : resolveGotoTarget(diagram, block);

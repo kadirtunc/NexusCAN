@@ -10,16 +10,16 @@ import { CalleeCache, preflightCalls, terminalIssueMessage, type BodyLoader } fr
 import { isCallType, readCallRef } from './callIndex';
 import { checkEcuBinding, checkEcuSession, resolveFrameDiagram, type SessionProbe } from './ecuBinding';
 import { flowRegistry } from './registry/flowRegistryStore';
-import { asBytes } from './flowValues';
 import type { EcuRecordV1 } from '../../types/diagWorkspace';
 import type { BlockStatus } from './types';
-import { cancelAllFlashRuns, runFlashBlock } from './flashRun';
+import { cancelAllFlashRuns, clearImage, runFlashBlock } from './flashRun';
 import { flashRuntime } from './flashRuntime';
 import { createScope, FOR_ITERATION_CAP, forValueAt, formatValue, type FlowScope } from './coreBlocks';
 import { CORE_EXEC_BLOCKS, WHILE_DEFAULT_MAX, execVarSet, readForRange, renderLogMessage } from './coreRuntime';
 import { validateCore, type CoreIssue } from './coreValidate';
 import { findEntryBlock, resolveRunInputs, validateInterface } from './flowInterface';
-import { FLOW_INPUT, flowInputSpecs, flowOutputName, flowOutputOutcome, flowOutputSpecs } from './flowPorts';
+import { FLOW_OUT, FLOW_RETURN, FLOW_START, blockPortSpec, flowInSpecs, returnName, returnOutcome } from './flowPorts';
+import { FLASH_IMAGE_KEY, applyBoundParams, preflightBoundValues } from './boundParams';
 import type { FlowOutcome } from '../../types/flowLibrary';
 import type { TranslationKey } from '../../i18n';
 import { diagnosticsStore } from '../../store/diagnosticsStore';
@@ -101,8 +101,8 @@ export interface RunContext {
 export interface FlowRunOptions {
   transport?: FlowTransport;
   /**
-   * Values of the `flow_input` inputs by key (`Uint8Array` for file / bytes / hex, text / number / bool / select
-   * as entered). Missing optional inputs take their spec default; a missing required one refuses the run.
+   * Values of the `flow_in` inputs by key (`FlowFileValue` or `Uint8Array` for file, `Uint8Array` for bytes / hex,
+   * text / number / bool / select as entered). Missing optional inputs take their spec default; a missing required one refuses the run.
    */
   inputs?: Record<string, unknown>;
   /** The ECU bound to this run (single ECU per run): passed as the value of the `ecu` input and checked. */
@@ -135,15 +135,18 @@ interface Frame {
   real: RealFlowExecutor | null;
   eval: RealFlowExecutor;
   finished: boolean;
-  reached: { name: string; outcome: FlowOutcome; outputs: Record<string, unknown> } | null;
+  /** Outcome of the frame (set by a `flow_return`, or implicitly `ok` when the exec path ends) + sampled outputs. */
+  reached: { name: string; outcome: FlowOutcome; outputs: Record<string, unknown>; implicit: boolean } | null;
+  /** Runtime image keys of bound `file` ports loaded in this frame: released when the frame exits. */
+  imageKeys: Set<string>;
   loopSignal: 'break' | 'continue' | null;
   loopDepth: number;
 }
 
-/** Result of one run (diag-workspace-v1 §8): the outcome and the values recorded by the reached `flow_output`. */
+/** Result of one run (diag-workspace-v1 §8): the outcome and the values sampled from the `flow_out` blocks. */
 export interface FlowRunResult {
   outcome: FlowOutcome;
-  /** Name of the reached `flow_output`; `null` for the implicit outcome (no `flow_output`, legacy `end`, error, stop). */
+  /** Name of the reached `flow_return`; `null` for the implicit outcome (exec path ended without one, error, stop). */
   name: string | null;
   outputs: Record<string, unknown>;
   /** Stop / Panic Stop ended the run (outcome `error`). */
@@ -177,7 +180,7 @@ function log(blockId: string, blockLabel: string, msg: string) {
 }
 
 /** Blocks that are pure flow structure (no transport, no fabricated data) and run identically in real mode. */
-const REAL_STRUCTURAL: ReadonlySet<string> = new Set(['start', 'end', 'flow_input', 'flow_output', 'delay', 'loop', 'flow_while', 'uds_lockout_guard', 'flow_terminal', 'flow_goto']);
+const REAL_STRUCTURAL: ReadonlySet<string> = new Set([FLOW_START, FLOW_RETURN, 'delay', 'loop', 'flow_while', 'uds_lockout_guard', 'flow_terminal', 'flow_goto']);
 
 /** Pre-run refusal of a failed validation: block statuses + log, nothing executes. */
 function refuseRun(diagram: FlowDiagram, issues: Array<{ blockId: string; message: string }>, headerKey: TranslationKey): void {
@@ -288,11 +291,12 @@ export class FlowEngine {
     const frame = {
       diagram, name, path, pathKey, ecu, inputValues,
       scope: createScope(diagram.variables ?? []),
-      real: null, finished: false, reached: null, loopSignal: null, loopDepth: 0,
+      real: null, finished: false, reached: null, loopSignal: null, loopDepth: 0, imageKeys: new Set<string>(),
     } as unknown as Frame;
     const src = (): FlowDiagram => frame.diagram;
-    frame.real = this._demo ? null : new RealFlowExecutor(transport, this._ctx, evalLog, () => this._stopped, false, src);
-    frame.eval = frame.real ?? new RealFlowExecutor(transport, this._ctx, evalLog, () => this._stopped, true, src);
+    const inputs = (): Record<string, unknown> => frame.inputValues;
+    frame.real = this._demo ? null : new RealFlowExecutor(transport, this._ctx, evalLog, () => this._stopped, false, src, inputs);
+    frame.eval = frame.real ?? new RealFlowExecutor(transport, this._ctx, evalLog, () => this._stopped, true, src, inputs);
     return frame;
   }
 
@@ -326,13 +330,42 @@ export class FlowEngine {
     try {
       this._cameFrom = null;
       await this.executeChain(entry);
+      await this.finishFrame(frame);
     } catch (err) {
       unhandled = err ?? new Error('error');
     } finally {
       if (child && !kaBefore && this._ctx.keepaliveActive) await this.releaseKeepalive(this._stopped ? 'stop' : 'end');
+      // Images loaded from bound `file` ports live exactly as long as their frame.
+      for (const key of frame.imageKeys) clearImage(key);
+      frame.imageKeys.clear();
       this.leave();
     }
     return { unhandled };
+  }
+
+  /**
+   * Frame end (a `flow_return` was reached, or the exec path finished = implicit `ok`): every `flow_out` is sampled
+   * with the `softInput` rule (a source that did not run on this path is absent). A `required` output without a
+   * value on outcome `ok` is a run error in the real engine; the simulated one stays lenient.
+   */
+  private async finishFrame(frame: Frame): Promise<void> {
+    if (this._stopped || this._abortError !== null) return;
+    const ret = frame.reached ?? { name: 'ok', outcome: 'ok' as FlowOutcome, outputs: {}, implicit: true };
+    const outputs: Record<string, unknown> = {};
+    for (const b of frame.diagram.blocks) {
+      if (b.type !== FLOW_OUT) continue;
+      const spec = blockPortSpec(b);
+      const v = await frame.eval.softInput(b, 'value');
+      if (v !== undefined) {
+        outputs[spec.key] = v;
+        this.setStatus(b, 'success');
+      } else if (spec.required && ret.outcome === 'ok' && frame.real !== null) {
+        const msg = t('flowReg.run.outputMissing', { name: spec.key, block: b.label });
+        this.setStatus(b, 'error', msg);
+        throw new Error(msg);
+      }
+    }
+    frame.reached = { ...ret, outputs };
   }
 
   async run(opts: FlowRunOptions = {}): Promise<void> {
@@ -402,21 +435,18 @@ export class FlowEngine {
       return;
     }
 
-    // Flow interface (keys, single `flow_input`, `ecu` input) and the run-time input values: refused BEFORE any TX.
+    // Flow interface (keys, single `flow_start`, `ecu` input, bound params) and the run-time input values: refused BEFORE any TX.
     const ifaceIssues = validateInterface(diagram);
     if (ifaceIssues.length > 0) {
       refuseAll(ifaceIssues, 'flowReg.val.invalid');
       return;
     }
-    let inputValues: Record<string, unknown> = {};
-    if (startBlock.type === FLOW_INPUT) {
-      const resolved = resolveRunInputs(flowInputSpecs(startBlock), { ...(opts.inputs ?? {}), ...(ecu ? { ecu } : {}) });
-      if (resolved.errors.length > 0) {
-        refuseAll(resolved.errors.map((message) => ({ blockId: startBlock.id, message })), 'flowReg.run.refused');
-        return;
-      }
-      inputValues = resolved.values;
+    const resolved = resolveRunInputs(flowInSpecs(diagram), { ...(opts.inputs ?? {}), ...(ecu ? { ecu } : {}) });
+    if (resolved.errors.length > 0) {
+      refuseAll(resolved.errors.map((message) => ({ blockId: startBlock.id, message })), 'flowReg.run.refused');
+      return;
     }
+    const inputValues: Record<string, unknown> = resolved.values;
 
     // Call graph (cycles, unresolved refs, ports), ECU binding (protocols, `{ecu.*}` per frame) and the session.
     const cache = new CalleeCache(opts.resolveCallee ?? ((id, rev) => flowRegistry.loadBody(id, rev)));
@@ -447,6 +477,13 @@ export class FlowEngine {
       return;
     }
 
+    // Bound values that are already known (flow_in / constant sources) are validated now, before ANY TX.
+    const boundIssues = await preflightBoundValues(root.diagram, (b, p) => root.eval.core.optional(b, p, 0));
+    if (boundIssues.length > 0) {
+      refuseAll(boundIssues, 'flowReg.val.invalid');
+      return;
+    }
+
     const { unhandled } = await this.runFrame(root, startBlock, false);
     if (unhandled !== null) {
       flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
@@ -455,12 +492,12 @@ export class FlowEngine {
     // Every terminal path (end, unhandled error, stop, Panic): no keep-alive survives the run.
     await this.releaseKeepalive(this._stopped ? 'stop' : 'end');
     unregisterTx?.();
-    const reached = root.reached as { name: string; outcome: FlowOutcome; outputs: Record<string, unknown> } | null;
+    const reached = root.reached;
     const failed = unhandled !== null || this._abortError !== null;
     this.result = this._stopped
       ? { outcome: 'error', name: null, outputs: {}, stopped: true, refused: false }
       : reached && !failed
-        ? { outcome: reached.outcome, name: reached.name, outputs: reached.outputs, stopped: false, refused: false }
+        ? { outcome: reached.outcome, name: reached.implicit ? null : reached.name, outputs: reached.outputs, stopped: false, refused: false }
         : { outcome: failed ? 'error' : 'ok', name: null, outputs: {}, stopped: false, refused: false };
 
     flowStore.setRunning(false);
@@ -501,7 +538,17 @@ export class FlowEngine {
     this.setStatus(block, 'running');
 
     try {
-      const outcome = await this.dispatchBlock(block);
+      // Bound parameters (`p:<key>` ports) override the stored config for THIS execution only; invalid / missing
+      // values throw here, before the block transmits anything.
+      const effective = await applyBoundParams(
+        block,
+        (portId) => this._eval.core.optional(block, portId, 0),
+        // Distinct from the panel-loaded image of the block (key = block id), which a bound file must never clobber.
+        `bound\u0000${this._frame.pathKey}\u0000${block.id}`,
+      );
+      const imageKey = effective.config[FLASH_IMAGE_KEY];
+      if (effective !== block && typeof imageKey === 'string') this._frame.imageKeys.add(imageKey);
+      const outcome = await this.dispatchBlock(effective);
       this._eval.record(block, outcome);
       flowStore.setFrameResult(this._frame.pathKey, block.id, outcome.result);
       if (outcome.failed) {
@@ -668,31 +715,17 @@ export class FlowEngine {
         return { message: msg };
       }
 
-      case 'flow_input':
-        return { message: t('diagEng.startMsg'), nextPort: 'start', outputs: { ...this._frame.inputValues } };
+      case FLOW_START:
+        return { message: t('diagEng.startMsg'), nextPort: 'start' };
 
-      case 'flow_output': {
-        // Records the wired output values and ends the run with this outcome.
-        const ev = this._eval;
-        const outputs: Record<string, unknown> = {};
-        for (const spec of flowOutputSpecs(block)) {
-          // A value whose source never ran on this path (another branch) is simply absent.
-          const v = await ev.softInput(block, spec.key);
-          if (v !== undefined) outputs[spec.key] = v;
-          else if (spec.required && this._real) {
-            // The real engine enforces required outputs; the simulated one stays lenient (fabricated values).
-            throw new Error(t('flowReg.run.outputMissing', { name: spec.key, block: block.label }));
-          }
-        }
-        const name = flowOutputName(block).trim();
-        const outcome = flowOutputOutcome(block);
-        this._frame.reached = { name, outcome, outputs };
+      case FLOW_RETURN: {
+        // Ends the frame with this outcome; the `flow_out` values are sampled once, at frame end (`finishFrame`).
+        const name = returnName(block).trim();
+        const outcome = returnOutcome(block);
+        this._frame.reached = { name, outcome, outputs: {}, implicit: false };
         this._frame.finished = true;
-        return { message: t('flowReg.run.outputReached', { name, outcome }), result: outputs };
+        return { message: t('flowReg.run.outputReached', { name, outcome }) };
       }
-
-      case 'start': return { message: t('diagEng.startMsg') };
-      case 'end':   return { message: t('diagEng.endMsg') };
 
       case 'delay': {
         const ms = Number(block.config['delay_ms'] ?? 1000);
@@ -1163,7 +1196,7 @@ export class FlowEngine {
       // ── Flash Image (DEMO: local simulated download, nothing transmitted) ─────
 
       case 'uds_flash_image':
-        return runFlashBlock(block, { demo: true, tabId: null, log: (msg) => log(block.id, block.label, `[${ts()}]   ${msg}`), transport: demoFlowTransport });
+        return runFlashBlock(block, { demo: true, tabId: null, log: (msg) => log(block.id, block.label, `[${ts()}]   ${msg}`), transport: demoFlowTransport, shouldStop: () => this._stopped });
 
       // ── Keep-alive / wait-ready (DEMO: simulated, nothing transmitted) ───────
 
@@ -1384,14 +1417,10 @@ export class FlowEngine {
     const errors: string[] = [];
     for (const spec of callee.iface.inputs) {
       const v = await parent.eval.core.optional(block, spec.key, 0);
-      if (v !== undefined) {
-        if ((spec.type === 'file' || spec.type === 'bytes') && !asBytes(v)) errors.push(t('flowReg.run.missing', { name: spec.key }));
-        else values[spec.key] = spec.type === 'file' || spec.type === 'bytes' ? asBytes(v) : v;
-      } else {
-        const r = resolveRunInputs([spec], {});
-        errors.push(...r.errors);
-        Object.assign(values, r.values);
-      }
+      // Wired value (or the spec default when nothing is wired) goes through the same checks as a root run input.
+      const r = resolveRunInputs([spec], v !== undefined ? { [spec.key]: v } : {});
+      errors.push(...r.errors);
+      Object.assign(values, r.values);
     }
     if (errors.length > 0) throw new Error(`${callee.name}: ${errors.join('; ')}`);
     const childEcu = (values['ecu'] ?? null) as EcuRecordV1 | null;
@@ -1408,7 +1437,7 @@ export class FlowEngine {
     log(block.id, block.label, `[${ts()}]   ${t('flowNest.log.enter', { name: callee.name, rev: ref.revision })}`);
     const { unhandled } = await this.runFrame(child, entry, true);
     if (unhandled !== null) throw (unhandled instanceof Error ? unhandled : new Error(String(unhandled)));
-    const reached = child.reached as { name: string; outcome: FlowOutcome; outputs: Record<string, unknown> } | null;
+    const reached = child.reached;
     const name = reached ? reached.name : 'ok';
     const outputs = reached ? reached.outputs : {};
     log(block.id, block.label, `[${ts()}]   ${t('flowNest.log.leave', { name: callee.name, outcome: name })}`);

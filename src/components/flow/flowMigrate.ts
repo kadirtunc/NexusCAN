@@ -9,10 +9,14 @@
  *   error (the run is refused): behaviour is never changed silently.
  */
 import { t } from '../../i18n';
-import type { FlowVariableDeclV1, FlowVariableType } from '../../types/flowLibrary';
+import type { FlowPortSpecV1, FlowVariableDeclV1, FlowVariableType } from '../../types/flowLibrary';
 import type { FlowBlock, FlowConnection, FlowDiagram } from './types';
 import { getBlockDef } from './blockDefs';
 import { isValidVarName } from './coreBlocks';
+import {
+  FLOW_IN, FLOW_OUT, FLOW_RETURN, FLOW_START, LEGACY_END, LEGACY_FLOW_INPUT, LEGACY_FLOW_OUTPUT, LEGACY_START, VALUE_PORT,
+  readPortSpecs, returnOutcome,
+} from './flowPorts';
 
 export interface MigrationResult {
   diagram: FlowDiagram;
@@ -184,28 +188,152 @@ export function migrateLegacyVars(input: FlowDiagram): MigrationResult {
   return { diagram: { ...input, blocks, connections: conns, variables: decls }, notes };
 }
 
-// ─── start -> flow_input (diag-workspace-v1 §8) ─────────────────────────────────────────────────────
+// ─── v1 interface blocks -> flow-interface-v2 (§4) ─────────────────────────────────────────────────
 
-/**
- * Legacy `start` -> `flow_input` with `inputs: []`: same id, label and position; the exec output port
- * `exec_out` becomes `start`. Only the FIRST `start` (the one the engine ran) is migrated, and nothing is
- * changed when a `flow_input` already exists, so a flow never ends up with two interface blocks. Legacy
- * `end` blocks are NOT migrated (they keep working as outcome `ok`).
- */
-export function migrateLegacyStart(input: FlowDiagram): FlowDiagram {
-  if (input.blocks.some((b) => b.type === 'flow_input')) return input;
-  const start = input.blocks.find((b) => b.type === 'start');
-  if (!start) return input;
-  return {
-    ...input,
-    blocks: input.blocks.map((b) => (b.id === start.id ? { ...b, type: 'flow_input', config: { inputs: [] } } : b)),
-    connections: input.connections.map((c) =>
-      c.fromBlockId === start.id && c.fromPortId === 'exec_out' ? { ...c, fromPortId: 'start' } : c),
-  };
+const IN_STEP_Y = 60;
+const IN_FIRST_DY = 100;
+
+function sourceKey(c: FlowConnection): string {
+  return `${c.fromBlockId}\u0000${c.fromPortId}`;
 }
 
-/** Every load-time migration in order (legacy variables, then start -> flow_input). */
+/**
+ * Deterministic v1 -> v2 interface migration (never silent):
+ * - `start` -> `flow_start` (same id; `exec_out` connections -> `start`). Only the FIRST `start`, and only when
+ *   there is no `flow_input` (a stray `start` next to a `flow_input` stays an inert legacy block, as before).
+ * - `flow_input { inputs }` -> `flow_start` (same id, `start` port kept) + one `flow_in` per spec
+ *   (`${oldId}__in_${key}`, same x, stacked below, config = spec + `order` = index); `(old, key)` connections ->
+ *   `(newIn, 'value')`.
+ * - `flow_output { name, outcome, outputs }` -> `flow_return { name, outcome }` (same id, `in` kept) + one
+ *   `flow_out` per distinct output key over ALL old outputs (`${firstOwnerId}__out_${key}`, `order` = first-seen
+ *   index); `(old, key)` connections -> `(flowOut, 'value')`. A key that had different sources or different types
+ *   keeps the FIRST and gets `config.migrateConflict` (a `migrate_output_conflict` validation issue: the flow
+ *   cannot run until it is fixed and the conflict is acknowledged).
+ * - `end` -> `flow_return { name: 'ok', outcome: 'ok' }` (`exec_in` -> `in`).
+ */
+export function migrateInterfaceV2(input: FlowDiagram): MigrationResult {
+  const hasLegacy = input.blocks.some((b) => b.type === LEGACY_START || b.type === LEGACY_END || b.type === LEGACY_FLOW_INPUT || b.type === LEGACY_FLOW_OUTPUT);
+  // A `start` next to an existing `flow_start` / `flow_input` is inert legacy data: never converted (idempotent).
+  const startConvertible = !input.blocks.some((b) => b.type === FLOW_START || b.type === LEGACY_FLOW_INPUT);
+  const needsWork = input.blocks.some((b) => b.type === LEGACY_END || b.type === LEGACY_FLOW_INPUT || b.type === LEGACY_FLOW_OUTPUT
+    || (b.type === LEGACY_START && startConvertible));
+  if (!hasLegacy || !needsWork) return { diagram: input, notes: [] };
+
+  const notes: string[] = [];
+  const usedIds = new Set(input.blocks.map((b) => b.id));
+  const uniqueId = (base: string): string => {
+    let id = base;
+    let n = 2;
+    while (usedIds.has(id)) id = `${base}_${n++}`;
+    usedIds.add(id);
+    return id;
+  };
+  const newBlock = (id: string, type: string, label: string, x: number, y: number, config: Record<string, unknown>): FlowBlock =>
+    ({ id, type, label, x, y, config, status: 'idle', collapsed: false });
+
+  let blocks: FlowBlock[] = input.blocks.map((b) => ({ ...b }));
+  let conns: FlowConnection[] = input.connections.map((c) => ({ ...c }));
+  const added: FlowBlock[] = [];
+  const legacyDefaultLabel = t('flowReg.blk.flowInput');
+
+  // 1. start -> flow_start (first one only, and only without a flow_input)
+  if (startConvertible) {
+    const start = blocks.find((b) => b.type === LEGACY_START);
+    if (start) {
+      blocks = blocks.map((b) => (b.id === start.id ? { ...b, type: FLOW_START, config: {} } : b));
+      conns = conns.map((c) => (c.fromBlockId === start.id && c.fromPortId === 'exec_out' ? { ...c, fromPortId: 'start' } : c));
+    }
+  }
+
+  // 2. flow_input -> flow_start + flow_in blocks
+  for (const old of blocks.filter((b) => b.type === LEGACY_FLOW_INPUT)) {
+    const specs = readPortSpecs(old.config['inputs']);
+    blocks = blocks.map((b) => (b.id === old.id
+      ? { ...b, type: FLOW_START, label: b.label === legacyDefaultLabel ? t('flowIface.blk.start') : b.label, config: {} }
+      : b));
+    specs.forEach((spec, i) => {
+      const id = uniqueId(`${old.id}__in_${spec.key}`);
+      added.push(newBlock(id, FLOW_IN, spec.label !== '' ? spec.label : spec.key, old.x, old.y + IN_FIRST_DY + i * IN_STEP_Y, { ...spec, order: i }));
+      // `start` is the exec port of the block: a (legacy-invalid) data key of that name is never remapped.
+      if (spec.key !== 'start') {
+        conns = conns.map((c) => (c.fromBlockId === old.id && c.fromPortId === spec.key ? { ...c, fromBlockId: id, fromPortId: VALUE_PORT } : c));
+      }
+    });
+  }
+
+  // 3. flow_output -> flow_return + flow_out blocks (one per distinct key)
+  interface OutAcc {
+    key: string;
+    owner: FlowBlock;
+    ownerIndex: number;
+    spec: FlowPortSpecV1;
+    required: boolean;
+    order: number;
+    source: FlowConnection | null;
+    dropped: string[];
+  }
+  const outs = new Map<string, OutAcc>();
+  const labelOf = (id: string): string => blocks.find((b) => b.id === id)?.label ?? added.find((b) => b.id === id)?.label ?? id;
+  const oldOutputs = blocks.filter((b) => b.type === LEGACY_FLOW_OUTPUT);
+  const perOwner = new Map<string, number>();
+  for (const old of oldOutputs) {
+    const outcomeName = typeof old.config['name'] === 'string' ? old.config['name'] : '';
+    for (const spec of readPortSpecs(old.config['outputs'])) {
+      const incoming = conns.find((c) => c.toBlockId === old.id && c.toPortId === spec.key) ?? null;
+      const acc = outs.get(spec.key);
+      if (!acc) {
+        const idx = perOwner.get(old.id) ?? 0;
+        perOwner.set(old.id, idx + 1);
+        outs.set(spec.key, { key: spec.key, owner: old, ownerIndex: idx, spec, required: spec.required && returnOutcome(old) === 'ok', order: outs.size, source: incoming, dropped: [] });
+        continue;
+      }
+      // `required` only ever bound the `ok` outcome in the engine: outputs on fail / error stay non-required.
+      acc.required = acc.required || (spec.required && returnOutcome(old) === 'ok');
+      if (spec.type !== acc.spec.type) acc.dropped.push(`${outcomeName}: ${spec.type} ≠ ${acc.spec.type}`);
+      if (incoming) {
+        if (acc.source === null) acc.source = incoming;
+        else if (sourceKey(incoming) !== sourceKey(acc.source)) acc.dropped.push(`${outcomeName}: ${labelOf(incoming.fromBlockId)}.${incoming.fromPortId}`);
+      }
+    }
+  }
+  const oldOutIds = new Set(oldOutputs.map((b) => b.id));
+  const newConns: FlowConnection[] = [];
+  for (const acc of outs.values()) {
+    const id = uniqueId(`${acc.owner.id}__out_${acc.key}`);
+    // Spec of a flow_out: no default / options / accept (those belong to inputs).
+    const config: Record<string, unknown> = { ...acc.spec, required: acc.required, order: acc.order };
+    delete config['default'];
+    delete config['options'];
+    delete config['accept'];
+    if (acc.dropped.length > 0) {
+      config['migrateConflict'] = acc.dropped.join('; ');
+      notes.push(t('flowIface.mig.conflict', { key: acc.key, detail: acc.dropped.join('; ') }));
+    }
+    added.push(newBlock(id, FLOW_OUT, acc.spec.label !== '' ? acc.spec.label : acc.key, acc.owner.x, acc.owner.y + IN_FIRST_DY + acc.ownerIndex * IN_STEP_Y, config));
+    if (acc.source) newConns.push({ ...acc.source, toBlockId: id, toPortId: VALUE_PORT });
+  }
+  // Every connection into an old output key is replaced by (at most) one connection into its flow_out (the kept
+  // one is re-created with its original id on the new endpoint); the exec `in` connections stay.
+  conns = [...conns.filter((c) => !(oldOutIds.has(c.toBlockId) && c.toPortId !== 'in')), ...newConns];
+  blocks = blocks.map((b) => {
+    if (b.type !== LEGACY_FLOW_OUTPUT) return b;
+    return { ...b, type: FLOW_RETURN, config: { name: typeof b.config['name'] === 'string' ? b.config['name'] : '', outcome: returnOutcome(b) } };
+  });
+
+  // 4. end -> flow_return ok
+  const endIds = new Set(blocks.filter((b) => b.type === LEGACY_END).map((b) => b.id));
+  if (endIds.size > 0) {
+    blocks = blocks.map((b) => (endIds.has(b.id) ? { ...b, type: FLOW_RETURN, config: { name: 'ok', outcome: 'ok' } } : b));
+    conns = conns.map((c) => (endIds.has(c.toBlockId) && c.toPortId === 'exec_in' ? { ...c, toPortId: 'in' } : c));
+  }
+
+  notes.unshift(t('flowIface.mig.converted'));
+  return { diagram: { ...input, blocks: [...blocks, ...added], connections: conns }, notes };
+}
+
+/** Every load-time migration in order (legacy variables, then the v1 interface blocks -> v2). */
 export function migrateAll(input: FlowDiagram): MigrationResult {
   const vars = migrateLegacyVars(input);
-  return { diagram: migrateLegacyStart(vars.diagram), notes: vars.notes };
+  const iface = migrateInterfaceV2(vars.diagram);
+  return { diagram: iface.diagram, notes: [...vars.notes, ...iface.notes] };
 }

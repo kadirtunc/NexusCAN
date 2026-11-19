@@ -1,13 +1,15 @@
 /**
- * Editor of an interface port list (`flow_input.inputs` / `flow_output.outputs`): key, label, type, required,
- * default and select options. Text fields commit on blur / Enter, so a half-typed key never rewires the graph.
+ * Editor of ONE interface port (`flow_in` / `flow_out` block config, flow-interface-v2 §2): key, label, type,
+ * required, order, description and the type-specific fields (default / options, unit / min / max, byteLength,
+ * accept). Text fields commit on blur / Enter, so a half-typed key never renames the port mid-typing.
  */
 import React, { useEffect, useState } from 'react';
-import { Plus, Trash2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
-import type { FlowPortSpecV1, FlowPortValueType } from '../../types/flowLibrary';
-import { DIAG_BTN_SM, DIAG_CHECKBOX } from '../diagnostics/diagUi';
-import { PORT_VALUE_TYPES, readPortSpecs } from './flowPorts';
+import type { FlowPortValueType } from '../../types/flowLibrary';
+import { DIAG_CHECKBOX } from '../diagnostics/diagUi';
+import { flowStore } from './FlowStore';
+import { PORT_VALUE_TYPES, blockPortSpec } from './flowPorts';
+import type { FlowBlock } from './types';
 
 const FIELD =
   'h-[26px] w-full rounded-[2px] border border-hairline bg-canvas px-1.5 font-mono text-[12px] tabular-nums text-ink outline-none placeholder:text-subtle focus:border-focus';
@@ -45,122 +47,132 @@ const CommitInput: React.FC<{
   );
 };
 
-/** Next unused key `in1`, `in2`, ... (or `out1` ...). */
-function nextKey(specs: readonly FlowPortSpecV1[], prefix: string): string {
-  let n = 1;
-  while (specs.some((s) => s.key === `${prefix}${n}`)) n += 1;
-  return `${prefix}${n}`;
-}
+const LABEL = 'mb-0.5 block text-[11.5px] text-muted';
 
-export const PortSpecsEditor: React.FC<{
-  value: unknown;
-  /** `input` = flow_input (may declare the `ecu` input and file inputs), `output` = flow_output values. */
-  side: 'input' | 'output';
-  onChange: (specs: FlowPortSpecV1[]) => void;
-}> = ({ value, side, onChange }) => {
+/** Number draft that commits a finite number (or clears the field when emptied). */
+const NumCommit: React.FC<{ value: number | undefined; onCommit: (v: number | undefined) => void; label: string }> = ({ value, onCommit, label }) => (
+  <CommitInput
+    value={value === undefined ? '' : String(value)}
+    label={label}
+    onCommit={(v) => {
+      const trimmed = v.trim();
+      if (trimmed === '') onCommit(undefined);
+      else if (Number.isFinite(Number(trimmed))) onCommit(Number(trimmed));
+    }}
+  />
+);
+
+export const PortSpecEditor: React.FC<{ block: FlowBlock; side: 'input' | 'output' }> = ({ block, side }) => {
   const { t } = useI18n();
-  const specs = readPortSpecs(value);
-  const update = (i: number, patch: Partial<FlowPortSpecV1>): void => {
-    onChange(specs.map((s, idx) => {
-      if (idx !== i) return s;
-      const next: FlowPortSpecV1 = { ...s, ...patch };
-      if (next.default === undefined) delete next.default;
-      if (next.options === undefined) delete next.options;
-      return next;
-    }));
-  };
+  const s = blockPortSpec(block);
+  const set = (patch: Record<string, unknown>): void => flowStore.updateBlockConfig(block.id, patch);
   const types = PORT_VALUE_TYPES.filter((ty) => side === 'input' || ty !== 'file');
+  const isNum = s.type === 'number';
+  const isBytes = s.type === 'hex' || s.type === 'bytes';
 
   return (
     <div className="flex flex-col gap-2">
-      {specs.length === 0 && <div className="text-[11.5px] leading-snug text-subtle">{t('flowReg.ports.none')}</div>}
-      {specs.map((s, i) => (
-        <div key={i} className="flex flex-col gap-1 border border-hairline bg-canvas p-1.5">
-          <div className="flex items-center gap-1">
-            <CommitInput
-              value={s.key}
-              label={t('flowReg.ports.key')}
-              placeholder="key"
-              onCommit={(key) => update(i, { key: key.trim() })}
-            />
-            <button
-              type="button"
-              onClick={() => onChange(specs.filter((_, idx) => idx !== i))}
-              title={t('flowReg.ports.remove')}
-              aria-label={t('flowReg.ports.remove')}
-              className={`${DIAG_BTN_SM} hover:!border-critical hover:!text-critical`}
-            >
-              <Trash2 className="h-3 w-3" aria-hidden="true" />
-            </button>
-          </div>
-          <CommitInput
-            value={s.label}
-            label={t('flowReg.ports.label')}
-            placeholder={t('flowReg.ports.label')}
-            onCommit={(label) => update(i, { label })}
-          />
-          <div className="flex items-center gap-1">
-            <select
-              value={s.type}
-              aria-label={t('flowReg.ports.type')}
-              onChange={(e) => {
-                const type = e.target.value as FlowPortValueType;
-                const patch: Partial<FlowPortSpecV1> = { type };
-                if (type === 'ecu') patch.key = 'ecu';
-                if (type === 'select' && s.options === undefined) patch.options = [];
-                update(i, patch);
-              }}
-              className={`${FIELD} cursor-pointer`}
-            >
-              {types.map((ty) => (
-                <option key={ty} value={ty}>{ty}</option>
-              ))}
-            </select>
-            <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[11.5px] text-muted">
-              <input
-                type="checkbox"
-                checked={s.required}
-                onChange={(e) => update(i, { required: e.target.checked })}
-                className={DIAG_CHECKBOX}
-              />
-              {t('flowReg.ports.required')}
-            </label>
-          </div>
-          {s.type !== 'ecu' && s.type !== 'file' && (
-            <CommitInput
-              value={s.default === undefined ? '' : String(s.default)}
-              label={t('flowReg.ports.default')}
-              placeholder={t('flowReg.ports.default')}
-              onCommit={(v) => {
-                if (v === '') update(i, { default: undefined });
-                else if (s.type === 'number' && Number.isFinite(Number(v))) update(i, { default: Number(v) });
-                else if (s.type === 'bool') update(i, { default: v.trim().toLowerCase() === 'true' });
-                else update(i, { default: v });
-              }}
-            />
-          )}
-          {s.type === 'select' && (
-            <CommitInput
-              value={(s.options ?? []).join(', ')}
-              label={t('flowReg.ports.options')}
-              placeholder={t('flowReg.ports.options')}
-              invalid={(s.options ?? []).length === 0}
-              onCommit={(v) => update(i, { options: v.split(',').map((x) => x.trim()).filter((x) => x.length > 0) })}
-            />
-          )}
+      <div>
+        <label className={LABEL}>{t('flowIface.spec.key')}</label>
+        <CommitInput value={s.key} label={t('flowIface.spec.key')} placeholder="key" onCommit={(key) => set({ key: key.trim() })} />
+      </div>
+      <div>
+        <label className={LABEL}>{t('flowIface.spec.label')}</label>
+        <CommitInput value={s.label} label={t('flowIface.spec.label')} onCommit={(label) => set({ label })} />
+      </div>
+      <div className="flex items-end gap-2">
+        <div className="min-w-0 flex-1">
+          <label className={LABEL}>{t('flowIface.spec.type')}</label>
+          <select
+            value={s.type}
+            aria-label={t('flowIface.spec.type')}
+            onChange={(e) => {
+              const type = e.target.value as FlowPortValueType;
+              const patch: Record<string, unknown> = { type };
+              if (type === 'ecu') patch['key'] = 'ecu';
+              if (type === 'select' && s.options === undefined) patch['options'] = [];
+              set(patch);
+            }}
+            className={`${FIELD} cursor-pointer`}
+          >
+            {types.map((ty) => (
+              <option key={ty} value={ty}>{ty}</option>
+            ))}
+          </select>
         </div>
-      ))}
-      <button
-        type="button"
-        className={DIAG_BTN_SM}
-        onClick={() => {
-          const key = nextKey(specs, side === 'input' ? 'in' : 'out');
-          onChange([...specs, { key, label: key, type: 'text', required: false }]);
-        }}
-      >
-        <Plus className="h-3 w-3" aria-hidden="true" />
-        {t('flowReg.ports.add')}
-      </button>
+        <label className="flex shrink-0 cursor-pointer items-center gap-1 pb-1 text-[11.5px] text-muted">
+          <input type="checkbox" checked={s.required} onChange={(e) => set({ required: e.target.checked })} className={DIAG_CHECKBOX} />
+          {t('flowIface.spec.required')}
+        </label>
+      </div>
+      {s.type === 'ecu' && <div className="text-[11px] leading-snug text-subtle">{t('flowIface.spec.ecuNote')}</div>}
+      <div>
+        <label className={LABEL}>{t('flowIface.spec.order')}</label>
+        <NumCommit value={s.order} label={t('flowIface.spec.order')} onCommit={(order) => set({ order })} />
+      </div>
+      <div>
+        <label className={LABEL}>{t('flowIface.spec.description')}</label>
+        <CommitInput value={s.description ?? ''} label={t('flowIface.spec.description')} onCommit={(description) => set({ description: description === '' ? undefined : description })} />
+      </div>
+      {side === 'input' && s.type !== 'ecu' && s.type !== 'file' && (
+        <div>
+          <label className={LABEL}>{t('flowIface.spec.default')}</label>
+          <CommitInput
+            value={s.default === undefined ? '' : String(s.default)}
+            label={t('flowIface.spec.default')}
+            onCommit={(v) => {
+              if (v === '') set({ default: undefined });
+              else if (s.type === 'number' && Number.isFinite(Number(v))) set({ default: Number(v) });
+              else if (s.type === 'bool') set({ default: v.trim().toLowerCase() === 'true' });
+              else set({ default: v });
+            }}
+          />
+        </div>
+      )}
+      {side === 'input' && s.type === 'select' && (
+        <div>
+          <label className={LABEL}>{t('flowIface.spec.options')}</label>
+          <CommitInput
+            value={(s.options ?? []).join(', ')}
+            label={t('flowIface.spec.options')}
+            invalid={(s.options ?? []).length === 0}
+            onCommit={(v) => set({ options: v.split(',').map((x) => x.trim()).filter((x) => x.length > 0) })}
+          />
+        </div>
+      )}
+      {isNum && (
+        <div className="grid grid-cols-3 gap-2">
+          <div>
+            <label className={LABEL}>{t('flowIface.spec.unit')}</label>
+            <CommitInput value={s.unit ?? ''} label={t('flowIface.spec.unit')} onCommit={(unit) => set({ unit: unit === '' ? undefined : unit })} />
+          </div>
+          <div>
+            <label className={LABEL}>{t('flowIface.spec.min')}</label>
+            <NumCommit value={s.min} label={t('flowIface.spec.min')} onCommit={(min) => set({ min })} />
+          </div>
+          <div>
+            <label className={LABEL}>{t('flowIface.spec.max')}</label>
+            <NumCommit value={s.max} label={t('flowIface.spec.max')} onCommit={(max) => set({ max })} />
+          </div>
+        </div>
+      )}
+      {isBytes && (
+        <div>
+          <label className={LABEL}>{t('flowIface.spec.byteLength')}</label>
+          <NumCommit value={s.byteLength} label={t('flowIface.spec.byteLength')} onCommit={(byteLength) => set({ byteLength: byteLength !== undefined && Number.isInteger(byteLength) && byteLength > 0 ? byteLength : undefined })} />
+        </div>
+      )}
+      {side === 'input' && s.type === 'file' && (
+        <div>
+          <label className={LABEL}>{t('flowIface.spec.accept')}</label>
+          <CommitInput
+            value={(s.accept ?? []).join(', ')}
+            label={t('flowIface.spec.accept')}
+            placeholder=".hex, .s19, .bin"
+            onCommit={(v) => set({ accept: v.split(',').map((x) => x.trim()).filter((x) => x.length > 0) })}
+          />
+        </div>
+      )}
     </div>
   );
 };

@@ -34,8 +34,11 @@ import type {
   FlashReportDto,
 } from '../../types/flash';
 import type { DiagSessionConfigDto } from '../../types/udsClient';
+import type { FlowFileValue } from '../../types/flowLibrary';
 import type { FlowBlock } from './types';
 import type { FlowTransport } from './flowTransport';
+import { FLASH_FILE_KEY, FLASH_IMAGE_KEY } from './boundParams';
+import { isFlowFileValue } from './flowValues';
 import { flashRuntime } from './flashRuntime';
 import { crc32 } from './flowAlgos';
 
@@ -236,44 +239,79 @@ export async function loadImageFromFile(
 ): Promise<void> {
   const token = ++tokenSeq;
   loadTokens.set(blockId, token);
-  const prev = flashRuntime.getImage(blockId);
   flashRuntime.patchImage(blockId, { loading: true, loadError: null, file });
+  let bytes: Uint8Array;
+  try {
+    bytes = new Uint8Array(await file.arrayBuffer());
+  } catch (e) {
+    if (loadTokens.get(blockId) === token) flashRuntime.patchImage(blockId, { loading: false, loadError: e instanceof Error ? e.message : String(e) });
+    return;
+  }
+  await loadImageCore(blockId, token, { name: file.name, bytes }, file, cfg, demo);
+}
+
+/**
+ * Same as `loadImageFromFile` for an in-memory file (a bound `file` port value). `imageKey` is the runtime
+ * image key (frame path + block id): the image is released by `clearImage(imageKey)` when the frame exits.
+ */
+export async function loadImageFromBytes(
+  imageKey: string,
+  file: FlowFileValue,
+  cfg: Record<string, unknown>,
+  demo: boolean,
+): Promise<void> {
+  const token = ++tokenSeq;
+  loadTokens.set(imageKey, token);
+  flashRuntime.patchImage(imageKey, { loading: true, loadError: null, file: null });
+  await loadImageCore(imageKey, token, file, null, cfg, demo);
+}
+
+async function loadImageCore(
+  key: string,
+  token: number,
+  src: FlowFileValue,
+  file: File | null,
+  cfg: Record<string, unknown>,
+  demo: boolean,
+): Promise<void> {
+  const prev = flashRuntime.getImage(key);
   try {
     const settings = readFlashSettings(cfg);
-    const bytes = new Uint8Array(await file.arrayBuffer());
     let handle: FlashImageHandleDto;
     if (demo) {
-      handle = mockHandle(file.name, bytes, settings.format, settings.baseAddress);
+      handle = mockHandle(src.name, src.bytes, settings.format, settings.baseAddress);
     } else {
-      const format = resolveLoadFormat(settings.format, file.name);
+      const format = resolveLoadFormat(settings.format, src.name);
       handle = await apiFlashLoadImage({
-        fileName: file.name,
+        fileName: src.name,
         format,
         baseAddress: format === 'binary' ? settings.baseAddress : 0,
-        dataBase64: bytesToBase64(bytes),
+        dataBase64: bytesToBase64(src.bytes),
       });
     }
-    if (loadTokens.get(blockId) !== token) {
+    if (loadTokens.get(key) !== token) {
       releaseBackendImage({ handle, mock: demo });
       return;
     }
     releaseBackendImage(prev);
-    flashRuntime.patchImage(blockId, {
+    flashRuntime.patchImage(key, {
       handle,
       mock: demo,
       file,
+      source: src,
       loadedFormat: settings.format,
       loadedBase: settings.baseAddress,
       loading: false,
       loadError: null,
     });
   } catch (e) {
-    if (loadTokens.get(blockId) !== token) return;
+    if (loadTokens.get(key) !== token) return;
     const msg = e instanceof Error ? e.message : String(e);
-    flashRuntime.patchImage(blockId, { loading: false, loadError: msg });
+    flashRuntime.patchImage(key, { loading: false, loadError: msg });
   }
 }
 
+/** Releases the runtime image of `key` (block id or a bound-file runtime key). */
 export function clearImage(blockId: string): void {
   loadTokens.set(blockId, ++tokenSeq);
   releaseBackendImage(flashRuntime.getImage(blockId));
@@ -326,21 +364,43 @@ function preflightBus(tabId: string): void {
   if (bus.listenOnly || !bus.txArmed) throw new Error(t('flash.err.notArmed', { bus: busId }));
 }
 
-/** Real mode: a usable loaded image for this block (reloads the kept file when settings changed). */
-async function ensureRealImage(block: FlowBlock, settings: FlashBlockSettings): Promise<FlashImageHandleDto> {
-  let img = flashRuntime.getImage(block.id);
+/**
+ * Real mode: a usable loaded image. `imageKey` = the block id (panel-loaded image) or the runtime key of a bound
+ * `file` port (`src` = its value: loaded once per key, reloaded only when the file / format / base changed).
+ */
+async function ensureRealImage(
+  imageKey: string,
+  config: Record<string, unknown>,
+  settings: FlashBlockSettings,
+  src: FlowFileValue | null,
+): Promise<FlashImageHandleDto> {
+  let img = flashRuntime.getImage(imageKey);
   const stale = (): boolean =>
     img.handle === null ||
     img.mock ||
+    (src !== null && img.source?.bytes !== src.bytes) ||
     img.loadedFormat !== settings.format ||
-    (usesBaseAddress(settings.format, img.handle?.fileName ?? img.file?.name ?? '') && img.loadedBase !== settings.baseAddress);
-  if (stale() && img.file !== null) {
-    await loadImageFromFile(block.id, img.file, block.config, false);
-    img = flashRuntime.getImage(block.id);
+    (usesBaseAddress(settings.format, img.handle?.fileName ?? img.source?.name ?? img.file?.name ?? '') && img.loadedBase !== settings.baseAddress);
+  if (stale()) {
+    if (src !== null) {
+      await loadImageFromBytes(imageKey, src, config, false);
+    } else if (img.file !== null) {
+      await loadImageFromFile(imageKey, img.file, config, false);
+    } else if (img.source !== null) {
+      await loadImageFromBytes(imageKey, img.source, config, false);
+    }
+    img = flashRuntime.getImage(imageKey);
     if (img.loadError !== null) throw new Error(img.loadError);
   }
   if (stale() || img.handle === null) throw new Error(t('flash.err.noImage'));
   return img.handle;
+}
+
+/** Image source of one execution: a bound `file` value + its runtime key, or the panel-loaded image of the block. */
+export function flashSource(block: FlowBlock): { imageKey: string; file: FlowFileValue | null } {
+  const f = block.config[FLASH_FILE_KEY];
+  const k = block.config[FLASH_IMAGE_KEY];
+  return { imageKey: typeof k === 'string' ? k : block.id, file: isFlowFileValue(f) ? f : null };
 }
 
 /**
@@ -349,17 +409,23 @@ async function ensureRealImage(block: FlowBlock, settings: FlashBlockSettings): 
  */
 export interface FlashBackend {
   /** Pre-flight (Listen-Only / Arm, session, image). Throws BEFORE anything is transmitted. */
-  prepare(block: FlowBlock, settings: FlashBlockSettings, tabId: string): Promise<{ handle: FlashImageHandleDto; dto: DiagSessionConfigDto }>;
+  prepare(
+    block: FlowBlock,
+    settings: FlashBlockSettings,
+    tabId: string,
+    /** Image source: the runtime image key and the bound `file` value (null = the image loaded in the panel). */
+    source: { imageKey: string; file: FlowFileValue | null },
+  ): Promise<{ handle: FlashImageHandleDto; dto: DiagSessionConfigDto }>;
   download(dto: DiagSessionConfigDto, imageId: string, cfg: DownloadConfigDto, onProgress: (p: FlashProgressDto) => void): Promise<FlashReportDto>;
   cancel(dto: DiagSessionConfigDto): Promise<void>;
 }
 
 export const realFlashBackend: FlashBackend = {
-  async prepare(block, settings, tabId) {
+  async prepare(block, settings, tabId, source) {
     preflightBus(tabId);
     const dto = diagnosticsStore.getTabConfigDto(tabId);
     if (dto === null) throw new Error(t('flash.err.notConnected'));
-    const handle = await ensureRealImage(block, settings);
+    const handle = await ensureRealImage(source.imageKey, block.config, settings, source.file);
     return { handle, dto };
   },
   download: (dto, imageId, cfg, onProgress) => apiFlashDownload(dto, imageId, cfg, onProgress),
@@ -383,6 +449,8 @@ export interface FlashRunEnv {
   transport: FlowTransport;
   /** Override of the `cmd_flash_*` backend (tests); default `transport.flash ?? realFlashBackend`. */
   backend?: FlashBackend;
+  /** Engine Stop / Panic Stop flag: checked after the image load and right before erase and download. */
+  shouldStop?: () => boolean;
 }
 
 function cancelledError(phase: FlashPhase, segmentIndex: number | null, address: number | null, segmentsCompleted: number): FlashErrorDto {
@@ -415,32 +483,15 @@ function errText(e: unknown): string {
  */
 export async function runFlashBlock(block: FlowBlock, env: FlashRunEnv): Promise<FlashOutcome> {
   const settings = readFlashSettings(block.config);
-  const { demo, tabId, log, transport } = env;
-  const backend = env.backend ?? transport.flash ?? realFlashBackend;
+  const { demo, tabId } = env;
+  const backend = env.backend ?? env.transport.flash ?? realFlashBackend;
 
-  let handle: FlashImageHandleDto;
-  let configDto: DiagSessionConfigDto | null = null;
-  if (demo) {
-    const img = flashRuntime.getImage(block.id);
-    handle = img.handle !== null && img.mock ? img.handle : demoDefaultHandle();
-  } else {
-    if (tabId === null) throw new Error(t('flash.err.notConnected'));
-    const prepared = await backend.prepare(block, settings, tabId);
-    handle = prepared.handle;
-    configDto = prepared.dto;
-  }
-
-  const summary = handle.summary;
-  const segs = summary.segments;
-  // Validate the erase records up-front: a segment that does not fit the erase ALFID must fail
-  // before the first erase request goes out.
-  const eraseData = settings.erase.mode === 'per_segment' ? segs.map((sg) => eraseRequestData(sg, settings.erase)) : [];
-
-  flashRuntime.beginRun(block.id, demo);
-  log(t('flash.log.start', { file: handle.fileName, segments: segs.length, bytes: summary.totalBytes, crc: formatCrc32(summary.crc32) }));
-
+  const source = flashSource(block);
   const token: SimCancelToken = { cancelled: false };
-  const dto = configDto;
+  let dto: DiagSessionConfigDto | null = null;
+  const stopped = (): boolean => token.cancelled || env.shouldStop?.() === true;
+  // Cancellable from the very start (image load included): Stop / Panic Stop during `prepare` must not let
+  // the run reach erase or download afterwards.
   const run: ActiveRun = {
     cancel: () => {
       token.cancelled = true;
@@ -448,12 +499,53 @@ export async function runFlashBlock(block: FlowBlock, env: FlashRunEnv): Promise
     },
   };
   activeRuns.set(block.id, run);
+  try {
+    let handle: FlashImageHandleDto;
+    if (demo) {
+      if (source.file !== null) {
+        handle = mockHandle(source.file.name !== '' ? source.file.name : 'firmware.bin', source.file.bytes, settings.format, settings.baseAddress);
+      } else {
+        const img = flashRuntime.getImage(source.imageKey);
+        handle = img.handle !== null && img.mock ? img.handle : demoDefaultHandle();
+      }
+    } else {
+      if (tabId === null) throw new Error(t('flash.err.notConnected'));
+      const prepared = await backend.prepare(block, settings, tabId, source);
+      handle = prepared.handle;
+      dto = prepared.dto;
+    }
+    return await runPrepared(block, env, settings, backend, handle, dto, token, stopped);
+  } finally {
+    activeRuns.delete(block.id);
+  }
+}
+
+async function runPrepared(
+  block: FlowBlock,
+  env: FlashRunEnv,
+  settings: FlashBlockSettings,
+  backend: FlashBackend,
+  handle: FlashImageHandleDto,
+  dto: DiagSessionConfigDto | null,
+  token: SimCancelToken,
+  stopped: () => boolean,
+): Promise<FlashOutcome> {
+  const { demo, log, transport } = env;
+  const summary = handle.summary;
+  const segs = summary.segments;
+  const eraseData = settings.erase.mode === 'per_segment' ? segs.map((sg) => eraseRequestData(sg, settings.erase)) : [];
+  flashRuntime.beginRun(block.id, demo);
+  if (stopped()) {
+    token.cancelled = true;
+    return failOutcome(block.id, cancelledError('requestDownload', 0, segs[0]?.address ?? null, 0), null, log);
+  }
+  log(t('flash.log.start', { file: handle.fileName, segments: segs.length, bytes: summary.totalBytes, crc: formatCrc32(summary.crc32) }));
 
   try {
     // ── 1. Erase per segment (optional) ─────────────────────────────────────
     for (let i = 0; i < eraseData.length; i++) {
       const sg = segs[i];
-      if (token.cancelled) return failOutcome(block.id, cancelledError('requestDownload', i, sg.address, 0), null, log);
+      if (stopped()) return failOutcome(block.id, cancelledError('requestDownload', i, sg.address, 0), null, log);
       flashRuntime.setStage(block.id, { kind: 'erase', index: i + 1, count: segs.length });
       const where = { i: i + 1, n: segs.length, addr: formatAddress(sg.address), len: sg.length };
       log(t('flash.log.erase', { ...where, rid: settings.erase.routineId.toString(16).toUpperCase().padStart(4, '0') }));
@@ -476,7 +568,7 @@ export async function runFlashBlock(block: FlowBlock, env: FlashRunEnv): Promise
         }), log);
       }
     }
-    if (token.cancelled) return failOutcome(block.id, cancelledError('requestDownload', 0, segs[0]?.address ?? null, 0), null, log);
+    if (stopped()) return failOutcome(block.id, cancelledError('requestDownload', 0, segs[0]?.address ?? null, 0), null, log);
 
     // ── 2. Download (0x34 → 0x36* → 0x37) ───────────────────────────────────
     flashRuntime.setStage(block.id, eraseData.length > 0 || settings.verify.mode === 'per_segment_crc32'
@@ -505,7 +597,7 @@ export async function runFlashBlock(block: FlowBlock, env: FlashRunEnv): Promise
     if (settings.verify.mode === 'per_segment_crc32') {
       for (let i = 0; i < segs.length; i++) {
         const sg = segs[i];
-        if (token.cancelled) return failOutcome(block.id, cancelledError('done', i, sg.address, segs.length), null, log);
+        if (stopped()) return failOutcome(block.id, cancelledError('done', i, sg.address, segs.length), null, log);
         flashRuntime.setStage(block.id, { kind: 'verify', index: i + 1, count: segs.length });
         const where = { i: i + 1, n: segs.length, addr: formatAddress(sg.address), crc: formatCrc32(sg.crc32) };
         log(t('flash.log.verify', { ...where, rid: settings.verify.routineId.toString(16).toUpperCase().padStart(4, '0') }));
@@ -533,8 +625,6 @@ export async function runFlashBlock(block: FlowBlock, env: FlashRunEnv): Promise
   } catch (e) {
     const fe = e instanceof FlashCallError ? e : null;
     return failOutcome(block.id, fe?.flash ?? null, errText(e), log);
-  } finally {
-    activeRuns.delete(block.id);
   }
 }
 

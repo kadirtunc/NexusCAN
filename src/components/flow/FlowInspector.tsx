@@ -2,7 +2,7 @@ import React, { useCallback, useState } from 'react';
 import { Settings2, Trash2 } from 'lucide-react';
 import type { FlowBlock, BlockDef, ConfigField } from './types';
 import { useFlowStore, flowStore } from './FlowStore';
-import { FUNCTIONAL_OK_BLOCKS, getBlockDefFor, REQUEST_OPTION_BLOCKS, SPR_BLOCKS } from './blockDefs';
+import { bindableFields, boundPortId, FUNCTIONAL_OK_BLOCKS, getBlockDefFor, readBoundParams, REQUEST_OPTION_BLOCKS, SPR_BLOCKS, type BindableField } from './blockDefs';
 import { useDiagnosticsSelector } from '../../store/diagnosticsStore';
 import { portColor } from './BlockNode';
 import { blockDescription, blockLabel, fieldPlaceholder, localizedText } from './blockText';
@@ -12,7 +12,9 @@ import { flowFiles, useFlowFilesVersion } from './flowFiles';
 import { FlashImagePanel, FlashRunPanel } from './FlashImagePanel';
 import { DIAG_BTN_SM } from '../diagnostics/diagUi';
 import { IssueList, useCoreIssues, VariablesPanel } from './FlowVariablesPanel';
-import { PortSpecsEditor } from './PortSpecsEditor';
+import { PortSpecEditor } from './PortSpecsEditor';
+import { bindableLabel } from './boundParams';
+import { FLOW_IN, FLOW_OUT } from './flowPorts';
 import { CallInspector } from './CallInspector';
 import { isCallType } from './callIndex';
 import { gotoTargetId, listTerminals, resolveGotoTarget, terminalName, terminalReferences } from './flowTerminals';
@@ -115,9 +117,6 @@ const ConfigFieldInput: React.FC<FieldProps> = ({ field, value, onChange }) => {
   switch (field.type) {
     case 'variable':
       return <VariableSelect value={strVal} onChange={onChange} />;
-
-    case 'portspecs':
-      return <PortSpecsEditor value={value} side={field.key === 'inputs' ? 'input' : 'output'} onChange={onChange} />;
 
     case 'namelist':
       return <NameListInput value={value} placeholder={fieldPlaceholder(field)} onChange={onChange} />;
@@ -396,6 +395,59 @@ function portTypeTone(type: string): DiagTone {
   }
 }
 
+// ─── Parameter binding ("Porta bağla" / "Flow girişine yükselt") ──────────────
+
+/** Bind / unbind / promote controls of one bindable field (flow-interface-v2 §3). */
+const BindControls: React.FC<{ block: FlowBlock; f: BindableField }> = ({ block, f }) => {
+  const { t } = useI18n();
+  const { diagram, readOnly } = useFlowStore();
+  const bound = readBoundParams(block.config).includes(f.key);
+  const port = boundPortId(f.key);
+  const wired = diagram.connections.some((c) => c.toBlockId === block.id && c.toPortId === port);
+  const [msg, setMsg] = useState<string | null>(null);
+  const promote = (): void => {
+    const r = flowStore.promoteParam(block.id, f.key);
+    setMsg(r.ok ? null : t(r.reason === 'wired' ? 'flowIface.promote.wired' : 'flowIface.promote.unknown'));
+  };
+  return (
+    <div className="mt-1 flex flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {bound ? (
+          <>
+            <span className="font-mono text-[11px] tabular-nums text-focus">{t('flowIface.bind.bound', { port })}</span>
+            <button type="button" disabled={readOnly} className={DIAG_BTN_SM} onClick={() => flowStore.unbindParam(block.id, f.key)}>
+              {t('flowIface.bind.unbind')}
+            </button>
+          </>
+        ) : (
+          <button type="button" disabled={readOnly} className={DIAG_BTN_SM} title={t('flowIface.bind.toggleTip', { key: f.key })} onClick={() => flowStore.bindParam(block.id, f.key)}>
+            {t('flowIface.bind.toggle')}
+          </button>
+        )}
+        {(!bound || !wired) && (
+          <button type="button" disabled={readOnly} className={DIAG_BTN_SM} title={t('flowIface.bind.promoteTip')} onClick={promote}>
+            {t('flowIface.bind.promote')}
+          </button>
+        )}
+      </div>
+      {bound && !wired && <div className="text-[11px] leading-snug text-warn">{t('flowIface.bind.unwired')}</div>}
+      {bound && f.kind === 'file' && <div className="text-[11px] leading-snug text-subtle">{t('flowIface.bind.file')}</div>}
+      {msg !== null && <div className="text-[11px] text-critical">{msg}</div>}
+    </div>
+  );
+};
+
+/** Migration conflict of a `flow_out` (never silent): explained here; it clears only when the output is rewired / edited. */
+const MigrateConflictBox: React.FC<{ block: FlowBlock }> = ({ block }) => {
+  const conflict = block.config['migrateConflict'];
+  if (typeof conflict !== 'string' || conflict === '') return null;
+  return (
+    <div className="border border-critical bg-canvas px-2 py-1.5" role="alert">
+      <div className="text-[11.5px] leading-snug text-critical">{conflict}</div>
+    </div>
+  );
+};
+
 // ─── Single block inspector ───────────────────────────────────────────────────
 
 interface BlockInspectorProps {
@@ -418,6 +470,7 @@ const BlockInspector: React.FC<BlockInspectorProps> = ({ block, def }) => {
 
   const sectionClass = 'border-b border-hairline px-3 py-2.5';
   const issues = useCoreIssues(block.id);
+  const boundKeys = readBoundParams(block.config);
 
   return (
     <div className="flex h-full flex-col gap-0 overflow-y-auto">
@@ -432,24 +485,48 @@ const BlockInspector: React.FC<BlockInspectorProps> = ({ block, def }) => {
 
       {isCallType(block.type) && <CallInspector block={block} />}
 
+      {(block.type === FLOW_IN || block.type === FLOW_OUT) && (
+        <div className={sectionClass}>
+          <div className={`${DIAG_SECTION_TITLE} mb-2`}>{t('flowIface.spec.title')}</div>
+          <div className="flex flex-col gap-2">
+            {block.type === FLOW_OUT && <MigrateConflictBox block={block} />}
+            <PortSpecEditor block={block} side={block.type === FLOW_IN ? 'input' : 'output'} />
+          </div>
+        </div>
+      )}
+
       {/* Config */}
-      {def.configSchema.length > 0 && (
+      {(def.configSchema.length > 0 || bindableFields(block.type).length > 0) && (
         <div className={sectionClass}>
           <div className={`${DIAG_SECTION_TITLE} mb-2`}>{t('diagHmi.flow.configuration')}</div>
           <div className="flex flex-col gap-2">
             {block.type === 'uds_flash_image' && <FlashImagePanel blockId={block.id} config={block.config} />}
-            {def.configSchema.filter((field) => field.visibleWhen === undefined || field.visibleWhen(block.config)).map((field) => (
-              <div key={field.key}>
-                <label className="mb-0.5 block text-[11.5px] text-muted">{localizedText(field)}</label>
-                {block.type === 'flow_goto' && field.key === 'target_terminal_id' ? (
-                  <GotoTargetSelect block={block} onChange={(val) => handleConfigChange(field.key, val)} />
-                ) : (
-                  <ConfigFieldInput
-                    field={field}
-                    value={block.config[field.key]}
-                    onChange={(val) => handleConfigChange(field.key, val)}
-                  />
-                )}
+            {def.configSchema.filter((field) => field.visibleWhen === undefined || field.visibleWhen(block.config)).map((field) => {
+              const bind = bindableFields(block.type).find((f) => f.key === field.key);
+              const isBound = bind !== undefined && boundKeys.includes(field.key);
+              return (
+                <div key={field.key}>
+                  <label className="mb-0.5 block text-[11.5px] text-muted">{localizedText(field)}</label>
+                  {block.type === 'flow_goto' && field.key === 'target_terminal_id' ? (
+                    <GotoTargetSelect block={block} onChange={(val) => handleConfigChange(field.key, val)} />
+                  ) : (
+                    // A bound field is read-only: its value comes from the `p:` port at run time.
+                    <fieldset disabled={isBound} className={isBound ? 'opacity-60' : undefined}>
+                      <ConfigFieldInput
+                        field={field}
+                        value={block.config[field.key]}
+                        onChange={(val) => handleConfigChange(field.key, val)}
+                      />
+                    </fieldset>
+                  )}
+                  {bind !== undefined && <BindControls block={block} f={bind} />}
+                </div>
+              );
+            })}
+            {bindableFields(block.type).filter((f) => f.field === null).map((f) => (
+              <div key={f.key}>
+                <label className="mb-0.5 block text-[11.5px] text-muted">{bindableLabel(f)}</label>
+                <BindControls block={block} f={f} />
               </div>
             ))}
             {block.type === 'io_file_input' && <FlowFilePicker blockId={block.id} />}

@@ -160,7 +160,7 @@ async function main(): Promise<void> {
     eq(r.errors, [], `golden 1: no errors [${mode}]`);
     eq(r.lines.length, 100, `golden 1: exactly 100 log lines [${mode}]`);
     eq(r.lines, Array.from({ length: 100 }, (_, i) => `x = ${i}`), `golden 1: x = 0 .. x = 99 [${mode}]`);
-    const endCounter = flowStore.getSnapshot().diagram.blocks.find((b) => b.type === 'end');
+    const endCounter = flowStore.getSnapshot().diagram.blocks.find((b) => b.type === 'flow_return');
     ok(endCounter !== undefined && status(endCounter.id) === 'success', `golden 1: loop exits to End [${mode}]`);
     // a second run starts again from the typed initial (x = 0): variables are run-scoped
     r = await run(mode);
@@ -172,7 +172,7 @@ async function main(): Promise<void> {
     r = await run(mode);
     eq(r.errors, [], `golden 2: no errors [${mode}]`);
     eq(r.lines, ['i = 1', 'i = 2', 'i = 3', 'i = 4'], `golden 2: 4 logged iterations, break at 5 [${mode}]`);
-    const endFor = flowStore.getSnapshot().diagram.blocks.find((b) => b.type === 'end');
+    const endFor = flowStore.getSnapshot().diagram.blocks.find((b) => b.type === 'flow_return');
     ok(endFor !== undefined && status(endFor.id) === 'success', `golden 2: loop exits via done_out [${mode}]`);
 
     // 3: sum 1..100
@@ -265,13 +265,13 @@ async function main(): Promise<void> {
 
   // text_format at run time: input port wins over a same-named variable; bytes as hex, numbers decimal
   {
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const c = blk('data_const', 'C', { value: 'AA BB', format: 'hex' });
     const fmt = blk('text_format', 'Fmt', { template: 'x={x} nrc={nrc}', inputs: ['x', 'nrc'] });
     const lg = blk('log', 'Log', { message: '{value}' });
     const cx = blk('data_const', 'CX', { value: '9', format: 'dec' });
     const d = dia([start, c, cx, fmt, lg], [
-      wire(start, 'exec_out', lg), wire(c, 'value_out', fmt, 'nrc'), wire(cx, 'value_out', fmt, 'x'), wire(fmt, 'text_out', lg, 'value_in'),
+      wire(start, 'start', lg), wire(c, 'value_out', fmt, 'nrc'), wire(cx, 'value_out', fmt, 'x'), wire(fmt, 'text_out', lg, 'value_in'),
     ], [num('x', '1')]);
     await both('text_format ports', d, (r) => {
       eq(r.errors, [], 'text_format run: no errors');
@@ -280,10 +280,10 @@ async function main(): Promise<void> {
   }
   // unconnected declared input = run error with block label
   {
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const fmt = blk('text_format', 'FmtOpen', { template: '{a}', inputs: ['a'] });
     const lg = blk('log', 'Log', { message: '{value}' });
-    const d = dia([start, fmt, lg], [wire(start, 'exec_out', lg), wire(fmt, 'text_out', lg, 'value_in')]);
+    const d = dia([start, fmt, lg], [wire(start, 'start', lg), wire(fmt, 'text_out', lg, 'value_in')]);
     await both('text_format open input', d, (r) => {
       ok(r.errors.some((e) => e.includes('FmtOpen')), 'text_format unconnected input: error names the block');
     });
@@ -292,14 +292,14 @@ async function main(): Promise<void> {
   // ── 6. var_set / var_get semantics ───────────────────────────────────────────
   {
     // set with coercion, add / sub default amount 1, add with value_in, reads are pure
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const s1 = blk('var_set', 'S1', { name: 'n', mode: 'set' });
     const c = blk('data_const', 'C', { value: '41', format: 'text' });
     const s2 = blk('var_set', 'S2', { name: 'n', mode: 'add', amount: 1 });
     const s3 = blk('var_set', 'S3', { name: 'n', mode: 'sub', amount: 5 });
     const l = blk('log', 'L', { message: 'n={n}' });
     const d = dia([start, s1, c, s2, s3, l], [
-      wire(start, 'exec_out', s1), wire(c, 'value_out', s1, 'value_in'), wire(s1, 'exec_out', s2), wire(s2, 'exec_out', s3), wire(s3, 'exec_out', l),
+      wire(start, 'start', s1), wire(c, 'value_out', s1, 'value_in'), wire(s1, 'exec_out', s2), wire(s2, 'exec_out', s3), wire(s3, 'exec_out', l),
     ], [num('n', '0')]);
     await both('var_set basic', d, (r) => {
       eq(r.errors, [], 'var_set: no errors');
@@ -308,38 +308,38 @@ async function main(): Promise<void> {
   }
   {
     // pure read does not assign: var_get feeding a log twice never changes the value
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const g = blk('var_get', 'G', { name: 'k' });
     const l1 = blk('log', 'L1', { message: 'a' });
     const l2 = blk('log', 'L2', { message: 'b' });
-    const d = dia([start, g, l1, l2], [wire(start, 'exec_out', l1), wire(l1, 'exec_out', l2), wire(g, 'value', l1, 'value_in'), wire(g, 'value', l2, 'value_in')], [num('k', '7')]);
+    const d = dia([start, g, l1, l2], [wire(start, 'start', l1), wire(l1, 'exec_out', l2), wire(g, 'value', l1, 'value_in'), wire(g, 'value', l2, 'value_in')], [num('k', '7')]);
     await both('pure read', d, (r) => eq(r.lines, ['a 7', 'b 7'], 'var_get is a pure read (legacy append format kept)'));
   }
   {
     // coercion error: text into a number variable
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const c = blk('data_const', 'C', { value: 'abc', format: 'text' });
     const s = blk('var_set', 'SetBad', { name: 'n', mode: 'set' });
-    const d = dia([start, c, s], [wire(start, 'exec_out', s), wire(c, 'value_out', s, 'value_in')], [num('n')]);
+    const d = dia([start, c, s], [wire(start, 'start', s), wire(c, 'value_out', s, 'value_in')], [num('n')]);
     await both('coerce error', d, (r) => ok(r.errors.some((e) => e.includes('SetBad')), 'var_set: "abc" -> number is a run error naming the block'));
     // add on a text variable: static validation error and no run
     const s2 = blk('var_set', 'AddText', { name: 't', mode: 'add' });
-    const dd = dia([blk('start', 'Start'), s2], [], [{ name: 't', type: 'text', initial: '' }]);
+    const dd = dia([blk('flow_start', 'Start'), s2], [], [{ name: 't', type: 'text', initial: '' }]);
     ok(codes(dd).includes('var_type'), 'var_set add on a text variable is a validation error');
-    load(dia([start, s2], [wire(start, 'exec_out', s2)], [{ name: 't', type: 'text', initial: 'a' }]));
+    load(dia([start, s2], [wire(start, 'start', s2)], [{ name: 't', type: 'text', initial: 'a' }]));
     const rr = await run('real');
     ok(rr.errors.some((e) => e.includes('AddText')), 'var_set add on text: run refused with the block label');
   }
   {
     // bool and bytes variables
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const c1 = blk('data_const', 'C1', { value: 'AB CD', format: 'hex' });
     const s1 = blk('var_set', 'S1', { name: 'bs', mode: 'set' });
     const c2 = blk('data_const', 'C2', { value: '0', format: 'dec' });
     const s2 = blk('var_set', 'S2', { name: 'flag', mode: 'set' });
     const l = blk('log', 'L', { message: 'bs={bs} flag={flag}' });
     const d = dia([start, c1, s1, c2, s2, l], [
-      wire(start, 'exec_out', s1), wire(c1, 'value_out', s1, 'value_in'), wire(s1, 'exec_out', s2), wire(c2, 'value_out', s2, 'value_in'), wire(s2, 'exec_out', l),
+      wire(start, 'start', s1), wire(c1, 'value_out', s1, 'value_in'), wire(s1, 'exec_out', s2), wire(c2, 'value_out', s2, 'value_in'), wire(s2, 'exec_out', l),
     ], [{ name: 'bs', type: 'bytes', initial: '' }, { name: 'flag', type: 'bool', initial: 'true' }]);
     await both('bool/bytes vars', d, (r) => {
       eq(r.errors, [], 'bool/bytes: no errors');
@@ -348,10 +348,10 @@ async function main(): Promise<void> {
   }
   {
     // unknown variable: validation error and refused run
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const g = blk('var_get', 'GetGhost', { name: 'ghost' });
     const l = blk('log', 'L', { message: '' });
-    const d = dia([start, g, l], [wire(start, 'exec_out', l), wire(g, 'value', l, 'value_in')]);
+    const d = dia([start, g, l], [wire(start, 'start', l), wire(g, 'value', l, 'value_in')]);
     ok(codes(d).includes('var_unknown'), 'var_get of an undeclared variable is a validation error');
     load(d);
     const r = await run('sim');
@@ -377,7 +377,7 @@ async function main(): Promise<void> {
     eq([cfg(g.id)['name'], cfg(s.id)['name'], cfg(f.id)['template'], cfg(fs.id)['template'], cfg(l.id)['message']],
       ['count', 'count', 'x={count}', 'x={x}', 'v {count} {{x}}'], 'rename updates every reference');
     // store-level rename keeps references valid
-    load(dia([blk('start', 'Start'), blk('var_get', 'G', { name: 'x' })], [], [num('x')]));
+    load(dia([blk('flow_start', 'Start'), blk('var_get', 'G', { name: 'x' })], [], [num('x')]));
     ok(flowStore.updateVariable('x', { name: 'y' }), 'store rename accepted');
     eq(flowStore.getSnapshot().diagram.blocks[1].config['name'], 'y', 'store rename re-points var_get');
     ok(!flowStore.updateVariable('y', { name: '9bad' }), 'store rename rejects an invalid name');
@@ -401,9 +401,9 @@ async function main(): Promise<void> {
   eq(checkForRange({ from: NaN, to: 5, step: 1 }), 'not_finite', 'for: NaN');
   {
     const mk = (cfg: Record<string, unknown>): FlowDiagram => {
-      const start = blk('start', 'Start');
+      const start = blk('flow_start', 'Start');
       const f = blk('flow_for', 'ForX', cfg);
-      return dia([start, f], [wire(start, 'exec_out', f)]);
+      return dia([start, f], [wire(start, 'start', f)]);
     };
     ok(codes(mk({ from: 1, to: 3, step: 0 })).includes('for_range'), 'flow_for step 0 is a validation error');
     ok(codes(mk({ from: 1, to: 3, step: -1 })).includes('for_range'), 'flow_for sign-inconsistent step is a validation error');
@@ -417,15 +417,15 @@ async function main(): Promise<void> {
       ok(rc.errors.some((e) => e.includes('ForX') && e.includes('100000')), `flow_for safety cap 100000 is a run error [${mode}]`);
     }
     // counting down, and a step that skips the end
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const f = blk('flow_for', 'F', { from: 10, to: 1, step: -4 });
     const l = blk('log', 'L', { message: 'i' });
-    const dd = dia([start, f, l], [wire(start, 'exec_out', f), wire(f, 'body_out', l), wire(f, 'index', l, 'value_in')]);
+    const dd = dia([start, f, l], [wire(start, 'start', f), wire(f, 'body_out', l), wire(f, 'index', l, 'value_in')]);
     await both('for down', dd, (r) => eq(r.lines, ['i 10', 'i 6', 'i 2'], 'flow_for counts down by step'));
   }
   {
     // continue skips the rest of the body (index 3), break exits
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const f = blk('flow_for', 'F', { from: 1, to: 5, step: 1 });
     const three = blk('data_const', 'Three', { value: '3', format: 'dec' });
     const eq3 = blk('data_compare', 'Eq3', { operator: 'eq' });
@@ -433,7 +433,7 @@ async function main(): Promise<void> {
     const cont = blk('flow_continue', 'Cont');
     const lg = blk('log', 'Lg', { message: 'i={value}' });
     const d = dia([start, f, three, eq3, cond, cont, lg], [
-      wire(start, 'exec_out', f), wire(f, 'body_out', cond), wire(f, 'index', eq3, 'left_in'), wire(three, 'value_out', eq3, 'right_in'),
+      wire(start, 'start', f), wire(f, 'body_out', cond), wire(f, 'index', eq3, 'left_in'), wire(three, 'value_out', eq3, 'right_in'),
       wire(eq3, 'result_out', cond, 'bool_in'), wire(cond, 'true_out', cont), wire(cond, 'false_out', lg), wire(f, 'index', lg, 'value_in'),
     ]);
     eq(codes(d), [], 'continue inside a loop body validates');
@@ -444,7 +444,7 @@ async function main(): Promise<void> {
   }
   {
     // nested loops: break leaves only the INNER loop
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const outer = blk('flow_for', 'Outer', { from: 1, to: 2, step: 1 });
     const setO = blk('var_set', 'SetO', { name: 'o', mode: 'set' });
     const inner = blk('flow_for', 'Inner', { from: 1, to: 5, step: 1 });
@@ -455,7 +455,7 @@ async function main(): Promise<void> {
     const brk = blk('flow_break', 'Brk');
     const after = blk('log', 'After', { message: 'inner done' });
     const d = dia([start, outer, setO, inner, lg, two, eq2, cond, brk, after], [
-      wire(start, 'exec_out', outer), wire(outer, 'body_out', setO), wire(outer, 'index', setO, 'value_in'), wire(setO, 'exec_out', inner),
+      wire(start, 'start', outer), wire(outer, 'body_out', setO), wire(outer, 'index', setO, 'value_in'), wire(setO, 'exec_out', inner),
       wire(inner, 'body_out', lg), wire(inner, 'index', lg, 'value_in'), wire(lg, 'exec_out', cond),
       wire(inner, 'index', eq2, 'left_in'), wire(two, 'value_out', eq2, 'right_in'), wire(eq2, 'result_out', cond, 'bool_in'),
       wire(cond, 'true_out', brk), wire(inner, 'done_out', after),
@@ -467,18 +467,18 @@ async function main(): Promise<void> {
   }
   {
     // break in a while and in the legacy fixed loop
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const lp = blk('loop', 'Loop', { iterations: 4 });
     const lg = blk('log', 'Lg', { message: 'pass' });
-    const d = dia([start, lp, lg], [wire(start, 'exec_out', lp), wire(lp, 'body_out', lg)]);
+    const d = dia([start, lp, lg], [wire(start, 'start', lp), wire(lp, 'body_out', lg)]);
     await both('fixed loop', d, (r) => eq(r.lines.length, 4, 'loop block runs its body exactly `iterations` times'));
 
-    const start2 = blk('start', 'Start');
+    const start2 = blk('flow_start', 'Start');
     const wh = blk('flow_while', 'While', { max_iterations: 50 });
     const t = blk('data_const', 'T', { value: '1', format: 'dec' });
     const brk = blk('flow_break', 'Brk');
     const lg2 = blk('log', 'Lg', { message: 'once' });
-    const d2 = dia([start2, wh, t, brk, lg2], [wire(start2, 'exec_out', wh), wire(t, 'value_out', wh, 'bool_in'), wire(wh, 'body_out', lg2), wire(lg2, 'exec_out', brk)]);
+    const d2 = dia([start2, wh, t, brk, lg2], [wire(start2, 'start', wh), wire(t, 'value_out', wh, 'bool_in'), wire(wh, 'body_out', lg2), wire(lg2, 'exec_out', brk)]);
     await both('while break', d2, (r) => {
       eq(r.errors, [], 'while + break: no errors');
       eq(r.lines, ['once'], 'break ends a while loop');
@@ -486,9 +486,9 @@ async function main(): Promise<void> {
   }
   {
     // break / continue outside a loop: validation error + refused run
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const brk = blk('flow_break', 'BrkOut');
-    const d = dia([start, brk], [wire(start, 'exec_out', brk)]);
+    const d = dia([start, brk], [wire(start, 'start', brk)]);
     ok(codes(d).includes('loop_outside'), 'flow_break outside a loop is a validation error');
     const cont = blk('flow_continue', 'ContOut');
     ok(codes(dia([cont], [])).includes('loop_outside'), 'flow_continue outside a loop is a validation error');
@@ -500,21 +500,21 @@ async function main(): Promise<void> {
     // inside a loop (also reached through a nested pure/branch path) it is fine
     const f = blk('flow_for', 'F', { from: 1, to: 2 });
     const brk2 = blk('flow_break', 'Brk2');
-    eq(codes(dia([start, f, brk2], [wire(start, 'exec_out', f), wire(f, 'body_out', brk2)])), [], 'flow_break in a loop body validates');
+    eq(codes(dia([start, f, brk2], [wire(start, 'start', f), wire(f, 'body_out', brk2)])), [], 'flow_break in a loop body validates');
     // a break on the done_out path of the loop is OUTSIDE it
     const brk3 = blk('flow_break', 'Brk3');
-    ok(codes(dia([start, f, brk3], [wire(start, 'exec_out', f), wire(f, 'done_out', brk3)])).includes('loop_outside'), 'flow_break after done_out is outside the loop');
+    ok(codes(dia([start, f, brk3], [wire(start, 'start', f), wire(f, 'done_out', brk3)])).includes('loop_outside'), 'flow_break after done_out is outside the loop');
   }
 
   // ── 8b. flow_while safety cap is a run error, never a silent stop ────────────
   {
     const mkWhile = (cond: 'x150' | 'true', cfg: Record<string, unknown>): FlowDiagram => {
-      const start = blk('start', 'Start');
+      const start = blk('flow_start', 'Start');
       const wh = blk('flow_while', 'WhileCap', cfg);
       const lg = blk('log', 'Lg', { message: 'x = {x}' });
       const inc = blk('var_set', 'Inc', { name: 'x', mode: 'add', amount: 1 });
       const bl: FlowBlock[] = [start, wh, lg, inc];
-      const cn: FlowConnection[] = [wire(start, 'exec_out', wh), wire(wh, 'body_out', lg), wire(lg, 'exec_out', inc)];
+      const cn: FlowConnection[] = [wire(start, 'start', wh), wire(wh, 'body_out', lg), wire(lg, 'exec_out', inc)];
       if (cond === 'x150') {
         const lim = blk('data_const', 'Lim', { value: '150', format: 'dec' });
         const lt = blk('data_compare', 'Lt', { operator: 'lt' });
@@ -549,12 +549,12 @@ async function main(): Promise<void> {
 
   // ── 9. log templates ─────────────────────────────────────────────────────────
   {
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const l1 = blk('log', 'Plain', { message: 'hello world' });
     const c = blk('data_const', 'C', { value: 'AA BB', format: 'hex' });
     const l2 = blk('log', 'Legacy', { message: 'bytes:' });
     const l3 = blk('log', 'Esc', { message: 'literal {{x}} and {x}' });
-    const d = dia([start, l1, c, l2, l3], [wire(start, 'exec_out', l1), wire(l1, 'exec_out', l2), wire(c, 'value_out', l2, 'value_in'), wire(l2, 'exec_out', l3)], [num('x', '4')]);
+    const d = dia([start, l1, c, l2, l3], [wire(start, 'start', l1), wire(l1, 'exec_out', l2), wire(c, 'value_out', l2, 'value_in'), wire(l2, 'exec_out', l3)], [num('x', '4')]);
     await both('log compat', d, (r) => {
       eq(r.lines, ['hello world', 'bytes: AA BB', 'literal {x} and 4'], 'log: messages without braces byte-identical; {{ }} escapes; {x} variable');
     });
@@ -565,10 +565,10 @@ async function main(): Promise<void> {
   // ── 10. migration of the legacy data_var ─────────────────────────────────────
   {
     // (a) set_in unconnected -> declared variable + var_get; reader connection re-pointed to `value`
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const dv = blk('data_var', 'Counter', { name: 'cnt', initial: '5' });
     const lg = blk('log', 'Lg', { message: 'cnt =' });
-    const d = dia([start, dv, lg], [wire(start, 'exec_out', lg), wire(dv, 'get_out', lg, 'value_in')]);
+    const d = dia([start, dv, lg], [wire(start, 'start', lg), wire(dv, 'get_out', lg, 'value_in')]);
     const m = migrateLegacyVars(d);
     eq(m.diagram.variables, [{ name: 'cnt', type: 'number', initial: '5' }], 'migration (a): variable declared, type inferred from initial');
     const mb = m.diagram.blocks.find((b) => b.id === dv.id);
@@ -586,18 +586,18 @@ async function main(): Promise<void> {
     eq(mi.diagram.variables?.map((v) => v.name), ['my_var_1'], 'migration (a): invalid name sanitized');
     eq(codes(mi.diagram), [], 'migration (a): sanitized name validates');
     // unchanged diagrams are returned as-is
-    const plain = dia([blk('start', 'S')], []);
+    const plain = dia([blk('flow_start', 'S')], []);
     ok(migrateLegacyVars(plain).diagram === plain, 'migration: no legacy block -> same diagram object');
   }
   {
     // (b) set_in connected, exactly one exec reader -> var_set inserted before it
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const c = blk('data_const', 'Forty2', { value: '42', format: 'dec' });
     const dv = blk('data_var', 'Assign', { name: 'v', initial: '' });
     const lg = blk('log', 'Reader', { message: 'v =' });
-    const end = blk('end', 'End');
+    const end = blk('flow_return', 'End', { name: 'ok', outcome: 'ok' });
     const d = dia([start, c, dv, lg, end], [
-      wire(start, 'exec_out', lg), wire(c, 'value_out', dv, 'set_in'), wire(dv, 'get_out', lg, 'value_in'), wire(lg, 'exec_out', end),
+      wire(start, 'start', lg), wire(c, 'value_out', dv, 'set_in'), wire(dv, 'get_out', lg, 'value_in'), wire(lg, 'exec_out', end, 'in'),
     ]);
     const m = migrateLegacyVars(d);
     const sets = m.diagram.blocks.filter((b) => b.type === 'var_set');
@@ -617,13 +617,13 @@ async function main(): Promise<void> {
   }
   {
     // (c) not provable: two readers / while reader -> block kept as data_var, flagged, run refused
-    const start = blk('start', 'Start');
+    const start = blk('flow_start', 'Start');
     const c = blk('data_const', 'C', { value: '1', format: 'dec' });
     const dv = blk('data_var', 'Ambig', { name: 'v', initial: '0' });
     const l1 = blk('log', 'R1', { message: '' });
     const l2 = blk('log', 'R2', { message: '' });
     const d = dia([start, c, dv, l1, l2], [
-      wire(start, 'exec_out', l1), wire(l1, 'exec_out', l2), wire(c, 'value_out', dv, 'set_in'), wire(dv, 'get_out', l1, 'value_in'), wire(dv, 'get_out', l2, 'value_in'),
+      wire(start, 'start', l1), wire(l1, 'exec_out', l2), wire(c, 'value_out', dv, 'set_in'), wire(dv, 'get_out', l1, 'value_in'), wire(dv, 'get_out', l2, 'value_in'),
     ]);
     const m = migrateLegacyVars(d);
     eq(m.diagram.blocks.find((b) => b.id === dv.id)?.type, 'data_var', 'migration (c): ambiguous block is kept as data_var');
@@ -636,15 +636,15 @@ async function main(): Promise<void> {
       ok(r.errors.length > 0 && r.lines.length === 0 && status(dv.id) === 'error', `migration (c): run refused, block marked [${mode}]`);
     }
     // while reader
-    const start2 = blk('start', 'Start');
+    const start2 = blk('flow_start', 'Start');
     const c2 = blk('data_const', 'C2', { value: '1', format: 'dec' });
     const dv2 = blk('data_var', 'WhileVar', { name: 'w', initial: '0' });
     const wh = blk('flow_while', 'W', {});
-    const d2 = dia([start2, c2, dv2, wh], [wire(start2, 'exec_out', wh), wire(c2, 'value_out', dv2, 'set_in'), wire(dv2, 'get_out', wh, 'bool_in')]);
+    const d2 = dia([start2, c2, dv2, wh], [wire(start2, 'start', wh), wire(c2, 'value_out', dv2, 'set_in'), wire(dv2, 'get_out', wh, 'bool_in')]);
     eq(migrateLegacyVars(d2).diagram.blocks.find((b) => b.id === dv2.id)?.type, 'data_var', 'migration (c): while reader is not migrated (per-iteration re-evaluation)');
     // persistence: variables survive the library save / load round trip (the Flow Registry replaced the old
     // localStorage diagram list, so the same guarantee is checked through the library body converters)
-    load(dia([blk('start', 'S')], [], [num('keep', '9')]));
+    load(dia([blk('flow_start', 'S')], [], [num('keep', '9')]));
     const persisted = fromFlowBody(toFlowBody(flowStore.getSnapshot().diagram, {
       id: 'persist-test', revision: 1, description: '', createdAt: '', updatedAt: '', author: null, origin: 'user', aiReviewed: true, tags: [],
     }));

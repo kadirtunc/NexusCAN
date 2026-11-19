@@ -7,7 +7,7 @@ import { t } from '../../i18n';
 import type { EcuRecordV1 } from '../../types/diagWorkspace';
 import { listEcuRefs, resolveEcuRefs } from '../diagnostics/workspace/ecuRefs';
 import { getBlockDef } from './blockDefs';
-import { flowInputSpecs } from './flowPorts';
+import { FLOW_IN, blockPortSpec } from './flowPorts';
 import type { FlowIssue } from './flowInterface';
 import type { FlowDiagram } from './types';
 
@@ -19,9 +19,9 @@ export interface RunFrameInfo {
   diagram: FlowDiagram;
 }
 
-/** Whether a diagram declares an `ecu` input on its `flow_input`. */
+/** Whether a diagram declares an `ecu` input (a `flow_in` of type `ecu`). */
 export function declaresEcu(diagram: FlowDiagram): boolean {
-  return diagram.blocks.some((b) => b.type === 'flow_input' && flowInputSpecs(b).some((s) => s.type === 'ecu'));
+  return diagram.blocks.some((b) => b.type === FLOW_IN && blockPortSpec(b).type === 'ecu');
 }
 
 /** Diagram copy whose block configs have every `{ecu.*}` resolved (blocks without refs are shared). */

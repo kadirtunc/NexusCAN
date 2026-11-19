@@ -9,6 +9,7 @@ import { localizedText } from './blockText';
 import { useI18n } from '../../i18n';
 import { FlashNodeProgress } from './FlashImagePanel';
 import { isCompactBlock } from './flowTerminals';
+import { FLOW_IN, blockPortSpec, portTypeOf } from './flowPorts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -29,6 +30,7 @@ export function categoryAccentColor(cat: string): string {
     case 'uds':  return 'var(--status-focus)';
     case 'data': return 'var(--status-nominal)';
     case 'io':   return 'var(--status-warn)';
+    case 'interface': return 'var(--status-focus)';
     default:     return 'var(--border-strong)';
   }
 }
@@ -380,3 +382,65 @@ export const TerminalPill: React.FC<TerminalPillProps> = React.memo(
   },
 );
 TerminalPill.displayName = 'TerminalPill';
+
+// ─── PortPill (flow_in / flow_out: compact Simulink-like port blocks) ───────────
+
+interface PortPillProps {
+  block:        FlowBlock;
+  selected:     boolean;
+  zoom:         number;
+  panX:         number;
+  panY:         number;
+  onSelect:     (e: React.MouseEvent) => void;
+  onDragStart:  (e: React.MouseEvent) => void;
+}
+
+/** Interface port block: order badge, key and type chip on one row; no animation, tabular numerals. */
+export const PortPill: React.FC<PortPillProps> = React.memo(
+  ({ block, selected, zoom, panX, panY, onSelect, onDragStart }) => {
+    const spec = blockPortSpec(block);
+    const isIn = block.type === FLOW_IN;
+    const tone = portColor(portTypeOf(spec.type));
+    const conflict = typeof block.config['migrateConflict'] === 'string' && block.config['migrateConflict'] !== '';
+    const border = conflict ? 'var(--status-critical)' : selected ? 'var(--status-focus)' : tone;
+    const title = [spec.label !== '' ? spec.label : spec.key, spec.description ?? '', spec.unit ?? ''].filter((x) => x !== '').join(' · ');
+    const chip: React.CSSProperties = {
+      flexShrink: 0, fontSize: 8.5 * zoom, lineHeight: 1, padding: `${2 * zoom}px ${4 * zoom}px`, borderRadius: 2 * zoom,
+      border: `1px solid ${tone}`, color: tone,
+    };
+    return (
+      <div
+        title={title}
+        style={{
+          position:      'absolute',
+          left:          block.x * zoom + panX,
+          top:           block.y * zoom + panY,
+          width:         PILL_WIDTH * zoom,
+          height:        PILL_HEIGHT * zoom,
+          boxSizing:     'border-box',
+          display:       'flex',
+          alignItems:    'center',
+          gap:           4 * zoom,
+          padding:       `0 ${10 * zoom}px`,
+          borderRadius:  `${2 * zoom}px`,
+          border:        `${Math.max(1, selected ? 1.5 * zoom : zoom)}px ${spec.required ? 'solid' : 'dashed'} ${border}`,
+          background:    'var(--bg-surface)',
+          flexDirection: isIn ? 'row' : 'row-reverse',
+          userSelect:    'none',
+          cursor:        'grab',
+          pointerEvents: 'all',
+          overflow:      'hidden',
+        }}
+        onMouseDown={(e) => { e.stopPropagation(); onSelect(e); onDragStart(e); }}
+      >
+        <span className="font-mono tabular-nums" style={{ ...chip, border: '1px solid var(--border-strong)', color: 'var(--text-muted)' }}>{spec.order ?? '–'}</span>
+        <span
+          className="font-mono tabular-nums"
+          style={{ flex: 1, minWidth: 0, fontSize: 10.5 * zoom, fontWeight: 600, color: 'var(--text-ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: isIn ? 'left' : 'right' }}
+        >{spec.key !== '' ? spec.key : '?'}{spec.required ? '*' : ''}</span>
+        <span className="font-mono tabular-nums" style={chip}>{spec.type}</span>
+      </div>
+    );
+  },
+);
+PortPill.displayName = 'PortPill';

@@ -1,22 +1,27 @@
 /**
- * Flow interface (diag-workspace-v1 §8): derived from the `flow_input` / `flow_output` blocks, validated
- * (keys, uniqueness, the single `ecu` input) and used to resolve the run-time input values. Pure.
+ * Flow interface (flow-interface-v2): derived from the `flow_start` / `flow_in` / `flow_out` / `flow_return`
+ * blocks, validated (keys, uniqueness, the single `ecu` input, bound parameters) and used to resolve the
+ * run-time input values. Pure.
  */
 import { t } from '../../i18n';
 import { REGISTRY_KEY_RE } from '../../types/diagWorkspace';
-import type { FlowInterfaceV1, FlowOutcomeSpecV1, FlowPortSpecV1 } from '../../types/flowLibrary';
-import { requiredProtocols } from './blockDefs';
+import type { FlowFileValue, FlowInterfaceV1, FlowOutcomeSpecV1, FlowPortSpecV1 } from '../../types/flowLibrary';
+import { listEcuRefs } from '../diagnostics/workspace/ecuRefs';
+import { bindableFields, boundPortId, readBoundParams, requiredProtocols } from './blockDefs';
 import {
-  FLOW_INPUT,
-  FLOW_OUTPUT,
-  flowInputSpecs,
-  flowOutputName,
-  flowOutputOutcome,
-  flowOutputSpecs,
+  FLOW_IN,
+  FLOW_OUT,
+  FLOW_RETURN,
+  FLOW_START,
+  blockPortSpec,
+  flowInSpecs,
+  flowOutSpecs,
+  returnName,
+  returnOutcome,
 } from './flowPorts';
 import type { FlowDiagram } from './types';
 import { formatValue } from './coreBlocks';
-import { asBytes, hexField, numeric } from './flowValues';
+import { asBytes, hexField, isFlowFileValue, numeric } from './flowValues';
 
 export interface FlowIssue {
   /** Offending block id; `''` for a flow-level issue. */
@@ -25,88 +30,150 @@ export interface FlowIssue {
   message: string;
 }
 
-/** The flow's entry block: the `flow_input` block, else the legacy `start`. */
+/** The flow's entry block: its `flow_start` (first one when invalid data has several). */
 export function findEntryBlock(diagram: Pick<FlowDiagram, 'blocks'>): FlowDiagram['blocks'][number] | undefined {
-  return diagram.blocks.find((b) => b.type === FLOW_INPUT) ?? diagram.blocks.find((b) => b.type === 'start');
+  return diagram.blocks.find((b) => b.type === FLOW_START);
 }
 
-/** Interface of the flow; a legacy `start` flow (no `flow_input`) has no inputs and no declared outcomes. */
+/**
+ * Interface of the flow: inputs / outputs sorted by (order, key); outcomes in block order, a repeated name
+ * counts once; a flow without a `flow_return` ends `ok` when its exec path finishes (implicit outcome).
+ */
 export function deriveFlowInterface(diagram: FlowDiagram): FlowInterfaceV1 {
-  const input = diagram.blocks.find((b) => b.type === FLOW_INPUT);
-  const outcomes: FlowOutcomeSpecV1[] = diagram.blocks
-    .filter((b) => b.type === FLOW_OUTPUT)
-    .map((b) => ({ name: flowOutputName(b), outcome: flowOutputOutcome(b), outputs: flowOutputSpecs(b) }));
-  // A flow without a `flow_output` ends `ok` when its exec path finishes: that implicit outcome is part of the
-  // interface so consumers (call blocks) never special-case it.
-  if (outcomes.length === 0) outcomes.push({ name: 'ok', outcome: 'ok', outputs: [] });
+  const outcomes: FlowOutcomeSpecV1[] = [];
+  for (const b of diagram.blocks) {
+    if (b.type !== FLOW_RETURN) continue;
+    const name = returnName(b);
+    if (!outcomes.some((o) => o.name === name)) outcomes.push({ name, outcome: returnOutcome(b) });
+  }
+  if (outcomes.length === 0) outcomes.push({ name: 'ok', outcome: 'ok' });
   return {
-    inputs: input ? flowInputSpecs(input) : [],
+    inputs: flowInSpecs(diagram),
     outcomes,
+    outputs: flowOutSpecs(diagram),
     requiresProtocols: requiredProtocols(diagram),
   };
 }
 
-/** Key is usable as an interface key; `start` / `in` are the reserved exec port ids of the two blocks. */
-function checkSpecs(
-  specs: readonly FlowPortSpecV1[],
+/** `in(ecu, image) → ok · fail | out(crc32)`: the derived interface of a flow as one line (flow-interface-v2 §7). */
+export function interfaceSummary(diagram: FlowDiagram): string {
+  const iface = deriveFlowInterface(diagram);
+  const ins = iface.inputs.map((i) => i.key).join(', ');
+  const outcomes = iface.outcomes.map((o) => (o.name !== '' ? o.name : o.outcome)).join(' · ');
+  const outs = iface.outputs.map((o) => o.key).join(', ');
+  return `in(${ins}) → ${outcomes}${outs !== '' ? ` | out(${outs})` : ''}`;
+}
+
+/** Per-spec checks shared by `flow_in` and `flow_out`. */
+function checkSpec(
+  s: FlowPortSpecV1,
   blockId: string,
-  reserved: string,
-  issues: FlowIssue[],
   side: 'input' | 'output',
+  seen: Set<string>,
+  reservedKeys: ReadonlySet<string>,
+  issues: FlowIssue[],
 ): void {
-  const seen = new Set<string>();
-  let ecuCount = 0;
-  for (const s of specs) {
-    const add = (code: string, message: string): void => {
-      issues.push({ blockId, code, message });
-    };
-    if (!REGISTRY_KEY_RE.test(s.key) || s.key === reserved) {
-      add(`${side}_key`, t('flowReg.val.key', { key: s.key, reserved }));
-    } else if (seen.has(s.key)) {
-      add(`${side}_dup`, t('flowReg.val.keyDup', { key: s.key }));
-    }
-    seen.add(s.key);
-    if (s.type === 'ecu') {
-      ecuCount += 1;
-      if (s.key !== 'ecu') add('ecu_key', t('flowReg.val.ecuKey', { key: s.key }));
-    } else if (s.key === 'ecu') {
-      add('ecu_key', t('flowReg.val.ecuKeyType', { type: s.type }));
-    }
-    if (s.type === 'select' && (s.options === undefined || s.options.length === 0)) {
-      add(`${side}_options`, t('flowReg.val.options', { key: s.key }));
+  const add = (code: string, message: string): void => {
+    issues.push({ blockId, code, message });
+  };
+  const reservedOwn = side === 'input' ? s.key === 'in' : s.key === 'in' || s.key === 'error';
+  if (!REGISTRY_KEY_RE.test(s.key) || reservedOwn) {
+    add(`${side}_key`, t('flowReg.val.key', { key: s.key, reserved: side === 'input' ? 'in' : 'in / error' }));
+  } else if (reservedKeys.has(s.key)) {
+    add('output_reserved', t('flowIface.val.outReserved', { key: s.key }));
+  } else if (seen.has(s.key)) {
+    add(`${side}_dup`, t('flowReg.val.keyDup', { key: s.key }));
+  }
+  seen.add(s.key);
+  if (s.type === 'ecu') {
+    if (s.key !== 'ecu') add('ecu_key', t('flowReg.val.ecuKey', { key: s.key }));
+  } else if (s.key === 'ecu') {
+    add('ecu_key', t('flowReg.val.ecuKeyType', { type: s.type }));
+  }
+  if (s.type === 'select' && (s.options === undefined || s.options.length === 0)) {
+    add(`${side}_options`, t('flowReg.val.options', { key: s.key }));
+  }
+  if (s.min !== undefined && s.max !== undefined && s.min > s.max) {
+    add(`${side}_range`, t('flowIface.val.range', { key: s.key, min: s.min, max: s.max }));
+  }
+}
+
+/** Bound-parameter rules: every bound key is a known bindable field and its `p:` port is wired. */
+function checkBound(diagram: FlowDiagram, issues: FlowIssue[]): void {
+  for (const b of diagram.blocks) {
+    const keys = readBoundParams(b.config);
+    if (keys.length === 0) continue;
+    const fields = bindableFields(b.type);
+    for (const key of keys) {
+      if (!fields.some((f) => f.key === key)) {
+        issues.push({ blockId: b.id, code: 'bound_unknown', message: t('flowIface.val.boundUnknown', { block: b.label, key }) });
+      } else if (!diagram.connections.some((c) => c.toBlockId === b.id && c.toPortId === boundPortId(key))) {
+        issues.push({ blockId: b.id, code: 'bound_unwired', message: t('flowIface.val.boundUnwired', { block: b.label, port: boundPortId(key) }) });
+      }
     }
   }
-  if (ecuCount > 1) issues.push({ blockId, code: 'ecu_multiple', message: t('flowReg.val.ecuMany') });
 }
 
 /** Static validation of the flow interface (localized, block-addressed). */
 export function validateInterface(diagram: FlowDiagram): FlowIssue[] {
   const issues: FlowIssue[] = [];
-  const inputs = diagram.blocks.filter((b) => b.type === FLOW_INPUT);
-  if (inputs.length > 1) {
-    for (const b of inputs) issues.push({ blockId: b.id, code: 'input_multiple', message: t('flowReg.val.inputMany', { n: inputs.length }) });
+  const starts = diagram.blocks.filter((b) => b.type === FLOW_START);
+  if (starts.length === 0) issues.push({ blockId: '', code: 'no_entry', message: t('flowIface.val.noEntry') });
+  else if (starts.length > 1) {
+    for (const b of starts) issues.push({ blockId: b.id, code: 'start_multiple', message: t('flowIface.val.startMany', { n: starts.length }) });
   }
-  for (const b of inputs) checkSpecs(flowInputSpecs(b), b.id, 'start', issues, 'input');
 
-  const outs = diagram.blocks.filter((b) => b.type === FLOW_OUTPUT);
-  const names = new Map<string, number>();
-  for (const b of outs) {
-    const n = flowOutputName(b).trim();
-    names.set(n, (names.get(n) ?? 0) + 1);
+  const ins = diagram.blocks.filter((b) => b.type === FLOW_IN);
+  const seenIn = new Set<string>();
+  for (const b of ins) checkSpec(blockPortSpec(b), b.id, 'input', seenIn, new Set(), issues);
+  if (ins.filter((b) => blockPortSpec(b).type === 'ecu').length > 1) {
+    issues.push({ blockId: '', code: 'ecu_multiple', message: t('flowReg.val.ecuMany') });
   }
-  for (const b of outs) {
-    const n = flowOutputName(b).trim();
-    if (n === '') issues.push({ blockId: b.id, code: 'output_name', message: t('flowReg.val.outName', { block: b.label }) });
-    else if ((names.get(n) ?? 0) > 1) issues.push({ blockId: b.id, code: 'output_name_dup', message: t('flowReg.val.outDup', { name: n }) });
-    checkSpecs(flowOutputSpecs(b), b.id, 'in', issues, 'output');
+
+  const returns = diagram.blocks.filter((b) => b.type === FLOW_RETURN);
+  // Without a `flow_return` the implicit outcome `ok` still owns the port id `ok`.
+  const reservedOut = new Set<string>(returns.length === 0 ? ['ok'] : returns.map((b) => returnName(b).trim()));
+  const seenOut = new Set<string>();
+  for (const b of diagram.blocks.filter((x) => x.type === FLOW_OUT)) {
+    const spec = blockPortSpec(b);
+    checkSpec(spec, b.id, 'output', seenOut, reservedOut, issues);
+    const conflict = b.config['migrateConflict'];
+    if (typeof conflict === 'string' && conflict !== '') {
+      issues.push({ blockId: b.id, code: 'migrate_output_conflict', message: t('flowIface.val.migrateConflict', { key: spec.key, detail: conflict }) });
+    }
   }
+  // `flow_return` names: non-empty, not `in`, unique. Repeated returns with the SAME outcome are one outcome
+  // (outputs are flow-level, so they cannot differ): only a name used with different outcomes is ambiguous.
+  const byName = new Map<string, Set<string>>();
+  for (const b of returns) {
+    const n = returnName(b).trim();
+    byName.set(n, (byName.get(n) ?? new Set()).add(returnOutcome(b)));
+  }
+  for (const b of returns) {
+    const n = returnName(b).trim();
+    if (n === '') issues.push({ blockId: b.id, code: 'return_name', message: t('flowIface.val.returnEmpty', { block: b.label }) });
+    else if (n === 'in') issues.push({ blockId: b.id, code: 'return_reserved', message: t('flowIface.val.returnReserved', { name: n }) });
+    else if ((byName.get(n)?.size ?? 0) > 1) issues.push({ blockId: b.id, code: 'return_name_dup', message: t('flowIface.val.returnDup', { name: n }) });
+  }
+  checkBound(diagram, issues);
   return issues;
+}
+
+/** Live-editor rule: `{ecu.*}` references need an `ecu` `flow_in` (the run-time check lives in `ecuBinding.ts`). */
+export function validateEcuRefs(diagram: FlowDiagram): FlowIssue[] {
+  const hasEcu = diagram.blocks.some((b) => b.type === FLOW_IN && blockPortSpec(b).type === 'ecu');
+  if (hasEcu) return [];
+  const uses = diagram.blocks.filter((b) => listEcuRefs(b.config).length > 0);
+  return uses.map((b) => ({ blockId: b.id, code: 'ecu_undeclared', message: t('flowIface.val.ecuUndeclared', { block: b.label }) }));
 }
 
 // ─── Run inputs ────────────────────────────────────────────────────────────────
 
 export interface ResolvedInputs {
-  /** Value per input key (`Uint8Array` for hex / bytes / file, `number`, `string`, `boolean`). */
+  /**
+   * Value per input key: `FlowFileValue` for file, `Uint8Array` for hex / bytes, `number`, `string`, `boolean`,
+   * the ECU record for `ecu`.
+   */
   values: Record<string, unknown>;
   errors: string[];
 }
@@ -120,10 +187,17 @@ function isEcuValue(v: unknown): boolean {
   return typeof v === 'object' && v !== null && !(v instanceof Uint8Array) && typeof (v as Record<string, unknown>)['id'] === 'string';
 }
 
+/** Lower-case extension (with the dot) of a file name; `''` when there is none. */
+function extOf(name: string): string {
+  const i = name.lastIndexOf('.');
+  return i < 0 ? '' : name.slice(i).toLowerCase();
+}
+
 /**
- * Resolves the run-time values of the declared inputs from the user's `provided` map (falling back to the
- * spec default). An `ecu` input cannot be provided yet (ECU binding = B2): a required one refuses the run,
- * an optional one stays undefined.
+ * Resolves the run-time values of the declared inputs from the `provided` map (falling back to the spec
+ * default) and checks them against the spec: `min` / `max` (an out-of-range number is an error, never clamped),
+ * `byteLength`, `accept` (file extension), select options. An `ecu` input is the registry ECU record chosen in
+ * the run form (or the ECU bound by the caller); a required one that is missing refuses the run.
  */
 export function resolveRunInputs(specs: readonly FlowPortSpecV1[], provided: Readonly<Record<string, unknown>>): ResolvedInputs {
   const values: Record<string, unknown> = {};
@@ -143,15 +217,35 @@ export function resolveRunInputs(specs: readonly FlowPortSpecV1[], provided: Rea
       if (s.required) errors.push(t('flowReg.run.missing', { name: label }));
       continue;
     }
+    const checkLength = (b: Uint8Array): boolean => {
+      if (s.byteLength !== undefined && b.length !== s.byteLength) {
+        errors.push(t('flowIface.run.byteLength', { name: label, n: b.length, want: s.byteLength }));
+        return false;
+      }
+      return true;
+    };
     try {
       switch (s.type) {
-        case 'file':
+        case 'file': {
+          let file: FlowFileValue | null = null;
+          if (isFlowFileValue(raw)) file = raw;
+          else {
+            const b = asBytes(raw);
+            if (b) file = { name: '', bytes: b };
+          }
+          if (file === null) {
+            errors.push(t('flowIface.run.badBytes', { name: label }));
+          } else if (s.accept !== undefined && s.accept.length > 0 && file.name !== '' && !s.accept.map((x) => x.toLowerCase()).includes(extOf(file.name))) {
+            errors.push(t('flowIface.run.accept', { name: label, file: file.name, accept: s.accept.join(' ') }));
+          } else {
+            values[s.key] = file;
+          }
+          break;
+        }
         case 'bytes': {
-          const b = asUint8(raw);
-          const typed = b ?? asBytes(raw);
-          if (typed) values[s.key] = typed;
-          else if (typeof raw === 'string' && s.type === 'bytes') values[s.key] = Uint8Array.from(hexField(raw, label));
-          else if (s.required) errors.push(t('flowReg.run.missing', { name: label }));
+          const b = asUint8(raw) ?? asBytes(raw) ?? (typeof raw === 'string' ? Uint8Array.from(hexField(raw, label)) : null);
+          if (b === null) errors.push(t('flowIface.run.badBytes', { name: label }));
+          else if (checkLength(b)) values[s.key] = b;
           break;
         }
         case 'hex': {
@@ -159,14 +253,19 @@ export function resolveRunInputs(specs: readonly FlowPortSpecV1[], provided: Rea
             if (s.required) errors.push(t('flowReg.run.missing', { name: label }));
             else values[s.key] = new Uint8Array(0);
           } else {
-            values[s.key] = asBytes(raw) ?? Uint8Array.from(hexField(raw, label));
+            const b = asBytes(raw) ?? Uint8Array.from(hexField(raw, label));
+            if (checkLength(b)) values[s.key] = b;
           }
           break;
         }
         case 'number': {
           const n = numeric(typeof raw === 'string' ? raw.trim() : raw);
           if (!Number.isFinite(n)) errors.push(t('flowReg.run.badNumber', { name: label, value: String(raw) }));
-          else values[s.key] = n;
+          else if ((s.min !== undefined && n < s.min) || (s.max !== undefined && n > s.max)) {
+            errors.push(t('flowIface.run.range', {
+              name: label, value: n, min: s.min !== undefined ? s.min : '−∞', max: s.max !== undefined ? s.max : '∞', unit: s.unit ?? '',
+            }));
+          } else values[s.key] = n;
           break;
         }
         case 'bool': {

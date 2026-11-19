@@ -11,7 +11,7 @@ export type WarningLevel = 'none' | 'info' | 'warn' | 'high' | 'critical';
 /** Block packs (palette groups). Protocol packs declare `requires` on their blocks. */
 export type BlockPack = 'core' | 'can' | 'uds' | 'kwp' | 'obd' | 'j1939' | 'canopen' | 'xcp' | 'custom';
 
-/** Interface port of a flow (declared in `flow_input` / `flow_output` config). */
+/** Interface port of a flow (declared in `flow_in` / `flow_out` block config; flow-interface-v2 §2). */
 export type FlowPortValueType = 'ecu' | 'file' | 'hex' | 'number' | 'text' | 'bool' | 'bytes' | 'select';
 
 export interface FlowPortSpecV1 {
@@ -21,20 +21,46 @@ export interface FlowPortSpecV1 {
   required: boolean;
   default?: string | number | boolean;
   options?: string[];         // type 'select'
+  /** Port order on the call block / run form (ascending, ties by key). */
+  order?: number;
+  /** Tooltip + AI prompt. */
+  description?: string;
+  /** `number`: unit text and inclusive range (run form + `resolveRunInputs`: out of range = error, never clamped). */
+  unit?: string;
+  min?: number;
+  max?: number;
+  /** `hex` / `bytes`: exact byte length when set. */
+  byteLength?: number;
+  /** `file`: accepted extensions, e.g. `['.hex', '.s19', '.srec', '.bin']`. */
+  accept?: string[];
+}
+
+/** `flow_in.config`. */
+export type FlowInSpecV2 = FlowPortSpecV1;
+/** `flow_out.config`. */
+export type FlowOutSpecV2 = Omit<FlowPortSpecV1, 'default' | 'options' | 'accept'>;
+
+/** Value of a `file` input at run time (the name is needed for format auto-detect). */
+export interface FlowFileValue {
+  name: string;
+  bytes: Uint8Array;
 }
 
 export type FlowOutcome = 'ok' | 'fail' | 'error';
 
 export interface FlowOutcomeSpecV1 {
-  name: string;               // flow_output config.name, unique per flow
+  name: string;               // flow_return config.name
   outcome: FlowOutcome;
-  outputs: FlowPortSpecV1[];
 }
 
 /** Derived from the graph, never stored separately. */
 export interface FlowInterfaceV1 {
+  /** From `flow_in`, sorted by (order, key). */
   inputs: FlowPortSpecV1[];
+  /** From `flow_return`; none -> `[{ name: 'ok', outcome: 'ok' }]`. */
   outcomes: FlowOutcomeSpecV1[];
+  /** From `flow_out`, sorted by (order, key); flow-level (not per outcome). */
+  outputs: FlowPortSpecV1[];
   /** Union of `requires` over the expanded subtree; empty = protocol-agnostic. */
   requiresProtocols: DiagProtocol[];
 }

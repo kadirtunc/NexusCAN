@@ -13,7 +13,7 @@ import { FlowRegistryPanel } from './registry/FlowRegistryPanel';
 import { FlowDocTabs } from './registry/FlowDocTabs';
 import { RunInputsDialog } from './registry/RunInputsDialog';
 import { flowRegistry, useFlowRegistry } from './registry/flowRegistryStore';
-import { deriveFlowInterface } from './flowInterface';
+import { deriveFlowInterface, interfaceSummary } from './flowInterface';
 import { ExtractDialog, FlowNotices, FlowTrailBar } from './FlowNestUi';
 import type { EcuRecordV1 } from '../../types/diagWorkspace';
 import { formatValue } from './coreBlocks';
@@ -211,14 +211,6 @@ const HelpOverlay: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 };
 
 // ─── FlowEditor ────────────────────────────────────────────────────────────
-
-/** `in(ecu, image) → ok · fail`: the derived interface of a flow as one line. */
-function interfaceSummary(diagram: Parameters<typeof deriveFlowInterface>[0]): string {
-  const iface = deriveFlowInterface(diagram);
-  const ins = iface.inputs.map((i) => `${i.key}:${i.type}`).join(', ');
-  const outs = iface.outcomes.length > 0 ? iface.outcomes.map((o) => (o.name !== '' ? o.name : o.outcome)).join(' · ') : 'ok';
-  return `${ins || '—'} → ${outs}`;
-}
 
 export const FlowEditor: React.FC = () => {
   const { t } = useI18n();

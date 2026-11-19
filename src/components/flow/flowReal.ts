@@ -14,6 +14,7 @@ import { buildFingerprint, fitBytes, isEmptyValue, textToAscii } from './flowDat
 import { asBytes, compareValues, hexB, hexField, hexList, toBool, valueText } from './flowValues';
 import { CORE_PURE_BLOCKS, evalCorePure, type CoreReader } from './coreRuntime';
 import { flowFiles } from './flowFiles';
+import { FLOW_IN, blockPortSpec } from './flowPorts';
 import { flowPrompt } from './flowPrompt';
 import { runFlashBlock } from './flashRun';
 import {
@@ -40,6 +41,7 @@ const MAX_EVAL_DEPTH = 16;
 /** Blocks without exec ports: evaluated lazily when a downstream block reads their output. */
 const PURE_BLOCKS: ReadonlySet<string> = new Set([
   ...CORE_PURE_BLOCKS,
+  FLOW_IN,
   'data_const',
   'data_byte_builder',
   'data_extract',
@@ -93,6 +95,8 @@ export class RealFlowExecutor {
     private readonly lenient = false,
     /** Diagram of the frame this executor serves (default: the canvas diagram). */
     private readonly source: (() => FlowDiagram) | null = null,
+    /** Input values of the frame this executor serves (read by the pure `flow_in` blocks). */
+    private readonly frameInputs: () => Record<string, unknown> = () => ({}),
   ) {}
 
   /** Data-input reader handed to the shared core block runtime (`coreRuntime.ts`). */
@@ -116,6 +120,7 @@ export class RealFlowExecutor {
     const src = this.diagram().blocks.find((b) => b.id === blockId);
     if (!src) return false;
     if (src.type === 'flow_for') return portId === 'index';
+    if (src.type === FLOW_IN) return this.frameInputs()[blockPortSpec(src).key] !== undefined;
     if (src.type !== 'data_const' && src.type !== 'data_compare' && !CORE_PURE_BLOCKS.has(src.type)) return false;
     if (seen.has(blockId)) return false;
     seen.add(blockId);
@@ -158,7 +163,9 @@ export class RealFlowExecutor {
     const conn = this.findInputConn(block, portId);
     if (!conn) return undefined;
     const src = this.diagram().blocks.find((b) => b.id === conn.fromBlockId);
-    if (src && !PURE_BLOCKS.has(src.type) && src.type !== 'flow_for' && !this.outputs.has(src.id)) return undefined;
+    // A source that did not run on this path, or ran and did not produce this port (e.g. a failed flash block has
+    // no `crc32`), reads as absent.
+    if (src && !PURE_BLOCKS.has(src.type) && src.type !== 'flow_for' && !(conn.fromPortId in (this.outputs.get(src.id) ?? {}))) return undefined;
     return this.readOutput(conn.fromBlockId, conn.fromPortId, 1);
   }
 
@@ -207,6 +214,9 @@ export class RealFlowExecutor {
     const cfg = block.config;
     if (CORE_PURE_BLOCKS.has(block.type)) return evalCorePure(block, this.core, this.ctx.scope, depth);
     switch (block.type) {
+      case FLOW_IN:
+        // Frame input `key` (undefined = optional input that was not provided: reads as "not connected").
+        return this.frameInputs()[blockPortSpec(block).key];
       case 'data_const': {
         const format = String(cfg['format'] ?? 'text');
         const value = cfg['value'];
@@ -767,6 +777,7 @@ export class RealFlowExecutor {
           tabId: this.transport.tabId ?? null,
           log: (msg) => this.log(block, msg),
           transport: this.transport,
+          shouldStop: this.shouldStop,
         });
 
       // ── TesterPresent keep-alive (backend loop of the pinned session) ────────

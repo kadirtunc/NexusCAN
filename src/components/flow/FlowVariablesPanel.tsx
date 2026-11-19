@@ -4,7 +4,7 @@ import type { FlowVariableType } from '../../types/flowLibrary';
 import { useI18n } from '../../i18n';
 import { flowStore, useFlowStore } from './FlowStore';
 import { validateCore } from './coreValidate';
-import { validateInterface, type FlowIssue } from './flowInterface';
+import { validateEcuRefs, validateInterface, type FlowIssue } from './flowInterface';
 import { canUseVariableName, variableReferences } from './flowVars';
 import { DIAG_BTN_SM, DIAG_SECTION_TITLE } from '../diagnostics/diagUi';
 
@@ -127,7 +127,7 @@ export const VariablesPanel: React.FC = () => {
 /** Core-pack and flow-interface validation errors (all blocks, or the ones of `blockId`). */
 export function useCoreIssues(blockId?: string): FlowIssue[] {
   const { diagram } = useFlowStore();
-  const all: FlowIssue[] = [...validateCore(diagram), ...validateInterface(diagram)];
+  const all: FlowIssue[] = [...validateCore(diagram), ...validateInterface(diagram), ...validateEcuRefs(diagram)];
   return blockId === undefined ? all : all.filter((i) => i.blockId === blockId);
 }
 

@@ -25,7 +25,7 @@ import { callIndex, callType, isCallType, readCallRef } from '../callIndex';
 import { buildExtraction } from '../extractBlock';
 import { validateInterface } from '../flowInterface';
 import { validateCore } from '../coreValidate';
-import { FLOW_INPUT, FLOW_OUTPUT } from '../flowPorts';
+import { FLOW_RETURN, FLOW_START } from '../flowPorts';
 import type { FlowBlock, FlowConnection, FlowDiagram, FlowTemplate } from '../types';
 import { bodyMeta, buildFlowFile, contentCanon, fromFlowBody, parseFlowFile, toFlowBody, type FlowMeta } from './flowBody';
 import { ipcFlowLibClient, type FlowLibClient } from './flowLibClient';
@@ -468,21 +468,21 @@ export class FlowRegistryStore {
     return `${prefix}_${this.uuid().replace(/-/g, '').slice(0, 10)}`;
   }
 
-  /** `flow_input` (+ for a block one `flow_output` "ok" wired to it). */
+  /** `flow_start` (+ for a block one `flow_return` "ok" wired to it). */
   private seedDiagram(kind: FlowLibKind, id: string, name: string): FlowDiagram {
-    const input: FlowBlock = {
-      id: this.freshId('in'), type: FLOW_INPUT, label: t('flowReg.blk.flowInput'), x: 80, y: 120,
-      config: { inputs: [] }, status: 'idle', collapsed: false,
+    const start: FlowBlock = {
+      id: this.freshId('start'), type: FLOW_START, label: t('flowIface.blk.start'), x: 80, y: 120,
+      config: {}, status: 'idle', collapsed: false,
     };
-    const blocks: FlowBlock[] = [input];
+    const blocks: FlowBlock[] = [start];
     const connections: FlowConnection[] = [];
     if (kind === 'nexuscan.block') {
       const out: FlowBlock = {
-        id: this.freshId('out'), type: FLOW_OUTPUT, label: 'ok', x: 460, y: 120,
-        config: { name: 'ok', outcome: 'ok', outputs: [] }, status: 'idle', collapsed: false,
+        id: this.freshId('ret'), type: FLOW_RETURN, label: 'ok', x: 460, y: 120,
+        config: { name: 'ok', outcome: 'ok' }, status: 'idle', collapsed: false,
       };
       blocks.push(out);
-      connections.push({ id: this.freshId('c'), fromBlockId: input.id, fromPortId: 'start', toBlockId: out.id, toPortId: 'in' });
+      connections.push({ id: this.freshId('c'), fromBlockId: start.id, fromPortId: 'start', toBlockId: out.id, toPortId: 'in' });
     }
     return { id, name, blocks, connections, variables: [] };
   }

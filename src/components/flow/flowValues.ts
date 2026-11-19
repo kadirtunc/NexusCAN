@@ -4,6 +4,7 @@
  * No I/O, no clock reads.
  */
 import { t } from '../../i18n';
+import type { FlowFileValue } from '../../types/flowLibrary';
 import { asciiText, rawBytes } from './flowData';
 
 export function hexB(b: number): string {
@@ -14,8 +15,16 @@ export function hexList(bytes: ArrayLike<number>): string {
   return Array.from(bytes).map(hexB).join(' ');
 }
 
+/** `{ name, bytes }` value of a `file` input (flow-interface-v2 §2). */
+export function isFlowFileValue(v: unknown): v is FlowFileValue {
+  if (typeof v !== 'object' || v === null || v instanceof Uint8Array || Array.isArray(v)) return false;
+  const o = v as Record<string, unknown>;
+  return typeof o['name'] === 'string' && o['bytes'] instanceof Uint8Array;
+}
+
 export function asBytes(v: unknown): Uint8Array | null {
   if (v instanceof Uint8Array) return v;
+  if (isFlowFileValue(v)) return v.bytes;
   if (Array.isArray(v) && v.every((x): x is number => typeof x === 'number')) return Uint8Array.from(v);
   return null;
 }

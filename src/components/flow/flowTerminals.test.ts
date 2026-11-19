@@ -26,19 +26,19 @@ function dia(blocks: FlowBlock[], connections: FlowConnection[]): FlowDiagram {
   return { id: 'd', name: 'd', blocks, connections };
 }
 
-/** start -> logA -> goto(T) ; T -> logT -> end ; `skipped` is an unwired log that must never run */
+/** flow_start -> logA -> goto(T) ; T -> logT -> flow_return ; `skipped` is an unwired log that must never run */
 function sample(): { d: FlowDiagram; term: FlowBlock; go: FlowBlock; logT: FlowBlock; skipped: FlowBlock } {
-  const start = blk('start', 'Start');
+  const start = blk('flow_start', 'Start');
   const logA = blk('log', 'LogA', { message: 'A' });
   const skipped = blk('log', 'Skipped', { message: 'S' });
   const term = blk('flow_terminal', 'T', { name: 'SAFE ABORT', color: 'amber' });
   const go = blk('flow_goto', 'Goto', {});
   go.config = { target_terminal_id: term.id };
   const logT = blk('log', 'LogT', { message: 'T' });
-  const end = blk('end', 'End');
+  const end = blk('flow_return', 'End', { name: 'ok', outcome: 'ok' });
   const d = dia(
     [start, logA, skipped, term, go, logT, end],
-    [wire(start, 'exec_out', logA), wire(logA, 'exec_out', go), wire(term, 'exec_out', logT), wire(logT, 'exec_out', end)],
+    [wire(start, 'start', logA), wire(logA, 'exec_out', go), wire(term, 'exec_out', logT), wire(logT, 'exec_out', end, 'in')],
   );
   return { d, term, go, logT, skipped };
 }

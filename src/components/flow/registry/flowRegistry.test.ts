@@ -1,7 +1,8 @@
 /**
  * Headless tests of the Flow Registry phase (B1): library file serialization (no runtime fields, canonical
- * content hash), `start` -> `flow_input` migration, the derived flow interface and its validation,
- * `flow_output` outcome semantics and run-input reading on BOTH engines, the localStorage -> library migration
+ * content hash), the v1 `start` / `end` -> `flow_start` / `flow_return` migration, the derived flow interface
+ * (flow-interface-v2) and its validation, `flow_return` / `flow_out` outcome semantics and run-input reading
+ * on BOTH engines, the localStorage -> library migration
  * (fake storage + fake client), the registry store (documents, per-document undo, conflict handling, revisions,
  * import) and the side-panel preference helpers.
  * Run: `npm run test:flowreg` (esbuild bundle -> node; throws on the first failure).
@@ -9,7 +10,7 @@
 import { FlowEngine } from '../FlowEngine';
 import { flowStore, LEGACY_FLOW_STORAGE_KEY } from '../FlowStore';
 import { getBlockDefFor, portsCompatible, requiredProtocols } from '../blockDefs';
-import { migrateAll, migrateLegacyStart } from '../flowMigrate';
+import { migrateAll, migrateInterfaceV2 } from '../flowMigrate';
 import { deriveFlowInterface, resolveRunInputs, validateInterface } from '../flowInterface';
 import { clampPanelWidth, parsePanelPrefs } from '../ResizablePanel';
 import type { FlowRequestOptions, FlowTransport } from '../flowTransport';
@@ -255,83 +256,101 @@ async function main(): Promise<void> {
     ok(!parseFlowFile(JSON.stringify({ ...file, flow: { ...file.flow, id: 'bad id!' } })).ok, 'parser rejects an invalid id');
   }
 
-  // ── 3. start -> flow_input migration ─────────────────────────────────────────
+  // ── 3. start / end -> flow_start / flow_return migration ─────────────────────
   {
-    const s = blk('start', 'Start');
+    const s0 = blk('start', 'Start');
     const l = logBlock('L', 'x');
     const e = blk('end', 'End');
-    const d = dia([s, l, e], [wire(s, 'exec_out', l, 'exec_in'), wire(l, 'exec_out', e, 'exec_in')]);
-    const m = migrateLegacyStart(d);
-    const fi = m.blocks.find((b) => b.id === s.id) as FlowBlock;
-    eq([fi.type, fi.x, fi.y, fi.label, fi.config], ['flow_input', s.x, s.y, 'Start', { inputs: [] }], 'start -> flow_input keeps id, position, label');
+    const d = dia([s0, l, e], [wire(s0, 'exec_out', l, 'exec_in'), wire(l, 'exec_out', e, 'exec_in')]);
+    const m = migrateInterfaceV2(d).diagram;
+    const fs = m.blocks.find((b) => b.id === s0.id) as FlowBlock;
+    eq([fs.type, fs.x, fs.y, fs.label, fs.config], ['flow_start', s0.x, s0.y, 'Start', {}], 'start -> flow_start keeps id, position, label');
     eq(m.connections[0].fromPortId, 'start', 'exec_out re-pointed to start');
-    eq(m.blocks.find((b) => b.id === e.id)?.type, 'end', 'end is NOT migrated');
-    eq(migrateLegacyStart(m), m, 'migration is idempotent');
-    const two = dia([s, blk('start', 'S2'), l], [wire(s, 'exec_out', l, 'exec_in')]);
-    eq(migrateLegacyStart(two).blocks.filter((b) => b.type === 'flow_input').length, 1, 'only the first start is migrated');
-    eq(migrateAll(d).diagram.blocks[0].type, 'flow_input', 'migrateAll includes the start migration');
-    eq(migrateLegacyStart(dia([blk('flow_input', 'In', { inputs: [] }), blk('start', 'S')], [])).blocks.map((b) => b.type), ['flow_input', 'start'], 'an existing flow_input blocks the migration');
+    const fr = m.blocks.find((b) => b.id === e.id) as FlowBlock;
+    eq([fr.type, fr.config], ['flow_return', { name: 'ok', outcome: 'ok' }], 'end -> flow_return ok');
+    eq(m.connections[1].toPortId, 'in', 'end exec_in re-pointed to in');
+    eq(migrateInterfaceV2(m).diagram, m, 'migration is idempotent');
+    const two = dia([s0, blk('start', 'S2'), l], [wire(s0, 'exec_out', l, 'exec_in')]);
+    eq(migrateInterfaceV2(two).diagram.blocks.filter((b) => b.type === 'flow_start').length, 1, 'only the first start is migrated');
+    eq(migrateAll(d).diagram.blocks[0].type, 'flow_start', 'migrateAll includes the interface migration');
+    eq(migrateInterfaceV2(dia([blk('flow_input', 'In', { inputs: [] }), blk('start', 'S')], [])).diagram.blocks.map((b) => b.type), ['flow_start', 'start'], 'an existing flow_input keeps a stray start inert');
     // the store applies it on load
     load(d);
-    eq(flowStore.getSnapshot().diagram.blocks[0].type, 'flow_input', 'loadTemplate migrates start');
+    eq(flowStore.getSnapshot().diagram.blocks[0].type, 'flow_start', 'loadTemplate migrates start');
   }
 
-  // ── 4. Interface: ports, derivation, validation ─────────────────────────────
+  // ── 4. Interface: ports, derivation, validation (flow-interface-v2 §2 / §5) ───
   {
-    const inputs = [spec('ecu', 'ecu', { required: true }), spec('image', 'file'), spec('h', 'hex'), spec('n', 'number'), spec('f', 'bool'), spec('bb', 'bytes')];
-    const fi = blk('flow_input', 'In', { inputs });
-    const defIn = getBlockDefFor(fi);
-    eq(defIn?.ports.map((p) => [p.id, p.type, p.direction]), [
-      ['start', 'exec', 'output'], ['ecu', 'ecu', 'output'], ['image', 'bytes', 'output'], ['h', 'data', 'output'],
-      ['n', 'data', 'output'], ['f', 'bool', 'output'], ['bb', 'bytes', 'output'],
-    ], 'flow_input ports derive from config (ecu->ecu, file/bytes->bytes, bool->bool, others->data)');
-    const fo = blk('flow_output', 'Out', { name: 'ok', outcome: 'ok', outputs: [spec('code', 'number'), spec('blob', 'bytes')] });
-    eq(getBlockDefFor(fo)?.ports.map((p) => [p.id, p.type, p.direction]), [
-      ['in', 'exec', 'input'], ['code', 'data', 'input'], ['blob', 'bytes', 'input'],
-    ], 'flow_output ports: exec in + one per output');
+    const inSpecs = [
+      spec('ecu', 'ecu', { required: true, order: 0 }), spec('image', 'file', { order: 1 }), spec('h', 'hex', { order: 2 }),
+      spec('n', 'number', { order: 3 }), spec('f', 'bool', { order: 4 }), spec('bb', 'bytes', { order: 5 }),
+    ];
+    const ins = inSpecs.map((sp) => blk('flow_in', sp.key, { ...sp }));
+    eq(ins.map((b) => getBlockDefFor(b)?.ports.map((p) => [p.id, p.type, p.direction])), [
+      [['value', 'ecu', 'output']], [['value', 'bytes', 'output']], [['value', 'data', 'output']],
+      [['value', 'data', 'output']], [['value', 'bool', 'output']], [['value', 'bytes', 'output']],
+    ], 'flow_in port derives from its spec (ecu->ecu, file/bytes->bytes, bool->bool, others->data)');
+    const outA = blk('flow_out', 'code', { ...spec('code', 'number'), order: 0 });
+    const outB = blk('flow_out', 'blob', { ...spec('blob', 'bytes'), order: 1 });
+    eq([outA, outB].map((b) => getBlockDefFor(b)?.ports.map((p) => [p.id, p.type, p.direction, p.optional])), [
+      [['value', 'data', 'input', true]], [['value', 'bytes', 'input', true]],
+    ], 'flow_out: one optional value input of the spec type');
+    eq(getBlockDefFor(blk('flow_return', 'R', { name: 'ok', outcome: 'ok' }))?.ports.map((p) => [p.id, p.type, p.direction]), [['in', 'exec', 'input']], 'flow_return: exec in');
+    eq(getBlockDefFor(blk('flow_start', 'S'))?.ports.map((p) => [p.id, p.type, p.direction]), [['start', 'exec', 'output']], 'flow_start: exec start');
     ok(!portsCompatible('ecu', 'data') && !portsCompatible('data', 'ecu') && portsCompatible('ecu', 'ecu'), 'ecu connects only to ecu');
-    eq(getBlockDefFor(blk('flow_input', 'In', { inputs: [] }))?.ports.length, 1, 'no inputs: only the start port');
 
-    const fail = blk('flow_output', 'F', { name: 'bad', outcome: 'fail', outputs: [] });
+    const retOk = blk('flow_return', 'Ok', { name: 'ok', outcome: 'ok' });
+    const retBad = blk('flow_return', 'F', { name: 'bad', outcome: 'fail' });
+    const start = blk('flow_start', 'S');
     const uds = blk('uds_session', 'Session', {});
-    const d = dia([fi, fo, fail, uds], []);
+    const d = dia([start, ...ins, retOk, retBad, outA, outB, uds], []);
     const iface = deriveFlowInterface(d);
-    eq(iface.inputs, inputs, 'derived inputs');
-    eq(iface.outcomes.map((o) => [o.name, o.outcome, o.outputs.length]), [['ok', 'ok', 2], ['bad', 'fail', 0]], 'derived outcomes');
+    eq(iface.inputs, inSpecs, 'derived inputs (sorted by order)');
+    eq(iface.outcomes, [{ name: 'ok', outcome: 'ok' }, { name: 'bad', outcome: 'fail' }], 'derived outcomes');
+    eq(iface.outputs.map((o) => o.key), ['code', 'blob'], 'derived flow-level outputs');
     eq(iface.requiresProtocols, ['uds_can'], 'requiresProtocols from the pack');
-    eq(requiredProtocols(dia([fi, fo], [])), [], 'protocol-agnostic flow requires nothing');
-    eq(deriveFlowInterface(dia([blk('start', 'S')], [])).inputs, [], 'legacy start flow has no inputs');
-    const codesOf = (blocks: FlowBlock[]): string[] => validateInterface(dia(blocks, [])).map((i) => i.code);
-    eq(codesOf([fi, fo, fail]), [], 'valid interface has no issues');
-    eq(codesOf([blk('flow_input', 'A', { inputs: [] }), blk('flow_input', 'B', { inputs: [] })]), ['input_multiple', 'input_multiple'], 'two flow_input blocks');
-    eq(codesOf([blk('flow_input', 'A', { inputs: [spec('1bad', 'text')] })]), ['input_key'], 'key regex');
-    eq(codesOf([blk('flow_input', 'A', { inputs: [spec('has space', 'text')] })]), ['input_key'], 'key regex (space)');
-    eq(codesOf([blk('flow_input', 'A', { inputs: [spec('start', 'text')] })]), ['input_key'], 'reserved key start');
-    eq(codesOf([blk('flow_input', 'A', { inputs: [spec('x', 'text'), spec('x', 'number')] })]), ['input_dup'], 'duplicate input keys');
-    eq(codesOf([blk('flow_input', 'A', { inputs: [spec('vehicle', 'ecu')] })]), ['ecu_key'], 'ecu input key must be "ecu"');
-    eq(codesOf([blk('flow_input', 'A', { inputs: [spec('ecu', 'text')] })]), ['ecu_key'], 'key "ecu" is reserved for the ecu type');
-    ok(codesOf([blk('flow_input', 'A', { inputs: [spec('ecu', 'ecu'), spec('ecu2', 'ecu')] })]).includes('ecu_multiple'), 'at most one ecu input');
-    eq(codesOf([blk('flow_input', 'A', { inputs: [spec('s', 'select')] })]), ['input_options'], 'select needs options');
-    eq(codesOf([blk('flow_output', 'A', { name: 'x', outcome: 'ok', outputs: [] }), blk('flow_output', 'B', { name: 'x', outcome: 'fail', outputs: [] })]), ['output_name_dup', 'output_name_dup'], 'unique output names');
-    eq(codesOf([blk('flow_output', 'A', { name: '  ', outcome: 'ok', outputs: [] })]), ['output_name'], 'empty output name');
-    eq(codesOf([blk('flow_output', 'A', { name: 'x', outcome: 'ok', outputs: [spec('in', 'text')] })]), ['output_key'], 'reserved output key in');
-    eq(validateInterface(dia([blk('flow_input', 'A', { inputs: [spec('1bad', 'text')] })], []))[0].message.includes('1bad'), true, 'issues are localized and name the key');
+    eq(requiredProtocols(dia([start, ...ins], [])), [], 'protocol-agnostic flow requires nothing');
+    eq(deriveFlowInterface(dia([start], [])).outcomes, [{ name: 'ok', outcome: 'ok' }], 'no flow_return: implicit ok');
+    const codesOf = (blocks: FlowBlock[], withStart = true): string[] => validateInterface(dia(withStart ? [blk('flow_start', 'S'), ...blocks] : blocks, [])).map((i) => i.code);
+    eq(codesOf([...ins, retOk, retBad, outA, outB]), [], 'valid interface has no issues');
+    eq(codesOf([], false), ['no_entry'], 'no flow_start = no entry');
+    eq(codesOf([blk('flow_start', 'B')]), ['start_multiple', 'start_multiple'], 'two flow_start blocks');
+    eq(codesOf([blk('flow_in', 'A', { ...spec('1bad', 'text') })]), ['input_key'], 'key regex');
+    eq(codesOf([blk('flow_in', 'A', { ...spec('has space', 'text') })]), ['input_key'], 'key regex (space)');
+    eq(codesOf([blk('flow_in', 'A', { ...spec('in', 'text') })]), ['input_key'], 'reserved input key in');
+    eq(codesOf([blk('flow_in', 'A', { ...spec('x', 'text') }), blk('flow_in', 'B', { ...spec('x', 'number') })]), ['input_dup'], 'duplicate input keys');
+    eq(codesOf([blk('flow_in', 'A', { ...spec('vehicle', 'ecu') })]), ['ecu_key'], 'ecu input key must be "ecu"');
+    eq(codesOf([blk('flow_in', 'A', { ...spec('ecu', 'text') })]), ['ecu_key'], 'key "ecu" is reserved for the ecu type');
+    ok(codesOf([blk('flow_in', 'A', { ...spec('ecu', 'ecu') }), blk('flow_in', 'B', { ...spec('ecu2', 'ecu') })]).includes('ecu_multiple'), 'at most one ecu input');
+    eq(codesOf([blk('flow_in', 'A', { ...spec('s', 'select') })]), ['input_options'], 'select needs options');
+    eq(codesOf([blk('flow_in', 'A', { ...spec('n', 'number', { min: 5, max: 1 }) })]), ['input_range'], 'min <= max');
+    eq(codesOf([blk('flow_return', 'A', { name: 'x', outcome: 'ok' }), blk('flow_return', 'B', { name: 'x', outcome: 'fail' })]), ['return_name_dup', 'return_name_dup'], 'a return name used with different outcomes');
+    eq(codesOf([blk('flow_return', 'A', { name: 'x', outcome: 'ok' }), blk('flow_return', 'B', { name: 'x', outcome: 'ok' })]), [], 'repeated returns with the same outcome are one outcome');
+    eq(codesOf([blk('flow_return', 'A', { name: '  ', outcome: 'ok' })]), ['return_name'], 'empty return name');
+    eq(codesOf([blk('flow_return', 'A', { name: 'in', outcome: 'ok' })]), ['return_reserved'], 'return name in is reserved');
+    eq(codesOf([blk('flow_out', 'A', { ...spec('in', 'text') })]), ['output_key'], 'reserved output key in');
+    eq(codesOf([blk('flow_out', 'A', { ...spec('error', 'text') })]), ['output_key'], 'reserved output key error');
+    eq(codesOf([blk('flow_out', 'A', { ...spec('done', 'text') }), blk('flow_return', 'R', { name: 'done', outcome: 'ok' })]), ['output_reserved'], 'output key = outcome name');
+    eq(codesOf([blk('flow_out', 'A', { ...spec('x', 'text') }), blk('flow_out', 'B', { ...spec('x', 'text') })]), ['output_dup'], 'duplicate output keys');
+    eq(validateInterface(dia([blk('flow_start', 'S'), blk('flow_in', 'A', { ...spec('1bad', 'text') })], []))[0].message.includes('1bad'), true, 'issues are localized and name the key');
 
     // editing the interface drops dangling connections (undoable)
-    const src = blk('flow_input', 'In', { inputs: [spec('n', 'number')] });
+    const src = blk('flow_in', 'In', { ...spec('n', 'number') });
     const dst = blk('log', 'L', {});
-    load(dia([src, dst], [wire(src, 'n', dst, 'value_in')]));
-    eq(flowStore.getSnapshot().diagram.connections.length, 1, 'connection from the dynamic port');
-    flowStore.updateBlockConfig(src.id, { inputs: [spec('m', 'number')] });
-    eq(flowStore.getSnapshot().diagram.connections.length, 0, 'renaming a port drops its connection');
+    load(dia([blk('flow_start', 'S'), src, dst], [wire(src, 'value', dst, 'value_in')]));
+    eq(flowStore.getSnapshot().diagram.connections.length, 1, 'connection from the flow_in value port');
+    flowStore.updateBlockConfig(src.id, { type: 'bool' });
+    eq(flowStore.getSnapshot().diagram.connections.length, 1, 'compatible type change (data -> bool) keeps the connection');
+    flowStore.updateBlockConfig(src.id, { type: 'ecu' });
+    eq(flowStore.getSnapshot().diagram.connections.length, 0, 'incompatible type change drops the connection');
     flowStore.undo();
     eq(flowStore.getSnapshot().diagram.connections.length, 1, 'undo restores the connection');
-    flowStore.updateBlockConfig(src.id, { inputs: [spec('n', 'bool')] });
-    eq(flowStore.getSnapshot().diagram.connections.length, 1, 'compatible type change (data -> bool) keeps the connection');
-    flowStore.updateBlockConfig(src.id, { inputs: [spec('n', 'ecu')] });
-    eq(flowStore.getSnapshot().diagram.connections.length, 0, 'incompatible type change drops the connection');
-    // exactly one flow_input
-    ok(flowStore.addBlock('flow_input', 0, 0) === '', 'a second flow_input cannot be added');
+    // exactly one flow_start; any number of flow_in / flow_out
+    ok(flowStore.addBlock('flow_start', 0, 0) === '', 'a second flow_start cannot be added');
+    const n1 = flowStore.addBlock('flow_in', 0, 0);
+    const n2 = flowStore.addBlock('flow_in', 0, 0);
+    const keys = flowStore.getSnapshot().diagram.blocks.filter((b) => b.id === n1 || b.id === n2).map((b) => b.config['key']);
+    eq(keys, ['in1', 'in2'], 'added flow_in blocks get unique keys');
   }
 
   // ── 5. resolveRunInputs ──────────────────────────────────────────────────────
@@ -347,19 +366,37 @@ async function main(): Promise<void> {
     eq(resolveRunInputs([spec('s', 'select', { options: ['a'] })], { s: 'q' }).errors.length, 1, 'bad option');
     eq(resolveRunInputs([spec('ecu', 'ecu', { required: true })], {}).errors.length, 1, 'required ecu input refuses the run');
     eq(resolveRunInputs([spec('ecu', 'ecu')], {}).errors, [], 'optional ecu input is skipped');
+    // file inputs resolve to FlowFileValue; a bare Uint8Array is wrapped
+    const fv = resolveRunInputs([spec('img', 'file')], { img: { name: 'a.hex', bytes: new Uint8Array([1, 2]) } });
+    eq([fv.errors, (fv.values['img'] as { name: string }).name], [[], 'a.hex'], 'FlowFileValue input kept');
+    eq((resolveRunInputs([spec('img', 'file')], { img: new Uint8Array([1]) }).values['img'] as { name: string }).name, '', 'bytes wrapped as an unnamed file value');
+    // spec checks: range (never clamped), byte length, accepted extension
+    eq(resolveRunInputs([spec('n', 'number', { min: 1, max: 10 })], { n: '11' }).errors.length, 1, 'number above max is an error');
+    eq(resolveRunInputs([spec('n', 'number', { min: 1, max: 10 })], { n: '0' }).errors.length, 1, 'number below min is an error');
+    eq(resolveRunInputs([spec('n', 'number', { min: 1, max: 10 })], { n: '10' }).errors, [], 'number on the bound passes');
+    eq(resolveRunInputs([spec('a', 'hex', { byteLength: 4 })], { a: '0102' }).errors.length, 1, 'hex byteLength mismatch');
+    eq(resolveRunInputs([spec('a', 'hex', { byteLength: 4 })], { a: '01020304' }).errors, [], 'hex byteLength match');
+    eq(resolveRunInputs([spec('img', 'file', { accept: ['.hex', '.bin'] })], { img: { name: 'x.S19', bytes: new Uint8Array([1]) } }).errors.length, 1, 'file extension not accepted');
+    eq(resolveRunInputs([spec('img', 'file', { accept: ['.hex', '.bin'] })], { img: { name: 'x.HEX', bytes: new Uint8Array([1]) } }).errors, [], 'file extension accepted (case-insensitive)');
   }
 
-  // ── 6. flow_output semantics + run inputs on BOTH engines ───────────────────
+  // ── 6. flow_return / flow_out semantics + run inputs on BOTH engines ─────────
   {
-    // outputs recorded from wired values; inputs read from the flow_input ports
-    const fi = blk('flow_input', 'In', { inputs: [spec('n', 'number', { required: true }), spec('t', 'text', { default: 'hi' }), spec('h', 'hex')] });
-    const fo = blk('flow_output', 'Out', { name: 'done', outcome: 'ok', outputs: [spec('n', 'number'), spec('t', 'text'), spec('h', 'hex')] });
-    const d = dia([fi, fo], [wire(fi, 'start', fo, 'in'), wire(fi, 'n', fo, 'n'), wire(fi, 't', fo, 't'), wire(fi, 'h', fo, 'h')]);
+    // outputs sampled from wired values at frame end; inputs read from the flow_in blocks
+    const st = blk('flow_start', 'S');
+    const inN = blk('flow_in', 'n', { ...spec('n', 'number', { required: true }) });
+    const inT = blk('flow_in', 't', { ...spec('t', 'text', { default: 'hi' }) });
+    const inH = blk('flow_in', 'h', { ...spec('h', 'hex') });
+    const ret = blk('flow_return', 'Ret', { name: 'done', outcome: 'ok' });
+    const oN = blk('flow_out', 'n', { ...spec('n', 'number') });
+    const oT = blk('flow_out', 't', { ...spec('t', 'text') });
+    const oH = blk('flow_out', 'h', { ...spec('h', 'hex') });
+    const d = dia([st, inN, inT, inH, ret, oN, oT, oH], [wire(st, 'start', ret, 'in'), wire(inN, 'value', oN, 'value'), wire(inT, 'value', oT, 'value'), wire(inH, 'value', oH, 'value')]);
     await both(d, { n: '7', h: '0A 0B' }, (r, mode) => {
       eq(r.errors, [], `inputs run: no errors [${mode}]`);
-      eq(r.eng.result?.outcome, 'ok', `flow_output ok [${mode}]`);
+      eq(r.eng.result?.outcome, 'ok', `flow_return ok [${mode}]`);
       eq(r.eng.result?.name, 'done', `outcome name [${mode}]`);
-      eq(r.eng.result?.outputs['n'], 7, `number input read from the flow_input port [${mode}]`);
+      eq(r.eng.result?.outputs['n'], 7, `number input read from the flow_in block [${mode}]`);
       eq(r.eng.result?.outputs['t'], 'hi', `text default used [${mode}]`);
       eq(Array.from(r.eng.result?.outputs['h'] as Uint8Array), [10, 11], `hex input -> bytes [${mode}]`);
       eq([r.eng.result?.stopped, r.eng.result?.refused], [false, false], `not stopped / refused [${mode}]`);
@@ -370,47 +407,56 @@ async function main(): Promise<void> {
       eq(r.eng.result?.outcome, 'error', `refused run is an error outcome [${mode}]`);
       eq(r.tx, [], `refused run transmits nothing [${mode}]`);
       ok(r.errors.some((m) => m.includes('"n"')), `refusal names the input [${mode}]`);
-      eq(flowStore.getSnapshot().diagram.blocks.find((b) => b.id === fi.id)?.status, 'error', `entry block marked [${mode}]`);
+      eq(flowStore.getSnapshot().diagram.blocks.find((b) => b.id === st.id)?.status, 'error', `entry block marked [${mode}]`);
     });
-    // required ecu input: refused (B2)
-    const fiE = blk('flow_input', 'In', { inputs: [spec('ecu', 'ecu', { required: true })] });
-    await both(dia([fiE], []), {}, (r, mode) => {
+    // required ecu input: refused
+    const fiE = blk('flow_in', 'ecu', { ...spec('ecu', 'ecu', { required: true }) });
+    await both(dia([blk('flow_start', 'S'), fiE], []), {}, (r, mode) => {
       eq(r.eng.result?.refused, true, `required ecu input refuses the run [${mode}]`);
     });
-    const fiO = blk('flow_input', 'In', { inputs: [spec('ecu', 'ecu')] });
-    await both(dia([fiO], []), {}, (r, mode) => {
+    const fiO = blk('flow_in', 'ecu', { ...spec('ecu', 'ecu') });
+    await both(dia([blk('flow_start', 'S'), fiO], []), {}, (r, mode) => {
       eq([r.eng.result?.refused, r.eng.result?.outcome], [false, 'ok'], `optional ecu input does not block [${mode}]`);
     });
-    // two flow_input blocks: refused by the interface validation
-    await both(dia([blk('flow_input', 'A', { inputs: [] }), blk('flow_input', 'B', { inputs: [] })], []), {}, (r, mode) => {
-      eq(r.eng.result?.refused, true, `two flow_input blocks refuse the run [${mode}]`);
+    // two flow_start blocks / no flow_start: refused
+    await both(dia([blk('flow_start', 'A'), blk('flow_start', 'B')], []), {}, (r, mode) => {
+      eq(r.eng.result?.refused, true, `two flow_start blocks refuse the run [${mode}]`);
+    });
+    await both(dia([blk('log', 'L', { message: 'x' })], []), {}, (r, mode) => {
+      eq(r.eng.result?.refused, true, `no flow_start refuses the run [${mode}]`);
     });
 
     // outcomes ok / fail / error
     for (const outcome of ['ok', 'fail', 'error'] as const) {
-      const i2 = blk('flow_input', 'In', { inputs: [] });
+      const i2 = blk('flow_start', 'S');
       const c = blk('data_const', 'C', { value: '42', format: 'dec' });
-      const o2 = blk('flow_output', 'Out', { name: `n_${outcome}`, outcome, outputs: [spec('v', 'number')] });
-      await both(dia([i2, c, o2], [wire(i2, 'start', o2, 'in'), wire(c, 'value_out', o2, 'v')]), {}, (r, mode) => {
-        eq([r.eng.result?.outcome, r.eng.result?.name, r.eng.result?.outputs['v']], [outcome, `n_${outcome}`, 42], `flow_output ${outcome} + output recorded [${mode}]`);
+      const o2 = blk('flow_return', 'Ret', { name: `n_${outcome}`, outcome });
+      const ov = blk('flow_out', 'v', { ...spec('v', 'number') });
+      await both(dia([i2, c, o2, ov], [wire(i2, 'start', o2, 'in'), wire(c, 'value_out', ov, 'value')]), {}, (r, mode) => {
+        eq([r.eng.result?.outcome, r.eng.result?.name, r.eng.result?.outputs['v']], [outcome, `n_${outcome}`, 42], `flow_return ${outcome} + output recorded [${mode}]`);
       });
     }
 
-    // no flow_output: ok when the path ends; legacy end = ok, no outputs
+    // no flow_return: ok when the path ends (implicit), outputs still sampled
     const l1 = logBlock('L', 'a');
-    const i3 = blk('start', 'Start');
-    const e3 = blk('end', 'End');
-    await both(dia([i3, l1, e3], [wire(i3, 'exec_out', l1, 'exec_in'), wire(l1, 'exec_out', e3, 'exec_in')]), {}, (r, mode) => {
-      eq([r.eng.result?.outcome, r.eng.result?.name, r.eng.result?.outputs], ['ok', null, {}], `legacy end = ok without outputs [${mode}]`);
-      eq(r.lines, ['a'], `legacy flow ran [${mode}]`);
+    const i3 = blk('flow_start', 'S');
+    await both(dia([i3, l1], [wire(i3, 'start', l1, 'exec_in')]), {}, (r, mode) => {
+      eq([r.eng.result?.outcome, r.eng.result?.name, r.eng.result?.outputs], ['ok', null, {}], `implicit ok without outputs [${mode}]`);
+      eq(r.lines, ['a'], `flow ran [${mode}]`);
     });
-    const i4 = blk('flow_input', 'In', { inputs: [] });
+    const i3b = blk('flow_start', 'S');
+    const c3b = blk('data_const', 'C', { value: '5', format: 'dec' });
+    const o3b = blk('flow_out', 'v', { ...spec('v', 'number') });
+    await both(dia([i3b, c3b, o3b], [wire(c3b, 'value_out', o3b, 'value')]), {}, (r, mode) => {
+      eq([r.eng.result?.outcome, r.eng.result?.name, r.eng.result?.outputs['v']], ['ok', null, 5], `implicit ok samples the flow_out [${mode}]`);
+    });
+    const i4 = blk('flow_start', 'S');
     await both(dia([i4], []), {}, (r, mode) => {
-      eq(r.eng.result?.outcome, 'ok', `no flow_output: ok [${mode}]`);
+      eq(r.eng.result?.outcome, 'ok', `no flow_return: ok [${mode}]`);
     });
 
     // unhandled error -> error
-    const i5 = blk('flow_input', 'In', { inputs: [] });
+    const i5 = blk('flow_start', 'S');
     const c5 = blk('data_const', 'C', { value: '1', format: 'dec' });
     const m5 = blk('math', 'Div', { op: 'div', b: 0 });
     const l5 = blk('log', 'L', { message: 'x' });
@@ -419,15 +465,15 @@ async function main(): Promise<void> {
       ok(r.errors.length > 0, `error logged [${mode}]`);
     });
 
-    // reaching a flow_output inside a loop ends the whole run
-    const i6 = blk('flow_input', 'In', { inputs: [] });
+    // reaching a flow_return inside a loop ends the whole run
+    const i6 = blk('flow_start', 'S');
     const f6 = blk('flow_for', 'For', { from: 1, to: 5, step: 1 });
     const a6 = logBlock('A', 'iter');
-    const o6 = blk('flow_output', 'Out', { name: 'stop', outcome: 'fail', outputs: [] });
+    const o6 = blk('flow_return', 'Ret', { name: 'stop', outcome: 'fail' });
     const z6 = logBlock('Z', 'after');
     await both(dia([i6, f6, a6, o6, z6], [wire(i6, 'start', f6, 'exec_in'), wire(f6, 'body_out', a6, 'exec_in'), wire(a6, 'exec_out', o6, 'in'), wire(f6, 'done_out', z6, 'exec_in')]), {}, (r, mode) => {
-      eq(r.lines, ['iter'], `flow_output in a loop body ends the run after one iteration [${mode}]`);
-      eq([r.eng.result?.outcome, r.eng.result?.name], ['fail', 'stop'], `loop flow_output outcome [${mode}]`);
+      eq(r.lines, ['iter'], `flow_return in a loop body ends the run after one iteration [${mode}]`);
+      eq([r.eng.result?.outcome, r.eng.result?.name], ['fail', 'stop'], `loop flow_return outcome [${mode}]`);
     });
     stopAllTxSources();
   }
@@ -460,7 +506,7 @@ async function main(): Promise<void> {
       const first = parseFlowFile(await lib.load(list.find((e) => e.name === 'First')?.id ?? '', null));
       ok(first.ok, 'migrated file parses');
       if (first.ok) {
-        eq(first.file.flow.blocks[0].type, 'flow_input', 'migrated flow uses flow_input');
+        eq(first.file.flow.blocks[0].type, 'flow_start', 'migrated flow uses flow_start');
         eq(first.file.flow.connections[0].fromPortId, 'start', 'migrated connection re-pointed');
         ok(!/status|lastResult/.test(JSON.stringify(first.file.flow)), 'migrated file has no runtime fields');
         eq([first.file.flow.author, first.file.flow.aiReviewed], [null, true], 'author null, aiReviewed true');
@@ -513,13 +559,13 @@ async function main(): Promise<void> {
     const lib = new FakeLib();
     const reg = new FlowRegistryStore(lib, null, { uuid, now });
 
-    // new flow = flow_input; new block = flow_input + flow_output "ok"
+    // new flow = flow_start; new block = flow_start + flow_return "ok"
     const fid = reg.newDocument('nexuscan.flow');
-    eq(flowStore.getSnapshot().diagram.blocks.map((b) => b.type), ['flow_input'], 'new flow starts with a flow_input');
+    eq(flowStore.getSnapshot().diagram.blocks.map((b) => b.type), ['flow_start'], 'new flow starts with a flow_start');
     const bid = reg.newDocument('nexuscan.block');
     const blockDoc = reg.getDoc(bid);
     eq(blockDoc?.kind, 'nexuscan.block', 'custom block document');
-    eq(flowStore.getSnapshot().diagram.blocks.map((b) => b.type), ['flow_input', 'flow_output'], 'new block: flow_input + flow_output');
+    eq(flowStore.getSnapshot().diagram.blocks.map((b) => b.type), ['flow_start', 'flow_return'], 'new block: flow_start + flow_return');
     eq(flowStore.getSnapshot().diagram.blocks[1].config['name'], 'ok', 'block output is "ok"');
     eq(flowStore.getSnapshot().diagram.connections.length, 1, 'block start is wired to the output');
     eq(reg.getSnapshot().activeKey, bid, 'new document is active');
@@ -651,7 +697,7 @@ async function main(): Promise<void> {
     const legacyEntry = (await lib.list(false)).find((e) => e.name === 'Legacy');
     ok(legacyEntry !== undefined, 'legacy import stored');
     const lp = parseFlowFile(await lib.load(legacyEntry?.id ?? '', null));
-    eq(lp.ok ? lp.file.flow.blocks[0].type : '?', 'flow_input', 'imported start migrated to flow_input');
+    eq(lp.ok ? lp.file.flow.blocks[0].type : '?', 'flow_start', 'imported start migrated to flow_start');
     eq(lp.ok ? lp.file.flow.blocks[0].x : -1, 80, 'imported block without coordinates is laid out');
 
     // tabs: close the active document selects a neighbour; the last close empties the canvas

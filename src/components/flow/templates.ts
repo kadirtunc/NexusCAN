@@ -2,6 +2,8 @@ import { getLocale, t } from '../../i18n';
 import type { FlowTemplate, FlowBlock, FlowConnection } from './types';
 import { getBlockDef } from './blockDefs';
 import { PORT_SPACING } from './types';
+import type { FlowPortSpecV1 } from '../../types/flowLibrary';
+import { FLASH_FILE_ACCEPT } from './blockDefs';
 
 let _idCounter = 0;
 function tid(): string {
@@ -65,6 +67,38 @@ function estBlockHeight(b: FlowBlock): number {
 /** Functional + suppressPosRspMsgIndicationBit request options (network-wide 0x28 / 0x85). */
 const F_SPR = { req_addressing: 'functional', req_spr: true } as const;
 
+/** Interface of both flasher templates (flow-interface-v2 §6): 4 inputs and 2 outputs, in this order. */
+const FLASHER_INPUTS: FlowPortSpecV1[] = [
+  { key: 'ecu', label: 'ECU', type: 'ecu', required: true, order: 0 },
+  { key: 'firmware', label: 'Firmware image', type: 'file', required: true, order: 1, accept: [...FLASH_FILE_ACCEPT] },
+  { key: 'baseAddr', label: 'Base address', type: 'hex', required: false, order: 2, byteLength: 4, default: '00000000' },
+  { key: 'secLevel', label: 'Security level', type: 'select', required: false, order: 3, options: ['01', '03', '11'], default: '11' },
+];
+const FLASHER_OUTPUTS: FlowPortSpecV1[] = [
+  { key: 'crc32', label: 'CRC32', type: 'number', required: false, order: 0 },
+  { key: 'report', label: 'Flash report', type: 'text', required: false, order: 1 },
+];
+
+/** Creates the `flow_in` / `flow_out` port blocks of a flasher: inputs stacked left, outputs right of the flash block. */
+function flasherInterface(
+  B: (type: string, label: string, x: number, y: number, config?: Record<string, unknown>) => FlowBlock,
+  pos: { inX: number; inY: number; secX: number; secY: number; fwX: number; fwY: number; outX: number; outY: number } = {
+    inX: X0 - 160, inY: ROW.r1, secX: cx(2), secY: ROW.r3 + AUX, fwX: cx(6), fwY: ROW.r3 + AUX + 60, outX: cx(7), outY: ROW.r3 + AUX + 10,
+  },
+): void {
+  const at = (key: string): { x: number; y: number } => {
+    if (key === 'ecu') return { x: pos.inX, y: pos.inY };
+    if (key === 'firmware') return { x: pos.fwX, y: pos.fwY };
+    if (key === 'baseAddr') return { x: pos.fwX, y: pos.fwY + 36 };
+    return { x: pos.secX, y: pos.secY };
+  };
+  for (const spec of FLASHER_INPUTS) {
+    const p = at(spec.key);
+    B('flow_in', spec.label, p.x, p.y, { ...spec });
+  }
+  FLASHER_OUTPUTS.forEach((spec, i) => B('flow_out', spec.label, pos.outX, pos.outY + i * 36, { ...spec }));
+}
+
 /**
  * Production-grade ISO 14229-1 reprogramming sequence (pre-programming → programming session →
  * download → post-programming) with two recovery lanes:
@@ -96,6 +130,24 @@ function buildEcuFlasher(): FlowTemplate {
     for (let i = 0; i + 1 < list.length; i++) W(list[i][0], list[i][1], list[i + 1][0]);
   };
 
+  // ── Interface (flow-interface-v2 §6) ──────────────────────────────────────────
+  // Returns are created first (ok, safe_abort, bootloader_fail, post_warning, error) so the derived outcome order is stable.
+  // safe_abort = failure BEFORE the first erase / 0x34 (application untouched); bootloader_fail = after that point.
+  const R = (name: string, outcome: 'ok' | 'fail' | 'error', x: number, y: number): FlowBlock =>
+    B('flow_return', name, x, y, { name, outcome });
+  const retOk   = R('ok', 'ok', cx(6), ROW.r5);
+  const retSafe = R('safe_abort', 'fail', cx(6), ROW.safe);
+  const retBoot = R('bootloader_fail', 'fail', cx(5), ROW.boot);
+  const retPost = R('post_warning', 'fail', cx(4), ROW.post);
+  // Declares the `error` outcome; reached by no wire (operator Stop / Panic Stop and unhandled errors use the call block's `error` port).
+  R('error', 'error', cx(3), ROW.r1 + AUX);
+  flasherInterface(B);
+  const fFirmware = blocks.find((b) => b.type === 'flow_in' && b.config['key'] === 'firmware') as FlowBlock;
+  const fBase     = blocks.find((b) => b.type === 'flow_in' && b.config['key'] === 'baseAddr') as FlowBlock;
+  const fSec      = blocks.find((b) => b.type === 'flow_in' && b.config['key'] === 'secLevel') as FlowBlock;
+  const outCrc    = blocks.find((b) => b.type === 'flow_out' && b.config['key'] === 'crc32') as FlowBlock;
+  const outReport = blocks.find((b) => b.type === 'flow_out' && b.config['key'] === 'report') as FlowBlock;
+
   // ── Recovery lanes (bottom) ───────────────────────────────────────────────
   // Each lane starts at a wireless TERMINAL; every recovery route elsewhere is a small GOTO pill next to
   // its source block (no long wires across the diagram).
@@ -113,9 +165,9 @@ function buildEcuFlasher(): FlowTemplate {
   const sDef   = B('uds_session', t('udsTpl.fl.defaultSession'), cx(3), ROW.safe, { session_type: 'default' });
   const sKa    = B('uds_tester_present_keepalive', t('udsTpl.fl.kaStop'), cx(4), ROW.safe, { action: 'stop', interval_ms: 2000 });
   const sDone  = B('log', t('udsTpl.fl.safeDone'), cx(5), ROW.safe, { message: t('udsTpl.fl.safeDoneMsg') });
-  const sEnd   = B('end', t('udsTpl.fl.endAborted'), cx(6), ROW.safe);
   W(termSafe, 'exec_out', sHead);
-  chain([sHead, 'exec_out'], [sComm, 'exec_out'], [sDtc, 'exec_out'], [sDef, 'exec_out'], [sKa, 'exec_out'], [sDone, 'exec_out'], [sEnd, '']);
+  chain([sHead, 'exec_out'], [sComm, 'exec_out'], [sDtc, 'exec_out'], [sDef, 'exec_out'], [sKa, 'exec_out'], [sDone, 'exec_out']);
+  W(sDone, 'exec_out', retSafe, 'in');
   W(sComm, 'error_out', sDtc);
   W(sDtc, 'error_out', sDef);
   W(sDef, 'error_out', sKa);
@@ -126,20 +178,28 @@ function buildEcuFlasher(): FlowTemplate {
   const bDtc   = B('uds_dtc_setting', t('udsTpl.fl.dtcOnF'), cx(2), ROW.boot, { setting_type: '01', ...F_SPR });
   const bKa    = B('uds_tester_present_keepalive', t('udsTpl.fl.kaStop'), cx(3), ROW.boot, { action: 'stop', interval_ms: 2000 });
   const bDone  = B('log', t('udsTpl.fl.bootDone'), cx(4), ROW.boot, { message: t('udsTpl.fl.bootDoneMsg') });
-  const bEnd   = B('end', t('udsTpl.fl.endFailed'), cx(5), ROW.boot);
   W(termBoot, 'exec_out', bHead);
-  chain([bHead, 'exec_out'], [bComm, 'exec_out'], [bDtc, 'exec_out'], [bKa, 'exec_out'], [bDone, 'exec_out'], [bEnd, '']);
+  chain([bHead, 'exec_out'], [bComm, 'exec_out'], [bDtc, 'exec_out'], [bKa, 'exec_out'], [bDone, 'exec_out']);
+  W(bDone, 'exec_out', retBoot, 'in');
   W(bComm, 'error_out', bDtc);
   W(bDtc, 'error_out', bKa);
   W(bKa, 'error_out', bDone);
 
-  // Post-programming failures join the bootloader lane's network recovery (no critical message, no 11 01).
+  // Post-programming failures run the same network recovery (comm + DTC setting on, keep-alive stop; no critical
+  // message, no 11 01) and end with their own outcome `post_warning` (the ECU runs its new application).
   const pHead  = B('log', t('udsTpl.fl.postHead'), cx(0), ROW.post, { message: t('udsTpl.fl.postHeadMsg') });
+  const pComm  = B('uds_comm_control', t('udsTpl.fl.commOnF'), cx(1), ROW.post, { control_type: '00', comm_type: '01', ...F_SPR });
+  const pDtc   = B('uds_dtc_setting', t('udsTpl.fl.dtcOnF'), cx(2), ROW.post, { setting_type: '01', ...F_SPR });
+  const pKa    = B('uds_tester_present_keepalive', t('udsTpl.fl.kaStop'), cx(3), ROW.post, { action: 'stop', interval_ms: 2000 });
   W(termPost, 'exec_out', pHead);
-  W(pHead, 'exec_out', bComm);
+  chain([pHead, 'exec_out'], [pComm, 'exec_out'], [pDtc, 'exec_out'], [pKa, 'exec_out']);
+  W(pComm, 'error_out', pDtc);
+  W(pDtc, 'error_out', pKa);
+  W(pKa, 'exec_out', retPost, 'in');
+  W(pKa, 'error_out', retPost, 'in');
 
   // ── A · Pre-programming (row 1: confirmation + identification) ─────────────
-  const start   = B('start', t('diagBlk.start'), cx(0), ROW.r1);
+  const start   = B('flow_start', t('flowIface.blk.start'), cx(0), ROW.r1);
   const hdrA    = B('log', t('udsTpl.fl.hdrA'), cx(1), ROW.r1, { message: t('udsTpl.fl.hdrAMsg') });
   const prompt  = B('io_user_prompt', t('udsTpl.fl.prompt'), cx(2), ROW.r1, { message: t('udsTpl.fl.promptMsg') });
   const ext1    = B('uds_session', t('udsTpl.fl.extSession'), cx(3), ROW.r1, { session_type: 'extended' });
@@ -149,14 +209,15 @@ function buildEcuFlasher(): FlowTemplate {
   const spare   = B('uds_read_did', t('udsTpl.fl.readSpare'), cx(7), ROW.r1, { did: 'F187' });
   const spareLog= B('log', t('udsTpl.fl.logSpare'), cx(8), ROW.r1, { message: 'F187:' });
   const abortLog= B('log', t('udsTpl.fl.cancelled'), cx(2), ROW.r1 + AUX, { message: t('udsTpl.fl.cancelledMsg') });
-  const abortEnd= B('end', t('udsTpl.fl.endAborted'), cx(3), ROW.r1 + AUX);
 
-  chain([start, 'exec_out'], [hdrA, 'exec_out'], [prompt, 'exec_out'], [ext1, 'exec_out'], [kaOn, 'exec_out'],
+  W(start, 'start', hdrA);
+  chain([hdrA, 'exec_out'], [prompt, 'exec_out'], [ext1, 'exec_out'], [kaOn, 'exec_out'],
     [vin, 'exec_out'], [vinLog, 'exec_out'], [spare, 'exec_out'], [spareLog, '']);
   W(vin, 'data_out', vinLog, 'value_in');
   W(spare, 'data_out', spareLog, 'value_in');
   W(prompt, 'error_out', abortLog);
-  W(abortLog, 'exec_out', abortEnd);
+  // Declined confirmation: nothing was transmitted yet, so it ends `safe_abort` directly (no restore-lane frames).
+  W(abortLog, 'exec_out', retSafe, 'in');
 
   // ── A · Pre-programming (row 2: versions, HW compatibility, preconditions, network) ──
   const swOld   = B('uds_read_did', t('udsTpl.fl.readSwBefore'), cx(0), ROW.r2, { did: 'F189' });
@@ -189,7 +250,7 @@ function buildEcuFlasher(): FlowTemplate {
   const waitBoot= B('uds_wait_ecu_ready', t('udsTpl.fl.waitBoot'), cx(2), ROW.r3, {
     initial_delay_ms: 500, poll_ms: 250, timeout_ms: 10000, probe: '3E00', probe_session: '02', probe_timeout_ms: 300,
   });
-  const sec     = B('uds_security_access', t('udsTpl.fl.security'), cx(3), ROW.r3, { access_level: '11', algorithm: 'xor_ff', constant: '5A3C1E8F', script: '' });
+  const sec     = B('uds_security_access', t('udsTpl.fl.security'), cx(3), ROW.r3, { access_level: '11', algorithm: 'xor_ff', constant: '5A3C1E8F', script: '', boundParams: ['access_level'] });
   const fp      = B('data_fingerprint', t('udsTpl.fl.fingerprint'), cx(3), ROW.r3 + AUX, {
     format: 'iso_f15a', serial: 'NEXUS1', serial_len: 6, pad: '20', template: '{YY}{MM}{DD} {SERIAL:6}',
   });
@@ -200,6 +261,7 @@ function buildEcuFlasher(): FlowTemplate {
     erase_mode: 'per_segment', erase_routine_id: 'FF00', erase_alfid: '44', erase_timeout_ms: 30000,
     erase_busy_retry: 3, erase_busy_delay_ms: 200, erase_expected_status: '',
     verify_mode: 'per_segment_crc32', verify_routine_id: '0202', verify_expected_status: '00', verify_timeout_ms: 5000,
+    boundParams: ['file', 'base_address'],
   });
   const deps    = B('uds_routine_ctrl', t('udsTpl.fl.deps'), cx(7), ROW.r3, { control_type: '01', routine_id: 'FF01', expect_status: '00' });
 
@@ -208,6 +270,12 @@ function buildEcuFlasher(): FlowTemplate {
   W(sec, 'success_out', fpWrite);
   W(fp, 'bytes_out', fpWrite, 'data_in');
   chain([fpWrite, 'exec_out'], [hdrC, 'exec_out'], [flash, 'exec_out'], [deps, '']);
+  // Bound parameters (§6) and outputs: firmware / base address / security level come from the flow inputs.
+  W(fFirmware, 'value', flash, 'p:file');
+  W(fBase, 'value', flash, 'p:base_address');
+  W(fSec, 'value', sec, 'p:access_level');
+  W(flash, 'crc32', outCrc, 'value');
+  W(flash, 'report', outReport, 'value');
 
   // ── D · Post-programming (row 4: reset, wait, restore network, clear DTCs, re-read version) ──
   const hdrD    = B('log', t('udsTpl.fl.hdrD'), cx(0), ROW.r4, { message: t('udsTpl.fl.hdrDMsg') });
@@ -237,7 +305,6 @@ function buildEcuFlasher(): FlowTemplate {
   const def     = B('uds_session', t('udsTpl.fl.defaultSession'), cx(3), ROW.r5, { session_type: 'default' });
   const kaOff   = B('uds_tester_present_keepalive', t('udsTpl.fl.kaStop'), cx(4), ROW.r5, { action: 'stop', interval_ms: 2000 });
   const okLog   = B('log', t('udsTpl.fl.ok'), cx(5), ROW.r5, { message: t('udsTpl.fl.okMsg') });
-  const end     = B('end', t('diagBlk.end'), cx(6), ROW.r5);
 
   W(swNew, 'exec_out', chgCond);
   W(swOld, 'data_out', chgCmp, 'left_in');
@@ -256,7 +323,8 @@ function buildEcuFlasher(): FlowTemplate {
   W(expCond, 'false_out', expBad);
   W(swNew, 'data_out', expBad, 'value_in');
   G(expBad, 'exec_out', termPost);
-  chain([def, 'exec_out'], [kaOff, 'exec_out'], [okLog, 'exec_out'], [end, '']);
+  chain([def, 'exec_out'], [kaOff, 'exec_out'], [okLog, 'exec_out']);
+  W(okLog, 'exec_out', retOk, 'in');
   W(swNew, 'data_out', okLog, 'value_in');
 
   // ── Error routing ──────────────────────────────────────────────────────────
@@ -287,26 +355,42 @@ function buildEcuFlasher(): FlowTemplate {
 function buildEcuFlasherMinimal(): FlowTemplate {
   // Short sequence: Ext session (10 03) → DTCSetting off (85 02) → CommControl off (28 03)
   // → Programming session (10 02) → Security → Erase (31 01 FF00) → Flash Image → CheckMemory (31 01 0202, CRC32) → Reset (11 01)
+  // Interface (flow-interface-v2 §6): same 4 inputs / 2 outputs as the production flasher; outcomes ok /
+  // safe_abort (failure before the first erase, ECU restored) / bootloader_fail (erase, download or verify failed).
 
-  const start      = makeBlock('start',               t('diagBlk.start'),                   100,  200);
+  const retOk      = makeBlock('flow_return',         'ok',                              2600,  200, { name: 'ok', outcome: 'ok' });
+  const retSafe    = makeBlock('flow_return',         'safe_abort',                      1350,  520, { name: 'safe_abort', outcome: 'fail' });
+  const retBoot    = makeBlock('flow_return',         'bootloader_fail',                 2100,  520, { name: 'bootloader_fail', outcome: 'fail' });
+  const inBlocks   = FLASHER_INPUTS.map((spec, i) => makeBlock('flow_in', spec.label, -60, 200 + i * 36, { ...spec }));
+  const outBlocks  = FLASHER_OUTPUTS.map((spec, i) => makeBlock('flow_out', spec.label, 2100, 200 + i * 36, { ...spec }));
+  const [, inFirmware, inBase, inSec] = inBlocks;
+
+  const start      = makeBlock('flow_start',          t('flowIface.blk.start'),             100,  200);
   const extSession = makeBlock('uds_session',         'Extended Session (10 03)',  350,  200, { session_type: 'extended' });
   const dtcOff     = makeBlock('uds_dtc_setting',     'DTC Setting OFF (85 02)',   600,  200, { setting_type: '02' });
   const commOff    = makeBlock('uds_comm_control',    t('diagTpl.commOff'),               850,  200, { control_type: '03', comm_type: '01' });
   const progSession= makeBlock('uds_session',         'Programming Session (10 02)', 1100, 200, { session_type: 'programming' });
-  const security   = makeBlock('uds_security_access', 'Security Access L1',       1350,  200, { access_level: '11', algorithm: 'xor_ff' });
+  const security   = makeBlock('uds_security_access', 'Security Access L1',       1350,  200, { access_level: '11', algorithm: 'xor_ff', boundParams: ['access_level'] });
   const erase      = makeBlock('uds_routine_ctrl',    t('diagTpl.eraseMemory'),         1600,  200, { control_type: '01', routine_id: 'FF00' });
   const flash      = makeBlock('uds_flash_image',     t('flash.block.short'),            1850,  200, {
     file_name: '', format: 'auto', base_address: '00000000', alfid: '44', dfi: '00', max_block_len: 0, retries: 2, transfer_timeout_ms: 0,
+    boundParams: ['file', 'base_address'],
   });
   const checkProg  = makeBlock('uds_routine_ctrl',    'Check Memory (0202)',       2100,  200, { control_type: '01', routine_id: '0202' });
   const reset      = makeBlock('uds_ecu_reset',       'Hard Reset (11 01)',        2350,  200, { reset_type: 'hardReset' });
-  const end        = makeBlock('end',                 t('diagBlk.end'),                    2600,  200);
+  // Two error logs: failures from the erase on end as `bootloader_fail`, earlier ones restore the ECU and end `safe_abort`.
+  // (Stop / Panic Stop and unhandled errors leave through the call block's always-present `error` port.)
   const logErr     = makeBlock('log',                 t('diagTpl.flashError'),              1850,  520, { message: t('diagTpl.flashErrorMsg') });
+  const logAbort   = makeBlock('log',                 t('diagTpl.flashError'),               350,  520, { message: t('diagTpl.flashErrorMsg') });
+  // safe_abort lane (failure before the erase, application untouched): comm control on, DTC setting on, default session.
+  const abComm     = makeBlock('uds_comm_control',    t('udsTpl.fl.commOnF'),            600,  520, { control_type: '00', comm_type: '01' });
+  const abDtc      = makeBlock('uds_dtc_setting',     t('udsTpl.fl.dtcOnF'),             850,  520, { setting_type: '01' });
+  const abDef      = makeBlock('uds_session',         t('udsTpl.fl.defaultSession'),    1100,  520, { session_type: 'default' });
 
-  const blocks = [start, extSession, dtcOff, commOff, progSession, security, erase, flash, checkProg, reset, end, logErr];
+  const blocks = [retOk, retSafe, retBoot, ...inBlocks, ...outBlocks, start, extSession, dtcOff, commOff, progSession, security, erase, flash, checkProg, reset, logErr, logAbort, abComm, abDtc, abDef];
 
   const connections: FlowConnection[] = [
-    conn(start,       'exec_out',    extSession,  'exec_in'),
+    conn(start,       'start',       extSession,  'exec_in'),
     conn(extSession,  'exec_out',    dtcOff,      'exec_in'),
     conn(dtcOff,      'exec_out',    commOff,     'exec_in'),
     conn(commOff,     'exec_out',    progSession, 'exec_in'),
@@ -316,17 +400,31 @@ function buildEcuFlasherMinimal(): FlowTemplate {
     conn(flash,       'exec_out',    checkProg,   'exec_in'),
     conn(flash,       'crc32',       checkProg,   'option_in'),
     conn(checkProg,   'exec_out',    reset,       'exec_in'),
-    conn(reset,       'exec_out',    end,         'exec_in'),
-    // error paths
-    conn(extSession,  'error_out',   logErr,      'exec_in'),
-    conn(dtcOff,      'error_out',   logErr,      'exec_in'),
-    conn(commOff,     'error_out',   logErr,      'exec_in'),
-    conn(progSession, 'error_out',   logErr,      'exec_in'),
-    conn(security,    'error_out',   logErr,      'exec_in'),
+    conn(reset,       'exec_out',    retOk,       'in'),
+    // bound parameters + outputs
+    conn(inFirmware,  'value',       flash,       'p:file'),
+    conn(inBase,      'value',       flash,       'p:base_address'),
+    conn(inSec,       'value',       security,    'p:access_level'),
+    conn(flash,       'crc32',       outBlocks[0], 'value'),
+    conn(flash,       'report',      outBlocks[1], 'value'),
+    // error paths: before the erase = safe_abort (application untouched), from the erase on = bootloader_fail
+    conn(extSession,  'error_out',   logAbort,    'exec_in'),
+    conn(dtcOff,      'error_out',   logAbort,    'exec_in'),
+    conn(commOff,     'error_out',   logAbort,    'exec_in'),
+    conn(progSession, 'error_out',   logAbort,    'exec_in'),
+    conn(security,    'error_out',   logAbort,    'exec_in'),
     conn(erase,       'error_out',   logErr,      'exec_in'),
     conn(flash,       'fail_out',    logErr,      'exec_in'),
     conn(checkProg,   'error_out',   logErr,      'exec_in'),
-    conn(logErr,      'exec_out',    end,         'exec_in'),
+    conn(reset,       'error_out',   logErr,      'exec_in'),
+    conn(logErr,      'exec_out',    retBoot,     'in'),
+    conn(logAbort,    'exec_out',    abComm,      'exec_in'),
+    conn(abComm,      'exec_out',    abDtc,       'exec_in'),
+    conn(abComm,      'error_out',   abDtc,       'exec_in'),
+    conn(abDtc,       'exec_out',    abDef,       'exec_in'),
+    conn(abDtc,       'error_out',   abDef,       'exec_in'),
+    conn(abDef,       'exec_out',    retSafe,     'in'),
+    conn(abDef,       'error_out',   retSafe,     'in'),
   ];
 
   return {
@@ -342,19 +440,19 @@ function buildEcuFlasherMinimal(): FlowTemplate {
 // ─── DTC RAPORU ──────────────────────────────────────────────────────────────
 
 function buildDtcReport(): FlowTemplate {
-  const start   = makeBlock('start',        t('diagBlk.start'),          100, 200);
+  const start   = makeBlock('flow_start',        t('flowIface.blk.start'),          100, 200);
   const session  = makeBlock('uds_session', 'Session Control', 350, 200, { session_type: 'extended' });
   const readDtc = makeBlock('uds_read_dtc', t('diagTpl.readDtc'),         600, 200, { sub_fn: '02', status_mask: 'FF' });
   const display = makeBlock('io_display',   t('diagTpl.showDtc'),      850, 200);
-  const end     = makeBlock('end',          t('diagBlk.end'),          1100, 200);
+  const end     = makeBlock('flow_return',          t('flowIface.blk.return'),          1100, 200, { name: 'ok', outcome: 'ok' });
 
   const blocks = [start, session, readDtc, display, end];
   const connections: FlowConnection[] = [
-    conn(start,   'exec_out',    session,  'exec_in'),
+    conn(start,   'start',    session,  'exec_in'),
     conn(session, 'exec_out',    readDtc,  'exec_in'),
     conn(readDtc, 'exec_out',    display,  'exec_in'),
     conn(readDtc, 'dtc_list_out',display,  'value_in'),
-    conn(display, 'exec_out',    end,      'exec_in'),
+    conn(display, 'exec_out',    end,      'in'),
   ];
 
   return {
@@ -370,24 +468,24 @@ function buildDtcReport(): FlowTemplate {
 // ─── ECU KİMLİK OKUMA ────────────────────────────────────────────────────────
 
 function buildEcuIdentity(): FlowTemplate {
-  const start    = makeBlock('start',        t('diagBlk.start'),               100, 200);
+  const start    = makeBlock('flow_start',        t('flowIface.blk.start'),               100, 200);
   const session  = makeBlock('uds_session',  'Session Control',      350, 200, { session_type: 'extended' });
   const readVin  = makeBlock('uds_read_did', t('diagTpl.readVin'),       600, 200, { did: 'F190' });
   const dispVin  = makeBlock('io_display',   t('diagTpl.showVin'),           850, 200);
   const readSw   = makeBlock('uds_read_did', t('diagTpl.readSw'),  1100, 200, { did: 'F188' });
   const dispSw   = makeBlock('io_display',   t('diagTpl.showSw'),      1350, 200);
-  const end      = makeBlock('end',          t('diagBlk.end'),               1600, 200);
+  const end      = makeBlock('flow_return',          t('flowIface.blk.return'),               1600, 200, { name: 'ok', outcome: 'ok' });
 
   const blocks = [start, session, readVin, dispVin, readSw, dispSw, end];
   const connections: FlowConnection[] = [
-    conn(start,   'exec_out', session, 'exec_in'),
+    conn(start,   'start', session, 'exec_in'),
     conn(session, 'exec_out', readVin, 'exec_in'),
     conn(readVin, 'exec_out', dispVin, 'exec_in'),
     conn(readVin, 'data_out', dispVin, 'value_in'),
     conn(dispVin, 'exec_out', readSw,  'exec_in'),
     conn(readSw,  'exec_out', dispSw,  'exec_in'),
     conn(readSw,  'data_out', dispSw,  'value_in'),
-    conn(dispSw,  'exec_out', end,     'exec_in'),
+    conn(dispSw,  'exec_out', end,     'in'),
   ];
 
   return {
@@ -403,18 +501,18 @@ function buildEcuIdentity(): FlowTemplate {
 // ─── TAM TANILAMATIC ─────────────────────────────────────────────────────────
 
 function buildFullDiag(): FlowTemplate {
-  const start     = makeBlock('start',        t('diagBlk.start'),              100, 200);
+  const start     = makeBlock('flow_start',        t('flowIface.blk.start'),              100, 200);
   const session   = makeBlock('uds_session',  'Session Control',     350, 200, { session_type: 'extended' });
   const readDtc   = makeBlock('uds_read_dtc', t('diagTpl.readDtc'),             600, 200, { sub_fn: '02', status_mask: 'FF' });
   const logDtc    = makeBlock('log',          t('diagTpl.dtcResults'),       850, 200, { message: t('diagTpl.dtcListRead') });
   const readDid   = makeBlock('uds_read_did', t('diagTpl.readDid'),       1100, 200, { did: 'F190' });
   const display   = makeBlock('io_display',   t('diagTpl.showDid'),         1350, 200);
   const clearDtc  = makeBlock('uds_clear_dtc',t('diagTpl.clearDtc'),        1600, 200, { group: 'FFFFFF' });
-  const end       = makeBlock('end',          t('diagBlk.end'),              1850, 200);
+  const end       = makeBlock('flow_return',          t('flowIface.blk.return'),              1850, 200, { name: 'ok', outcome: 'ok' });
 
   const blocks = [start, session, readDtc, logDtc, readDid, display, clearDtc, end];
   const connections: FlowConnection[] = [
-    conn(start,    'exec_out',    session,  'exec_in'),
+    conn(start,    'start',    session,  'exec_in'),
     conn(session,  'exec_out',    readDtc,  'exec_in'),
     conn(readDtc,  'exec_out',    logDtc,   'exec_in'),
     conn(readDtc,  'dtc_list_out',logDtc,   'value_in'),
@@ -422,7 +520,7 @@ function buildFullDiag(): FlowTemplate {
     conn(readDid,  'exec_out',    display,  'exec_in'),
     conn(readDid,  'data_out',    display,  'value_in'),
     conn(display,  'exec_out',    clearDtc, 'exec_in'),
-    conn(clearDtc, 'exec_out',    end,      'exec_in'),
+    conn(clearDtc, 'exec_out',    end,      'in'),
   ];
 
   return {
@@ -441,14 +539,14 @@ const EX_X = [80, 340, 600, 860, 1120, 1380] as const;
 
 /** 1. Counter 0 -> 99: var x = 0; while x < 100: log "x = {x}"; x = x + 1. */
 function buildExCounter(): FlowTemplate {
-  const start = makeBlock('start', t('diagBlk.start'), EX_X[0], 160);
+  const start = makeBlock('flow_start', t('flowIface.blk.start'), EX_X[0], 160);
   const get = makeBlock('var_get', 'x', EX_X[0], 420, { name: 'x' });
   const hundred = makeBlock('data_const', '100', EX_X[0], 560, { value: '100', format: 'dec' });
   const lt = makeBlock('data_compare', 'x < 100', EX_X[1], 460, { operator: 'lt', pass_if_right_empty: false });
   const loop = makeBlock('flow_while', t('diagBlk.whileLoop'), EX_X[2], 160, { max_iterations: 1000 });
   const lg = makeBlock('log', t('diagBlk.writeToLog'), EX_X[3], 160, { message: 'x = {x}' });
   const inc = makeBlock('var_set', 'x = x + 1', EX_X[4], 160, { name: 'x', mode: 'add', amount: 1 });
-  const end = makeBlock('end', t('diagBlk.end'), EX_X[3], 360);
+  const end = makeBlock('flow_return', t('flowIface.blk.return'), EX_X[3], 360, { name: 'ok', outcome: 'ok' });
   return {
     id: 'ex_counter',
     nameKey: 'flowCore.tpl.counter.name',
@@ -459,13 +557,13 @@ function buildExCounter(): FlowTemplate {
       variables: [{ name: 'x', type: 'number', initial: '0' }],
       blocks: [start, get, hundred, lt, loop, lg, inc, end],
       connections: [
-        conn(start, 'exec_out', loop, 'exec_in'),
+        conn(start, 'start', loop, 'exec_in'),
         conn(get, 'value', lt, 'left_in'),
         conn(hundred, 'value_out', lt, 'right_in'),
         conn(lt, 'result_out', loop, 'bool_in'),
         conn(loop, 'body_out', lg, 'exec_in'),
         conn(lg, 'exec_out', inc, 'exec_in'),
-        conn(loop, 'done_out', end, 'exec_in'),
+        conn(loop, 'done_out', end, 'in'),
       ],
     },
   };
@@ -473,14 +571,14 @@ function buildExCounter(): FlowTemplate {
 
 /** 2. for 1..10, break at index == 5, log "i = {value}" otherwise. */
 function buildExForBreak(): FlowTemplate {
-  const start = makeBlock('start', t('diagBlk.start'), EX_X[0], 160);
+  const start = makeBlock('flow_start', t('flowIface.blk.start'), EX_X[0], 160);
   const loop = makeBlock('flow_for', t('flowCore.blk.flowFor'), EX_X[1], 160, { from: 1, to: 10, step: 1 });
   const five = makeBlock('data_const', '5', EX_X[1], 420, { value: '5', format: 'dec' });
   const eq = makeBlock('data_compare', 'index == 5', EX_X[2], 360, { operator: 'eq', pass_if_right_empty: false });
   const cond = makeBlock('condition', t('diagBlk.condition'), EX_X[3], 160);
   const brk = makeBlock('flow_break', t('flowCore.blk.flowBreak'), EX_X[4], 160);
   const lg = makeBlock('log', t('diagBlk.writeToLog'), EX_X[4], 360, { message: 'i = {value}' });
-  const end = makeBlock('end', t('diagBlk.end'), EX_X[2], 160);
+  const end = makeBlock('flow_return', t('flowIface.blk.return'), EX_X[2], 160, { name: 'ok', outcome: 'ok' });
   return {
     id: 'ex_for_break',
     nameKey: 'flowCore.tpl.forBreak.name',
@@ -490,7 +588,7 @@ function buildExForBreak(): FlowTemplate {
     diagram: {
       blocks: [start, loop, five, eq, cond, brk, lg, end],
       connections: [
-        conn(start, 'exec_out', loop, 'exec_in'),
+        conn(start, 'start', loop, 'exec_in'),
         conn(loop, 'index', eq, 'left_in'),
         conn(five, 'value_out', eq, 'right_in'),
         conn(eq, 'result_out', cond, 'bool_in'),
@@ -498,7 +596,7 @@ function buildExForBreak(): FlowTemplate {
         conn(cond, 'true_out', brk, 'exec_in'),
         conn(cond, 'false_out', lg, 'exec_in'),
         conn(loop, 'index', lg, 'value_in'),
-        conn(loop, 'done_out', end, 'exec_in'),
+        conn(loop, 'done_out', end, 'in'),
       ],
     },
   };
@@ -506,11 +604,11 @@ function buildExForBreak(): FlowTemplate {
 
 /** 3. sum = sum + index for 1..100, then log "sum = {sum}" (5050). */
 function buildExSum(): FlowTemplate {
-  const start = makeBlock('start', t('diagBlk.start'), EX_X[0], 160);
+  const start = makeBlock('flow_start', t('flowIface.blk.start'), EX_X[0], 160);
   const loop = makeBlock('flow_for', t('flowCore.blk.flowFor'), EX_X[1], 160, { from: 1, to: 100, step: 1 });
   const add = makeBlock('var_set', 'sum = sum + index', EX_X[2], 160, { name: 'sum', mode: 'add', amount: 1 });
   const lg = makeBlock('log', t('diagBlk.writeToLog'), EX_X[2], 360, { message: 'sum = {sum}' });
-  const end = makeBlock('end', t('diagBlk.end'), EX_X[3], 360);
+  const end = makeBlock('flow_return', t('flowIface.blk.return'), EX_X[3], 360, { name: 'ok', outcome: 'ok' });
   return {
     id: 'ex_sum',
     nameKey: 'flowCore.tpl.sum.name',
@@ -521,11 +619,11 @@ function buildExSum(): FlowTemplate {
       variables: [{ name: 'sum', type: 'number', initial: '0' }],
       blocks: [start, loop, add, lg, end],
       connections: [
-        conn(start, 'exec_out', loop, 'exec_in'),
+        conn(start, 'start', loop, 'exec_in'),
         conn(loop, 'body_out', add, 'exec_in'),
         conn(loop, 'index', add, 'value_in'),
         conn(loop, 'done_out', lg, 'exec_in'),
-        conn(lg, 'exec_out', end, 'exec_in'),
+        conn(lg, 'exec_out', end, 'in'),
       ],
     },
   };
@@ -533,13 +631,13 @@ function buildExSum(): FlowTemplate {
 
 /** 4. Extended session -> read F190 -> convert to text -> text_format "VIN = {vin}" -> log. */
 function buildExDid(): FlowTemplate {
-  const start = makeBlock('start', t('diagBlk.start'), EX_X[0], 160);
+  const start = makeBlock('flow_start', t('flowIface.blk.start'), EX_X[0], 160);
   const ses = makeBlock('uds_session', 'Extended Session (10 03)', EX_X[1], 160, { session_type: 'extended' });
   const rd = makeBlock('uds_read_did', t('diagTpl.readVin'), EX_X[2], 160, { did: 'F190' });
   const cv = makeBlock('convert', t('flowCore.blk.convert'), EX_X[2], 420, { target: 'text', byteLength: 1, endianness: 'big' });
   const fmt = makeBlock('text_format', t('flowCore.tpl.vinLabel'), EX_X[3], 420, { template: 'VIN = {vin}', inputs: ['vin'] });
   const lg = makeBlock('log', t('diagBlk.writeToLog'), EX_X[4], 160, { message: '{value}' });
-  const end = makeBlock('end', t('diagBlk.end'), EX_X[5], 160);
+  const end = makeBlock('flow_return', t('flowIface.blk.return'), EX_X[5], 160, { name: 'ok', outcome: 'ok' });
   return {
     id: 'ex_did_format',
     nameKey: 'flowCore.tpl.did.name',
@@ -549,13 +647,13 @@ function buildExDid(): FlowTemplate {
     diagram: {
       blocks: [start, ses, rd, cv, fmt, lg, end],
       connections: [
-        conn(start, 'exec_out', ses, 'exec_in'),
+        conn(start, 'start', ses, 'exec_in'),
         conn(ses, 'exec_out', rd, 'exec_in'),
         conn(rd, 'exec_out', lg, 'exec_in'),
         conn(rd, 'data_out', cv, 'value_in'),
         conn(cv, 'value', fmt, 'vin'),
         conn(fmt, 'text_out', lg, 'value_in'),
-        conn(lg, 'exec_out', end, 'exec_in'),
+        conn(lg, 'exec_out', end, 'in'),
       ],
     },
   };

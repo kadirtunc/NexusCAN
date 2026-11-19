@@ -9,7 +9,8 @@ import type {
 import type { FlowTemplate } from './types';
 import { getBlockDef, getBlockDefFor, portsCompatible } from './blockDefs';
 import { migrateAll } from './flowMigrate';
-import { FLOW_INPUT } from './flowPorts';
+import { FLOW_IN, FLOW_OUT, FLOW_START, blockPortSpec, sortPortSpecs } from './flowPorts';
+import { bindParam, promoteParam, unbindParam, type PromoteResult } from './boundEdit';
 import { callType, type CallInfo } from './callIndex';
 import { callPorts } from './callPorts';
 import type { FlowRefV1 } from '../../types/diagWorkspace';
@@ -138,8 +139,8 @@ class FlowStoreImpl {
     if (this.state.readOnly) return '';
     const def = getBlockDef(type);
     if (!def) return '';
-    // Exactly one `flow_input` per flow.
-    if (type === FLOW_INPUT && this.state.diagram.blocks.some((b) => b.type === FLOW_INPUT)) return '';
+    // Exactly one `flow_start` per flow.
+    if (type === FLOW_START && this.state.diagram.blocks.some((b) => b.type === FLOW_START)) return '';
     this.pushUndo();
     const block: FlowBlock = {
       id: uuid(),
@@ -151,6 +152,16 @@ class FlowStoreImpl {
       status: 'idle',
       collapsed: false,
     };
+    // A fresh interface port gets a unique key (`in1` / `out1` ...), its label and the next order.
+    if (type === FLOW_IN || type === FLOW_OUT) {
+      const peers = this.state.diagram.blocks.filter((b) => b.type === type).map(blockPortSpec);
+      const prefix = type === FLOW_IN ? 'in' : 'out';
+      let n = 1;
+      while (peers.some((s) => s.key === `${prefix}${n}`)) n += 1;
+      const key = `${prefix}${n}`;
+      block.label = key;
+      block.config = { ...block.config, key, label: key, order: sortPortSpecs(peers).reduce((m, s) => Math.max(m, (s.order ?? -1) + 1), peers.length) };
+    }
     // A fresh variable block defaults to the first declared variable.
     if (type === 'var_get' || type === 'var_set') {
       const first = this.state.diagram.variables?.[0];
@@ -242,6 +253,16 @@ class FlowStoreImpl {
     this.setState({ diagram });
   }
 
+  /** Drops the migration-conflict flag of a `flow_out` once it is really edited / rewired (never by an "acknowledge"). */
+  private clearedConflict(blocks: FlowBlock[], blockId: string): FlowBlock[] {
+    return blocks.map((b) => {
+      if (b.id !== blockId || b.type !== FLOW_OUT || !('migrateConflict' in b.config)) return b;
+      const cfg = { ...b.config };
+      delete cfg['migrateConflict'];
+      return { ...b, config: cfg };
+    });
+  }
+
   updateBlockConfig(blockId: string, config: Record<string, unknown>): void {
     if (this.state.readOnly) return;
     this.pushUndo();
@@ -251,11 +272,12 @@ class FlowStoreImpl {
         b.id === blockId ? { ...b, config: { ...b.config, ...config } } : b,
       ),
     };
-    // Config-derived ports (`text_format.inputs`, `flow_input.inputs`, `flow_output.outputs`): drop connections
+    if (!('migrateConflict' in config)) diagram = { ...diagram, blocks: this.clearedConflict(diagram.blocks, blockId) };
+    // Config-derived ports (`text_format.inputs`, the `flow_in` / `flow_out` type, `boundParams`): drop connections
     // into / out of ports that no longer exist or whose type is no longer compatible (undoable as one change).
     const updated = diagram.blocks.find((b) => b.id === blockId);
-    if (updated && (updated.type === 'text_format' || updated.type === FLOW_INPUT || updated.type === 'flow_output')
-      && ('inputs' in config || 'outputs' in config)) {
+    if (updated && (updated.type === 'text_format' || updated.type === FLOW_IN || updated.type === FLOW_OUT || 'boundParams' in config)
+      && ('inputs' in config || 'type' in config || 'boundParams' in config)) {
       const ports = getBlockDefFor(updated)?.ports ?? [];
       const portOf = (b: FlowBlock, id: string) => getBlockDefFor(b)?.ports.find((p) => p.id === id);
       diagram = {
@@ -272,6 +294,34 @@ class FlowStoreImpl {
       };
     }
     this.setState({ diagram });
+  }
+
+  // ── Bound parameters (flow-interface-v2 §3): each one ONE undo step ────────────────────────────
+
+  bindParam(blockId: string, key: string): void {
+    if (this.state.readOnly) return;
+    const next = bindParam(this.state.diagram, blockId, key);
+    if (next === this.state.diagram) return;
+    this.pushUndo();
+    this.setState({ diagram: next });
+  }
+
+  unbindParam(blockId: string, key: string): void {
+    if (this.state.readOnly) return;
+    const next = unbindParam(this.state.diagram, blockId, key);
+    if (next === this.state.diagram) return;
+    this.pushUndo();
+    this.setState({ diagram: next, selectedConnectionId: null });
+  }
+
+  /** "Flow girişine yükselt": creates + wires a `flow_in` for the field. */
+  promoteParam(blockId: string, fieldKey: string): PromoteResult {
+    if (this.state.readOnly) return { ok: false, reason: 'unknown' };
+    const res = promoteParam(this.state.diagram, blockId, fieldKey, () => uuid());
+    if (!res.ok) return res;
+    this.pushUndo();
+    this.setState({ diagram: res.diagram });
+    return res;
   }
 
   updateBlockLabel(blockId: string, label: string): void {
@@ -395,6 +445,7 @@ class FlowStoreImpl {
     this.setState({
       diagram: {
         ...diagram,
+        blocks: this.clearedConflict(diagram.blocks, conn.toBlockId),
         connections: [...diagram.connections, newConn],
       },
     });
@@ -404,9 +455,11 @@ class FlowStoreImpl {
   removeConnection(id: string): void {
     if (this.state.readOnly) return;
     this.pushUndo();
+    const removed = this.state.diagram.connections.find((c) => c.id === id);
     this.setState({
       diagram: {
         ...this.state.diagram,
+        blocks: removed ? this.clearedConflict(this.state.diagram.blocks, removed.toBlockId) : this.state.diagram.blocks,
         connections: this.state.diagram.connections.filter((c) => c.id !== id),
       },
       selectedConnectionId: null,
@@ -482,7 +535,7 @@ class FlowStoreImpl {
         ...emptyDiagram(),
         id: this.state.diagram.id,
         name: this.state.diagram.name,
-        blocks: this.state.diagram.blocks.filter((b) => b.type === FLOW_INPUT),
+        blocks: this.state.diagram.blocks.filter((b) => b.type === FLOW_START || b.type === FLOW_IN || b.type === FLOW_OUT),
       },
       selectedBlockIds: [],
       selectedConnectionId: null,

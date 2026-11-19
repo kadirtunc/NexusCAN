@@ -14,6 +14,7 @@ import type {
   FlashProgressDto,
   FlashReportDto,
 } from '../../types/flash';
+import type { FlowFileValue } from '../../types/flowLibrary';
 
 export interface FlashImageState {
   handle: FlashImageHandleDto | null;
@@ -21,6 +22,8 @@ export interface FlashImageState {
   mock: boolean;
   /** Kept so a format / base-address change can reload without a new file pick. */
   file: File | null;
+  /** Bytes + name of the loaded file (also set for images that came from a bound `file` port, where `file` is null). */
+  source: FlowFileValue | null;
   loadedFormat: string;
   loadedBase: number;
   loading: boolean;
@@ -58,6 +61,7 @@ const IDLE_IMAGE: FlashImageState = {
   handle: null,
   mock: false,
   file: null,
+  source: null,
   loadedFormat: '',
   loadedBase: 0,
   loading: false,

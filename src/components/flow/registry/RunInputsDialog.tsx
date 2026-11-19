@@ -1,6 +1,9 @@
 /**
- * "Run inputs" dialog: asks for the `flow_input` values before a run. File inputs use the in-memory `flowFiles`
- * mechanism (keyed per document + input key); `ecu` inputs cannot be provided yet (ECU binding = Phase B2).
+ * "Run inputs" dialog (Test Run, flow-interface-v2 §7): the form is generated from the `flow_in` specs in
+ * (order, key) order, showing unit / min / max / byte length / accepted extensions and the description. File
+ * inputs use the in-memory `flowFiles` mechanism (keyed per document + input key) and are handed over as
+ * `FlowFileValue { name, bytes }`; the `ecu` input is an ECU picker over the active vehicle's ECU registry.
+ * Values are checked by `resolveRunInputs` (range / length / extension errors refuse the run, never clamped).
  */
 import React, { useState } from 'react';
 import { useI18n } from '../../../i18n';
@@ -64,7 +67,7 @@ export const RunInputsDialog: React.FC<{
     for (const s of inputs) {
       if (s.type === 'file') {
         const f = flowFiles.get(inputFileKey(docId, s.key));
-        if (f) provided[s.key] = f.bytes;
+        if (f) provided[s.key] = { name: f.name, bytes: f.bytes };
       } else if (s.type !== 'ecu') {
         provided[s.key] = values[s.key];
       }
@@ -96,11 +99,14 @@ export const RunInputsDialog: React.FC<{
             const id = `run-in-${s.key}`;
             return (
               <div key={s.key}>
-                <label htmlFor={id} className="mb-0.5 flex items-center gap-1.5 text-[11.5px] text-muted">
+                <label htmlFor={id} className="mb-0.5 flex items-center gap-1.5 text-[11.5px] text-muted" title={s.description}>
+                  <span className="font-mono text-[10.5px] tabular-nums text-subtle">{s.order ?? '–'}</span>
                   <span>{label}</span>
                   <span className="font-mono text-[10.5px] text-subtle">{s.key} · {s.type}</span>
+                  {s.unit !== undefined && <span className="font-mono text-[10.5px] text-subtle">[{s.unit}]</span>}
                   {s.required && <span className="font-mono text-[10.5px] text-warn">{t('flowReg.ports.required')}</span>}
                 </label>
+                {s.description !== undefined && <div className="mb-1 text-[11px] leading-snug text-subtle">{s.description}</div>}
                 {s.type === 'ecu' ? (
                   <div className="flex flex-col gap-1.5">
                     <select id={id} value={ecuId} onChange={(e) => { setEcuId(e.target.value); setOpenMsg(null); }} className={`${FIELD} cursor-pointer`}>
@@ -134,6 +140,7 @@ export const RunInputsDialog: React.FC<{
                     <input
                       id={id}
                       type="file"
+                      accept={s.accept !== undefined ? s.accept.join(',') : undefined}
                       onChange={(e) => {
                         const f = e.target.files?.[0];
                         if (f) void flowFiles.set(inputFileKey(docId, s.key), f);
@@ -141,6 +148,9 @@ export const RunInputsDialog: React.FC<{
                       }}
                       className="w-full text-[12px] text-muted file:mr-2 file:cursor-pointer file:rounded-[2px] file:border file:border-hairline file:bg-elevated file:px-2 file:py-1 file:text-[12px] file:text-ink"
                     />
+                    {s.accept !== undefined && (
+                      <span className="font-mono text-[11px] text-subtle">{t('flowIface.run.accepts', { accept: s.accept.join(' ') })}</span>
+                    )}
                     {(() => {
                       const f = flowFiles.get(inputFileKey(docId, s.key));
                       return f ? (
@@ -188,6 +198,14 @@ export const RunInputsDialog: React.FC<{
                     onChange={(e) => setValues((v) => ({ ...v, [s.key]: e.target.value }))}
                     className={FIELD}
                   />
+                )}
+                {s.type === 'number' && (s.min !== undefined || s.max !== undefined) && (
+                  <div className="mt-0.5 font-mono text-[11px] tabular-nums text-subtle">
+                    {t('flowIface.run.range.hint', { min: s.min ?? '−∞', max: s.max ?? '∞' })}{s.unit !== undefined ? ` ${s.unit}` : ''}
+                  </div>
+                )}
+                {(s.type === 'hex' || s.type === 'bytes') && s.byteLength !== undefined && (
+                  <div className="mt-0.5 font-mono text-[11px] tabular-nums text-subtle">{s.byteLength} B</div>
                 )}
               </div>
             );

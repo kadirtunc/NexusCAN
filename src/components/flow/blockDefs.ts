@@ -1,10 +1,13 @@
-import type { BlockDef, BlockDefSeed, BlockCategory, FlowBlock, PortDef, PortType } from './types';
+import type { BlockDef, BlockDefSeed, BlockCategory, ConfigField, FlowBlock, PortDef, PortType } from './types';
 import type { BlockPack } from '../../types/flowLibrary';
 import type { DiagProtocol } from '../../types/diagWorkspace';
 import { formatInputs } from './coreRuntime';
 import { callIndex, isCallType, readCallRef, refKey } from './callIndex';
 import { callPorts, CALL_ERROR, CALL_IN } from './callPorts';
-import { FLOW_INPUT, FLOW_OUTPUT, interfacePorts, interfacePortsKey } from './flowPorts';
+import {
+  FLOW_IN, FLOW_OUT, FLOW_RETURN, FLOW_START, LEGACY_END, LEGACY_FLOW_INPUT, LEGACY_FLOW_OUTPUT, LEGACY_START,
+  VALUE_PORT, interfacePorts, interfacePortsKey,
+} from './flowPorts';
 
 // ─── CORE CATEGORY (diag-workspace-v1 §8.1) ───────────────────────────────────
 
@@ -207,48 +210,101 @@ const coreBlocks: BlockDefSeed[] = [
   },
 ];
 
-// ─── FLOW CATEGORY ────────────────────────────────────────────────────────────
+// ─── INTERFACE CATEGORY (flow-interface-v2 §2) ───────────────────────────────
 
-const flowBlocks: BlockDefSeed[] = [
+const interfaceBlocks: BlockDefSeed[] = [
   {
-    type: FLOW_INPUT,
-    labelKey: 'flowReg.blk.flowInput',
-    category: 'flow',
-    descriptionKey: 'flowReg.desc.flowInput',
-    icon: 'LogIn',
+    type: FLOW_START,
+    labelKey: 'flowIface.blk.start',
+    category: 'interface',
+    descriptionKey: 'flowIface.desc.start',
+    icon: 'Play',
     ports: [{ id: 'start', label: 'start', type: 'exec', direction: 'output' }],
-    defaultConfig: { inputs: [] },
-    configSchema: [{ key: 'inputs', labelKey: 'flowReg.cfg.inputs', type: 'portspecs' }],
+    defaultConfig: {},
+    configSchema: [],
   },
   {
-    type: FLOW_OUTPUT,
-    labelKey: 'flowReg.blk.flowOutput',
-    category: 'flow',
-    descriptionKey: 'flowReg.desc.flowOutput',
+    // Pure: its `value` is the frame input `key`. Port type / label derive from the config (`getBlockDefFor`);
+    // the spec itself is edited by the dedicated port-spec inspector.
+    type: FLOW_IN,
+    labelKey: 'flowIface.blk.in',
+    category: 'interface',
+    descriptionKey: 'flowIface.desc.in',
+    icon: 'LogIn',
+    ports: [{ id: VALUE_PORT, label: VALUE_PORT, type: 'data', direction: 'output' }],
+    defaultConfig: { key: '', label: '', type: 'text', required: false },
+    configSchema: [],
+  },
+  {
+    // NOT on the exec path: sampled when the frame ends.
+    type: FLOW_OUT,
+    labelKey: 'flowIface.blk.out',
+    category: 'interface',
+    descriptionKey: 'flowIface.desc.out',
     icon: 'LogOut',
+    ports: [{ id: VALUE_PORT, label: VALUE_PORT, type: 'data', direction: 'input', optional: true }],
+    defaultConfig: { key: '', label: '', type: 'text', required: false },
+    configSchema: [],
+  },
+  {
+    type: FLOW_RETURN,
+    labelKey: 'flowIface.blk.return',
+    category: 'interface',
+    descriptionKey: 'flowIface.desc.return',
+    icon: 'CornerDownLeft',
     ports: [{ id: 'in', label: 'in', type: 'exec', direction: 'input' }],
-    defaultConfig: { name: 'ok', outcome: 'ok', outputs: [] },
+    defaultConfig: { name: 'ok', outcome: 'ok' },
     configSchema: [
-      { key: 'name', labelKey: 'flowReg.cfg.outputName', type: 'text', placeholder: 'ok' },
+      { key: 'name', labelKey: 'flowReg.cfg.outputName', type: 'text', placeholder: 'ok', bindable: false },
       {
         key: 'outcome',
         labelKey: 'flowReg.cfg.outcome',
         type: 'select',
+        bindable: false,
         options: [
           { value: 'ok', label: 'ok' },
           { value: 'fail', label: 'fail' },
           { value: 'error', label: 'error' },
         ],
       },
-      { key: 'outputs', labelKey: 'flowReg.cfg.outputs', type: 'portspecs' },
     ],
   },
+];
+
+// ─── FLOW CATEGORY ────────────────────────────────────────────────────────────
+
+const flowBlocks: BlockDefSeed[] = [
+  // v1 interface blocks: not offered in the palette; `migrateAll` rewrites them on load, the defs only keep
+  // unmigratable data renderable (flow-interface-v2 §4).
   {
-    type: 'start',
+    type: LEGACY_FLOW_INPUT,
+    labelKey: 'flowReg.blk.flowInput',
+    category: 'flow',
+    descriptionKey: 'flowReg.desc.flowInput',
+    icon: 'LogIn',
+    hidden: true,
+    ports: [{ id: 'start', label: 'start', type: 'exec', direction: 'output' }],
+    defaultConfig: { inputs: [] },
+    configSchema: [],
+  },
+  {
+    type: LEGACY_FLOW_OUTPUT,
+    labelKey: 'flowReg.blk.flowOutput',
+    category: 'flow',
+    descriptionKey: 'flowReg.desc.flowOutput',
+    icon: 'LogOut',
+    hidden: true,
+    ports: [{ id: 'in', label: 'in', type: 'exec', direction: 'input' }],
+    defaultConfig: { name: 'ok', outcome: 'ok', outputs: [] },
+    configSchema: [],
+  },
+  {
+    type: LEGACY_START,
     labelKey: 'diagBlk.start',
     category: 'flow',
     descriptionKey: 'diagBlk.startsTheFlow',
     icon: 'Play',
+    hidden: true,
     ports: [
       { id: 'exec_out', label: 'exec_out', type: 'exec', direction: 'output' },
     ],
@@ -256,11 +312,12 @@ const flowBlocks: BlockDefSeed[] = [
     configSchema: [],
   },
   {
-    type: 'end',
+    type: LEGACY_END,
     labelKey: 'diagBlk.end',
     category: 'flow',
     descriptionKey: 'diagBlk.endsTheFlow',
     icon: 'Square',
+    hidden: true,
     ports: [
       { id: 'exec_in', label: 'exec_in', type: 'exec', direction: 'input' },
     ],
@@ -1529,12 +1586,14 @@ function packed(defs: BlockDefSeed[], pack: BlockPack, requires?: DiagProtocol[]
 
 const coreDefs = packed(coreBlocks, 'core');
 const flowDefs = packed(flowBlocks, 'core');
+const interfaceDefs = packed(interfaceBlocks, 'core');
 const udsDefs = packed(udsBlocks, 'uds', ['uds_can']);
 const dataDefs = packed(dataBlocks, 'core');
 const ioDefs = packed(ioBlocks, 'core');
 
 export const BLOCK_CATALOG: BlockDef[] = [
   ...coreDefs,
+  ...interfaceDefs,
   ...flowDefs,
   ...udsDefs,
   ...dataDefs,
@@ -1543,6 +1602,7 @@ export const BLOCK_CATALOG: BlockDef[] = [
 
 export const BLOCK_CATALOG_BY_CATEGORY: Record<BlockCategory, BlockDef[]> = {
   core: coreDefs,
+  interface: interfaceDefs,
   flow: flowDefs,
   uds:  udsDefs,
   data: dataDefs,
@@ -1602,6 +1662,12 @@ const dynamicDefs = new Map<string, BlockDef>();
  * input per name in `config.inputs`; `flow_input` / `flow_output` get one port per interface spec.
  */
 export function getBlockDefFor(block: FlowBlock): BlockDef | undefined {
+  const base = getBlockDefForInner(block);
+  if (!base) return base;
+  return withBoundPorts(base, block);
+}
+
+function getBlockDefForInner(block: FlowBlock): BlockDef | undefined {
   const def = getBlockDef(block.type);
   if (!def) return def;
   if (isCallType(block.type)) {
@@ -1616,13 +1682,13 @@ export function getBlockDefFor(block: FlowBlock): BlockDef | undefined {
     dynamicDefs.set(key, next);
     return next;
   }
-  if (block.type === FLOW_INPUT || block.type === FLOW_OUTPUT) {
-    const extra = interfacePorts(block) ?? [];
-    if (extra.length === 0) return def;
+  if (block.type === FLOW_IN || block.type === FLOW_OUT) {
+    const ports = interfacePorts(block) ?? [];
+    if (ports.length === 0) return def;
     const key = interfacePortsKey(block);
     const cached = dynamicDefs.get(key);
     if (cached) return cached;
-    const next: BlockDef = { ...def, ports: [...def.ports, ...extra] };
+    const next: BlockDef = { ...def, ports };
     dynamicDefs.set(key, next);
     return next;
   }
@@ -1634,6 +1700,96 @@ export function getBlockDefFor(block: FlowBlock): BlockDef | undefined {
   if (cached) return cached;
   const inputs: PortDef[] = names.map((n) => ({ id: n, label: n, type: 'data', direction: 'input', optional: true }));
   const next: BlockDef = { ...def, ports: [...inputs, ...def.ports] };
+  dynamicDefs.set(key, next);
+  return next;
+}
+
+// ─── Bindable parameters (flow-interface-v2 §3) ───────────────────────────────
+
+/** Input port id of a bound parameter. */
+export const BOUND_PREFIX = 'p:';
+export const boundPortId = (key: string): string => `${BOUND_PREFIX}${key}`;
+
+/** Pseudo-field of `uds_flash_image`: the firmware file (not a config key; the value is a `FlowFileValue`). */
+export const FLASH_FILE_FIELD = 'file';
+export const FLASH_FILE_ACCEPT: readonly string[] = ['.hex', '.s19', '.srec', '.bin'];
+
+const BINDABLE_TYPES: ReadonlySet<ConfigField['type']> = new Set(['text', 'textarea', 'number', 'select', 'hex', 'boolean']);
+
+export type BindableKind = 'text' | 'textarea' | 'number' | 'select' | 'hex' | 'boolean' | 'file';
+
+export interface BindableField {
+  key: string;
+  kind: BindableKind;
+  /** Config field (`null` for the `file` pseudo-field). */
+  field: ConfigField | null;
+  /** Verbatim label for the pseudo-field. */
+  labelKey?: ConfigField['labelKey'];
+  label?: string;
+  portType: PortType;
+  options?: string[];
+  accept?: string[];
+}
+
+function boundPortType(kind: BindableKind): PortType {
+  return kind === 'boolean' ? 'bool' : kind === 'file' ? 'bytes' : 'data';
+}
+
+/** Structural blocks whose parameters are never bound (they ARE the interface / the jump markers). */
+const NON_BINDABLE_BLOCKS: ReadonlySet<string> = new Set([FLOW_START, FLOW_IN, FLOW_OUT, FLOW_RETURN, 'flow_terminal', 'flow_goto']);
+
+/** Fields of a block type that can be bound to an input port (catalog order; the `file` pseudo-field last). */
+export function bindableFields(type: string): BindableField[] {
+  const def = isCallType(type) || NON_BINDABLE_BLOCKS.has(type) ? undefined : getBlockDef(type);
+  if (!def) return [];
+  const out: BindableField[] = [];
+  for (const f of def.configSchema) {
+    if (f.bindable === false || !BINDABLE_TYPES.has(f.type)) continue;
+    const kind = f.type as BindableKind;
+    out.push({
+      key: f.key, kind, field: f, labelKey: f.labelKey, label: f.label, portType: boundPortType(kind),
+      ...(kind === 'select' ? { options: (f.options ?? []).map((o) => o.value) } : {}),
+    });
+  }
+  if (type === 'uds_flash_image') {
+    out.push({
+      key: FLASH_FILE_FIELD, kind: 'file', field: null, labelKey: 'flowIface.bind.firmwareFile',
+      portType: 'bytes', accept: [...FLASH_FILE_ACCEPT],
+    });
+  }
+  return out;
+}
+
+/** `config.boundParams` (field keys); a malformed value reads as none. */
+export function readBoundParams(config: Record<string, unknown>): string[] {
+  const raw = config['boundParams'];
+  return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : [];
+}
+
+/** One required `p:<key>` input per bound parameter (known keys only: unknown ones are a validation error). */
+export function boundPorts(block: FlowBlock): PortDef[] {
+  const keys = readBoundParams(block.config);
+  if (keys.length === 0) return [];
+  const fields = bindableFields(block.type);
+  const ports: PortDef[] = [];
+  for (const k of keys) {
+    const f = fields.find((x) => x.key === k);
+    if (!f) continue;
+    ports.push({ id: boundPortId(k), label: boundPortId(k), type: f.portType, direction: 'input' });
+  }
+  return ports;
+}
+
+function withBoundPorts(def: BlockDef, block: FlowBlock): BlockDef {
+  const extra = boundPorts(block);
+  if (extra.length === 0) return def;
+  const key = `bound\u0000${block.type}\u0000${def.ports.map((p) => p.id).join('|')}\u0000${extra.map((p) => `${p.id}:${p.type}`).join('|')}`;
+  const cached = dynamicDefs.get(key);
+  if (cached) return cached;
+  // Bound inputs sit with the other inputs (before the first output) so the port rows stay grouped.
+  const firstOut = def.ports.findIndex((p) => p.direction === 'output');
+  const at = firstOut < 0 ? def.ports.length : firstOut;
+  const next: BlockDef = { ...def, ports: [...def.ports.slice(0, at), ...extra, ...def.ports.slice(at)] };
   dynamicDefs.set(key, next);
   return next;
 }

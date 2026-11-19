@@ -5,7 +5,7 @@ import type { DiagProtocol } from '../../types/diagWorkspace';
 /** `ecu` carries an ECU record reference (flow interface input `ecu`, `ecu_source` in Phase C). */
 export type PortType = 'exec' | 'data' | 'bool' | 'bytes' | 'ecu';
 export type PortDirection = 'input' | 'output';
-export type BlockCategory = 'core' | 'flow' | 'uds' | 'data' | 'io';
+export type BlockCategory = 'core' | 'flow' | 'uds' | 'data' | 'io' | 'interface';
 export type BlockStatus = 'idle' | 'running' | 'success' | 'error' | 'skipped' | 'waiting';
 
 export interface PortDef {
@@ -52,13 +52,16 @@ export interface ConfigField extends LocalizedText {
     /** Select of the flow's declared variables (config value = variable name). */
     | 'variable'
     /** Comma-separated identifier list stored as `string[]` (text_format inputs). */
-    | 'namelist'
-    /** Interface port list (`flow_input.inputs` / `flow_output.outputs`), edited by the port-spec editor. */
-    | 'portspecs';
+    | 'namelist';
   options?: Array<{ value: string } & LocalizedText>;
   /** Verbatim placeholder (language-neutral). */
   placeholder?: string;
   placeholderKey?: TranslationKey;
+  /**
+   * Scalar fields (`text` / `textarea` / `number` / `select` / `hex` / `boolean`) can be bound to an input port
+   * (`p:<key>`, flow-interface-v2 §3); `false` opts a field out.
+   */
+  bindable?: boolean;
   /** Field is shown only while this returns true for the block's current config. */
   visibleWhen?: (config: Record<string, unknown>) => boolean;
 }

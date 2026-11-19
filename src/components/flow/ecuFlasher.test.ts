@@ -19,6 +19,8 @@ import type { FlashBackend } from './flashRun';
 import type { FlowBlock, FlowDiagram } from './types';
 import type { DownloadConfigDto, FirmwareImageSummaryDto, FlashReportDto } from '../../types/flash';
 import type { DiagSessionConfigDto } from '../../types/udsClient';
+import type { FlowFileValue } from '../../types/flowLibrary';
+import { newEcuRecord } from '../diagnostics/workspace/ecuDefaults';
 
 // ─── Tiny assert helpers ───────────────────────────────────────────────────────
 
@@ -76,11 +78,19 @@ class FakeTransport implements FlowTransport {
   override: Responder | null = null;
   delayMs = 0;
   readonly flash: FlashBackend;
+  /** What `prepare` received: the effective settings of the flash block and its image source (bound `file`). */
+  /** Hook run inside `prepare` (image load); may stop the engine and gate the load. */
+  onPrepare: (() => void) | null = null;
+  prepareGate: Promise<void> | null = null;
+  prepared: Array<{ baseAddress: number; imageKey: string; file: FlowFileValue | null }> = [];
 
   constructor() {
     const self = this;
     this.flash = {
-      async prepare() {
+      async prepare(_block, settings, _tab, source) {
+        self.prepared.push({ baseAddress: settings.baseAddress, imageKey: source.imageKey, file: source.file });
+        self.onPrepare?.();
+        if (self.prepareGate) await self.prepareGate;
         return { handle: { imageId: 'img-1', fileName: 'fw.hex', format: 'intelHex', summary: SUMMARY }, dto: DTO };
       },
       async download(_dto: DiagSessionConfigDto, imageId: string, cfg: DownloadConfigDto): Promise<FlashReportDto> {
@@ -194,10 +204,16 @@ function blockByLabel(label: string): FlowBlock {
 function runLogText(): string {
   return flowStore.getSnapshot().runLog.map((e) => e.message).join('\n');
 }
-async function runFlasher(tr: FakeTransport, prep?: () => void): Promise<void> {
+/** The firmware the operator picked for the run form (flow-interface-v2 §6: `firmware` is a file input). */
+const FIRMWARE: FlowFileValue = { name: 'fw.hex', bytes: Uint8Array.from([0x3a, 0x00, 0x00, 0x00, 0x01, 0xff]) };
+const ECU = newEcuRecord({ name: 'Engine1' });
+let lastResult: FlowEngine['result'] = null;
+async function runFlasher(tr: FakeTransport, prep?: () => void, inputs: Record<string, unknown> = {}): Promise<void> {
   loadFlasher();
   prep?.();
-  await new FlowEngine().run({ transport: tr });
+  const eng = new FlowEngine();
+  await eng.run({ transport: tr, ecu: ECU, inputs: { firmware: FIRMWARE, ...inputs } });
+  lastResult = eng.result;
 }
 const lastKa = (tr: FakeTransport): boolean | undefined => tr.recs.filter((r) => r.kind === 'ka').at(-1)?.ka;
 
@@ -460,7 +476,7 @@ async function keepaliveRelease(): Promise<void> {
   tr.delayMs = 40;
   loadFlasher();
   const engine = new FlowEngine();
-  const run = engine.run({ transport: tr });
+  const run = engine.run({ transport: tr, ecu: ECU, inputs: { firmware: FIRMWARE } });
   while (!tr.recs.some((r) => r.kind === 'ka')) await new Promise((r) => setTimeout(r, 5));
   await new Promise((r) => setTimeout(r, 60));
   engine.stop();
@@ -472,7 +488,7 @@ async function keepaliveRelease(): Promise<void> {
   const p = new FakeTransport();
   p.delayMs = 40;
   loadFlasher();
-  const run2 = new FlowEngine().run({ transport: p });
+  const run2 = new FlowEngine().run({ transport: p, ecu: ECU, inputs: { firmware: FIRMWARE } });
   while (!p.recs.some((r) => r.kind === 'ka')) await new Promise((r) => setTimeout(r, 5));
   stopAllTxSources();
   await run2;
@@ -488,6 +504,159 @@ async function keepaliveRelease(): Promise<void> {
     if (c) flowStore.removeConnection(c.id);
   });
   eq(u.lines().at(-1), 'KA STOP', 'unhandled error: engine still stops the keep-alive');
+}
+
+// ─── 7. Flow interface v2: bound parameters + run inputs ───────────────────────
+
+async function boundInputs(): Promise<void> {
+  // defaults: secLevel 11 / baseAddr 00000000 / the firmware file reaches the flash block as its image source
+  const a = new FakeTransport();
+  await runFlasher(a);
+  eq(a.prepared.map((p) => [p.baseAddress, p.file?.name]), [[0, 'fw.hex']], 'bound file + base address reach the flash block (defaults)');
+  const flashBlock = blockByLabel(t('udsTpl.fl.flash'));
+  eq(a.prepared[0].imageKey, `bound\u0000\u0000${flashBlock.id}`, 'image key = frame path + block id (distinct from the panel image key)');
+  eq(flashBlock.config['base_address'], '00000000', 'the stored flash config is untouched by the override');
+  ok(!('file' in flashBlock.config) && !('$imageKey' in flashBlock.config), 'no transient keys leak into the stored config');
+  ok(a.lines().includes('27 11|P'), 'secLevel default 11 -> 27 11');
+
+  // overrides: secLevel 03 (27 03 / 27 04) and baseAddr 08000000
+  const b = new FakeTransport();
+  await runFlasher(b, undefined, { secLevel: '03', baseAddr: '08000000' });
+  ok(b.lines().includes('27 03|P') && b.lines().some((l) => l.startsWith('27 04 ')), 'secLevel 03 overrides the access level of the 0x27 block');
+  ok(!b.lines().includes('27 11|P'), 'the stored access level 11 is not used when bound');
+  eq(b.prepared[0].baseAddress, 0x08000000, 'baseAddr override reaches the flash settings');
+  eq(blockByLabel(t('udsTpl.fl.security')).config['access_level'], '11', 'stored access_level unchanged after the run');
+
+  // refused before ANY TX: missing firmware, wrong extension, bad select, wrong byte length, missing ecu
+  const refusals: Array<[string, Record<string, unknown>]> = [
+    ['missing firmware', { firmware: undefined }],
+    ['extension not accepted', { firmware: { name: 'fw.exe', bytes: FIRMWARE.bytes } }],
+    ['select outside the options', { secLevel: '99' }],
+    ['hex byte length', { baseAddr: '0102' }],
+  ];
+  for (const [label, inputs] of refusals) {
+    const tr = new FakeTransport();
+    loadFlasher();
+    const eng = new FlowEngine();
+    await eng.run({ transport: tr, ecu: ECU, inputs: { firmware: FIRMWARE, ...inputs } });
+    eq([eng.result?.refused, tr.recs.length], [true, 0], `${label}: run refused, nothing transmitted`);
+  }
+  {
+    const tr = new FakeTransport();
+    loadFlasher();
+    const eng = new FlowEngine();
+    await eng.run({ transport: tr, inputs: { firmware: FIRMWARE } });
+    eq([eng.result?.refused, tr.recs.length], [true, 0], 'missing ECU: run refused, nothing transmitted');
+  }
+}
+
+// ─── 8. Stop during the image load (prepare) + pre-run bound validation ────────
+
+async function stopDuringPrepare(): Promise<void> {
+  const tr = new FakeTransport();
+  let release: () => void = () => undefined;
+  tr.prepareGate = new Promise<void>((r) => { release = r; });
+  loadFlasher();
+  const eng = new FlowEngine();
+  tr.onPrepare = () => {
+    eng.stop();
+    release();
+  };
+  await eng.run({ transport: tr, ecu: ECU, inputs: { firmware: FIRMWARE } });
+  eq(tr.recs.filter((r) => r.kind === 'download').length, 0, 'Stop during image load: no download');
+  ok(!tr.uds().some((r) => r.sid === 0x31 && r.data[1] === 0xff && r.data[2] === 0x00), 'Stop during image load: no erase request');
+  ok(!tr.uds().some((r) => r.sid === 0x34 || r.sid === 0x36 || r.sid === 0x37), 'Stop during image load: no transfer request');
+  eq(eng.result?.stopped, true, 'Stop during image load: result is stopped');
+  eq(lastKa(tr), false, 'Stop during image load: keep-alive stopped');
+}
+
+async function preRunBoundValidation(): Promise<void> {
+  // secLevel passes its own select (ZZ is offered) but is NOT valid hex for the bound access_level field:
+  // the whole run is refused before 10 03 / 85 / 28 go out.
+  const tr = new FakeTransport();
+  loadFlasher();
+  const sec = diagram().blocks.find((b) => b.type === 'flow_in' && b.config['key'] === 'secLevel') as FlowBlock;
+  flowStore.updateBlockConfig(sec.id, { options: ['01', '03', '11', 'ZZ'] });
+  const eng = new FlowEngine();
+  await eng.run({ transport: tr, ecu: ECU, inputs: { firmware: FIRMWARE, secLevel: 'ZZ' } });
+  eq([eng.result?.refused, tr.recs.length], [true, 0], 'invalid bound value refused pre-run: zero requests');
+  ok(runLogText().includes('p:access_level'), 'pre-run refusal names the bound port');
+}
+
+// ─── 9. safe_abort (before the first erase / 0x34) vs bootloader_fail (after) ──
+
+async function outcomeSplit(): Promise<void> {
+  const neg = (m: (sid: number, d: readonly number[]) => boolean, err: string) =>
+    (sid: number, data: readonly number[]): Error | undefined => (m(sid, data) ? new Error(err) : undefined);
+  const preErase: Array<[string, (sid: number, d: readonly number[]) => boolean, string]> = [
+    ['10 03', (sid, d) => sid === 0x10 && d[0] === 0x03, 'NRC 0x22 (conditionsNotCorrect)'],
+    ['85 02', (sid, d) => sid === 0x85 && (d[0] & 0x7f) === 0x02, 'NRC 0x22 (conditionsNotCorrect)'],
+    ['28 03', (sid, d) => sid === 0x28 && (d[0] & 0x7f) === 0x03, 'NRC 0x22 (conditionsNotCorrect)'],
+    ['10 02', (sid, d) => sid === 0x10 && d[0] === 0x02, 'NRC 0x7E (subFunctionNotSupportedInActiveSession)'],
+    ['10 02 timeout', (sid, d) => sid === 0x10 && d[0] === 0x02, 'timeout (P2)'],
+    ['27 11 seed', (sid, d) => sid === 0x27 && d[0] === 0x11, 'NRC 0x37 (requiredTimeDelayNotExpired)'],
+    ['27 12 key', (sid, d) => sid === 0x27 && d[0] === 0x12, 'NRC 0x35 (invalidKey)'],
+  ];
+  for (const [label, match, err] of preErase) {
+    const tr = new FakeTransport();
+    tr.override = neg(match, err);
+    await runFlasher(tr);
+    eq([lastResult?.outcome, lastResult?.name, lastResult?.stopped], ['fail', 'safe_abort', false], `${label} failure: outcome safe_abort`);
+    assertNoProgramming(tr, `${label} failure`);
+    ok(!tr.uds().some((r) => r.sid === 0x31 && r.data[1] === 0xff), `${label} failure: no FF xx routine at all`);
+    ok(tr.lines().includes('10 01|P') && lastKa(tr) === false, `${label} failure: lane restored the session and stopped the keep-alive`);
+  }
+  // after the erase has been sent: bootloader_fail
+  const erase = new FakeTransport();
+  erase.override = (sid, data) => (sid === 0x31 && data[1] === 0xff && data[2] === 0x00 ? new Error('NRC 0x72 (generalProgrammingFailure)') : undefined);
+  await runFlasher(erase);
+  eq([lastResult?.outcome, lastResult?.name], ['fail', 'bootloader_fail'], 'erase failure: bootloader_fail');
+  const dl = new FakeTransport();
+  dl.downloadFails = true;
+  await runFlasher(dl);
+  eq([lastResult?.outcome, lastResult?.name], ['fail', 'bootloader_fail'], 'download / transfer failure: bootloader_fail');
+  const chk = new FakeTransport();
+  chk.override = (sid, data) => (sid === 0x31 && data[1] === 0x02 && data[2] === 0x02 ? [0x71, 0x01, 0x02, 0x02, 0x01] : undefined);
+  await runFlasher(chk);
+  eq([lastResult?.outcome, lastResult?.name], ['fail', 'bootloader_fail'], 'check memory failure: bootloader_fail');
+  // declined confirmation: nothing transmitted yet -> safe_abort directly, no restore-lane frames at all
+  promptAnswer = null;
+  const cancel = new FakeTransport();
+  await runFlasher(cancel);
+  promptAnswer = 'OK';
+  eq([lastResult?.outcome, lastResult?.name], ['fail', 'safe_abort'], 'declined confirmation: safe_abort');
+  eq(cancel.recs.length, 0, 'declined confirmation: zero frames transmitted (no restore lane)');
+  // operator Stop stays `error`
+  const stp = new FakeTransport();
+  stp.delayMs = 40;
+  loadFlasher();
+  const se = new FlowEngine();
+  const sp = se.run({ transport: stp, ecu: ECU, inputs: { firmware: FIRMWARE } });
+  while (!stp.recs.some((r) => r.kind === 'ka')) await new Promise((r) => setTimeout(r, 5));
+  se.stop();
+  await sp;
+  eq([se.result?.outcome, se.result?.stopped], ['error', true], 'Stop: error outcome');
+  // minimal template: reset NRC (after the erase) ends bootloader_fail
+  const min = FLOW_TEMPLATES.find((x) => x.id === 'ecu_flasher_minimal');
+  if (!min) throw new Error('minimal template missing');
+  flowStore.loadTemplate(min);
+  const mr = new FakeTransport();
+  mr.override = (sid) => (sid === 0x11 ? new Error('NRC 0x22 (conditionsNotCorrect)') : undefined);
+  const me = new FlowEngine();
+  await me.run({ transport: mr, ecu: ECU, inputs: { firmware: FIRMWARE } });
+  eq([me.result?.outcome, me.result?.name], ['fail', 'bootloader_fail'], 'minimal: reset NRC -> bootloader_fail');
+  ok(mr.recs.some((r) => r.kind === 'download'), 'minimal: the download had run before the reset failed');
+  flowStore.loadTemplate(min);
+  const mp = new FakeTransport();
+  mp.override = (sid, data) => (sid === 0x10 && data[0] === 0x02 ? new Error('NRC 0x22 (conditionsNotCorrect)') : undefined);
+  const mpe = new FlowEngine();
+  await mpe.run({ transport: mp, ecu: ECU, inputs: { firmware: FIRMWARE } });
+  eq([mpe.result?.outcome, mpe.result?.name], ['fail', 'safe_abort'], 'minimal: pre-erase failure -> safe_abort');
+  ok(!mp.lines().includes('DOWNLOAD') && !mp.uds().some((r) => r.sid === 0x31 && r.data[1] === 0xff), 'minimal: nothing erased / downloaded');
+  ok(mp.lines().includes('28 00 01|P') && mp.lines().includes('85 01|P') && mp.lines().includes('10 01|P'), 'minimal: restore lane ran (comm on, DTC on, default session)');
+  const okRun = new FakeTransport();
+  await runFlasher(okRun);
+  eq([lastResult?.outcome, lastResult?.name], ['ok', 'ok'], 'happy path: ok');
 }
 
 // ─── Pure helpers ──────────────────────────────────────────────────────────────
@@ -509,6 +678,10 @@ async function main(): Promise<void> {
   await noFunctionalId();
   await waitReady();
   await keepaliveRelease();
+  await boundInputs();
+  await stopDuringPrepare();
+  await preRunBoundValidation();
+  await outcomeSplit();
   console.log(`ecuFlasher.test: ${passed} checks passed`);
 }
 

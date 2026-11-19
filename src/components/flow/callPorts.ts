@@ -1,13 +1,13 @@
 /**
- * Ports of a call block (diag-workspace-v1 §8) derived from the callee's interface: exec `in` + one input
- * per callee input (same key / type mapping as `flow_input`); one exec output per outcome name, an always
- * present exec `error` (unhandled callee error) and one data output per output key (union over outcomes).
- * A callee outcome named `error` shares the `error` port.
+ * Ports of a call block (flow-interface-v2 §2) derived from the callee's interface: exec `in` + one input per
+ * `flow_in` (port id = key, ordered by `order`); one exec output per outcome name, an always present exec
+ * `error` (unhandled callee error) and one data output per `flow_out` (port id = key; flow-level, not per
+ * outcome). A callee outcome named `error` shares the `error` port.
  */
 import { t } from '../../i18n';
 import type { FlowInterfaceV1 } from '../../types/flowLibrary';
 import { portTypeOf } from './flowPorts';
-import type { PortDef, PortType } from './types';
+import type { PortDef } from './types';
 
 export const CALL_IN = 'in';
 export const CALL_ERROR = 'error';
@@ -41,21 +41,14 @@ export function callPorts(iface: FlowInterfaceV1): CallPorts {
   }
   if (!outs.has(CALL_ERROR)) ports.push({ id: CALL_ERROR, label: CALL_ERROR, type: 'exec', direction: 'output' });
   const execOut = new Set<string>([...outs, CALL_ERROR]);
-  const dataTypes = new Map<string, PortType>();
-  for (const o of iface.outcomes) {
-    for (const s of o.outputs) {
-      const ty = portTypeOf(s.type);
-      const prev = dataTypes.get(s.key);
-      if (prev === undefined) {
-        if (execOut.has(s.key)) conflicts.push(t('flowNest.val.portClash', { id: s.key }));
-        else {
-          dataTypes.set(s.key, ty);
-          ports.push({ id: s.key, label: s.key, type: ty, direction: 'output' });
-        }
-      } else if (prev !== ty) {
-        conflicts.push(t('flowNest.val.typeConflict', { key: s.key, a: prev, b: ty }));
-      }
+  const outKeys = new Set<string>();
+  for (const s of iface.outputs) {
+    if (execOut.has(s.key) || outKeys.has(s.key)) {
+      conflicts.push(t('flowNest.val.portClash', { id: s.key }));
+      continue;
     }
+    outKeys.add(s.key);
+    ports.push({ id: s.key, label: s.key, type: portTypeOf(s.type), direction: 'output' });
   }
   return { ports, conflicts };
 }

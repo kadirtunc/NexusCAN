@@ -42,15 +42,56 @@ let seq = 0;
 function blk(type: string, label: string, config: Record<string, unknown> = {}): FlowBlock {
   return { id: `n${++seq}`, type, label, x: seq * 10, y: seq * 5, config, status: 'idle', collapsed: false };
 }
+
+/**
+ * flow-interface-v2 builders. `fin(inputs)` is the flow's `flow_start` plus one `flow_in` per spec; `fout(name,
+ * outcome, outputs)` is a `flow_return` plus one `flow_out` per output spec. The extra port blocks travel with
+ * their owner (`dia()` adds them, `wire()` maps `(start, key)` -> `(flow_in, value)` and `(return, key)` ->
+ * `(flow_out, value)`), so the diagrams below are plain v2 graphs.
+ */
+interface Parts {
+  ins: Map<string, FlowBlock>;
+  outs: Map<string, FlowBlock>;
+  extra: FlowBlock[];
+}
+const parts = new WeakMap<FlowBlock, Parts>();
 function wire(from: FlowBlock, fromPort: string, to: FlowBlock, toPort: string): FlowConnection {
-  return { id: `w${++seq}`, fromBlockId: from.id, fromPortId: fromPort, toBlockId: to.id, toPortId: toPort };
+  const pf = parts.get(from);
+  const pt = parts.get(to);
+  const src = pf && fromPort !== 'start' ? pf.ins.get(fromPort) : undefined;
+  const dst = pt && toPort !== 'in' ? pt.outs.get(toPort) : undefined;
+  return {
+    id: `w${++seq}`,
+    fromBlockId: (src ?? from).id, fromPortId: src ? 'value' : fromPort,
+    toBlockId: (dst ?? to).id, toPortId: dst ? 'value' : toPort,
+  };
 }
 function dia(blocks: FlowBlock[], connections: FlowConnection[], variables: FlowDiagram['variables'] = []): FlowDiagram {
-  return { id: 'd', name: 'd', blocks, connections, variables };
+  return { id: 'd', name: 'd', blocks: blocks.flatMap((b) => [b, ...(parts.get(b)?.extra ?? [])]), connections, variables };
 }
 const spec = (key: string, type: FlowPortSpecV1['type'], extra: Partial<FlowPortSpecV1> = {}): FlowPortSpecV1 => ({ key, label: key, type, required: false, ...extra });
-const fin = (inputs: FlowPortSpecV1[] = []): FlowBlock => blk('flow_input', 'In', { inputs });
-const fout = (name: string, outcome: 'ok' | 'fail' | 'error', outputs: FlowPortSpecV1[] = []): FlowBlock => blk('flow_output', name, { name, outcome, outputs });
+const fin = (inputs: FlowPortSpecV1[] = []): FlowBlock => {
+  const s = blk('flow_start', 'Start');
+  const p: Parts = { ins: new Map(), outs: new Map(), extra: [] };
+  inputs.forEach((sp, i) => {
+    const b = blk('flow_in', sp.key, { ...sp, order: i });
+    p.ins.set(sp.key, b);
+    p.extra.push(b);
+  });
+  parts.set(s, p);
+  return s;
+};
+const fout = (name: string, outcome: 'ok' | 'fail' | 'error', outputs: FlowPortSpecV1[] = []): FlowBlock => {
+  const r = blk('flow_return', name, { name, outcome });
+  const p: Parts = { ins: new Map(), outs: new Map(), extra: [] };
+  outputs.forEach((sp, i) => {
+    const b = blk('flow_out', sp.key, { ...sp, order: i });
+    p.outs.set(sp.key, b);
+    p.extra.push(b);
+  });
+  parts.set(r, p);
+  return r;
+};
 const logb = (message: string): FlowBlock => blk('log', `Log ${message}`, { message });
 const call = (flowId: string, revision: number, label = flowId): FlowBlock => blk(callType(flowId), label, { ref: { flowId, revision } });
 
@@ -129,17 +170,21 @@ const MODES = ['sim', 'real'] as const;
 async function main(): Promise<void> {
   // ── 1. Interface: implicit ok, call ports ────────────────────────────────────
   {
-    eq(deriveFlowInterface(dia([blk('start', 'S')], [])).outcomes, [{ name: 'ok', outcome: 'ok', outputs: [] }], 'a flow without flow_output derives the implicit ok outcome');
+    eq(deriveFlowInterface(dia([fin()], [])).outcomes, [{ name: 'ok', outcome: 'ok' }], 'a flow without flow_return derives the implicit ok outcome');
     eq(deriveFlowInterface(dia([fin(), fout('x', 'fail')], [])).outcomes.map((o) => o.name), ['x'], 'explicit outcomes replace the implicit one');
-    const iface = deriveFlowInterface(dia([fin([spec('ecu', 'ecu'), spec('n', 'number', { required: true })]), fout('done', 'ok', [spec('r', 'number')]), fout('bad', 'fail', [spec('r', 'number'), spec('blob', 'bytes')])], []));
+    const iface = deriveFlowInterface(dia([fin([spec('ecu', 'ecu'), spec('n', 'number', { required: true })]), fout('done', 'ok', [spec('r', 'number'), spec('blob', 'bytes')]), fout('bad', 'fail')], []));
     const { ports, conflicts } = callPorts(iface);
-    eq(ports.map((p) => `${p.direction}:${p.id}:${p.type}`), ['input:in:exec', 'input:ecu:ecu', 'input:n:data', 'output:done:exec', 'output:bad:exec', 'output:error:exec', 'output:r:data', 'output:blob:bytes'], 'call ports: exec in + inputs, exec per outcome + error, data outputs (union)');
+    eq(ports.map((p) => `${p.direction}:${p.id}:${p.type}`), ['input:in:exec', 'input:ecu:ecu', 'input:n:data', 'output:done:exec', 'output:bad:exec', 'output:error:exec', 'output:r:data', 'output:blob:bytes'], 'call ports: exec in + inputs, exec per outcome + error, flow-level data outputs');
     eq(ports.find((p) => p.id === 'n')?.optional, false, 'required callee input is not optional');
     eq(conflicts, [], 'no conflicts');
-    const clash = callPorts(deriveFlowInterface(dia([fin(), fout('a', 'ok', [spec('r', 'number')]), fout('b', 'ok', [spec('r', 'bytes')])], [])));
-    eq(clash.conflicts.length, 1, 'same output key with different types is a conflict');
+    // outputs are flow-level: a duplicated output key is a port clash (and a validation error), not a per-outcome union
+    const dupOut = callPorts(deriveFlowInterface(dia([fin(), fout('a', 'ok', [spec('r', 'number')]), fout('b', 'ok', [spec('r', 'bytes')])], [])));
+    eq(dupOut.conflicts.length, 1, 'the same output key twice is a conflict');
     const shared = callPorts(deriveFlowInterface(dia([fin(), fout('error', 'error')], [])));
     eq(shared.ports.filter((p) => p.id === 'error').length, 1, 'an outcome named error shares the error port');
+    // inputs / outputs follow `order` (ties by key)
+    const ord = deriveFlowInterface(dia([blk('flow_start', 'S'), blk('flow_in', 'b', { ...spec('b', 'text'), order: 1 }), blk('flow_in', 'a', { ...spec('a', 'text'), order: 1 }), blk('flow_in', 'z', { ...spec('z', 'text'), order: 0 })], []));
+    eq(ord.inputs.map((i) => i.key), ['z', 'a', 'b'], 'inputs sorted by (order, key)');
   }
 
   // ── 2. Call with inputs / outcomes / outputs on both engines ────────────────
@@ -445,7 +490,7 @@ async function main(): Promise<void> {
     eq([entry?.kind, entry?.latestRevision], ['nexuscan.block', 1], `extract: saved as nexuscan.block r1 [${mode}]`);
     const iface = callIndex.get({ flowId: entry?.id ?? '', revision: 1 })?.iface;
     eq(iface?.inputs.map((i) => i.key), ['value_out'], `extract: input key from the source port [${mode}]`);
-    eq(iface?.outcomes.map((o) => [o.name, o.outputs.map((x) => x.key)]), [['ok', ['result']]], `extract: outcome from the exec port, output from the data edge [${mode}]`);
+    eq([iface?.outcomes.map((o) => o.name), iface?.outputs.map((x) => x.key)], [['ok'], ['result']], `extract: outcome from the exec port, flow-level output from the data edge [${mode}]`);
     flowStore.undo();
     eq(flowStore.getSnapshot().diagram.blocks.length, 6, `extract: one undo restores the whole selection [${mode}]`);
     const post = await f.run(mode, after);
@@ -470,7 +515,7 @@ async function main(): Promise<void> {
     const r2 = buildExtraction(shared, [v2.id], 'X', 'cid', (p) => `${p}_1`);
     ok(!r2.ok && r2.message.includes('"x"'), 'extract: a variable shared with the rest of the flow is refused');
     const r3 = buildExtraction(shared, [rfi.id], 'X', 'cid', (p) => `${p}_1`);
-    ok(!r3.ok, 'extract: the flow_input cannot be extracted');
+    ok(!r3.ok, 'extract: the flow_start cannot be extracted');
     const loopless = dia([rfi, blk('flow_break', 'Br')], []);
     ok(!buildExtraction(loopless, [loopless.blocks[1].id], 'X', 'cid', (p) => `${p}_1`).ok, 'extract: a selection without an entry edge is refused');
   }

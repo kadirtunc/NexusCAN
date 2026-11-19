@@ -20,7 +20,9 @@
     "test:flowreg": "esbuild src/components/flow/registry/flowRegistry.test.ts --bundle --platform=node --format=esm | node --input-type=module",
     "test:flownest": "esbuild src/components/flow/registry/flowNest.test.ts --bundle --platform=node --format=esm | node --input-type=module",
     "test:terminals": "esbuild src/components/flow/flowTerminals.test.ts --bundle --platform=node --format=esm | node --input-type=module",
-    "test:diagws": "esbuild src/components/diagnostics/workspace/diagWorkspace.test.ts --bundle --platform=node --format=esm | node --input-type=module"
+    "test:diagws": "esbuild src/components/diagnostics/workspace/diagWorkspace.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:flowiface": "esbuild src/components/flow/flowInterfaceV2.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:flowiface-qa": "esbuild src/components/flow/flowInterfaceV2.qa.test.ts --bundle --platform=node --format=esm | node --input-type=module"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.2.0",

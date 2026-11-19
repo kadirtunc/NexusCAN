@@ -12,6 +12,7 @@ import { validateCore } from './coreValidate';
 import type { RunFrameInfo } from './ecuBinding';
 import { deriveFlowInterface, validateInterface, type FlowIssue } from './flowInterface';
 import { migrateAll } from './flowMigrate';
+import { FLOW_START } from './flowPorts';
 import { validateTerminals, type TerminalIssue } from './flowTerminals';
 import type { FlowDiagram } from './types';
 import { fromFlowBody } from './registry/flowBody';
@@ -19,7 +20,7 @@ import { fromFlowBody } from './registry/flowBody';
 export type BodyLoader = (id: string, revision: number | null) => Promise<{ kind: FlowLibKind; body: NxFlowBodyV1 }>;
 
 export interface ResolvedCallee extends CallInfo {
-  /** Editor diagram of the pinned revision (legacy `start` / variables migrated in memory). */
+  /** Editor diagram of the pinned revision (v1 interface blocks / legacy variables migrated in memory). */
   diagram: FlowDiagram;
 }
 
@@ -114,7 +115,7 @@ export async function preflightCalls(root: FlowDiagram, rootId: string | null, r
         for (const i of validateTerminals(callee.diagram)) {
           issues.push({ blockId: '', code: `terminal_${i.kind}`, message: `${where}: ${terminalIssueMessage(callee.diagram, i)}` });
         }
-        if (!callee.diagram.blocks.some((x) => x.type === 'flow_input' || x.type === 'start')) {
+        if (!callee.diagram.blocks.some((x) => x.type === FLOW_START)) {
           issues.push({ blockId: '', code: 'no_entry', message: `${where}: ${t('diagEng.startNotFound')}` });
         }
       }

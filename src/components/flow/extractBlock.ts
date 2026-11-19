@@ -1,8 +1,8 @@
 /**
  * "Make Custom Block from selection" (pure). The selection becomes the body of a new `nexuscan.block`:
- * `flow_input` inputs come from the incoming data edges, `flow_output` outcomes from the distinct outgoing exec
- * edges (named after the source port: `exec_out` -> `ok`, `error_out` -> `error`), outputs from the outgoing data
- * edges. The parent gets a call block wired to the same neighbours. Refuses selections whose semantics would
+ * `flow_in` inputs come from the incoming data edges, `flow_return` outcomes from the distinct outgoing exec
+ * edges (named after the source port: `exec_out` -> `ok`, `error_out` -> `error`), `flow_out` outputs from the
+ * outgoing data edges; `flow_start` starts the body. The parent gets a call block wired to the same neighbours. Refuses selections whose semantics would
  * change silently (several entry edges, variables shared with the rest of the flow, loop control without its loop).
  */
 import { t } from '../../i18n';
@@ -12,7 +12,7 @@ import { listEcuRefs } from '../diagnostics/workspace/ecuRefs';
 import { getBlockDefFor } from './blockDefs';
 import { callType } from './callIndex';
 import { LOOP_BLOCKS } from './coreRuntime';
-import { FLOW_INPUT, FLOW_OUTPUT, flowInputSpecs } from './flowPorts';
+import { FLOW_IN, FLOW_OUT, FLOW_RETURN, FLOW_START, LEGACY_START, VALUE_PORT, blockPortSpec } from './flowPorts';
 import { variableReferences } from './flowVars';
 import type { FlowBlock, FlowConnection, FlowDiagram, PortType } from './types';
 import { CALL_IN } from './callPorts';
@@ -29,7 +29,7 @@ export type ExtractionResult =
       outcomes: string[];
     };
 
-const UNSUPPORTED = new Set<string>([FLOW_INPUT, FLOW_OUTPUT, 'start', 'flow_terminal', 'flow_goto']);
+const UNSUPPORTED = new Set<string>([FLOW_START, FLOW_IN, FLOW_OUT, FLOW_RETURN, LEGACY_START, 'flow_terminal', 'flow_goto']);
 
 function sanitizeKey(raw: string): string {
   let s = raw.replace(/[^A-Za-z0-9_]/g, '_').replace(/^_+/, '');
@@ -40,7 +40,7 @@ function sanitizeKey(raw: string): string {
 function uniqueKey(base: string, taken: ReadonlySet<string>): string {
   let key = sanitizeKey(base);
   let n = 2;
-  while (taken.has(key) || key === 'in' || key === 'start' || !REGISTRY_KEY_RE.test(key)) {
+  while (taken.has(key) || key === 'in' || !REGISTRY_KEY_RE.test(key)) {
     key = `${sanitizeKey(base).slice(0, 28)}_${n}`;
     n += 1;
   }
@@ -116,8 +116,11 @@ export function buildExtraction(
     let key: string;
     if (ty === 'ecu') key = 'ecu';
     else {
-      key = uniqueKey(c.fromPortId, taken);
-      if (taken.has(sanitizeKey(c.fromPortId)) || key !== sanitizeKey(c.fromPortId)) key = uniqueKey(`${labelOf(c.fromBlockId)}_${c.fromPortId}`, taken);
+      // A `flow_in` source is named after its key (its port is always `value`).
+      const srcBlock = parent.blocks.find((b) => b.id === c.fromBlockId);
+      const base = srcBlock?.type === FLOW_IN ? blockPortSpec(srcBlock).key : c.fromPortId;
+      key = uniqueKey(base, taken);
+      if (taken.has(sanitizeKey(base)) || key !== sanitizeKey(base)) key = uniqueKey(`${labelOf(c.fromBlockId)}_${base}`, taken);
     }
     if (taken.has(key)) { inKeyOf.set(k, key); continue; }
     taken.add(key);
@@ -126,13 +129,14 @@ export function buildExtraction(
   }
   // `{ecu.*}` inside needs the ecu input even without an incoming ecu edge.
   const needEcu = inS.some((b) => listEcuRefs(b.config).length > 0);
-  const parentInput: FlowBlock | undefined = parent.blocks.find((b) => b.type === FLOW_INPUT);
-  const parentHasEcu = parentInput !== undefined && flowInputSpecs(parentInput).some((s) => s.type === 'ecu');
+  const parentEcuIn: FlowBlock | undefined = parent.blocks.find((b) => b.type === FLOW_IN && blockPortSpec(b).type === 'ecu');
+  const parentHasEcu = parentEcuIn !== undefined;
   if (needEcu && !taken.has('ecu')) {
     if (!parentHasEcu) return fail('flowNest.ext.ecuUndeclared');
     taken.add('ecu');
     inputs.push({ key: 'ecu', label: 'ecu', type: 'ecu', required: false });
   }
+  inputs.forEach((s, i) => { s.order = i; });
 
   // Outcomes: one per distinct outgoing exec source.
   const outcomeOf = new Map<string, string>();
@@ -166,37 +170,51 @@ export function buildExtraction(
   const maxX = Math.max(...inS.map((b) => b.x));
   const dx = 260 - minX;
   const dy = 80 - minY;
-  const fi: FlowBlock = {
-    id: genId('in'), type: FLOW_INPUT, label: t('flowReg.blk.flowInput'), x: 20, y: 80,
-    config: { inputs }, status: 'idle', collapsed: false,
+  const fs: FlowBlock = {
+    id: genId('start'), type: FLOW_START, label: t('flowIface.blk.start'), x: 20, y: 80,
+    config: {}, status: 'idle', collapsed: false,
   };
+  const fiBlocks: FlowBlock[] = inputs.map((spec, i) => ({
+    id: genId('in'), type: FLOW_IN, label: spec.label !== '' ? spec.label : spec.key, x: 20, y: 180 + i * 60,
+    config: { ...spec }, status: 'idle' as const, collapsed: false,
+  }));
+  const fiOf = (key: string): FlowBlock => fiBlocks[inputs.findIndex((s) => s.key === key)];
   const cConns: FlowConnection[] = inner.map((c) => ({ ...c }));
   const cid = (): string => genId('c');
   const entry = incExec[0];
-  cConns.push({ id: cid(), fromBlockId: fi.id, fromPortId: 'start', toBlockId: entry.toBlockId, toPortId: entry.toPortId });
+  cConns.push({ id: cid(), fromBlockId: fs.id, fromPortId: 'start', toBlockId: entry.toBlockId, toPortId: entry.toPortId });
   for (const c of incData) {
-    cConns.push({ id: cid(), fromBlockId: fi.id, fromPortId: inKeyOf.get(srcKey(c)) as string, toBlockId: c.toBlockId, toPortId: c.toPortId });
+    cConns.push({ id: cid(), fromBlockId: fiOf(inKeyOf.get(srcKey(c)) as string).id, fromPortId: VALUE_PORT, toBlockId: c.toBlockId, toPortId: c.toPortId });
   }
-  const flowOuts: FlowBlock[] = [];
+  const retBlocks: FlowBlock[] = [];
   let oy = 80;
+  const retX = maxX + dx + 260;
   for (const [k, nm] of outcomeOf) {
     const [fromBlockId, fromPortId] = k.split('\u0000');
-    const fo: FlowBlock = {
-      id: genId('out'), type: FLOW_OUTPUT, label: nm, x: maxX + dx + 260, y: oy,
-      config: { name: nm, outcome: nm === 'error' ? 'error' : nm === 'fail' ? 'fail' : 'ok', outputs: outputs.map((o) => ({ ...o })) },
+    const fr: FlowBlock = {
+      id: genId('ret'), type: FLOW_RETURN, label: nm, x: retX, y: oy,
+      config: { name: nm, outcome: nm === 'error' ? 'error' : nm === 'fail' ? 'fail' : 'ok' },
       status: 'idle', collapsed: false,
     };
     oy += 120;
-    flowOuts.push(fo);
-    cConns.push({ id: cid(), fromBlockId, fromPortId, toBlockId: fo.id, toPortId: 'in' });
-    for (const c of outData) {
-      cConns.push({ id: cid(), fromBlockId: c.fromBlockId, fromPortId: c.fromPortId, toBlockId: fo.id, toPortId: outKeyOf.get(srcKey(c)) as string });
-    }
+    retBlocks.push(fr);
+    cConns.push({ id: cid(), fromBlockId, fromPortId, toBlockId: fr.id, toPortId: 'in' });
+  }
+  // Outputs are flow-level: one `flow_out` per output key, fed by its source (sampled when the frame ends).
+  const outBlocks: FlowBlock[] = outputs.map((spec, i) => ({
+    id: genId('out'), type: FLOW_OUT, label: spec.label !== '' ? spec.label : spec.key, x: retX, y: oy + 20 + i * 60,
+    config: { ...spec, order: i }, status: 'idle' as const, collapsed: false,
+  }));
+  for (const c of outData) {
+    const key = outKeyOf.get(srcKey(c)) as string;
+    const fo = outBlocks[outputs.findIndex((o) => o.key === key)];
+    if (cConns.some((x) => x.toBlockId === fo.id)) continue;
+    cConns.push({ id: cid(), fromBlockId: c.fromBlockId, fromPortId: c.fromPortId, toBlockId: fo.id, toPortId: VALUE_PORT });
   }
   const callee: FlowDiagram = {
     id: calleeId,
     name,
-    blocks: [fi, ...inS.map((b) => ({ ...b, x: b.x + dx, y: b.y + dy, status: 'idle' as const, statusMessage: undefined, lastResult: undefined })), ...flowOuts],
+    blocks: [fs, ...fiBlocks, ...inS.map((b) => ({ ...b, x: b.x + dx, y: b.y + dy, status: 'idle' as const, statusMessage: undefined, lastResult: undefined })), ...retBlocks, ...outBlocks],
     connections: cConns,
     variables: usedVars.map((v) => ({ ...v })),
   };
@@ -219,7 +237,7 @@ export function buildExtraction(
       seenIn.add(key);
       add(c.fromBlockId, c.fromPortId, call.id, key);
     }
-    if (needEcu && !seenIn.has('ecu') && parentInput) add(parentInput.id, 'ecu', call.id, 'ecu');
+    if (needEcu && !seenIn.has('ecu') && parentEcuIn) add(parentEcuIn.id, VALUE_PORT, call.id, 'ecu');
     for (const c of outExec) add(call.id, outcomeOf.get(srcKey(c)) as string, c.toBlockId, c.toPortId);
     for (const c of outData) add(call.id, outKeyOf.get(srcKey(c)) as string, c.toBlockId, c.toPortId);
     return {
