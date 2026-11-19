@@ -144,6 +144,93 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # Release assets (push to main only): pick the user-facing installers / portable binaries out of
+      # the bundle tree (which also holds intermediate AppDir / .app folders) into one flat directory.
+      - name: Collect release assets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p 'require("./src-tauri/tauri.conf.json").version')
+          B=src-tauri/target/release/bundle
+          OUT=release-assets
+          mkdir -p "$OUT"
+          case "$RUNNER_OS" in
+            Linux)
+              cp "$B"/appimage/*.AppImage "$B"/deb/*.deb "$B"/rpm/*.rpm "$OUT"/
+              chmod +x "$OUT"/*.AppImage
+              ;;
+            Windows)
+              cp "$B"/msi/*.msi "$B"/nsis/*-setup.exe "$OUT"/
+              # Portable: runs without installing (needs the WebView2 runtime, preinstalled on Win 10/11).
+              cp src-tauri/target/release/nexuscan-tauri.exe "$OUT/NexusCAN_${VERSION}_x64_portable.exe"
+              ;;
+            macOS)
+              cp "$B"/dmg/*.dmg "$OUT"/
+              ;;
+          esac
+          ls -la "$OUT"
+
+      - name: Upload release assets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 3
+
+  # Publishes a GitHub Release with ready-to-run binaries for every push to main, but only after the
+  # full rust + tauri gate is green on all three OSes (no second build: reuses the tauri job's bundles).
+  release:
+    name: release (GitHub Releases)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [rust, tauri]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist-release
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist-release
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p 'require("./src-tauri/tauri.conf.json").version')
+          TAG="v${VERSION}-build.${GITHUB_RUN_NUMBER}"
+          SHORT=$(git rev-parse --short HEAD)
+          cat > notes.md <<EOF
+          NexusCAN ${VERSION}, build ${GITHUB_RUN_NUMBER} (commit ${SHORT}), all CI gates passed on Linux / Windows / macOS.
+
+          | Platform | File |
+          | :--- | :--- |
+          | Windows 10/11 x64 | \`*_x64-setup.exe\` (installer), \`*_x64_en-US.msi\`, \`*_x64_portable.exe\` (no install) |
+          | Linux x86_64 | \`*.AppImage\` (\`chmod +x\` and run), \`*.deb\`, \`*.rpm\` |
+          | macOS Apple Silicon | \`*_aarch64.dmg\` |
+
+          Builds are unsigned: Windows SmartScreen asks "Run anyway"; on macOS run
+          \`xattr -cr /Applications/NexusCAN.app\` once after copying the app.
+          Verify downloads with \`SHA256SUMS.txt\`.
+          EOF
+          gh release create "$TAG" dist-release/* \
+            --target "$GITHUB_SHA" \
+            --title "NexusCAN ${VERSION} (build ${GITHUB_RUN_NUMBER})" \
+            --notes-file notes.md \
+            --latest
+
   fuzz-smoke:
     name: fuzz-smoke (nightly, 60 s/target)
     runs-on: ubuntu-24.04
