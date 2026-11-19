@@ -27,6 +27,7 @@ import {
   type EcuTimingV1,
   type EcuVarV1,
   type FlowBindingParamValue,
+  type FileExpectV1,
   type FlowBindingV1,
 } from '../../../types/diagWorkspace';
 import { ADDRESS_FORMATS, type AddressFormat } from '../../../types/udsClient';
@@ -37,6 +38,7 @@ import {
   defaultTiming,
   nowIso,
 } from './ecuDefaults';
+import { normalizeFileExpect } from './ecuValidation';
 
 export const MAX_VEHICLES = 64;
 export const MAX_GROUPS = 128;
@@ -359,7 +361,7 @@ function sanitizeBinding(raw: unknown, where: string, ecuIds: ReadonlySet<string
       if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') params[key] = v;
     }
   }
-  return {
+  const out: FlowBindingV1 = {
     id,
     ecuId,
     flowRef: { flowId: ref['flowId'].slice(0, 128), revision: Math.trunc(ref['revision']) },
@@ -367,6 +369,22 @@ function sanitizeBinding(raw: unknown, where: string, ecuIds: ReadonlySet<string
     params: { ...params },
     order: int(raw['order'], 0),
   };
+  const fe = raw['fileExpect'];
+  if (fe !== undefined) {
+    if (!isRecord(fe)) {
+      problems.push(`${where}.fileExpect: dropped (not an object)`);
+    } else {
+      const expect: Record<string, FileExpectV1> = {};
+      for (const key of Object.keys(fe)) {
+        if (FORBIDDEN_KEYS.has(key)) continue;
+        const entry = normalizeFileExpect(fe[key]);
+        if (entry === null) problems.push(`${where}.fileExpect.${key}: dropped (malformed file name / CRC-32)`);
+        else expect[key] = entry;
+      }
+      if (Object.keys(expect).length > 0) out.fileExpect = expect;
+    }
+  }
+  return out;
 }
 
 function sanitizeVehicle(raw: unknown, where: string, problems: string[]): DiagVehicleV1 | null {

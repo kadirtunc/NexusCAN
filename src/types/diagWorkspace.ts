@@ -150,6 +150,12 @@ export interface FlowRefV1 {
 
 export type FlowBindingParamValue = string | number | boolean;
 
+/** Expected firmware of one `file` flow input (workbench-v1 §4): name + CRC-32 only, never the bytes. */
+export interface FileExpectV1 {
+  fileName: string;
+  crc32: string;              // 8 hex uppercase
+}
+
 /** One Workbench column cell source: flow bound to one ECU. "Bind to group" creates one per member. */
 export interface FlowBindingV1 {
   id: string;
@@ -158,6 +164,8 @@ export interface FlowBindingV1 {
   label: string | null;       // column label override; null = flow name
   /** Preset values for non-`ecu`, non-`file` flow inputs (file inputs are always asked at run time). */
   params: Record<string, FlowBindingParamValue>;
+  /** Expected firmware per `file` input key (additive, workbench-v1 §4). A CRC mismatch always refuses the run. */
+  fileExpect?: Record<string, FileExpectV1>;
   order: number;
 }
 

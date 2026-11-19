@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Activity, AlertTriangle, ChevronRight, Cpu, FileSearch, FlaskConical, Gauge, Network, Server, Terminal, Wifi, Workflow } from 'lucide-react';
+import { Activity, AlertTriangle, Boxes, ChevronRight, Cpu, FileSearch, FlaskConical, Gauge, Network, Server, Terminal, Wifi, Workflow } from 'lucide-react';
 import { useI18n, type TranslationKey } from '../../i18n';
 import { DIAG_DIVIDER, DiagBadge, DiagDemoBadge, DiagDot, DiagNotice } from './diagUi';
 import { sessionLabel } from './diagFormat';
@@ -15,10 +15,11 @@ import { UdsInstrumentPanel } from './uds-panel/UdsInstrumentPanel';
 import { TrafficDock } from './traffic/TrafficDock';
 import { EcuGraphView, type GraphNavTarget } from './ecu-graph/EcuGraphView';
 import { EcuRegistryView } from './workspace/EcuRegistryView';
+import { WorkbenchPanel } from './workbench/WorkbenchPanel';
 import { openSessionFromEcu, type OpenSessionNotice } from './workspace/openSession';
 import type { EcuRecordV1 } from '../../types/diagWorkspace';
 
-export type DiagSubTab = 'ecu_registry' | 'session' | 'ecu_graph' | 'dtc' | 'live_pids' | 'uds_console' | 'did_inspector' | 'flow' | 'uds_panel';
+export type DiagSubTab = 'ecu_registry' | 'workbench' | 'session' | 'ecu_graph' | 'dtc' | 'live_pids' | 'uds_console' | 'did_inspector' | 'flow' | 'uds_panel';
 
 // ECU Simulator sekmesi kullanıcı kararıyla arayüzden kaldırıldı (kod korunuyor:
 // ./ecu-sim/EcuSimulator.tsx, ./ecu-sim/ecuSimStore.ts). Gerekçe ve yeniden açma kriterleri:
@@ -32,6 +33,7 @@ interface SubTabDef {
 
 const SUB_TABS: SubTabDef[] = [
   { id: 'ecu_registry',  labelKey: 'diagHmi.tab.ecuRegistry',   icon: <Server className="h-3.5 w-3.5" aria-hidden="true" /> },
+  { id: 'workbench',     labelKey: 'diagHmi.tab.workbench',     icon: <Boxes className="h-3.5 w-3.5" aria-hidden="true" /> },
   { id: 'session',       labelKey: 'diagHmi.tab.session',       icon: <Wifi className="h-3.5 w-3.5" aria-hidden="true" /> },
   { id: 'ecu_graph',     labelKey: 'diagHmi.tab.ecuGraph',      icon: <Network className="h-3.5 w-3.5" aria-hidden="true" /> },
   { id: 'dtc',           labelKey: 'diagHmi.tab.dtc',           icon: <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> },
@@ -148,6 +150,15 @@ export const DiagnosticsView: React.FC = () => {
         return (
           <EcuRegistryView
             onOpenSession={openEcuSession}
+            onFindEcu={() => setActiveSubTab('session')}
+            onSimulate={simulateEcu}
+          />
+        );
+      case 'workbench':
+        return (
+          <WorkbenchPanel
+            onOpenSession={openEcuSession}
+            onGoRegistry={() => setActiveSubTab('ecu_registry')}
             onFindEcu={() => setActiveSubTab('session')}
             onSimulate={simulateEcu}
           />

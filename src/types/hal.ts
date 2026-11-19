@@ -168,7 +168,8 @@ export type DebugCategory =
   | 'TRACE'
   | 'BUS_ERR'
   | 'DIAG'
-  | 'WORKBENCH';
+  | 'WORKBENCH'
+  | 'RE';
 
 export type DebugEventSource = 'backend' | 'ui' | 'os' | 'protocol';
 

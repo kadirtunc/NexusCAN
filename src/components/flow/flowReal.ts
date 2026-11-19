@@ -4,7 +4,6 @@
  * values and no `Math.random` anywhere in this file. DEMO mode never reaches this code.
  */
 import { t } from '../../i18n';
-import { flowStore } from './FlowStore';
 import type { FlowBlock, FlowConnection, FlowDiagram } from './types';
 import type { RunContext } from './FlowEngine';
 import { hasCustomOptions, type FlowRequestOptions, type FlowTransport } from './flowTransport';
@@ -93,8 +92,8 @@ export class RealFlowExecutor {
      * Sources without a real value (simulated UDS blocks) read as "not connected" instead of failing.
      */
     private readonly lenient = false,
-    /** Diagram of the frame this executor serves (default: the canvas diagram). */
-    private readonly source: (() => FlowDiagram) | null = null,
+    /** Diagram of the frame this executor serves (injected: an executor never reads the canvas store). */
+    private readonly source: () => FlowDiagram,
     /** Input values of the frame this executor serves (read by the pure `flow_in` blocks). */
     private readonly frameInputs: () => Record<string, unknown> = () => ({}),
   ) {}
@@ -152,7 +151,7 @@ export class RealFlowExecutor {
   // ── Data connections ───────────────────────────────────────────────────────
 
   private diagram(): FlowDiagram {
-    return this.source ? this.source() : flowStore.getSnapshot().diagram;
+    return this.source();
   }
 
   /**

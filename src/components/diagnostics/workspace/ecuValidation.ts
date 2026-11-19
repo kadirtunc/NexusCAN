@@ -5,7 +5,7 @@
  * Field paths: `name`, `groupId`, `addressing.requestId`, `security.levels[2].level`,
  * `flash.memoryRegions[0].start`, `routines[1].rid`, `dids[0].did`, `vars[3].key`, ...
  */
-import { REGISTRY_KEY_RE, type DiagVehicleV1, type EcuRecordV1 } from '../../../types/diagWorkspace';
+import { REGISTRY_KEY_RE, type DiagVehicleV1, type EcuRecordV1, type FileExpectV1 } from '../../../types/diagWorkspace';
 import type { DiagWsKey } from '../../../i18n/shards/diagWorkspace';
 import { checkAddressing, checkIdForms, usesTargetByte } from '../addressing';
 import { MAX_EXT_ID, MAX_STD_ID } from '../sessionValidation';
@@ -286,4 +286,19 @@ export function validateVehicle(vehicle: DiagVehicleV1, tr: ValidationTranslate)
 /** First issue of exactly `field` (for inline display under an input). */
 export function issueFor(issues: readonly EcuIssue[], field: string): EcuIssue | undefined {
   return issues.find((i) => i.field === field);
+}
+
+// ── Binding `fileExpect` (workbench-v1 §4 / §9.1) ─────────────────────────────
+
+export const FILE_EXPECT_CRC_RE = /^[0-9A-F]{8}$/;
+
+/** Normalises ONE stored `fileExpect` entry (CRC upper-cased); `null` when malformed. */
+export function normalizeFileExpect(raw: unknown): FileExpectV1 | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const o = raw as Record<string, unknown>;
+  const name = o['fileName'];
+  const crc = o['crc32'];
+  if (typeof name !== 'string' || name === '' || typeof crc !== 'string') return null;
+  const up = crc.trim().toUpperCase();
+  return FILE_EXPECT_CRC_RE.test(up) ? { fileName: name.slice(0, 256), crc32: up } : null;
 }

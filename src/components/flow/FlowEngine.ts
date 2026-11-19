@@ -111,6 +111,13 @@ export interface FlowRunOptions {
   ecuSession?: () => SessionProbe | null;
   /** Loader of callee revisions (default: the flow registry). Callees are loaded once per run. */
   resolveCallee?: BodyLoader;
+  /**
+   * Root diagram to run instead of the canvas diagram (Workbench / dedicated engine). With it the engine NEVER reads or
+   * writes `flowStore` (diagram, block statuses, run log, run flags); log lines go to `onLog`.
+   */
+  rootBody?: FlowDiagram;
+  /** Log lines of a `rootBody` run (ignored for canvas runs, which log into `flowStore`). */
+  onLog?: (line: string) => void;
   /** Identity of the running flow (default: the canvas diagram). */
   rootId?: string | null;
   rootName?: string;
@@ -175,21 +182,39 @@ function newRunContext(): RunContext {
   };
 }
 
-function log(blockId: string, blockLabel: string, msg: string) {
-  flowStore.addRunLog({ blockId, blockLabel, level: 'info', message: msg });
+/** The slice of the canvas store the engine writes during a run. */
+export type RunSink = Pick<typeof flowStore,
+  'addRunLog' | 'clearRunLog' | 'setBlockStatus' | 'setPaused' | 'setRunning' | 'setFramePath' | 'setFrameStatus'
+  | 'setFrameResult' | 'clearFrameStatuses' | 'resetBlockStatuses'>;
+
+/** Detached sink (`rootBody` runs): nothing touches `flowStore`; log lines go to `onLog`. */
+function detachedSink(onLog?: (line: string) => void): RunSink {
+  const noop = (): void => undefined;
+  return {
+    addRunLog: (entry) => onLog?.(entry.message),
+    clearRunLog: noop,
+    setBlockStatus: noop,
+    setPaused: noop,
+    setRunning: noop,
+    setFramePath: noop,
+    setFrameStatus: noop,
+    setFrameResult: noop,
+    clearFrameStatuses: noop,
+    resetBlockStatuses: noop,
+  };
 }
 
 /** Blocks that are pure flow structure (no transport, no fabricated data) and run identically in real mode. */
 const REAL_STRUCTURAL: ReadonlySet<string> = new Set([FLOW_START, FLOW_RETURN, 'delay', 'loop', 'flow_while', 'uds_lockout_guard', 'flow_terminal', 'flow_goto']);
 
 /** Pre-run refusal of a failed validation: block statuses + log, nothing executes. */
-function refuseRun(diagram: FlowDiagram, issues: Array<{ blockId: string; message: string }>, headerKey: TranslationKey): void {
+function refuseRun(sink: RunSink, diagram: FlowDiagram, issues: Array<{ blockId: string; message: string }>, headerKey: TranslationKey): void {
   for (const issue of issues) {
-    if (issue.blockId !== '') flowStore.setBlockStatus(issue.blockId, 'error', issue.message);
-    flowStore.addRunLog({ blockId: issue.blockId, blockLabel: diagram.blocks.find((b) => b.id === issue.blockId)?.label ?? '',
+    if (issue.blockId !== '') sink.setBlockStatus(issue.blockId, 'error', issue.message);
+    sink.addRunLog({ blockId: issue.blockId, blockLabel: diagram.blocks.find((b) => b.id === issue.blockId)?.label ?? '',
       level: 'error', message: `[${ts()}] ✗ ${issue.message}` });
   }
-  flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
+  sink.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
     message: `[${ts()}] ✗ ${t(headerKey)}` });
 }
 
@@ -206,6 +231,8 @@ function activeSessionProbe(): SessionProbe {
 
 export class FlowEngine {
   private readonly _txSourceId = `uds-flow:${++flowEngineSeq}`;
+  /** Where run state / log go: the canvas store, or a detached sink for `rootBody` runs (Workbench). */
+  private _sink: RunSink = flowStore;
   private _stopped = false;
   private _paused  = false;
   private _resumeResolve: (() => void) | null = null;
@@ -237,6 +264,10 @@ export class FlowEngine {
   /** Block whose port led into the block now executing (for the goto jump log). */
   private _cameFrom: FlowBlock | null = null;
 
+  private log(blockId: string, blockLabel: string, msg: string): void {
+    this._sink.addRunLog({ blockId, blockLabel, level: 'info', message: msg });
+  }
+
   /** Flow Stop / Panic Stop: aborts the chain, prompts, flash downloads AND the keep-alive of this run. */
   stop(): void {
     this._stopped = true;
@@ -256,10 +287,10 @@ export class FlowEngine {
     this._ctx.keepaliveActive = false;
     try {
       await tr.setKeepalive(false, 0);
-      flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'warn',
+      this._sink.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'warn',
         message: `[${ts()}] ${t(reason === 'stop' ? 'udsFlow.log.kaReleasedStop' : 'udsFlow.log.kaReleasedEnd')}` });
     } catch (e) {
-      flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
+      this._sink.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
         message: `[${ts()}] ✗ ${t('udsFlow.log.kaReleaseFail', { msg: e instanceof Error ? e.message : String(e) })}` });
     }
   }
@@ -271,9 +302,9 @@ export class FlowEngine {
     this.result = { outcome: 'error', name: null, outputs: {}, stopped: false, refused: true };
   }
 
-  pause():  void { this._paused = true;  flowStore.setPaused(true); }
+  pause():  void { this._paused = true;  this._sink.setPaused(true); }
   resume(): void {
-    this._paused = false; flowStore.setPaused(false);
+    this._paused = false; this._sink.setPaused(false);
     this._resumeResolve?.(); this._resumeResolve = null;
   }
 
@@ -287,7 +318,7 @@ export class FlowEngine {
     diagram: FlowDiagram, name: string, path: string[], pathKey: string, ecu: EcuRecordV1 | null, inputValues: Record<string, unknown>,
   ): Frame {
     const transport = this._transport as FlowTransport;
-    const evalLog = (b: FlowBlock, msg: string): void => log(b.id, b.label, `[${ts()}]   ${msg}`);
+    const evalLog = (b: FlowBlock, msg: string): void => this.log(b.id, b.label, `[${ts()}]   ${msg}`);
     const frame = {
       diagram, name, path, pathKey, ecu, inputValues,
       scope: createScope(diagram.variables ?? []),
@@ -304,7 +335,7 @@ export class FlowEngine {
     this._stack.push(frame);
     this._frame = frame;
     this._ctx.scope = frame.scope;
-    flowStore.setFramePath(frame.path);
+    this._sink.setFramePath(frame.path);
   }
 
   private leave(): void {
@@ -313,9 +344,9 @@ export class FlowEngine {
     if (top) {
       this._frame = top;
       this._ctx.scope = top.scope;
-      flowStore.setFramePath(top.path);
+      this._sink.setFramePath(top.path);
     } else {
-      flowStore.setFramePath([]);
+      this._sink.setFramePath([]);
     }
   }
 
@@ -369,6 +400,7 @@ export class FlowEngine {
   }
 
   async run(opts: FlowRunOptions = {}): Promise<void> {
+    this._sink = opts.rootBody ? detachedSink(opts.onLog) : flowStore;
     this._stopped = false;
     this._paused  = false;
     this._abortError = null;
@@ -389,34 +421,34 @@ export class FlowEngine {
       ? null
       : registerTxSource(this._txSourceId, () => {
           this.stop();
-          flowStore.setRunning(false);
-          flowStore.setPaused(false);
+          this._sink.setRunning(false);
+          this._sink.setPaused(false);
         });
 
-    flowStore.setRunning(true);
-    flowStore.resetBlockStatuses();
-    flowStore.setFramePath([]);
+    this._sink.setRunning(true);
+    this._sink.resetBlockStatuses();
+    this._sink.setFramePath([]);
     flashRuntime.resetRuns();
-    flowStore.clearRunLog();
-    flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'info',
+    this._sink.clearRunLog();
+    this._sink.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'info',
       message: `[${ts()}] ${t('diagEng.flowStarted')} (${this._demo ? t('diagReal.flow.modeDemo') : t('diagReal.flow.modeReal')})` });
 
-    const diagram = flowStore.getSnapshot().diagram;
+    const diagram = opts.rootBody ?? flowStore.getSnapshot().diagram;
     const rootId = opts.rootId !== undefined ? opts.rootId : diagram.id;
     const rootName = opts.rootName ?? diagram.name;
     const refuseAll = (issues: Array<{ blockId: string; message: string }>, header: TranslationKey): void => {
-      refuseRun(diagram, issues, header);
+      refuseRun(this._sink, diagram, issues, header);
       this.refuse();
-      flowStore.setRunning(false);
+      this._sink.setRunning(false);
       unregisterTx?.();
     };
 
     const startBlock = findEntryBlock(diagram);
     if (!startBlock) {
-      flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
+      this._sink.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
         message: `[${ts()}] ✗ ${t('diagEng.startNotFound')}` });
       this.refuse();
-      flowStore.setRunning(false);
+      this._sink.setRunning(false);
       unregisterTx?.();
       return;
     }
@@ -469,10 +501,10 @@ export class FlowEngine {
     try {
       root = this.makeFrame(resolveFrameDiagram(diagram, ecu).diagram, rootName, [rootName], '', ecu, inputValues);
     } catch (err) {
-      flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
+      this._sink.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
         message: `[${ts()}] ✗ ${err instanceof Error ? err.message : String(err)}` });
       this.refuse();
-      flowStore.setRunning(false);
+      this._sink.setRunning(false);
       unregisterTx?.();
       return;
     }
@@ -486,7 +518,7 @@ export class FlowEngine {
 
     const { unhandled } = await this.runFrame(root, startBlock, false);
     if (unhandled !== null) {
-      flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
+      this._sink.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'error',
         message: `[${ts()}] ✗ ${unhandled instanceof Error ? unhandled.message : String(unhandled)}` });
     }
     // Every terminal path (end, unhandled error, stop, Panic): no keep-alive survives the run.
@@ -500,10 +532,10 @@ export class FlowEngine {
         ? { outcome: reached.outcome, name: reached.implicit ? null : reached.name, outputs: reached.outputs, stopped: false, refused: false }
         : { outcome: failed ? 'error' : 'ok', name: null, outputs: {}, stopped: false, refused: false };
 
-    flowStore.setRunning(false);
-    flowStore.setPaused(false);
+    this._sink.setRunning(false);
+    this._sink.setPaused(false);
     if (!this._stopped) {
-      flowStore.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'info',
+      this._sink.addRunLog({ blockId: '', blockLabel: 'Engine', level: 'info',
         message: `[${ts()}] ${t('diagEng.flowDone')}` });
     }
   }
@@ -550,7 +582,7 @@ export class FlowEngine {
       if (effective !== block && typeof imageKey === 'string') this._frame.imageKeys.add(imageKey);
       const outcome = await this.dispatchBlock(effective);
       this._eval.record(block, outcome);
-      flowStore.setFrameResult(this._frame.pathKey, block.id, outcome.result);
+      this._sink.setFrameResult(this._frame.pathKey, block.id, outcome.result);
       if (outcome.failed) {
         // Handled failure (e.g. flash download error): leave via `fail_out` when wired, else abort the run.
         const failPort = outcome.nextPort ?? 'fail_out';
@@ -558,12 +590,12 @@ export class FlowEngine {
           throw new Error(outcome.message);
         }
         this.setStatus(block, 'error', outcome.message);
-        flowStore.addRunLog({ blockId: block.id, blockLabel: block.label, level: 'error',
+        this._sink.addRunLog({ blockId: block.id, blockLabel: block.label, level: 'error',
           message: `[${ts()}] ✗ ${block.label}  →  ${outcome.message}` });
         return { nextPortId: outcome.nextPort ?? 'fail_out', result: outcome.result };
       }
       this.setStatus(block, 'success', outcome.message);
-      flowStore.addRunLog({ blockId: block.id, blockLabel: block.label, level: 'success',
+      this._sink.addRunLog({ blockId: block.id, blockLabel: block.label, level: 'success',
         message: `[${ts()}] ✓ ${block.label}  →  ${outcome.message}` });
 
       if (block.type === 'loop') {
@@ -627,7 +659,7 @@ export class FlowEngine {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.setStatus(block, 'error', msg);
-      flowStore.addRunLog({ blockId: block.id, blockLabel: block.label, level: 'error',
+      this._sink.addRunLog({ blockId: block.id, blockLabel: block.label, level: 'error',
         message: `[${ts()}] ✗ ${block.label}  →  ${msg}` });
       // The flash block has no `error_out`: its failures (including refused pre-flight) leave via
       // `fail_out`; wait-ready has only `timeout_out`.
@@ -664,7 +696,7 @@ export class FlowEngine {
     switch (block.type) {
       case 'log': {
         const msg = await renderLogMessage(block, ev.core, scope);
-        log(block.id, block.label, `[${ts()}]   LOG: ${msg || t('diagEng.empty')}`);
+        this.log(block.id, block.label, `[${ts()}]   LOG: ${msg || t('diagEng.empty')}`);
         return { message: msg || t('diagEng.emptyMsg') };
       }
       case 'var_set':
@@ -711,7 +743,7 @@ export class FlowEngine {
         const target = resolveGotoTarget(this._frame.diagram, block);
         if (target === null) throw new Error(t('udsFlow.term.missing'));
         const msg = t('udsFlow.term.jump', { name: terminalName(target), from: (this._cameFrom ?? block).label });
-        log(block.id, block.label, `[${ts()}]   ${msg}`);
+        this.log(block.id, block.label, `[${ts()}]   ${msg}`);
         return { message: msg };
       }
 
@@ -729,7 +761,7 @@ export class FlowEngine {
 
       case 'delay': {
         const ms = Number(block.config['delay_ms'] ?? 1000);
-        log(block.id, block.label, `[${ts()}]   ${t('diagEng.delayWaiting', { ms })}`);
+        this.log(block.id, block.label, `[${ts()}]   ${t('diagEng.delayWaiting', { ms })}`);
         await new Promise<void>((r) => setTimeout(r, ms));
         return { message: t('diagEng.delayDone', { ms }) };
       }
@@ -753,7 +785,7 @@ export class FlowEngine {
 
       case 'flow_timeout_guard': {
         const timeoutMs = Number(block.config['timeout_ms'] ?? 5000);
-        log(block.id, block.label, `[${ts()}]   ${t('diagEng.timeoutActive', { ms: timeoutMs })}`);
+        this.log(block.id, block.label, `[${ts()}]   ${t('diagEng.timeoutActive', { ms: timeoutMs })}`);
         return { message: t('diagEng.timeoutGuard', { ms: timeoutMs }) };
       }
 
@@ -764,11 +796,11 @@ export class FlowEngine {
         const subFn: Record<string, number> = { default: 0x01, programming: 0x02, extended: 0x03, safety: 0x04 };
         const sf = subFn[st] ?? 0x03;
 
-        log(block.id, block.label, `[${ts()}]   TX: 10 ${hexB(sf)}  (DiagnosticSessionControl)`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 10 ${hexB(sf)}  (DiagnosticSessionControl)`);
         const resp = await udsRequest(0x10, [sf, 0x00, 0x19, 0x01, 0xF4]);
         const p2ms  = ((resp[2] << 8) | resp[3]) * 0.5;
         const p2ext = ((resp[4] << 8) | resp[5]) * 10;
-        log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}  P2=${p2ms}ms P2*=${p2ext}ms`);
+        this.log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}  P2=${p2ms}ms P2*=${p2ext}ms`);
 
         ctx.sessionType = st as RunContext['sessionType'];
         return { message: t('diagEng.sessionOpened', { st: st.toUpperCase(), p2: p2ms }), result: { sessionType: st, p2: p2ms, p2ext } };
@@ -783,9 +815,9 @@ export class FlowEngine {
 
         if (ctx.sessionType === 'default') throw new Error(nrcName(0x7F));
 
-        log(block.id, block.label, `[${ts()}]   TX: 11 ${hexB(sf)}  (ECUReset)`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 11 ${hexB(sf)}  (ECUReset)`);
         const resp = await udsRequest(0x11, [sf]);
-        log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
 
         ctx.sessionType      = 'default';
         ctx.securityUnlocked = false;
@@ -801,9 +833,9 @@ export class FlowEngine {
         const group = String(block.config['group'] ?? 'FFFFFF').toUpperCase().replace(/[^0-9A-F]/g, '').padStart(6, '0');
         const gb = [parseInt(group.slice(0, 2), 16), parseInt(group.slice(2, 4), 16), parseInt(group.slice(4, 6), 16)];
 
-        log(block.id, block.label, `[${ts()}]   TX: 14 ${gb.map(hexB).join(' ')}  (ClearDiagnosticInformation)`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 14 ${gb.map(hexB).join(' ')}  (ClearDiagnosticInformation)`);
         const resp = await udsRequest(0x14, gb);
-        log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
 
         return { message: t('diagEng.dtcGroupCleared', { group }) };
       }
@@ -815,13 +847,13 @@ export class FlowEngine {
         const sf        = parseInt(subFnVal, 16);
         const statusMask = parseInt(String(block.config['status_mask'] ?? 'FF'), 16);
 
-        log(block.id, block.label, `[${ts()}]   TX: 19 ${hexB(sf)} ${hexB(statusMask)}  (ReadDTCInformation subFn=0x${hexB(sf)})`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 19 ${hexB(sf)} ${hexB(statusMask)}  (ReadDTCInformation subFn=0x${hexB(sf)})`);
         await udsRequest(0x19, [sf, statusMask]);
 
         // subFn 0x01 / 0x07 / 0x11: return count only
         if ([0x01, 0x07, 0x11].includes(sf)) {
           const count = sf === 0x07 ? 1 : 3;
-          log(block.id, block.label, `[${ts()}]   RX: 59 ${hexB(sf)} FF 00 ${hexB(count)}  (${t('diagEng.dtcMatched', { n: count })})`);
+          this.log(block.id, block.label, `[${ts()}]   RX: 59 ${hexB(sf)} FF 00 ${hexB(count)}  (${t('diagEng.dtcMatched', { n: count })})`);
           return { message: t('diagEng.dtcCount', { count, sf: hexB(sf), mask: hexB(statusMask) }), result: count };
         }
 
@@ -830,19 +862,19 @@ export class FlowEngine {
           const supported = ['P0100', 'P0200', 'P0300', 'C0010', 'U0100', 'U0073'];
           const single = [0x0B, 0x0C, 0x0D, 0x0E].includes(sf);
           const result = single ? [supported[0]] : supported;
-          result.forEach((d) => log(block.id, block.label, `[${ts()}]       ${d}`));
+          result.forEach((d) => this.log(block.id, block.label, `[${ts()}]       ${d}`));
           return { message: `${result.length} DTC (subFn=0x${hexB(sf)})`, result };
         }
 
         // subFn 0x09: severity info for specific DTC
         if (sf === 0x09) {
-          log(block.id, block.label, `[${ts()}]   RX: 59 09 00 P0100  status=0x08  severity=0x20`);
+          this.log(block.id, block.label, `[${ts()}]   RX: 59 09 00 P0100  status=0x08  severity=0x20`);
           return { message: t('diagEng.dtcSeverity'), result: { dtc: 'P0100', severity: 0x20 } };
         }
 
         // subFn 0x14 / 0x15 / 0x55: fault detection counter / permanent DTCs
         if ([0x14, 0x15, 0x55].includes(sf)) {
-          log(block.id, block.label, `[${ts()}]   RX: 59 ${hexB(sf)}  P0100 counter=127  P0300 permanent`);
+          this.log(block.id, block.label, `[${ts()}]   RX: 59 ${hexB(sf)}  P0100 counter=127  P0300 permanent`);
           return { message: t('diagEng.dtcCustom', { sf: hexB(sf) }), result: [] };
         }
 
@@ -852,9 +884,9 @@ export class FlowEngine {
           { code: 'P0300', raw: [0x03, 0x00, 0x00], status: 0x09, desc: t('diagEng.dtcDescP0300') },
           { code: 'U0100', raw: [0x50, 0x01, 0x00], status: 0x08, desc: t('diagEng.dtcDescU0100') },
         ];
-        log(block.id, block.label, `[${ts()}]   RX: 59 ${hexB(sf)} FF  ${t('diagEng.dtcRecords', { n: mockDtcs.length })}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: 59 ${hexB(sf)} FF  ${t('diagEng.dtcRecords', { n: mockDtcs.length })}`);
         mockDtcs.forEach((d) => {
-          log(block.id, block.label, `[${ts()}]       ${d.code}  status=0x${hexB(d.status)}  ${d.desc}`);
+          this.log(block.id, block.label, `[${ts()}]       ${d.code}  status=0x${hexB(d.status)}  ${d.desc}`);
         });
         return { message: `${mockDtcs.length} DTC (subFn=0x${hexB(sf)}, mask=0x${hexB(statusMask)})`, result: mockDtcs };
       }
@@ -865,7 +897,7 @@ export class FlowEngine {
         const did = String(block.config['did'] ?? 'F190').toUpperCase().replace(/[^0-9A-F]/g, '').padStart(4, '0');
         const didBytes = [parseInt(did.slice(0, 2), 16), parseInt(did.slice(2, 4), 16)];
 
-        log(block.id, block.label, `[${ts()}]   TX: 22 ${didBytes.map(hexB).join(' ')}  (ReadDataByIdentifier 0x${did})`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 22 ${didBytes.map(hexB).join(' ')}  (ReadDataByIdentifier 0x${did})`);
         await udsRequest(0x22, didBytes);
 
         const mockData: Record<string, { label: string; raw: number[]; display: string }> = {
@@ -882,8 +914,8 @@ export class FlowEngine {
 
         const entry = mockData[did] ?? { label: `DID 0x${did}`, raw: [0xDE, 0xAD, 0xBE, 0xEF], display: '0xDEADBEEF' };
         const rawBytes = new Uint8Array(entry.raw);
-        log(block.id, block.label, `[${ts()}]   RX: 62 ${didBytes.map(hexB).join(' ')} ${entry.raw.map(hexB).join(' ')}`);
-        log(block.id, block.label, `[${ts()}]       ${entry.label}: "${entry.display}"`);
+        this.log(block.id, block.label, `[${ts()}]   RX: 62 ${didBytes.map(hexB).join(' ')} ${entry.raw.map(hexB).join(' ')}`);
+        this.log(block.id, block.label, `[${ts()}]       ${entry.label}: "${entry.display}"`);
 
         return { message: `0x${did} (${entry.label}) = "${entry.display}"`, result: { did, label: entry.label, raw: rawBytes, display: entry.display }, outputs: { data_out: rawBytes } };
       }
@@ -899,13 +931,13 @@ export class FlowEngine {
         const sizeLen = sizeBytes.length;
         const memFmt  = ((addrLen & 0xF) << 4) | (sizeLen & 0xF);
 
-        log(block.id, block.label, `[${ts()}]   TX: 23 ${hexB(memFmt)} ${addrBytes.map(hexB).join(' ')} ${sizeBytes.map(hexB).join(' ')}  (ReadMemoryByAddress)`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 23 ${hexB(memFmt)} ${addrBytes.map(hexB).join(' ')} ${sizeBytes.map(hexB).join(' ')}  (ReadMemoryByAddress)`);
         await udsRequest(0x23, [memFmt, ...addrBytes, ...sizeBytes]);
 
         const dataSize = parseInt(sizeHex, 16);
         const mockData = new Uint8Array(Math.min(dataSize, 32));
         for (let i = 0; i < mockData.length; i++) mockData[i] = (parseInt(addrHex, 16) + i) & 0xFF;
-        log(block.id, block.label, `[${ts()}]   RX: 63 ${hex(mockData)}${dataSize > 32 ? ` ... (${dataSize} bytes total)` : ''}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: 63 ${hex(mockData)}${dataSize > 32 ? ` ... (${dataSize} bytes total)` : ''}`);
 
         return { message: `${t('diagEng.memRead', { addr: addrHex, size: dataSize })}`, result: mockData };
       }
@@ -924,40 +956,40 @@ export class FlowEngine {
         const script         = String(block.config['script']    ?? '');
 
         // ── Step 1: Request seed ─────────────────────────────────────────────
-        log(block.id, block.label, `[${ts()}]   [1/3] TX: 27 ${hexB(oddLevel)}  (SecurityAccess — requestSeed level=0x${accessLevelHex})`);
+        this.log(block.id, block.label, `[${ts()}]   [1/3] TX: 27 ${hexB(oddLevel)}  (SecurityAccess — requestSeed level=0x${accessLevelHex})`);
         await randomDelay(30, 80);
         const seedBytes = new Uint8Array(4);
         crypto.getRandomValues(seedBytes);
         const seedResp = new Uint8Array([0x67, oddLevel, ...seedBytes]);
-        log(block.id, block.label, `[${ts()}]   [1/3] RX: ${hex(seedResp)}  seed=${hex(seedBytes)}`);
+        this.log(block.id, block.label, `[${ts()}]   [1/3] RX: ${hex(seedResp)}  seed=${hex(seedBytes)}`);
 
         // Check for zero seed (already unlocked in some ECUs)
         if (seedBytes.every((b) => b === 0x00)) {
-          log(block.id, block.label, `[${ts()}]   [1/3] ${t('diagEng.seedZero')}`);
+          this.log(block.id, block.label, `[${ts()}]   [1/3] ${t('diagEng.seedZero')}`);
           ctx.securityUnlocked = true;
           ctx.unlockedLevel = oddLevel;
           return { message: `${t('diagEng.secAlreadyOpen', { level: accessLevelHex })}`, result: { seed: seedBytes, key: new Uint8Array(0), level: oddLevel }, nextPort: 'success_out' };
         }
 
         // ── Step 2: Calculate key ────────────────────────────────────────────
-        log(block.id, block.label, `[${ts()}]   [2/3] ${t('diagEng.keyCalc', { algorithm })}`);
+        this.log(block.id, block.label, `[${ts()}]   [2/3] ${t('diagEng.keyCalc', { algorithm })}`);
         let keyBytes: Uint8Array;
         try {
           keyBytes = await computeKey(algorithm, seedBytes, oddLevel, constantHex, script);
         } catch (e) {
           throw new Error(t('diagEng.scriptError', { msg: e instanceof Error ? e.message : String(e) }));
         }
-        log(block.id, block.label, `[${ts()}]   [2/3] key = ${hex(keyBytes)}`);
+        this.log(block.id, block.label, `[${ts()}]   [2/3] key = ${hex(keyBytes)}`);
 
         // ── Step 3: Send key ─────────────────────────────────────────────────
         const keyPayload = [evenLevel, ...keyBytes];
-        log(block.id, block.label, `[${ts()}]   [3/3] TX: 27 ${keyPayload.map(hexB).join(' ')}  (SecurityAccess — sendKey level=0x${hexB(evenLevel)})`);
+        this.log(block.id, block.label, `[${ts()}]   [3/3] TX: 27 ${keyPayload.map(hexB).join(' ')}  (SecurityAccess — sendKey level=0x${hexB(evenLevel)})`);
         await randomDelay(30, 80);
 
         if (Math.random() < 0.04) throw new Error(nrcName(0x35));
 
         const keyResp = new Uint8Array([0x67, evenLevel]);
-        log(block.id, block.label, `[${ts()}]   [3/3] RX: ${hex(keyResp)}  → ${t('diagEng.accessGranted')}`);
+        this.log(block.id, block.label, `[${ts()}]   [3/3] RX: ${hex(keyResp)}  → ${t('diagEng.accessGranted')}`);
 
         ctx.securityUnlocked = true;
         ctx.unlockedLevel    = oddLevel;
@@ -982,7 +1014,7 @@ export class FlowEngine {
 
         if (lockedUntil && Date.now() < lockedUntil) {
           const remaining = Math.ceil((lockedUntil - Date.now()) / 1000);
-          log(block.id, block.label, `[${ts()}]   ⚠ ${t('diagEng.lockActive', { s: remaining })}`);
+          this.log(block.id, block.label, `[${ts()}]   ⚠ ${t('diagEng.lockActive', { s: remaining })}`);
           return { message: t('diagEng.lockActiveShort', { s: remaining }), nextPort: 'delay_out' };
         }
 
@@ -992,11 +1024,11 @@ export class FlowEngine {
         if (attempts > maxAttempts) {
           ctx.variables.set(lockedKey, Date.now() + lockoutMs);
           ctx.variables.set(countKey, 0);
-          log(block.id, block.label, `[${ts()}]   ✗ ${t('diagEng.maxAttempts', { max: maxAttempts, ms: lockoutMs })}`);
+          this.log(block.id, block.label, `[${ts()}]   ✗ ${t('diagEng.maxAttempts', { max: maxAttempts, ms: lockoutMs })}`);
           return { message: t('diagEng.lockoutMsg', { nrc: nrcName(0x36), ms: lockoutMs }), nextPort: 'delay_out' };
         }
 
-        log(block.id, block.label, `[${ts()}]   ${t('diagEng.attemptAllowed', { a: attempts, max: maxAttempts })}`);
+        this.log(block.id, block.label, `[${ts()}]   ${t('diagEng.attemptAllowed', { a: attempts, max: maxAttempts })}`);
         return { message: t('diagEng.attemptShort', { a: attempts, max: maxAttempts }), result: attempts };
       }
 
@@ -1005,15 +1037,15 @@ export class FlowEngine {
       case 'uds_seed_validator': {
         const expectedHex = String(block.config['expected_key'] ?? 'C9A8').replace(/[^0-9a-fA-F]/g, '');
 
-        log(block.id, block.label, `[${ts()}]   ${t('diagEng.expectedKey', { key: expectedHex || t('diagEng.empty') })}`);
-        log(block.id, block.label, `[${ts()}]   ${t('diagEng.mockVerify')}`);
+        this.log(block.id, block.label, `[${ts()}]   ${t('diagEng.expectedKey', { key: expectedHex || t('diagEng.empty') })}`);
+        this.log(block.id, block.label, `[${ts()}]   ${t('diagEng.mockVerify')}`);
 
         const passed = Math.random() > 0.1; // 90% pass in simulation
         if (passed) {
-          log(block.id, block.label, `[${ts()}]   ✓ ${t('diagEng.keyMatched')}`);
+          this.log(block.id, block.label, `[${ts()}]   ✓ ${t('diagEng.keyMatched')}`);
           return { message: t('diagEng.keyVerified'), result: { valid: true, expected: expectedHex }, nextPort: 'pass_out' };
         } else {
-          log(block.id, block.label, `[${ts()}]   ✗ ${t('diagEng.keyMismatchLog', { nrc: nrcName(0x35) })}`);
+          this.log(block.id, block.label, `[${ts()}]   ✗ ${t('diagEng.keyMismatchLog', { nrc: nrcName(0x35) })}`);
           return { message: t('diagEng.keyMismatchMsg', { nrc: nrcName(0x35) }), result: { valid: false, expected: expectedHex }, nextPort: 'fail_out' };
         }
       }
@@ -1033,9 +1065,9 @@ export class FlowEngine {
           '02': 'disableRxAndEnableTx', '03': 'disableRxAndTx',
         };
 
-        log(block.id, block.label, `[${ts()}]   TX: 28 ${hexB(ctrlByte)} ${hexB(commByte)}  (CommunicationControl — ${ctrlLabel[ctrlType] ?? ctrlType})`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 28 ${hexB(ctrlByte)} ${hexB(commByte)}  (CommunicationControl — ${ctrlLabel[ctrlType] ?? ctrlType})`);
         const resp = await udsRequest(0x28, [ctrlByte, commByte]);
-        log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
 
         ctx.commControlled = ctrlType === '03';
         return { message: `CommunicationControl: ${ctrlLabel[ctrlType] ?? ctrlType}` };
@@ -1047,9 +1079,9 @@ export class FlowEngine {
         const did = String(block.config['did'] ?? 'F190').toUpperCase().replace(/[^0-9A-F]/g, '').padStart(4, '0');
         const didBytes = [parseInt(did.slice(0, 2), 16), parseInt(did.slice(2, 4), 16)];
         if (!ctx.securityUnlocked) throw new Error(nrcName(0x33));
-        log(block.id, block.label, `[${ts()}]   TX: 2E ${didBytes.map(hexB).join(' ')} <data>  (WriteDataByIdentifier 0x${did})`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 2E ${didBytes.map(hexB).join(' ')} <data>  (WriteDataByIdentifier 0x${did})`);
         const resp = await udsRequest(0x2E, [...didBytes, 0x00]);
-        log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
         return { message: t('diagEng.didWritten', { did }) };
       }
 
@@ -1062,9 +1094,9 @@ export class FlowEngine {
         const ctrlVal   = parseInt(String(block.config['control_value'] ?? '00'), 16);
         const ctrlLabel: Record<number, string> = { 0: 'returnControlToECU', 1: 'resetToDefault', 2: 'freezeCurrentState', 3: 'shortTermAdjustment' };
 
-        log(block.id, block.label, `[${ts()}]   TX: 2F ${didBytes.map(hexB).join(' ')} ${hexB(ctrlOpt)} ${hexB(ctrlVal)}  (InputOutputControl ${ctrlLabel[ctrlOpt] ?? ''})`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 2F ${didBytes.map(hexB).join(' ')} ${hexB(ctrlOpt)} ${hexB(ctrlVal)}  (InputOutputControl ${ctrlLabel[ctrlOpt] ?? ''})`);
         const resp = await udsRequest(0x2F, [...didBytes, ctrlOpt, ctrlVal]);
-        log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
 
         return { message: `IO Control 0x${did}: ${ctrlLabel[ctrlOpt] ?? ctrlOpt}`, result: resp };
       }
@@ -1089,11 +1121,11 @@ export class FlowEngine {
           'E200': 'requestSoftwareUpdate',
         };
 
-        log(block.id, block.label, `[${ts()}]   TX: 31 ${hexB(ctrlByte)} ${ridBytes.map(hexB).join(' ')}  (RoutineControl — 0x${rid} ${ridNames[rid] ?? ''} ${ctrlLabel[ctrlType] ?? ''})`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 31 ${hexB(ctrlByte)} ${ridBytes.map(hexB).join(' ')}  (RoutineControl — 0x${rid} ${ridNames[rid] ?? ''} ${ctrlLabel[ctrlType] ?? ''})`);
         await udsRequest(0x31, [ctrlByte, ...ridBytes]);
 
         const resultBytes = ctrlType === '03' ? new Uint8Array([0x00, 0x01]) : new Uint8Array([0x00]);
-        log(block.id, block.label, `[${ts()}]   RX: 71 ${hexB(ctrlByte)} ${ridBytes.map(hexB).join(' ')} ${hex(resultBytes)}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: 71 ${hexB(ctrlByte)} ${ridBytes.map(hexB).join(' ')} ${hex(resultBytes)}`);
 
         return { message: `Rutin 0x${rid} (${ctrlLabel[ctrlType] ?? ctrlType}) → ${hex(resultBytes)}`, result: resultBytes };
       }
@@ -1112,11 +1144,11 @@ export class FlowEngine {
         const sizeBytes = sizeHex.match(/.{2}/g)?.map((b) => parseInt(b, 16)) ?? [0,0x01,0,0];
         const memFmt    = ((addrBytes.length & 0xF) << 4) | (sizeBytes.length & 0xF);
 
-        log(block.id, block.label, `[${ts()}]   TX: 34 ${hexB(fmtByte)} ${hexB(memFmt)} ${addrBytes.map(hexB).join(' ')} ${sizeBytes.map(hexB).join(' ')}  (RequestDownload)`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 34 ${hexB(fmtByte)} ${hexB(memFmt)} ${addrBytes.map(hexB).join(' ')} ${sizeBytes.map(hexB).join(' ')}  (RequestDownload)`);
         await udsRequest(0x34, [fmtByte, memFmt, ...addrBytes, ...sizeBytes]);
 
         const maxBlockLen = 0x0802;
-        log(block.id, block.label, `[${ts()}]   RX: 74 20 ${hexB((maxBlockLen >> 8) & 0xFF)} ${hexB(maxBlockLen & 0xFF)}  maxBlockLen=0x${maxBlockLen.toString(16).toUpperCase()}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: 74 20 ${hexB((maxBlockLen >> 8) & 0xFF)} ${hexB(maxBlockLen & 0xFF)}  maxBlockLen=0x${maxBlockLen.toString(16).toUpperCase()}`);
 
         ctx.downloadActive   = true;
         ctx.downloadAddress  = parseInt(addrHex, 16);
@@ -1138,11 +1170,11 @@ export class FlowEngine {
         const sizeBytes = sizeHex.match(/.{2}/g)?.map((b) => parseInt(b, 16)) ?? [0,0x01,0,0];
         const memFmt    = ((addrBytes.length & 0xF) << 4) | (sizeBytes.length & 0xF);
 
-        log(block.id, block.label, `[${ts()}]   TX: 35 ${hexB(fmtByte)} ${hexB(memFmt)} ${addrBytes.map(hexB).join(' ')} ${sizeBytes.map(hexB).join(' ')}  (RequestUpload)`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 35 ${hexB(fmtByte)} ${hexB(memFmt)} ${addrBytes.map(hexB).join(' ')} ${sizeBytes.map(hexB).join(' ')}  (RequestUpload)`);
         await udsRequest(0x35, [fmtByte, memFmt, ...addrBytes, ...sizeBytes]);
 
         const maxBlockLen = 0x0802;
-        log(block.id, block.label, `[${ts()}]   RX: 75 20 ${hexB((maxBlockLen >> 8) & 0xFF)} ${hexB(maxBlockLen & 0xFF)}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: 75 20 ${hexB((maxBlockLen >> 8) & 0xFF)} ${hexB(maxBlockLen & 0xFF)}`);
 
         ctx.downloadActive   = true;
         ctx.downloadSize     = parseInt(sizeHex, 16);
@@ -1162,7 +1194,7 @@ export class FlowEngine {
         const remaining  = ctx.downloadSize - ctx.transferredBytes;
         const thisChunk  = Math.min(chunkSize, remaining);
 
-        log(block.id, block.label, `[${ts()}]   TX: 36 ${hexB(seq)} <${thisChunk} bytes data>  (TransferData blockSeq=${seq})`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 36 ${hexB(seq)} <${thisChunk} bytes data>  (TransferData blockSeq=${seq})`);
         await randomDelay(40, 160);
 
         if (Math.random() < 0.01) throw new Error(nrcName(0x73) + ` ${t('diagEng.blockSeqExpected', { seq })}`);
@@ -1172,7 +1204,7 @@ export class FlowEngine {
         ctx.transferBlockSeq  = (seq % 0xFF) + 1;
 
         const pct = Math.min(100, Math.round((ctx.transferredBytes / ctx.downloadSize) * 100));
-        log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}  [${pct}%]  ${ctx.transferredBytes}/${ctx.downloadSize} bytes`);
+        this.log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}  [${pct}%]  ${ctx.transferredBytes}/${ctx.downloadSize} bytes`);
 
         return { message: t('diagEng.blockMsg', { seq, done: ctx.transferredBytes, total: ctx.downloadSize, pct }), result: { seq, transferred: ctx.transferredBytes, total: ctx.downloadSize, percent: pct } };
       }
@@ -1182,9 +1214,9 @@ export class FlowEngine {
       case 'uds_transfer_exit': {
         if (!ctx.downloadActive) throw new Error(nrcName(0x24) + ` — ${t('diagEng.noActiveTransfer')}`);
 
-        log(block.id, block.label, `[${ts()}]   TX: 37  (RequestTransferExit)`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 37  (RequestTransferExit)`);
         const resp = await udsRequest(0x37, []);
-        log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}  — ${t('diagEng.transferDoneLog')}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}  — ${t('diagEng.transferDoneLog')}`);
 
         const transferred = ctx.transferredBytes;
         ctx.downloadActive   = false;
@@ -1196,7 +1228,7 @@ export class FlowEngine {
       // ── Flash Image (DEMO: local simulated download, nothing transmitted) ─────
 
       case 'uds_flash_image':
-        return runFlashBlock(block, { demo: true, tabId: null, log: (msg) => log(block.id, block.label, `[${ts()}]   ${msg}`), transport: demoFlowTransport, shouldStop: () => this._stopped });
+        return runFlashBlock(block, { demo: true, tabId: null, log: (msg) => this.log(block.id, block.label, `[${ts()}]   ${msg}`), transport: demoFlowTransport, shouldStop: () => this._stopped });
 
       // ── Keep-alive / wait-ready (DEMO: simulated, nothing transmitted) ───────
 
@@ -1212,7 +1244,7 @@ export class FlowEngine {
 
       case 'uds_wait_ecu_ready': {
         const ms = Math.min(1500, Math.max(0, Number(block.config['initial_delay_ms'] ?? 500)) + 120);
-        log(block.id, block.label, `[${ts()}]   ${t('udsFlow.wr.start', { probe: String(block.config['probe'] ?? '3E00'), initial: ms, total: Number(block.config['timeout_ms'] ?? 10000) })}`);
+        this.log(block.id, block.label, `[${ts()}]   ${t('udsFlow.wr.start', { probe: String(block.config['probe'] ?? '3E00'), initial: ms, total: Number(block.config['timeout_ms'] ?? 10000) })}`);
         await randomDelay(ms, ms + 60);
         return { message: t('udsFlow.wr.ready', { ms, n: 1 }), result: ms, outputs: { elapsed_out: ms } };
       }
@@ -1228,9 +1260,9 @@ export class FlowEngine {
         const sizeBytes = sizeHex.match(/.{2}/g)?.map((b) => parseInt(b, 16)) ?? [0,0,0,0x10];
         const memFmt    = ((addrBytes.length & 0xF) << 4) | (sizeBytes.length & 0xF);
 
-        log(block.id, block.label, `[${ts()}]   TX: 3D ${hexB(memFmt)} ${addrBytes.map(hexB).join(' ')} ${sizeBytes.map(hexB).join(' ')} <data>  (WriteMemoryByAddress)`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 3D ${hexB(memFmt)} ${addrBytes.map(hexB).join(' ')} ${sizeBytes.map(hexB).join(' ')} <data>  (WriteMemoryByAddress)`);
         const resp = await udsRequest(0x3D, [memFmt, ...addrBytes, ...sizeBytes]);
-        log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
 
         return { message: `WriteMemory 0x${addrHex}  size=0x${sizeHex}` };
       }
@@ -1240,10 +1272,10 @@ export class FlowEngine {
       case 'uds_tester_present': {
         const suppress = !!block.config['suppress'];
         const sf       = suppress ? 0x80 : 0x00;
-        log(block.id, block.label, `[${ts()}]   TX: 3E ${hexB(sf)}  (TesterPresent suppress=${suppress})`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 3E ${hexB(sf)}  (TesterPresent suppress=${suppress})`);
         if (!suppress) {
           await randomDelay(10, 30);
-          log(block.id, block.label, `[${ts()}]   RX: 7E 00`);
+          this.log(block.id, block.label, `[${ts()}]   RX: 7E 00`);
         }
         return { message: `TesterPresent${suppress ? ' (suppress)' : ''}` };
       }
@@ -1257,9 +1289,9 @@ export class FlowEngine {
         const st = String(block.config['setting_type'] ?? '02');
         const sf = parseInt(st, 16);
         const label = st === '01' ? 'DTCSettingOn' : 'DTCSettingOff';
-        log(block.id, block.label, `[${ts()}]   TX: 85 ${hexB(sf)}  (ControlDTCSetting — ${label})`);
+        this.log(block.id, block.label, `[${ts()}]   TX: 85 ${hexB(sf)}  (ControlDTCSetting — ${label})`);
         const resp = await udsRequest(0x85, [sf]);
-        log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
+        this.log(block.id, block.label, `[${ts()}]   RX: ${hex(resp)}`);
         ctx.dtcSettingOff = st === '02';
         return { message: `ControlDTCSetting: ${label}` };
       }
@@ -1287,15 +1319,15 @@ export class FlowEngine {
         };
 
         // 2-step sequence: verify → transition
-        log(block.id, block.label, `[${ts()}]   [1/2] TX: 87 ${hexB(lcByte)} ${hexB(brByte)}  (LinkControl — ${lcLabel[lcType] ?? lcType})`);
+        this.log(block.id, block.label, `[${ts()}]   [1/2] TX: 87 ${hexB(lcByte)} ${hexB(brByte)}  (LinkControl — ${lcLabel[lcType] ?? lcType})`);
         const verifyResp = await udsRequest(0x87, [lcByte, brByte]);
-        log(block.id, block.label, `[${ts()}]   [1/2] RX: ${hex(verifyResp)}  — Verify OK`);
+        this.log(block.id, block.label, `[${ts()}]   [1/2] RX: ${hex(verifyResp)}  — Verify OK`);
 
         // transitionMode with suppressPosRspMsgIndicationBit=1 (0x83)
         const transByte = 0x83; // transitionMode | suppress
-        log(block.id, block.label, `[${ts()}]   [2/2] TX: 87 ${hexB(transByte)}  (LinkControl — transitionMode, suppress=true)`);
+        this.log(block.id, block.label, `[${ts()}]   [2/2] TX: 87 ${hexB(transByte)}  (LinkControl — transitionMode, suppress=true)`);
         await randomDelay(20, 60);
-        log(block.id, block.label, `[${ts()}]   [2/2] ${t('diagEng.noResponse', { baud: brLabel[brId] ?? brId })}`);
+        this.log(block.id, block.label, `[${ts()}]   [2/2] ${t('diagEng.noResponse', { baud: brLabel[brId] ?? brId })}`);
 
         return { message: `LinkControl: ${brLabel[brId] ?? brId}  (${lcLabel[lcType] ?? lcType} → transitionMode)` };
       }
@@ -1320,7 +1352,7 @@ export class FlowEngine {
         const template = String(block.config['template'] ?? '00 00 00 00');
         const bytes = template.replace(/[^0-9a-fA-F]/g, '').match(/.{2}/g)?.map((b) => parseInt(b, 16)) ?? [];
         const result = new Uint8Array(bytes);
-        log(block.id, block.label, `[${ts()}]   ${t('diagEng.byteSeq', { hex: hex(result), n: result.length })}`);
+        this.log(block.id, block.label, `[${ts()}]   ${t('diagEng.byteSeq', { hex: hex(result), n: result.length })}`);
         return { message: t('diagEng.bytesBuilt', { n: result.length, hex: hex(result) }), result };
       }
 
@@ -1335,7 +1367,7 @@ export class FlowEngine {
         const mask  = (1 << bits) - 1;
         const value = (mockByte >> bitLow) & mask;
 
-        log(block.id, block.label, `[${ts()}]   byte[${byteOffset}]=0x${hexB(mockByte)}  bit[${bitHigh}:${bitLow}] = 0x${hexB(value)} (${value})`);
+        this.log(block.id, block.label, `[${ts()}]   byte[${byteOffset}]=0x${hexB(mockByte)}  bit[${bitHigh}:${bitLow}] = 0x${hexB(value)} (${value})`);
         return { message: `bit[${bitHigh}:${bitLow}] = 0x${hexB(value)}`, result: value };
       }
 
@@ -1355,7 +1387,7 @@ export class FlowEngine {
         }
 
         const hexResult = `0x${checksum.toString(16).toUpperCase().padStart(algorithm === 'crc16' ? 4 : 8, '0')}`;
-        log(block.id, block.label, `[${ts()}]   ${algorithm.toUpperCase()}: ${hexResult}`);
+        this.log(block.id, block.label, `[${ts()}]   ${algorithm.toUpperCase()}: ${hexResult}`);
         return { message: `${algorithm.toUpperCase()} = ${hexResult}`, result: checksum };
       }
 
@@ -1368,7 +1400,7 @@ export class FlowEngine {
         const mockSize = 65536; // 64KB mock firmware
         const data = new Uint8Array(mockSize);
         for (let i = 0; i < mockSize; i++) data[i] = (0x20 + i) & 0xFF;
-        log(block.id, block.label, `[${ts()}]   ${t('diagEng.fileLine', { path, n: mockSize })}`);
+        this.log(block.id, block.label, `[${ts()}]   ${t('diagEng.fileLine', { path, n: mockSize })}`);
         return { message: t('diagEng.fileRead', { path, n: mockSize }), result: data };
       }
 
@@ -1376,7 +1408,7 @@ export class FlowEngine {
 
       case 'io_user_prompt': {
         const msg = String(block.config['message'] ?? t('diagBlk.enterAValue'));
-        log(block.id, block.label, `[${ts()}]   Prompt: "${msg}" → "mock_value"`);
+        this.log(block.id, block.label, `[${ts()}]   Prompt: "${msg}" → "mock_value"`);
         return { message: t('diagEng.userPrompt'), result: 'mock_value' };
       }
 
@@ -1386,7 +1418,7 @@ export class FlowEngine {
   }
 
   private setStatus(block: FlowBlock, status: BlockStatus, message?: string): void {
-    flowStore.setFrameStatus(this._frame.pathKey, block.id, status, message);
+    this._sink.setFrameStatus(this._frame.pathKey, block.id, status, message);
   }
 
   /** Fatal runtime-limit error: every frame halts and the run ends with outcome `error`. */
@@ -1428,19 +1460,19 @@ export class FlowEngine {
       throw new Error(t('flowNest.err.otherEcu', { callee: callee.name, ecu: childEcu.name }));
     }
     const pathKey = parent.pathKey === '' ? block.id : `${parent.pathKey}/${block.id}`;
-    flowStore.clearFrameStatuses(pathKey);
+    this._sink.clearFrameStatuses(pathKey);
     const child = this.makeFrame(
       resolveFrameDiagram(callee.diagram, childEcu).diagram, callee.name, [...parent.path, callee.name], pathKey, childEcu, values,
     );
     const entry = findEntryBlock(child.diagram);
     if (!entry) throw new Error(`${callee.name}: ${t('diagEng.startNotFound')}`);
-    log(block.id, block.label, `[${ts()}]   ${t('flowNest.log.enter', { name: callee.name, rev: ref.revision })}`);
+    this.log(block.id, block.label, `[${ts()}]   ${t('flowNest.log.enter', { name: callee.name, rev: ref.revision })}`);
     const { unhandled } = await this.runFrame(child, entry, true);
     if (unhandled !== null) throw (unhandled instanceof Error ? unhandled : new Error(String(unhandled)));
     const reached = child.reached;
     const name = reached ? reached.name : 'ok';
     const outputs = reached ? reached.outputs : {};
-    log(block.id, block.label, `[${ts()}]   ${t('flowNest.log.leave', { name: callee.name, outcome: name })}`);
+    this.log(block.id, block.label, `[${ts()}]   ${t('flowNest.log.leave', { name: callee.name, outcome: name })}`);
     return { message: t('flowNest.log.returned', { name: callee.name, outcome: name }), nextPort: name, outputs, result: outputs };
   }
 

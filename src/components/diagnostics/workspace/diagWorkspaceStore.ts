@@ -347,7 +347,7 @@ export const diagWorkspaceStore = {
     return r.ok ? ok(undefined) : r;
   },
 
-  // ── Bindings (stored only in A1, no UI) ──
+  // ── Bindings (Workbench, workbench-v1 §4) ──
 
   addBinding(vehicleId: string, binding: Omit<FlowBindingV1, 'id' | 'order'>): StoreResult<string> {
     const veh = findVehicle(vehicleId);
@@ -360,6 +360,34 @@ export const diagWorkspaceStore = {
     };
     const r = withVehicle(vehicleId, (v) => ({ ...v, bindings: [...v.bindings, b] }));
     return r.ok ? ok(b.id) : r;
+  },
+
+  /** Adds several bindings in ONE commit ("bind to group": one binding per member ECU). Returns the new ids. */
+  addBindings(vehicleId: string, items: ReadonlyArray<Omit<FlowBindingV1, 'id' | 'order'>>): StoreResult<string[]> {
+    const veh = findVehicle(vehicleId);
+    if (!veh) return err('not_found');
+    if (items.some((b) => !veh.ecus.some((e) => e.id === b.ecuId))) return err('not_found');
+    let order = veh.bindings.reduce((m, x) => Math.max(m, x.order), -1) + 1;
+    const created: FlowBindingV1[] = items.map((b) => ({ ...b, id: newId(), order: order++ }));
+    const r = withVehicle(vehicleId, (v) => ({ ...v, bindings: [...v.bindings, ...created] }));
+    return r.ok ? ok(created.map((b) => b.id)) : r;
+  },
+
+  /** Replaces the editable content of a binding (id / ecuId / order are kept). */
+  updateBinding(vehicleId: string, binding: FlowBindingV1): StoreResult {
+    const veh = findVehicle(vehicleId);
+    const cur = veh?.bindings.find((b) => b.id === binding.id);
+    if (!veh || !cur) return err('not_found');
+    const next: FlowBindingV1 = { ...binding, ecuId: cur.ecuId, order: cur.order };
+    const r = withVehicle(vehicleId, (v) => ({ ...v, bindings: v.bindings.map((b) => (b.id === binding.id ? next : b)) }));
+    return r.ok ? ok(undefined) : r;
+  },
+
+  /** Replaces the whole binding list in ONE commit (update-to-latest and its undo). */
+  replaceBindings(vehicleId: string, bindings: readonly FlowBindingV1[]): StoreResult {
+    if (!findVehicle(vehicleId)) return err('not_found');
+    const r = withVehicle(vehicleId, (v) => ({ ...v, bindings: bindings.map((b) => ({ ...b })) }));
+    return r.ok ? ok(undefined) : r;
   },
 
   removeBinding(vehicleId: string, bindingId: string): StoreResult {
