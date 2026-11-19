@@ -18,7 +18,26 @@ import {
   type UdsReadRequest,
 } from './udsBinding';
 import { mockBytes, mockPhysicalValue } from './udsMock';
-import { udsReadDid, udsReadMemory } from './udsTransport';
+import { udsReadDid, udsReadMemory, udsReadObdPid } from './udsTransport';
+
+/** Session transport used for reads (injectable for headless tests). */
+export interface UdsReadTransport {
+  readDid(did: number): Promise<number[]>;
+  readMemory(address: number, size: number): Promise<number[]>;
+  /** OBD-II Mode 01: returns the PID data bytes after the `41 <pid>` echo. */
+  readObdPid(pid: number): Promise<number[]>;
+}
+
+export const DEFAULT_UDS_READ_TRANSPORT: UdsReadTransport = {
+  readDid: udsReadDid,
+  readMemory: udsReadMemory,
+  readObdPid: udsReadObdPid,
+};
+
+/** Polling is only ever allowed in explicit Run mode with an open panel (Design never polls). */
+export function udsPollAllowed(mode: 'design' | 'run', hasPanel: boolean): boolean {
+  return mode === 'run' && hasPanel;
+}
 
 export type UdsReadErrorKind = UdsTransportErrorKind | 'invalidId' | 'shortPayload';
 
@@ -68,7 +87,10 @@ export class UdsPollEngine {
   private readonly statuses = new Map<string, UdsReadStatus>();
   private readonly listeners = new Map<string, Set<() => void>>();
 
-  constructor(private readonly bus: SimulationRuntimeBus) {}
+  constructor(
+    private readonly bus: SimulationRuntimeBus,
+    private readonly transport: UdsReadTransport = DEFAULT_UDS_READ_TRANSPORT
+  ) {}
 
   public nowSec(): number {
     return (performance.now() - this.t0) / 1000;
@@ -219,11 +241,13 @@ export class UdsPollEngine {
         st.inFlight = true;
         try {
           const data =
-            st.req.service === 'read_did' && st.req.did !== null
-              ? await udsReadDid(st.req.did)
-              : st.req.address !== null
-                ? await udsReadMemory(st.req.address, Math.max(1, st.req.size))
-                : [];
+            st.req.service === 'obd_pid' && st.req.pid !== null
+              ? await this.transport.readObdPid(st.req.pid)
+              : st.req.service === 'read_did' && st.req.did !== null
+                ? await this.transport.readDid(st.req.did)
+                : st.req.address !== null
+                  ? await this.transport.readMemory(st.req.address, Math.max(1, st.req.size))
+                  : [];
           if (gen !== this.generation) return;
           this.applyResponse(st, data);
           st.nextDueMs = performance.now() + st.req.intervalMs;

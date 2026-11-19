@@ -15,6 +15,7 @@ import {
   createDefaultWidget,
 } from '../../simulation/virtualCanPacking';
 import { withDerivedBinding } from './udsBinding';
+import { cloneUdsPanelWithNewIds } from './udsPanelSanitize';
 import { diagnosticsStore } from '../../../store/diagnosticsStore';
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -29,8 +30,14 @@ export interface UdsPanelNotice {
   seq: number;
 }
 
+export type UdsPanelView = 'list' | 'editor';
+
 export interface UdsPanelState {
   panels: UdsPanelDto[];
+  /** Panel directory (`list`) vs. the Design / Run editor of the active panel (`editor`). */
+  view: UdsPanelView;
+  /** JSON of every panel as of the last project save / load (unsaved-changes dot). */
+  savedSnapshots: Readonly<Record<string, string>>;
   activePanelId: string | null;
   mode: UdsPanelMode;
   selectedWidgetId: string | null;
@@ -225,11 +232,14 @@ class UdsPanelStore {
   private readonly listeners = new Set<() => void>();
   private noticeSeq = 0;
 
+  private readonly mutationListeners = new Set<() => void>();
+
   constructor() {
-    const starter = makeStarterPanel();
     this.s = {
-      panels: [starter],
-      activePanelId: starter.id,
+      panels: [],
+      view: 'list',
+      savedSnapshots: {},
+      activePanelId: null,
       mode: 'design',
       selectedWidgetId: null,
       pollIntervalMs: 1000,
@@ -257,14 +267,92 @@ class UdsPanelStore {
     for (const cb of this.listeners) cb();
   }
 
+  /** Persistence hook: called after every USER edit of the panel set (not after restore / clear / markSaved). */
+  public onMutation(listener: () => void): () => void {
+    this.mutationListeners.add(listener);
+    return () => {
+      this.mutationListeners.delete(listener);
+    };
+  }
+
+  private touch(): void {
+    for (const cb of this.mutationListeners) cb();
+  }
+
+  // Project persistence
+
+  /** Deep copy for `NexusProjectFileV1.diagnosticPanels`. */
+  public exportForProject(): UdsPanelDto[] {
+    return JSON.parse(JSON.stringify(this.s.panels)) as UdsPanelDto[];
+  }
+
+  /** Project open: replaces all panels (already sanitized). Never starts polling; lands on the list in Design mode. */
+  public restoreFromProject(panels: readonly UdsPanelDto[]): void {
+    const copy = JSON.parse(JSON.stringify(panels)) as UdsPanelDto[];
+    this.emit({
+      panels: copy,
+      view: 'list',
+      activePanelId: null,
+      mode: 'design',
+      selectedWidgetId: null,
+      savedSnapshots: snapshotsOf(copy),
+    });
+  }
+
+  public clearAll(): void {
+    this.emit({
+      panels: [],
+      view: 'list',
+      activePanelId: null,
+      mode: 'design',
+      selectedWidgetId: null,
+      savedSnapshots: {},
+      notice: null,
+    });
+  }
+
+  /** Project save: the given (exported) panels are now the saved baseline. */
+  public markSaved(panels: readonly UdsPanelDto[]): void {
+    this.emit({ savedSnapshots: snapshotsOf(panels) });
+  }
+
   // Panels
 
-  public createPanel(name: string): void {
+  public enterPanel(id: string, mode: UdsPanelMode): void {
+    if (!this.s.panels.some((p) => p.id === id)) return;
+    this.emit({ activePanelId: id, view: 'editor', mode, selectedWidgetId: null });
+  }
+
+  public backToList(): void {
+    this.emit({ view: 'list', mode: 'design', selectedWidgetId: null });
+  }
+
+  public duplicatePanel(id: string): void {
+    const src = this.s.panels.find((p) => p.id === id);
+    if (!src) return;
+    const copy = cloneUdsPanelWithNewIds(src, `${src.name} (Copy)`);
+    this.emit({ panels: [...this.s.panels, copy] });
+    this.touch();
+  }
+
+  /** Adds an already sanitized panel (fresh ids) from a `.nexusdiagpanel.json` import. */
+  public addImportedPanel(panel: UdsPanelDto): void {
+    this.emit({ panels: [...this.s.panels, panel] });
+    this.touch();
+  }
+
+  public createStarterPanel(name: string): void {
+    const panel = { ...makeStarterPanel(), name };
+    this.emit({ panels: [...this.s.panels, panel] });
+    this.touch();
+  }
+
+  public createPanel(name: string, description = ''): string {
     const now = new Date().toISOString();
     const panel: UdsPanelDto = {
       id: createClientUid('uds-pan'),
       name,
-      description: '',
+      description,
       gridCols: 24,
       rowHeightPx: 42,
       targetDatabaseId: null,
@@ -273,22 +361,38 @@ class UdsPanelStore {
       createdAt: now,
       updatedAt: now,
     };
-    this.emit({ panels: [...this.s.panels, panel], activePanelId: panel.id, selectedWidgetId: null });
+    this.emit({ panels: [...this.s.panels, panel] });
+    this.touch();
+    return panel.id;
   }
 
   public deletePanel(id: string): void {
     const panels = this.s.panels.filter((p) => p.id !== id);
     const activePanelId =
       this.s.activePanelId === id ? (panels[0]?.id ?? null) : this.s.activePanelId;
-    this.emit({ panels, activePanelId, selectedWidgetId: null });
+    this.emit({
+      panels,
+      activePanelId,
+      selectedWidgetId: null,
+      view: activePanelId === null ? 'list' : this.s.view,
+    });
+    this.touch();
   }
 
-  public renamePanel(id: string, name: string): void {
+  public renamePanel(id: string, name: string, description?: string): void {
     this.emit({
       panels: this.s.panels.map((p) =>
-        p.id === id ? { ...p, name, updatedAt: new Date().toISOString() } : p
+        p.id === id
+          ? {
+              ...p,
+              name,
+              description: description ?? p.description,
+              updatedAt: new Date().toISOString(),
+            }
+          : p
       ),
     });
+    this.touch();
   }
 
   public setActivePanel(id: string): void {
@@ -304,6 +408,7 @@ class UdsPanelStore {
         p.id === id ? { ...updater(p), updatedAt: new Date().toISOString() } : p
       ),
     });
+    this.touch();
   };
 
   // UI state
@@ -335,6 +440,22 @@ class UdsPanelStore {
 }
 
 export const udsPanelStore = new UdsPanelStore();
+
+function snapshotsOf(panels: readonly UdsPanelDto[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const p of panels) out[p.id] = JSON.stringify(p);
+  return out;
+}
+
+/** Panels whose content differs from the last project save (new panels count as unsaved). */
+export function computeUdsDirtyById(
+  panels: readonly UdsPanelDto[],
+  saved: Readonly<Record<string, string>>
+): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const p of panels) out[p.id] = saved[p.id] !== JSON.stringify(p);
+  return out;
+}
 
 export function useUdsPanelStore(): UdsPanelState {
   return useSyncExternalStore(

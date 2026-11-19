@@ -53,6 +53,19 @@ export function udsReadMemory(address: number, size: number): Promise<number[]> 
   );
 }
 
+/**
+ * OBD-II Mode 01 read (`01 <pid>`) over the diagnostic session's own request id (physical
+ * addressing, same path as the Live PID gauges). Returns the PID DATA bytes (A, B, ...) after the
+ * `41 <pid>` echo; a mismatching PID echo is an error (never a silent wrong value).
+ */
+export async function udsReadObdPid(pid: number): Promise<number[]> {
+  const rsp = await diagnosticsStore.sendUdsStrict(0x01, [pid], { record: false, origin: 'panel' });
+  if (rsp.length < 1 || rsp[0] !== pid) {
+    throw new UdsTransportError('failed', `OBD-II PID echo mismatch (expected 0x${pid.toString(16).toUpperCase().padStart(2, '0')})`);
+  }
+  return rsp.slice(1);
+}
+
 // ─── TX gate (Listen-Only / Arm / Panic Stop) ────────────────────────────────
 
 export type UdsTxGateReason =

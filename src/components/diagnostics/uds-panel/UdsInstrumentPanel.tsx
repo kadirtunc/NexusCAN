@@ -1,14 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  ArrowLeft,
   Check,
   FlaskConical,
   Gauge,
   Lock,
   OctagonX,
   Play,
-  Plus,
-  Trash2,
   Wrench,
   X,
 } from 'lucide-react';
@@ -41,7 +40,7 @@ import {
   udsWidgetReadKey,
   udsServiceLabel,
 } from './udsBinding';
-import { udsPanelStore, useUdsPanelStore } from './udsInstrumentStore';
+import { computeUdsDirtyById, udsPanelStore, useUdsPanelStore } from './udsInstrumentStore';
 import {
   addUdsWidget,
   deleteUdsWidget,
@@ -49,8 +48,9 @@ import {
   moveUdsWidgetIntoGroup,
   updateUdsWidget,
 } from './udsPanelActions';
-import { UdsPollEngine, useUdsReadStatus, type UdsReadErrorKind } from './udsPollEngine';
+import { UdsPollEngine, udsPollAllowed, useUdsReadStatus, type UdsReadErrorKind } from './udsPollEngine';
 import { buildUdsTextboxAdapter } from './udsTextbox';
+import { UdsPanelListScreen } from './UdsPanelListScreen';
 import { UdsQuickDidList } from './UdsQuickDidList';
 import {
   executeUdsWrite,
@@ -200,63 +200,10 @@ function TxGateStrip({ gate, mock }: { gate: UdsTxGateState; mock: boolean }): R
   );
 }
 
-function PanelTab({
-  panel,
-  active,
-}: {
-  panel: UdsPanelDto;
-  active: boolean;
-}): React.JSX.Element {
-  const { t } = useI18n();
-  const [renaming, setRenaming] = useState(false);
-  const [draft, setDraft] = useState(panel.name);
-
-  if (renaming) {
-    const commit = (): void => {
-      const next = draft.trim();
-      if (next) udsPanelStore.renamePanel(panel.id, next);
-      setRenaming(false);
-    };
-    return (
-      <input
-        autoFocus
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') commit();
-          if (e.key === 'Escape') setRenaming(false);
-        }}
-        aria-label={t('udsPanel.toolbar.renameAria')}
-        className="h-[28px] w-40 rounded-[2px] border border-focus bg-canvas px-2 font-mono text-[12px] text-ink"
-      />
-    );
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={() => udsPanelStore.setActivePanel(panel.id)}
-      onDoubleClick={() => {
-        setDraft(panel.name);
-        setRenaming(true);
-      }}
-      title={t('udsPanel.toolbar.renameHint')}
-      aria-pressed={active}
-      className={`inline-flex h-[28px] shrink-0 cursor-pointer items-center rounded-[2px] border px-2.5 font-mono text-[12px] ${
-        active
-          ? 'border-strong bg-elevated font-semibold text-ink'
-          : 'border-hairline bg-canvas text-muted hover:border-strong hover:text-ink'
-      }`}
-    >
-      {panel.name}
-    </button>
-  );
-}
-
 // ─── Root ────────────────────────────────────────────────────────────────────
 
-export const UdsInstrumentPanel: React.FC = () => {
+/** Design / Run editor of the active panel (opened from the panel list). */
+export const UdsPanelEditor: React.FC = () => {
   const { t } = useI18n();
   const state = useUdsPanelStore();
   const gate = useUdsTxGate();
@@ -274,12 +221,21 @@ export const UdsInstrumentPanel: React.FC = () => {
   const gridContainerRef = useRef<HTMLDivElement | null>(null);
   const [suppressAutoGroupTarget, setSuppressAutoGroupTarget] = useState(false);
 
-  const { panels, activePanelId, mode, selectedWidgetId, pollIntervalMs, mockMode, notice } = state;
+  const { panels, activePanelId, mode, selectedWidgetId, pollIntervalMs, mockMode } = state;
   const panel = useMemo(
     () => panels.find((p) => p.id === activePanelId) ?? null,
     [panels, activePanelId]
   );
   const widgets = panel?.widgets ?? NO_WIDGETS;
+  const isDirty = useMemo(
+    () => (panel ? computeUdsDirtyById([panel], state.savedSnapshots)[panel.id] === true : false),
+    [panel, state.savedSnapshots]
+  );
+
+  // A vanished active panel (deleted elsewhere) returns to the directory.
+  useEffect(() => {
+    if (!panel) udsPanelStore.backToList();
+  }, [panel]);
   const isDesign = mode === 'design';
   const isRun = mode === 'run';
   const isTxOpen = mockMode || gate === 'open';
@@ -314,7 +270,8 @@ export const UdsInstrumentPanel: React.FC = () => {
   }, [engine, widgets, pollIntervalMs, mockMode]);
 
   useEffect(() => {
-    if (!isRun || !panel) return;
+    // Design mode (and a freshly opened panel) never polls: only an explicit Run starts the engine.
+    if (!udsPollAllowed(mode, panel !== null)) return;
     engine.start();
     let raf = 0;
     const loop = (): void => {
@@ -326,7 +283,7 @@ export const UdsInstrumentPanel: React.FC = () => {
       window.cancelAnimationFrame(raf);
       engine.stop();
     };
-  }, [engine, runtimeBus, isRun, panel, hasGraph, activeDiagTabId]);
+  }, [engine, runtimeBus, mode, panel, hasGraph, activeDiagTabId]);
 
   useEffect(() => () => engine.stop(), [engine]);
 
@@ -476,13 +433,6 @@ export const UdsInstrumentPanel: React.FC = () => {
     if (id !== null) setSuppressAutoGroupTarget(false);
   }, []);
 
-  const handleDeletePanel = useCallback(() => {
-    if (!panel) return;
-    if (window.confirm(t('udsPanel.toolbar.deleteConfirm', { name: panel.name }))) {
-      udsPanelStore.deletePanel(panel.id);
-    }
-  }, [panel, t]);
-
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -494,30 +444,28 @@ export const UdsInstrumentPanel: React.FC = () => {
             <Gauge className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
             {t('udsPanel.toolbar.title')}
           </span>
-          <div className="flex min-w-0 max-w-[46vw] items-center gap-1 overflow-x-auto">
-            {panels.map((p) => (
-              <PanelTab key={p.id} panel={p} active={p.id === activePanelId} />
-            ))}
-          </div>
           <button
             type="button"
-            onClick={() => udsPanelStore.createPanel(t('udsPanel.toolbar.newPanelName', { n: panels.length + 1 }))}
-            title={t('udsPanel.toolbar.newPanel')}
-            aria-label={t('udsPanel.toolbar.newPanel')}
-            className="inline-flex h-[28px] w-[28px] cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-canvas text-focus hover:border-strong"
+            onClick={() => udsPanelStore.backToList()}
+            title={t('udsPanel.list.back')}
+            aria-label={t('udsPanel.list.back')}
+            className="inline-flex h-[28px] cursor-pointer items-center gap-1 rounded-[2px] border border-hairline bg-canvas px-2 font-mono text-[11px] font-semibold uppercase text-muted hover:border-strong hover:text-ink"
           >
-            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+            <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+            {t('udsPanel.list.back')}
           </button>
           {panel && (
-            <button
-              type="button"
-              onClick={handleDeletePanel}
-              title={t('udsPanel.toolbar.deletePanel')}
-              aria-label={t('udsPanel.toolbar.deletePanel')}
-              className="inline-flex h-[28px] w-[28px] cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-canvas text-muted hover:border-critical hover:text-critical"
-            >
-              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-            </button>
+            <span className="inline-flex min-w-0 items-center gap-1.5 font-mono text-[12px] text-ink">
+              <span className="truncate font-semibold">{panel.name}</span>
+              {isDirty && (
+                <span
+                  className="h-2 w-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: 'var(--status-warn)' }}
+                  title={t('udsPanel.list.unsaved')}
+                  aria-label={t('udsPanel.list.unsaved')}
+                />
+              )}
+            </span>
           )}
         </div>
 
@@ -614,61 +562,7 @@ export const UdsInstrumentPanel: React.FC = () => {
         </div>
       )}
 
-      {notice && (
-        <div
-          role="alert"
-          className="flex shrink-0 items-center justify-between gap-2 border-b px-4 py-2 font-mono text-xs"
-          style={{
-            backgroundColor:
-              notice.tone === 'error' ? 'var(--status-critical-bg)' : 'var(--status-warn-bg)',
-            borderColor:
-              notice.tone === 'error' ? 'var(--status-critical-border)' : 'var(--status-warn-border)',
-            color: notice.tone === 'error' ? 'var(--status-critical)' : 'var(--status-warn)',
-          }}
-        >
-          <span className="inline-flex items-center gap-2">
-            {notice.tone === 'info' ? (
-              <Check className="h-3.5 w-3.5 shrink-0" />
-            ) : (
-              <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-            )}
-            {t(notice.key, notice.params)}
-          </span>
-          <button
-            type="button"
-            onClick={() => udsPanelStore.dismissNotice()}
-            className="cursor-pointer p-0.5"
-            aria-label={t('udsPanel.notice.dismissAria')}
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
-
-      {!panel ? (
-        <div className="flex flex-1 items-center justify-center p-6">
-          <div className="w-full max-w-xl rounded-[2px] border border-hairline bg-surface p-6">
-            <div className="flex items-center gap-2 border-b border-hairline pb-3 font-mono text-xs font-bold uppercase tracking-wider text-ink">
-              <Gauge className="h-4 w-4 text-focus" aria-hidden="true" />
-              {t('udsPanel.empty.title')}
-            </div>
-            <p className="mt-3 text-xs leading-relaxed text-muted">{t('udsPanel.empty.desc')}</p>
-            <button
-              type="button"
-              onClick={() => udsPanelStore.createPanel(t('udsPanel.toolbar.newPanelName', { n: 1 }))}
-              className="mt-5 inline-flex h-[32px] cursor-pointer items-center gap-1.5 rounded-[2px] border px-3.5 font-mono text-[12px] font-semibold uppercase"
-              style={{
-                backgroundColor: 'var(--status-focus-bg)',
-                borderColor: 'var(--status-focus-border)',
-                color: 'var(--status-focus)',
-              }}
-            >
-              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-              {t('udsPanel.empty.create')}
-            </button>
-          </div>
-        </div>
-      ) : (
+      {!panel ? null : (
         <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
           {isDesign && (
             <SimulationPaletteSidebar
@@ -701,10 +595,15 @@ export const UdsInstrumentPanel: React.FC = () => {
               const src = w.udsRead ?? w.udsWrite;
               if (!src) return { badge: null, tag: null };
               const id =
-                src.service === 'read_did' || src.service === 'write_did' || src.service === 'io_control'
-                  ? src.did
-                  : src.address;
-              return { badge: `UDS ${udsServiceLabel(src.service)}`, tag: id.toUpperCase() };
+                src.service === 'obd_pid'
+                  ? (src.obdPid ?? '')
+                  : src.service === 'read_did' || src.service === 'write_did' || src.service === 'io_control'
+                    ? src.did
+                    : src.address;
+              return {
+                badge: `${src.service === 'obd_pid' ? 'OBD' : 'UDS'} ${udsServiceLabel(src.service)}`,
+                tag: id.toUpperCase(),
+              };
             }}
             emptyState={
               <div className="absolute inset-0 flex items-center justify-center p-6">
@@ -753,6 +652,48 @@ export const UdsInstrumentPanel: React.FC = () => {
           )}
         </div>
       )}
+    </div>
+  );
+};
+
+// ─── Entry: panel directory <-> editor (+ shared notice banner) ─────────────
+
+export const UdsInstrumentPanel: React.FC = () => {
+  const { t } = useI18n();
+  const { view, notice } = useUdsPanelStore();
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-canvas">
+      {notice && (
+        <div
+          role="alert"
+          className="flex shrink-0 items-center justify-between gap-2 border-b px-4 py-2 font-mono text-xs"
+          style={{
+            backgroundColor:
+              notice.tone === 'error' ? 'var(--status-critical-bg)' : 'var(--status-warn-bg)',
+            borderColor:
+              notice.tone === 'error' ? 'var(--status-critical-border)' : 'var(--status-warn-border)',
+            color: notice.tone === 'error' ? 'var(--status-critical)' : 'var(--status-warn)',
+          }}
+        >
+          <span className="inline-flex items-center gap-2">
+            {notice.tone === 'info' ? (
+              <Check className="h-3.5 w-3.5 shrink-0" />
+            ) : (
+              <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+            )}
+            {t(notice.key, notice.params)}
+          </span>
+          <button
+            type="button"
+            onClick={() => udsPanelStore.dismissNotice()}
+            className="cursor-pointer p-0.5"
+            aria-label={t('udsPanel.notice.dismissAria')}
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+      {view === 'editor' ? <UdsPanelEditor /> : <UdsPanelListScreen />}
     </div>
   );
 };

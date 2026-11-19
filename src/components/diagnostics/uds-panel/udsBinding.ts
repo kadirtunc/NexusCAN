@@ -10,6 +10,7 @@ import type {
   UdsWidgetDto,
   UdsWriteBinding,
 } from '../../../types/uds';
+import { PID_CATALOG, type PidDefinition } from '../../../types/diagnostics';
 import { ACCENT_HEX_MAP, makeSignalBusKey } from '../../simulation/virtualCanPacking';
 
 export const UDS_MIN_POLL_MS = 50;
@@ -41,9 +42,61 @@ function bigEndianBytes(value: number, len: number): number[] {
   return out;
 }
 
+// ─── OBD-II Mode 01 PIDs ─────────────────────────────────────────────────────
+
+/** 1-2 uppercase hex chars (a PID is one byte). */
+export function sanitizeObdPid(raw: string): string {
+  return raw.toUpperCase().replace(/[^0-9A-F]/g, '').slice(0, 2);
+}
+
+/** PID byte (0..255) or null when empty. */
+export function parseObdPid(raw: string | undefined): number | null {
+  const clean = sanitizeObdPid(raw ?? '');
+  if (clean.length === 0) return null;
+  const n = Number.parseInt(clean, 16);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function findObdPidDef(pid: number | null): PidDefinition | null {
+  if (pid === null) return null;
+  return PID_CATALOG.find((p) => p.pid === pid) ?? null;
+}
+
+function decimalsOf(def: PidDefinition): number {
+  const sample = def.formatValue(1.234567);
+  const dot = sample.indexOf('.');
+  return dot < 0 ? 0 : Math.min(6, sample.length - dot - 1);
+}
+
+/**
+ * Binding defaults of a catalog PID (unit / min / max / decimals come from the catalog; the value
+ * itself is decoded by the catalog formula, so factor / offset stay neutral).
+ */
+export function obdReadDefaults(pid: number): Partial<UdsReadBinding> {
+  const def = findObdPidDef(pid);
+  const hex = pid.toString(16).toUpperCase().padStart(2, '0');
+  if (!def) {
+    return { service: 'obd_pid', obdPid: hex, byteOffset: 0, byteLen: 1, signed: false, factor: 1, offset: 0 };
+  }
+  return {
+    service: 'obd_pid',
+    obdPid: hex,
+    byteOffset: 0,
+    byteLen: def.bytes >= 4 ? 4 : def.bytes >= 2 ? 2 : 1,
+    signed: false,
+    factor: 1,
+    offset: 0,
+    unit: def.unit,
+    min: def.min,
+    max: def.max,
+    decimals: decimalsOf(def),
+  };
+}
+
 // ─── Synthetic runtime-bus keys (never collide with DBC `makeBindingSignalKey`) ─
 
 function readIdTag(r: UdsReadBinding): string {
+  if (r.service === 'obd_pid') return `PID:${sanitizeObdPid(r.obdPid ?? '')}`;
   return r.service === 'read_did'
     ? `DID:${sanitizeHex(r.did)}`
     : `MEM:${sanitizeHex(r.address)}`;
@@ -89,6 +142,8 @@ export function udsServiceLabel(service: UdsReadBinding['service'] | UdsWriteBin
       return '0x22';
     case 'read_mem':
       return '0x23';
+    case 'obd_pid':
+      return '0x01';
     case 'write_did':
       return '0x2E';
     case 'write_mem':
@@ -192,8 +247,20 @@ export function withDerivedBinding(w: UdsWidgetDto): UdsWidgetDto {
 
 // ─── Read decode ─────────────────────────────────────────────────────────────
 
-/** Decodes the physical value out of the response data payload; null if payload is too short. */
+/**
+ * Decodes the physical value out of the response data payload; null if payload is too short.
+ * `obd_pid` data = the PID data bytes (A, B, ...) after the `41 <pid>` echo. Catalog PIDs use the
+ * `PID_CATALOG` formula; unknown PIDs fall through to the raw-bytes + factor/offset path below.
+ */
 export function decodeReadValue(r: UdsReadBinding, data: readonly number[]): number | null {
+  if (r.service === 'obd_pid') {
+    const def = findObdPidDef(parseObdPid(r.obdPid));
+    if (def) {
+      const start = Math.max(0, r.byteOffset);
+      if (data.length < start + def.bytes) return null;
+      return def.formula(data.slice(start, start + def.bytes));
+    }
+  }
   const end = r.byteOffset + r.byteLen;
   if (r.byteOffset < 0 || data.length < end) return null;
   let raw = 0;
@@ -225,6 +292,8 @@ export interface UdsReadRequest {
   service: UdsReadBinding['service'];
   did: number | null;
   address: number | null;
+  /** OBD-II Mode 01 PID (obd_pid). */
+  pid: number | null;
   /** Bytes needed from the payload (max over consumers of byteOffset + byteLen). */
   size: number;
   intervalMs: number;
@@ -248,7 +317,11 @@ export function buildReadRequests(
     const key = udsWidgetReadKey(w) ?? udsReadBusKey(r);
     const textLen = udsTextLenOf(w);
     const idValue =
-      r.service === 'read_did' ? parseHexId(r.did) : parseHexId(r.address);
+      r.service === 'obd_pid'
+        ? parseObdPid(r.obdPid)
+        : r.service === 'read_did'
+          ? parseHexId(r.did)
+          : parseHexId(r.address);
     if (idValue === null || (r.service === 'read_did' && idValue > 0xffff)) {
       invalid.push({ key });
       continue;
@@ -265,6 +338,7 @@ export function buildReadRequests(
         service: r.service,
         did: r.service === 'read_did' ? idValue : null,
         address: r.service === 'read_mem' ? idValue : null,
+        pid: r.service === 'obd_pid' ? idValue : null,
         size: 0,
         intervalMs: interval,
         consumers: [],
@@ -273,7 +347,8 @@ export function buildReadRequests(
     }
     req.intervalMs = Math.min(req.intervalMs, interval);
     const textSpan = textLen === null ? 0 : textLen > 0 ? textLen : r.service === 'read_mem' ? UDS_MEM_TEXT_DEFAULT_LEN : 1;
-    req.size = Math.max(req.size, r.byteOffset + Math.max(r.byteLen, textSpan));
+    const obdBytes = r.service === 'obd_pid' ? (findObdPidDef(idValue)?.bytes ?? 0) : 0;
+    req.size = Math.max(req.size, r.byteOffset + Math.max(r.byteLen, textSpan, obdBytes));
     if (!req.consumers.some((c) => c.key === key)) {
       req.consumers.push({ key, read: r, textLen });
     }

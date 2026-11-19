@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Link2, Plus, Unlink } from 'lucide-react';
 import { useI18n, type TranslationKey } from '../../../i18n';
 import type {
@@ -10,7 +10,14 @@ import type {
   UdsWriteBinding,
   UdsWriteService,
 } from '../../../types/uds';
-import { sanitizeHex } from './udsBinding';
+import { PID_CATALOG } from '../../../types/diagnostics';
+import {
+  findObdPidDef,
+  obdReadDefaults,
+  parseObdPid,
+  sanitizeHex,
+  sanitizeObdPid,
+} from './udsBinding';
 import { defaultUdsRead, defaultUdsWrite, kindUsesUdsRead, kindUsesUdsWrite } from './udsInstrumentStore';
 import { patchUdsBindings } from './udsPanelActions';
 
@@ -21,7 +28,14 @@ const LABEL_CLS = 'block text-[9px] text-subtle';
 const READ_SERVICES: ReadonlyArray<{ value: UdsReadService; labelKey: TranslationKey }> = [
   { value: 'read_did', labelKey: 'udsPanel.bind.svc.read_did' },
   { value: 'read_mem', labelKey: 'udsPanel.bind.svc.read_mem' },
+  { value: 'obd_pid', labelKey: 'udsPanel.bind.svc.obd_pid' },
 ];
+
+const CUSTOM_PID = 'custom';
+
+function pidHex(pid: number): string {
+  return pid.toString(16).toUpperCase().padStart(2, '0');
+}
 const WRITE_SERVICES: ReadonlyArray<{ value: UdsWriteService; labelKey: TranslationKey }> = [
   { value: 'write_did', labelKey: 'udsPanel.bind.svc.write_did' },
   { value: 'write_mem', labelKey: 'udsPanel.bind.svc.write_mem' },
@@ -157,6 +171,22 @@ function ReadBlock({
     patchUdsBindings(widget.id, { udsRead: nextRead, ...sync });
   };
   const dis = !canMutate;
+  const isObd = read.service === 'obd_pid';
+  const obdDef = isObd ? findObdPidDef(parseObdPid(read.obdPid)) : null;
+  // "custom PID" is a UI mode: a PID outside the catalog (or an explicit choice) uses raw bytes + factor/offset.
+  const [customPid, setCustomPid] = useState<boolean>(isObd && obdDef === null);
+  // A PID in the catalog is always decoded by its catalog formula (raw byte fields only for unknown PIDs).
+  const showRawDecode = !isObd || obdDef === null;
+
+  const changeService = (service: UdsReadService): void => {
+    if (service === 'obd_pid') {
+      const pid = parseObdPid(read.obdPid) ?? 0x0c;
+      setCustomPid(false);
+      patch({ ...obdReadDefaults(pid), service });
+      return;
+    }
+    patch({ service });
+  };
 
   return (
     <div className="space-y-1.5">
@@ -166,7 +196,7 @@ function ReadBlock({
           <select
             disabled={dis}
             value={read.service}
-            onChange={(e) => patch({ service: e.target.value as UdsReadService })}
+            onChange={(e) => changeService(e.target.value as UdsReadService)}
             className={INPUT_CLS}
           >
             {READ_SERVICES.map((s) => (
@@ -176,13 +206,56 @@ function ReadBlock({
             ))}
           </select>
         </label>
-        {read.service === 'read_did' ? (
+        {isObd ? (
+          <label className="space-y-0.5">
+            <span className={LABEL_CLS}>{t('udsPanel.bind.obdPid')}</span>
+            <select
+              disabled={dis}
+              value={customPid || obdDef === null ? CUSTOM_PID : pidHex(obdDef.pid)}
+              onChange={(e) => {
+                if (e.target.value === CUSTOM_PID) {
+                  setCustomPid(true);
+                  return;
+                }
+                setCustomPid(false);
+                patch(obdReadDefaults(Number.parseInt(e.target.value, 16)));
+              }}
+              className={`${INPUT_CLS} font-mono`}
+            >
+              {PID_CATALOG.map((def) => (
+                <option key={def.pid} value={pidHex(def.pid)}>
+                  {`${pidHex(def.pid)} ${def.name} (${def.unit})`}
+                </option>
+              ))}
+              <option value={CUSTOM_PID}>{t('udsPanel.bind.obdCustom')}</option>
+            </select>
+          </label>
+        ) : read.service === 'read_did' ? (
           <HexField label={t('udsPanel.bind.did')} value={read.did} disabled={dis} onChange={(v) => patch({ did: v })} />
         ) : (
           <HexField label={t('udsPanel.bind.address')} value={read.address} disabled={dis} onChange={(v) => patch({ address: v })} />
         )}
       </div>
 
+      {isObd && (customPid || obdDef === null) && (
+        <div className="grid grid-cols-2 gap-1.5">
+          <label className="space-y-0.5">
+            <span className={LABEL_CLS}>{t('udsPanel.bind.obdPidHex')}</span>
+            <input
+              type="text"
+              disabled={dis}
+              value={read.obdPid ?? ''}
+              maxLength={2}
+              onChange={(e) => patch({ obdPid: sanitizeObdPid(e.target.value) })}
+              className={`${INPUT_CLS} font-mono uppercase tabular-nums`}
+            />
+          </label>
+        </div>
+      )}
+      {isObd && <p className="text-[9px] text-subtle">{t(obdDef ? 'udsPanel.bind.obdCatalogHint' : 'udsPanel.bind.obdRawHint')}</p>}
+
+      {showRawDecode && (
+      <>
       <div className="grid grid-cols-3 gap-1.5">
         <NumField label={t('udsPanel.bind.byteOffset')} value={read.byteOffset} disabled={dis} step="1" min={0} onChange={(v) => patch({ byteOffset: Math.max(0, Math.floor(v)) })} />
         <ByteLenField label={t('udsPanel.bind.byteLen')} value={read.byteLen} disabled={dis} onChange={(v) => patch({ byteLen: v })} />
@@ -208,6 +281,15 @@ function ReadBlock({
           <input type="text" disabled={dis} value={read.unit} onChange={(e) => patch({ unit: e.target.value })} className={INPUT_CLS} />
         </label>
       </div>
+      </>
+      )}
+
+      {!showRawDecode && (
+        <label className="block space-y-0.5">
+          <span className={LABEL_CLS}>{t('udsPanel.bind.unit')}</span>
+          <input type="text" disabled={dis} value={read.unit} onChange={(e) => patch({ unit: e.target.value })} className={INPUT_CLS} />
+        </label>
+      )}
 
       <div className="grid grid-cols-3 gap-1.5">
         <NumField label={t('udsPanel.bind.min')} value={read.min} disabled={dis} onChange={(v) => patch({ min: v })} />

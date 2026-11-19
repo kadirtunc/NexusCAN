@@ -3,7 +3,7 @@
  * panel's MOCK toggle ON (default OFF); the panel shows a prominent MOCK / DEMO badge meanwhile.
  */
 import type { UdsReadBinding } from '../../../types/uds';
-import { sanitizeHex } from './udsBinding';
+import { sanitizeHex, sanitizeObdPid } from './udsBinding';
 
 interface MockEntry {
   value: number;
@@ -23,16 +23,21 @@ const MOCK_BY_ID: Readonly<Record<string, MockEntry>> = {
   '2202': { value: 0, dynamic: false }, // A/C relay
 };
 
+function mockIdOf(r: UdsReadBinding): string {
+  if (r.service === 'obd_pid') return `PID${sanitizeObdPid(r.obdPid ?? '')}`;
+  return sanitizeHex(r.service === 'read_did' ? r.did : r.address);
+}
+
 /** Physical demo value for a read binding (already scaled; bypasses payload decode). */
 export function mockPhysicalValue(r: UdsReadBinding, nowMs: number): number {
-  const id = sanitizeHex(r.service === 'read_did' ? r.did : r.address);
+  const id = mockIdOf(r);
   const entry = MOCK_BY_ID[id];
   if (entry?.dynamic) {
     const range = (r.max - r.min) * 0.3;
     return Math.min(r.max, Math.max(r.min, entry.value + Math.sin(nowMs / 3000) * range));
   }
   if (entry) return entry.value;
-  const seed = Number.parseInt(id || '0', 16);
+  const seed = Number.parseInt(id.replace(/^PID/, '') || '0', 16);
   return r.min + (r.max - r.min) * (0.4 + Math.sin(nowMs / 4000 + seed) * 0.1);
 }
 
@@ -48,7 +53,7 @@ const MOCK_ASCII: Readonly<Record<string, string>> = {
 
 /** Demo bytes of a textbox read (ASCII DIDs get a labelled demo string; others the scaled value). */
 export function mockBytes(r: UdsReadBinding, textLen: number): Uint8Array {
-  const id = sanitizeHex(r.service === 'read_did' ? r.did : r.address);
+  const id = mockIdOf(r);
   const text = MOCK_ASCII[id] ?? String(Math.round(mockPhysicalValue(r, Date.now())));
   const bytes = Uint8Array.from(text, (ch) => ch.charCodeAt(0) & 0xff);
   if (textLen > 0) {

@@ -1,9 +1,10 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, type ReactNode } from 'react';
 import {
   Activity,
   ArrowLeft,
   ArrowRight,
   Compass,
+  Copy,
   Database,
   Download,
   FolderGit2,
@@ -69,7 +70,8 @@ function formatTimestampTabular(iso: string): string {
 }
 
 function summarizePanelWidgets(
-  panel: SimulationPanelDto
+  panel: SimulationPanelDto,
+  kindOrder: readonly SimulationWidgetKind[]
 ): Array<{ kind: SimulationWidgetKind; code: string; count: number }> {
   const counts = new Map<SimulationWidgetKind, number>();
   for (const w of panel.widgets) {
@@ -77,7 +79,7 @@ function summarizePanelWidgets(
   }
   const out: Array<{ kind: SimulationWidgetKind; code: string; count: number }> =
     [];
-  for (const kind of KIND_ORDER) {
+  for (const kind of kindOrder) {
     const c = counts.get(kind) ?? 0;
     if (c > 0) {
       out.push({ kind, code: KIND_SHORT_CODE[kind], count: c });
@@ -86,12 +88,26 @@ function summarizePanelWidgets(
   return out;
 }
 
-export interface SimulationPanelListViewProps {
+/** Optional pre-translated copy overrides (Diagnostic Simulation reuses this view with its own wording). */
+export interface PanelListTexts {
+  mainTitle?: string;
+  mainDesc?: string;
+  importLabel?: string;
+  exportTitle?: string;
+  emptyTitle?: string;
+  emptyDesc?: string;
+  duplicateTitle?: string;
+}
+
+/** Widget kind order of the component breakdown chips (default: Simulation order). */
+export const DEFAULT_PANEL_KIND_ORDER = KIND_ORDER;
+
+export interface SimulationPanelListViewProps<P extends SimulationPanelDto = SimulationPanelDto> {
   canMutate: boolean;
   allowProjectSwitch: boolean;
   projects: readonly CloudProjectDto[];
   resolvedProject: CloudProjectDto | null;
-  panels: readonly SimulationPanelDto[];
+  panels: readonly P[];
   dirtyById: Readonly<Record<string, boolean>>;
   databases: readonly NetworkDatabaseSummaryDto[];
   loadedDbEntries: readonly LoadedSimulationDatabaseEntry[];
@@ -105,12 +121,22 @@ export interface SimulationPanelListViewProps {
   onSyncFromCloud?: () => void | Promise<void>;
   syncingFromCloud?: boolean;
   onTriggerImportJson: () => void;
-  onExportPanelJson: (panel: SimulationPanelDto) => void;
-  onRequestRenamePanel: (panel: SimulationPanelDto) => void;
-  onRequestDeletePanel: (panel: SimulationPanelDto) => void;
+  onExportPanelJson: (panel: P) => void;
+  onRequestRenamePanel: (panel: P) => void;
+  onRequestDeletePanel: (panel: P) => void;
+  /** When given, every row gets a duplicate button (mutating users only). */
+  onDuplicatePanel?: (panel: P) => void;
+  /** Hide the signal-generator column / metric (panels without generators). Default: shown. */
+  showGenerators?: boolean;
+  /** Hide the DBC / project-sync chrome (badge, database metric). Default: shown. */
+  showDatabases?: boolean;
+  kindOrder?: readonly SimulationWidgetKind[];
+  texts?: PanelListTexts;
+  /** Extra header actions rendered before the primary actions. */
+  extraActions?: ReactNode;
 }
 
-export function SimulationPanelListView({
+export function SimulationPanelListView<P extends SimulationPanelDto = SimulationPanelDto>({
   canMutate,
   allowProjectSwitch,
   projects,
@@ -132,7 +158,13 @@ export function SimulationPanelListView({
   onExportPanelJson,
   onRequestRenamePanel,
   onRequestDeletePanel,
-}: SimulationPanelListViewProps): React.JSX.Element {
+  onDuplicatePanel,
+  showGenerators = true,
+  showDatabases = true,
+  kindOrder = KIND_ORDER,
+  texts,
+  extraActions,
+}: SimulationPanelListViewProps<P>): React.JSX.Element {
   const { t } = useI18n();
   const [query, setQuery] = useState<string>('');
 
@@ -236,21 +268,24 @@ export function SimulationPanelListView({
                 </div>
               )}
 
-              <span className="rounded-[2px] border border-hairline bg-canvas px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted">
-                {t('simWb.list.syncedBadge')}
-              </span>
+              {showDatabases && (
+                <span className="rounded-[2px] border border-hairline bg-canvas px-2 py-0.5 text-[10px] uppercase tracking-wider text-muted">
+                  {t('simWb.list.syncedBadge')}
+                </span>
+              )}
             </div>
 
             <h1 className="font-mono text-base font-bold uppercase tracking-wider text-ink">
-              {t('simWb.list.mainTitle')}
+              {texts?.mainTitle ?? t('simWb.list.mainTitle')}
             </h1>
             <p className="max-w-2xl text-xs leading-relaxed text-muted">
-              {t('simWb.list.mainDesc')}
+              {texts?.mainDesc ?? t('simWb.list.mainDesc')}
             </p>
           </div>
 
           {/* Primary Directory Actions */}
           <div className="flex flex-wrap items-center gap-2">
+            {extraActions}
             {onSyncFromCloud && (
               <button
                 type="button"
@@ -275,7 +310,7 @@ export function SimulationPanelListView({
                 className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-canvas px-3 font-mono text-[11px] font-semibold uppercase text-ink hover:border-strong hover:bg-elevated disabled:opacity-50"
               >
                 <Upload className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
-                {t('simWb.list.importJson')}
+                {texts?.importLabel ?? t('simWb.list.importJson')}
               </button>
             )}
 
@@ -310,7 +345,9 @@ export function SimulationPanelListView({
         </div>
 
         {/* 2. Summary Engineering Metrics Strip */}
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div
+          className={`grid grid-cols-2 gap-3 ${showGenerators && showDatabases ? 'lg:grid-cols-4' : 'lg:grid-cols-2'}`}
+        >
           <div className="rounded-[2px] border border-hairline bg-surface px-4 py-3 font-mono tabular-nums">
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted">
               <span>{t('simWb.list.metricRegistered')}</span>
@@ -344,6 +381,7 @@ export function SimulationPanelListView({
             </div>
           </div>
 
+          {showGenerators && (
           <div className="rounded-[2px] border border-hairline bg-surface px-4 py-3 font-mono tabular-nums">
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted">
               <span>{t('simWb.list.metricGenerators')}</span>
@@ -359,7 +397,9 @@ export function SimulationPanelListView({
               {t('simWb.list.metricGeneratorsSub')}
             </div>
           </div>
+          )}
 
+          {showDatabases && (
           <div className="rounded-[2px] border border-hairline bg-surface px-4 py-3 font-mono tabular-nums">
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted">
               <span>{t('simWb.list.metricDatabases')}</span>
@@ -382,6 +422,7 @@ export function SimulationPanelListView({
               {t('simWb.list.metricDatabasesSub')}
             </div>
           </div>
+          )}
         </div>
 
         {/* 3. Panel Directory Table / Empty State */}
@@ -420,10 +461,10 @@ export function SimulationPanelListView({
                 aria-hidden="true"
               />
               <h2 className="mt-3 font-mono text-xs font-bold uppercase tracking-wider text-ink">
-                {t('simWb.list.emptyTitle')}
+                {texts?.emptyTitle ?? t('simWb.list.emptyTitle')}
               </h2>
               <p className="mx-auto mt-2 max-w-lg text-xs leading-relaxed text-muted">
-                {t('simWb.list.emptyDesc')}
+                {texts?.emptyDesc ?? t('simWb.list.emptyDesc')}
               </p>
               {canMutate && (
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
@@ -460,7 +501,7 @@ export function SimulationPanelListView({
                     className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-canvas px-3 font-mono text-[11px] uppercase text-muted hover:border-strong hover:text-ink"
                   >
                     <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-                    {t('simWb.list.importJson')}
+                    {texts?.importLabel ?? t('simWb.list.importJson')}
                   </button>
                 </div>
               )}
@@ -480,9 +521,11 @@ export function SimulationPanelListView({
                     <th className="px-4 py-2.5 font-semibold">
                       {t('simWb.list.thComponents')}
                     </th>
-                    <th className="px-4 py-2.5 font-semibold">
-                      {t('simWb.list.thGenerators')}
-                    </th>
+                    {showGenerators && (
+                      <th className="px-4 py-2.5 font-semibold">
+                        {t('simWb.list.thGenerators')}
+                      </th>
+                    )}
                     <th className="px-4 py-2.5 font-semibold">
                       {t('simWb.list.thUpdated')}
                     </th>
@@ -493,7 +536,7 @@ export function SimulationPanelListView({
                 </thead>
                 <tbody className="divide-y divide-hairline">
                   {filteredPanels.map((panel) => {
-                    const summaryChips = summarizePanelWidgets(panel);
+                    const summaryChips = summarizePanelWidgets(panel, kindOrder);
                     const nonGroupCount = panel.widgets.filter(
                       (w) => w.kind !== 'group'
                     ).length;
@@ -575,6 +618,7 @@ export function SimulationPanelListView({
                         </td>
 
                         {/* 3. Generators */}
+                        {showGenerators && (
                         <td className="px-4 py-3.5 align-middle font-mono text-[10px] tabular-nums">
                           {panel.generators.length === 0 ? (
                             <span className="text-subtle">{t('simWb.list.noGen')}</span>
@@ -601,6 +645,7 @@ export function SimulationPanelListView({
                             </span>
                           )}
                         </td>
+                        )}
 
                         {/* 4. Updated At */}
                         <td className="px-4 py-3.5 align-middle whitespace-nowrap font-mono text-[11px] tabular-nums text-muted">
@@ -651,10 +696,22 @@ export function SimulationPanelListView({
                               </button>
                             )}
 
+                            {canMutate && onDuplicatePanel && (
+                              <button
+                                type="button"
+                                onClick={() => onDuplicatePanel(panel)}
+                                title={texts?.duplicateTitle}
+                                aria-label={texts?.duplicateTitle}
+                                className="inline-flex h-[28px] w-[28px] cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-canvas text-muted hover:border-strong hover:text-ink"
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+
                             <button
                               type="button"
                               onClick={() => onExportPanelJson(panel)}
-                              title={t('simWb.list.exportTitle')}
+                              title={texts?.exportTitle ?? t('simWb.list.exportTitle')}
                               aria-label={t('simWb.list.exportAria', { name: panel.name })}
                               className="inline-flex h-[28px] w-[28px] cursor-pointer items-center justify-center rounded-[2px] border border-hairline bg-canvas text-muted hover:border-strong hover:text-ink"
                             >
