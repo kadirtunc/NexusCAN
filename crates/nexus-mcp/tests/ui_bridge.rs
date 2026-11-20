@@ -311,7 +311,7 @@ async fn ui_calls_are_rate_limited_and_audited() {
 async fn tool_list_annotations_and_schemas() {
     let (_e, handle, client) = setup("list", None).await;
     let tools = client.list_all_tools().await.unwrap();
-    assert_eq!(tools.len(), 32);
+    assert_eq!(tools.len(), 46);
     let get = |n: &str| tools.iter().find(|t| t.name == n).unwrap();
     let ann = |n: &str| get(n).annotations.clone().unwrap();
     assert_eq!(ann("ui_get_state").read_only_hint, Some(true));

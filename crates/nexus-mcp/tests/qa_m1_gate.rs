@@ -994,13 +994,27 @@ async fn qa_curl_raw_jsonrpc_smoke() {
             "db_search_signals",
             "debug_events_query",
             "device_list",
+            "diag_conversation",
+            "diag_isotp_frames",
+            "diag_passive_discovery",
+            "diag_session_info",
             "driver_probe",
+            "flowlib_get",
+            "flowlib_list",
             "live_message_table",
             "live_signal_values",
             "live_trace_window",
             "periodic_tx_list",
             "project_get",
             "project_list",
+            "re_correlate",
+            "re_dbc_generate",
+            "re_row_detail",
+            "re_scan_results",
+            "re_series",
+            "re_status",
+            "run_latest",
+            "run_query",
             "signal_stats",
             "trace_compare",
             "trace_list",
@@ -1013,10 +1027,10 @@ async fn qa_curl_raw_jsonrpc_smoke() {
             "ui_notify",
             "ui_plot_signals",
             "ui_select_message",
-            "ui_trace_filter"
+            "ui_trace_filter",
         ]
     );
-    assert_eq!(names.len(), 32);
+    assert_eq!(names.len(), 46);
     for (n, read_only, not_destructive) in &ro {
         if n.starts_with("ui_") && n != "ui_get_state" {
             assert!(!read_only, "{n}: readOnlyHint must be false");

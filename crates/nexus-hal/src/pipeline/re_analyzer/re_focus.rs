@@ -2211,6 +2211,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn re_shared_observer_correlation_never_cancels_user_sweep() {
+        use crate::pipeline::re_analyzer::ReShared;
+        use std::sync::Arc;
+        let (a, r) = planted(16_000, 0);
+        let shared = Arc::new(ReShared::new());
+        *shared.lock() = a;
+        // User sweep (slow), then an MCP observer sweep must NOT cancel it.
+        let slow = corr_req(r.clone(), search(0, 63, [1, 32]), 10);
+        let s2 = Arc::clone(&shared);
+        let h = std::thread::spawn(move || s2.correlate(&slow).unwrap());
+        std::thread::sleep(Duration::from_millis(30));
+        let quick = corr_req(
+            r,
+            ReSearchDto {
+                byte_orders: vec![ReByteOrder::Motorola],
+                signed: vec![false],
+                ..search(0, 15, [16, 16])
+            },
+            1,
+        );
+        let q = shared.correlate_observer(&quick).unwrap();
+        assert!(!q.truncated);
+        let user = h.join().unwrap();
+        // Only the wall-time budget may truncate the user sweep, never the observer call.
+        if user.elapsed_ms < 1_500.0 {
+            assert!(!user.truncated, "observer must not cancel the user's sweep");
+        }
+    }
+
     // ─── Golden series fixture (shared with the TS codec test) ──────────────
 
     fn golden_analyzer() -> ReAnalyzer {

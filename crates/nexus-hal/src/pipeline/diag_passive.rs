@@ -980,6 +980,14 @@ impl PipelineEngine {
         Ok(snap)
     }
 
+    /// Buses that have a passive discovery scan (running or finished), ascending. Read-only:
+    /// never starts or stops a scan.
+    pub fn diag_passive_bus_ids(&self) -> Vec<u8> {
+        let mut ids: Vec<u8> = self.diag_passive.0.lock().keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// `cmd_diag_passive_discovery_snapshot` → current pairs (also after stop; an idle,
     /// empty snapshot when never started).
     pub fn cmd_diag_passive_discovery_snapshot(
