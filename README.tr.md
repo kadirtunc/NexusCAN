@@ -4,7 +4,7 @@
 
 [English](./README.md) · **Türkçe**
 
-**Açık kaynak CAN / CAN-FD analiz aracı. UDS tanılama ve tersine mühendislik özellikleriyle.**<br/>
+**Açık kaynak CAN / CAN-FD analiz aracı. UDS Diagnostics ve Reverse Engineering özellikleriyle.**<br/>
 Rust · Tauri v2 · MIT lisanslı
 
 [![GitHub stars](https://img.shields.io/github/stars/kadirtunc/NexusCAN?style=social)](https://github.com/kadirtunc/NexusCAN/stargazers)
@@ -20,8 +20,8 @@ Rust · Tauri v2 · MIT lisanslı
 <td width="50%"><img src="docs/assets/ecu_graph_scan.gif" alt="Fonksiyonel UDS taraması: cevap veren ECU'lar haritada beliriyor"/></td>
 </tr>
 <tr>
-<td align="center"><sub><b>Bus analizi</b>: canlı DBC/KCD çözümleme, CAN-FD, multiplexer, değişen bayt vurgusu.</sub></td>
-<td align="center"><sub><b>UDS tanılama</b>: tek fonksiyonel istek atılıyor, dört ECU cevap veriyor.</sub></td>
+<td align="center"><sub><b>Bus Analysis</b>: canlı DBC/KCD çözümleme, CAN-FD, multiplexer, değişen bayt vurgusu.</sub></td>
+<td align="center"><sub><b>UDS Diagnostics</b>: tek fonksiyonel istek atılıyor, dört ECU cevap veriyor.</sub></td>
 </tr>
 </table>
 
@@ -33,16 +33,16 @@ Rust · Tauri v2 · MIT lisanslı
 
 ## Neden yaptım
 
-Piyasadaki ticari CAN araçları iyi ama pahalı ve kapalı. Açık kaynak olanlar trafik dinlemek için yeterli, fakat iş tanılamaya gelince yetersiz kalıyor. NexusCAN'i bu ikisinin arasındaki boşluk için yazdım: önce sağlam bir CAN analiz aracı, üstüne de aynı altyapıyı kullanan bir tanılama ortamı.
+Piyasadaki ticari CAN araçları iyi ama pahalı ve kapalı. Açık kaynak olanlar trafik dinlemek için yeterli, fakat iş diagnostics tarafına gelince yetersiz kalıyor. NexusCAN'i bu ikisinin arasındaki boşluk için yazdım: önce sağlam bir CAN analiz aracı, üstüne de aynı altyapıyı kullanan bir diagnostics ortamı.
 
 Öne çıkan noktalar:
 
-- **Performans.** Frame'ler sabit 80 baytlık yapılarda tutuluyor, RX/TX tarafında heap tahsisi yok. Arayüz her frame için değil, saniyede 60 kez toplu güncelleniyor. Testlerde saniyede 50.000 frame'de kayıp yok.
-- **DBC desteği.** `.dbc` ve `.kcd` dosyaları üç aşamada derleniyor: Intel ve Motorola bit düzeni, signed ve float sinyaller, kademeli multiplexer, 64 baytlık CAN-FD mesajları, J1939 PGN'leri.
-- **Güvenlik.** Kanallar varsayılan olarak **Listen-Only** açılıyor, yani hatta hiçbir şey göndermiyor. Göndermek için **Arm** edip onaylamak gerekiyor. **Stop All TX** butonu her ekranda var.
-- **Tanılama.** Bus'taki ECU'ları bulup haritaya diziyor. Birine tıklayınca giden istekleri, gelen cevapları, NRC'leri ve ISO-TP frame'lerini hangi işleme ait olduklarıyla birlikte görüyorsunuz.
-- **Tersine mühendislik.** Bit bazında değişim haritası, baseline/action karşılaştırması, otomatik alan tespiti, OBD-II ile korelasyon ve Cheat Engine mantığında değer tarama. Bulduğunuz sinyali direkt DBC'ye kaydedebiliyorsunuz.
-- **Sahte veri yok.** Demo modu açıkça işaretli. Onun dışında hiçbir ekran uydurma değer göstermiyor.
+- **Performance.** Frame'ler sabit 80 baytlık yapılarda tutuluyor, RX/TX tarafında heap tahsisi yok. Arayüz her frame için değil, saniyede 60 kez toplu güncelleniyor. Testlerde saniyede 50.000 frame'de kayıp yok.
+- **DBC Support.** `.dbc` ve `.kcd` dosyaları üç aşamada derleniyor: Intel ve Motorola bit düzeni, signed ve float sinyaller, kademeli multiplexer, 64 baytlık CAN-FD mesajları, J1939 PGN'leri.
+- **Safety.** Kanallar varsayılan olarak **Listen-Only** açılıyor, yani hatta hiçbir şey göndermiyor. Göndermek için **Arm** edip onaylamak gerekiyor. **Stop All TX** butonu her ekranda var.
+- **Diagnostics.** Bus'taki ECU'ları bulup haritaya diziyor. Birine tıklayınca giden istekleri, gelen cevapları, NRC'leri ve ISO-TP frame'lerini hangi işleme ait olduklarıyla birlikte görüyorsunuz.
+- **Reverse Engineering.** Bit bazında Heatmap, Baseline/Action karşılaştırması, Field Classifier, OBD-II ile Correlation ve Cheat Engine mantığında Value Scan. Bulduğunuz sinyali direkt DBC'ye kaydedebiliyorsunuz.
+- **No fake data.** Demo modu açıkça işaretli. Onun dışında hiçbir ekran uydurma değer göstermiyor.
 
 ---
 
@@ -60,9 +60,9 @@ Dosyalar henüz imzalı değil. Windows'ta SmartScreen uyarısında "Yine de ça
 
 ---
 
-## Özellikler
+## Features
 
-### Bus analizi
+### Bus Analysis
 
 <img src="docs/assets/trace.png" alt="Çözümlenmiş sinyallerle kronolojik trace" width="100%"/>
 
@@ -80,21 +80,21 @@ Dosyalar henüz imzalı değil. Windows'ta SmartScreen uyarısında "Yine de ça
 </table>
 
 - **Receive / Transmit** (en üstteki görüntü): Her ID tek satırda güncelleniyor, sinyaller ve periyotlar canlı görünüyor. Ham veya sinyal bazlı frame'leri tek seferlik ya da periyodik gönderebilirsiniz. Değerler DBC'deki min/max aralığına kırpılıyor.
-- **Hata frame'leri**: Bit, stuff, form, ACK, CRC hataları ve error-passive / bus-off geçişleri okunabilir şekilde gösteriliyor. Frame'leri metin olarak kopyalayıp yapıştırabilirsiniz.
-- **Connections paneli**: Bağlı bus'lar adaptörü, modu ve durumuyla alt panelde listeleniyor.
-- **Debug konsolu**: Backend ve arayüz olaylarını kategorilere ayırarak gösteren, ayrı pencereye alınabilen bir konsol.
-- **Simülasyon panelleri**: DBC sinyallerine bağlanan sürükle-bırak göstergeler (ibre, LED, grafik, buton, slider). İsterseniz veritabanından otomatik taslak da oluşturabilirsiniz.
+- **Error Frames**: Bit, stuff, form, ACK, CRC hataları ve error-passive / bus-off geçişleri okunabilir şekilde gösteriliyor. Frame'leri metin olarak kopyalayıp yapıştırabilirsiniz.
+- **Connections Dock**: Bağlı bus'lar adaptörü, modu ve durumuyla alt panelde listeleniyor.
+- **Debug Console**: Backend ve arayüz olaylarını kategorilere ayırarak gösteren, ayrı pencereye alınabilen bir konsol.
+- **Simulation Panels**: DBC sinyallerine bağlanan sürükle-bırak göstergeler (ibre, LED, grafik, buton, slider). İsterseniz veritabanından otomatik taslak da oluşturabilirsiniz.
 
-### Güvenlik
+### Safety
 
 <img src="docs/assets/tx_control.png" alt="TX modu: bus bazında Listen-Only, Active ve tümünü Disarm" width="62%"/>
 
-TX durumu üst çubukta her zaman görünüyor. Disarm anında gerçekleşiyor, arm etmek ise onay istiyor. **Stop All TX** tüm periyodik gönderimleri iptal ediyor, bütün bus'ları disarm ediyor ve tanılama bağlantılarını kapatıyor. O anda gönderilmekte olan frame'in bitmesini bekliyor (en fazla 250 ms). Bu, `vcan0` üzerinde bağımsız bir dinleyiciyle test edildi: 1000 denemede, Stop'tan sonra hatta tek bir frame bile çıkmadı.
+TX durumu üst çubukta her zaman görünüyor. Disarm anında gerçekleşiyor, arm etmek ise onay istiyor. **Stop All TX** tüm periyodik gönderimleri iptal ediyor, bütün bus'ları disarm ediyor ve diagnostics bağlantılarını kapatıyor. O anda gönderilmekte olan frame'in bitmesini bekliyor (en fazla 250 ms). Bu, `vcan0` üzerinde bağımsız bir dinleyiciyle test edildi: 1000 denemede, Stop'tan sonra hatta tek bir frame bile çıkmadı.
 
-- **Donanım Listen-Only zorunluluğu (opsiyonel)**: *Require hardware Listen-Only* açıksa, sadece yazılımsal kilit sunabilen bir adaptör hiç açılmıyor. Her bus'ın yanında gerçekte hangi korumanın olduğu yazıyor: donanım, yazılım veya sanal.
+- **Hardware Listen-Only (opsiyonel)**: *Require hardware Listen-Only* açıksa, sadece yazılımsal kilit sunabilen bir adaptör hiç açılmıyor. Her bus'ın yanında gerçekte hangi korumanın olduğu yazıyor: donanım, yazılım veya sanal.
 - **Adaptörlere körü körüne güvenilmiyor**: SLCAN sürücüsü, adaptörün listen-only komutuna verdiği cevabı gerçekten kontrol ediyor. Sanal SocketCAN arayüzleri de isminden değil, kernel bilgisinden tespit ediliyor.
 
-### UDS tanılama
+### UDS Diagnostics
 
 <img src="docs/assets/ecu_graph.png" alt="Dört ECU'lu harita, BMS seçili ve kimlik bilgileri okunmuş" width="100%"/>
 
@@ -102,7 +102,7 @@ TX durumu üst çubukta her zaman görünüyor. Disarm anında gerçekleşiyor, 
 
 <img src="docs/assets/traffic_dock.png" alt="ISO-TP frame'lerine açılmış çok frame'li cevap" width="100%"/>
 
-**Traffic Dock**: Tüm tanılama sekmelerinin altında duran ortak bir panel. Görselde 203 baytlık bir `22 F1 F1` cevabı `SF → FF → FC → 29 × CF` frame'lerine açılmış durumda. Sağ tarafta çözümlenmiş veri ve **P2 / STmin zamanlama kontrolleri** var. İşlem, zaman çizelgesi ve ham frame olmak üzere üç görünümü var.
+**Traffic Dock**: Tüm Diagnostics sekmelerinin altında duran ortak bir panel. Görselde 203 baytlık bir `22 F1 F1` cevabı `SF → FF → FC → 29 × CF` frame'lerine açılmış durumda. Sağ tarafta çözümlenmiş veri ve **P2 / STmin zamanlama kontrolleri** var. İşlem, zaman çizelgesi ve ham frame olmak üzere üç görünümü var.
 
 <table>
 <tr>
@@ -115,27 +115,27 @@ TX durumu üst çubukta her zaman görünüyor. Disarm anında gerçekleşiyor, 
 </tr>
 </table>
 
-- **Pasif keşif**: Hatta hiçbir şey göndermeden, sadece trafiği dinleyerek tester ↔ ECU çiftlerini buluyor. Listen-Only modunda da çalışıyor.
-- **Fiziksel tarama**: Aktif tarama yapmak isterseniz ID'leri tek tek deniyor. Stop veya disarm olursa o ana kadarki sonuçla duruyor. 11-bit, 29-bit ve ISO 15765-2 adresleme formatları destekleniyor.
-- **DTC okuma**: `0x19` ReadDTCInformation rapor tipleri ve klasik `19 02` taraması, durum maskeleri çözümlenmiş olarak.
-- **ECU programlama**: `34` / `36` / `37` servisleriyle flash akışı. Bootloader simülatörü ve `vcan0` üzerinde uçtan uca testleri var. Yükleme sırasında Stop'a basarsanız sonrasında hiçbir silme veya yazma yapılmıyor.
+- **Passive Discovery**: Hatta hiçbir şey göndermeden, sadece trafiği dinleyerek tester ↔ ECU çiftlerini buluyor. Listen-Only modunda da çalışıyor.
+- **Physical Sweep**: Aktif tarama yapmak isterseniz ID'leri tek tek deniyor. Stop veya disarm olursa o ana kadarki sonuçla duruyor. 11-bit, 29-bit ve ISO 15765-2 adresleme formatları destekleniyor.
+- **DTC Reports**: `0x19` ReadDTCInformation rapor tipleri ve klasik `19 02` taraması, durum maskeleri çözümlenmiş olarak.
+- **ECU Flashing**: `34` / `36` / `37` servisleriyle flash akışı. Bootloader simülatörü ve `vcan0` üzerinde uçtan uca testleri var. Yükleme sırasında Stop'a basarsanız sonrasında hiçbir silme veya yazma yapılmıyor.
 - **SecurityAccess**: Seed/key profilleri ve dahili algoritmalar. Üreticinin `GenerateKeyEx` DLL'leri ayrı bir yardımcı süreçte (32 veya 64 bit) çalışıyor, DLL çökse bile uygulama etkilenmiyor. Harici program ve HTTP servisi de kullanılabiliyor.
-- **ECU kayıtları**: Araçlar, gruplar ve ECU'lar (adresleme, oturum, güvenlik ayarları) proje içinde saklanıyor. `.nexusecu.json` olarak içe/dışa aktarılabiliyor.
+- **ECU Registry**: Araçlar, gruplar ve ECU'lar (adresleme, oturum, güvenlik ayarları) proje içinde saklanıyor. `.nexusecu.json` olarak içe/dışa aktarılabiliyor.
 - **Flow Editor**: Görsel blok editörü. Değişken, matematik, mantık, döngü, metin, UDS, flash ve log blokları var. Akışlar Simulink bloğu gibi giriş/çıkış portlarıyla çalışıyor. Seçtiğiniz blokları tek bir özel bloğa dönüştürüp tekrar kullanabilirsiniz. Her kayıt ayrı bir sürüm olarak saklanıyor.
 - **Workbench**: Satırlarda aracın ECU'ları, sütunlarda onlara bağlı bloklar var. Bir hücreyi çalıştırıp sonucunu ve çıktılarını görüyorsunuz. Her çalışmanın kaydı (parametreler, dosyalar, çıktılar, log) proje bazında saklanıyor.
 - **Diagnostic Simulation**: UDS DID'lerine veya OBD-II PID'lerine bağlanan, kaydedilebilir gösterge panelleri. Run'a basmadan hiçbir sorgu gönderilmiyor.
 - **OBD-II**: Mode 01 canlı PID'ler.
 
-### Tersine mühendislik
+### Reverse Engineering
 
 Dokümantasyonu olmayan sinyalleri bulmak için ayrı bir sekme. Tamamen pasif çalışıyor, hatta hiçbir şey göndermiyor. Canlı bus'ta da Demo verisiyle de kullanılabiliyor.
 
-- **Isı haritası**: Her ID bir satır, her bayt sekiz hücre. Renk, bitin ne sıklıkla değiştiğini gösteriyor. Hücrelerin altında bit değerleri ve baytın hex karşılığı yazıyor. CAN-FD'de 512 bitin tamamı görünüyor.
+- **Heatmap**: Her ID bir satır, her bayt sekiz hücre. Renk, bitin ne sıklıkla değiştiğini gösteriyor. Hücrelerin altında bit değerleri ve baytın hex karşılığı yazıyor. CAN-FD'de 512 bitin tamamı görünüyor.
 - **Baseline → Action**: Araçta hiçbir şey yapmadan bir *Baseline* kaydı alıyorsunuz. Sonra butona basarken veya kapıyı açarken *Action* kaydı alıyorsunuz. Ekranda sadece sizin hareketinizle değişen bitler kalıyor. Sayaçlar, checksum'lar ve sensör gürültüsü otomatik eleniyor. `M` tuşuyla zaman çizelgesine işaret koyabilirsiniz.
-- **Alan tespiti**: Sabit bitleri, sayaçları (2/4/8 bit), checksum'ları (XOR8, SUM8, CRC8 SAE-J1850, CRC8 AUTOSAR), bayrakları ve fiziksel değerleri otomatik buluyor. Her ID'nin periyodunu ve jitter'ını gösteriyor.
+- **Field Classifier**: Sabit bitleri, sayaçları (2/4/8 bit), checksum'ları (XOR8, SUM8, CRC8 SAE-J1850, CRC8 AUTOSAR), bayrakları ve fiziksel değerleri otomatik buluyor. Her ID'nin periyodunu ve jitter'ını gösteriyor.
 - **Signal Inspector**: Izgarada bitleri seçiyorsunuz, farklı yorumlarını (uzunluk, Intel/Motorola, signed/unsigned, float, ölçek) aynı anda grafikte görüyorsunuz.
-- **Korelasyon**: Bus'tan okunan bir OBD-II PID'i (örneğin hız), koyduğunuz işaretler veya başka bir sinyal referans alınıyor. Frame'deki bütün olası bit kombinasyonları deneniyor (klasik bir frame için yaklaşık 6.200 aday, ~0,1 saniyede). En iyi eşleşmeler ölçek ve ofsetleriyle birlikte sıralanıyor. ±500 ms'ye kadar gecikme de tespit ediliyor.
-- **DBC'ye kaydetme**: Bulduğunuz sinyali isim, ölçek, birim ve değer tablosuyla taslak olarak kaydediyorsunuz. *Apply to bus* ile taslaklar `RE_found.dbc` olarak yükleniyor, trace ve grafiklerde hemen çözümleniyor. Ayrı bir `.dbc` dosyası olarak dışa aktarabilir veya mevcut DBC'nize yeni dosya olarak ekleyebilirsiniz.
+- **Correlation**: Bus'tan okunan bir OBD-II PID'i (örneğin hız), koyduğunuz işaretler veya başka bir sinyal referans alınıyor. Frame'deki bütün olası bit kombinasyonları deneniyor (klasik bir frame için yaklaşık 6.200 aday, ~0,1 saniyede). En iyi eşleşmeler ölçek ve ofsetleriyle birlikte sıralanıyor. ±500 ms'ye kadar gecikme de tespit ediliyor.
+- **Save to DBC**: Bulduğunuz sinyali isim, ölçek, birim ve değer tablosuyla taslak olarak kaydediyorsunuz. *Apply to bus* ile taslaklar `RE_found.dbc` olarak yükleniyor, trace ve grafiklerde hemen çözümleniyor. Ayrı bir `.dbc` dosyası olarak dışa aktarabilir veya mevcut DBC'nize yeni dosya olarak ekleyebilirsiniz.
 - **Value Scan**: Cheat Engine'deki gibi çalışıyor. Bir değer arıyorsunuz (örneğin 80 km/h), araçta bir şeyi değiştiriyorsunuz, sonra *arttı / azaldı / değişti / değişmedi* diye daraltıyorsunuz. Birkaç adımda doğru sinyal kalıyor. Değerleri ondalık veya `0x` hex girebilirsiniz. Son sekiz adım geri alınabiliyor. Bir milyon aday yaklaşık 50 ms'de taranıyor.
 
 ---
@@ -181,9 +181,9 @@ flowchart LR
         RP[Replay<br/>.blf .asc .trc .log]
     end
     subgraph Core["Rust backend"]
-        HAL[nexus-hal<br/>RawCanFrame 80 B · TX kontrolü]
+        HAL[nexus-hal<br/>RawCanFrame 80 B · TX gate]
         NET[nexus-netdb<br/>DBC/KCD derleyici]
-        PRO[nexus-protocols<br/>ISO-TP · UDS · keşif]
+        PRO[nexus-protocols<br/>ISO-TP · UDS client · discovery]
         ST[60 Hz StateTable]
     end
     UI[React arayüz<br/>Tauri IPC veya yerel bridge]
@@ -196,9 +196,9 @@ flowchart LR
 | Crate | Görevi |
 |---|---|
 | `nexus-core` | `RawCanFrame` (80 bayt, 64 baytlık CAN-FD verisi), zaman damgası |
-| `nexus-hal` | Adaptör sürücüleri, Listen-Only / Arm / Panic Stop kontrolü, tanılama (keşif, tarama, DTC, flash), replay, 60 Hz veri akışı, tersine mühendislik motoru |
+| `nexus-hal` | Adaptör sürücüleri, Listen-Only / Arm / Panic Stop kontrolü, diagnostics (discovery, sweep, DTC, flash), replay, 60 Hz veri akışı, Reverse Engineering motoru |
 | `nexus-netdb` | `.dbc` / `.kcd` derleyici, sinyal çözümleme ve kodlama, DBC yazıcı |
-| `nexus-protocols` | UDS istemcisi, ECU keşfi, ISO-TP, SAE J1939 (PGN, BAM/CMDT, adres talebi, DM1/DM2), flash akışı |
+| `nexus-protocols` | UDS client, ECU discovery, ISO-TP, SAE J1939 (PGN, BAM/CMDT, adres talebi, DM1/DM2), flash akışı |
 | `nexus-seedkey-native` / `-host` | SecurityAccess anahtar sağlayıcıları (üretici DLL'lerini ayrı süreçte çalıştırır) |
 | `nexus-ecu-sim` | Testler için UDS ECU ve bootloader simülatörü |
 | `nexus-cli` | Arayüzsüz çalışan ajan (her zaman Listen-Only) |
@@ -211,14 +211,14 @@ NexusCAN şu an **v0.1 önizleme** aşamasında. Neyin hazır, neyin yolda oldu�
 
 | Alan | Hazır | Sırada |
 |---|---|---|
-| Adaptörler | SocketCAN (Linux), SLCAN (tüm işletim sistemleri), mock simülatörler, dosyadan oynatma. **gs_usb / candleLight** (sürücü kurulumu gerektirmez) ve **PCAN-Basic** sürücüleri yazıldı. | gs_usb ve PCAN için gerçek donanım testleri, Kvaser, Vector XL |
-| Güvenlik | Varsayılan Listen-Only, opsiyonel donanım Listen-Only zorunluluğu, onaylı Arm, Stop All TX | Tüm adaptörlerde donanım Listen-Only doğrulaması |
-| Tanılama | UDS istemcisi, ECU haritası, pasif keşif, fiziksel tarama, Traffic Dock, DID / DTC / konsol, OBD-II, flash, seed/key, ECU kayıtları, Flow Editor, Workbench, Diagnostic Simulation | Workbench'te toplu çalıştırma ve rapor, çok ECU'lu akışlar, ODX/CDD |
-| Kayıt | Trace kaydı ve oynatma, BLF/ASC/TRC/CSV/candump | Tetiklemeli kayıt, ASAM MF4 |
-| Tersine mühendislik | Isı haritası, baseline/action, alan tespiti, Signal Inspector, korelasyon, DBC'ye kaydetme, Value Scan | Kayıtlı log üzerinde analiz, iki log karşılaştırma, seçici replay, aktif tarayıcılar |
-| Protokoller | UDS (ISO 14229), ISO-TP (ISO 15765-2), SAE J1939 | J1939 arayüzü, CANopen, XCP |
-| Platformlar | Linux (test edildi), tarayıcı modu; Windows, Linux ve macOS (Apple Silicon) kurulum dosyaları | Kod imzalama, Intel Mac sürümü |
-| Deneysel | NexusCloud istemcisi ve ajan: kodu repoda, **yayınlanan sürümlerde kapalı** | NexusCloud sunucusu, ajan sürümleri |
+| Adapters | SocketCAN (Linux), SLCAN (tüm işletim sistemleri), mock simülatörler, dosyadan oynatma. **gs_usb / candleLight** (sürücü kurulumu gerektirmez) ve **PCAN-Basic** sürücüleri yazıldı. | gs_usb ve PCAN için gerçek donanım testleri, Kvaser, Vector XL |
+| Safety | Varsayılan Listen-Only, opsiyonel Hardware Listen-Only, onaylı Arm, Stop All TX | Tüm adaptörlerde donanım Listen-Only doğrulaması |
+| Diagnostics | UDS client, ECU Graph, Passive Discovery, Physical Sweep, Traffic Dock, DID / DTC / UDS Console, OBD-II, flash, seed/key, ECU kayıtları, Flow Editor, Workbench, Diagnostic Simulation | Workbench'te toplu çalıştırma ve rapor, çok ECU'lu akışlar, ODX/CDD |
+| Recording | Trace kaydı ve replay, BLF/ASC/TRC/CSV/candump | Tetiklemeli kayıt, ASAM MF4 |
+| Reverse Engineering | Heatmap, Baseline/Action, Field Classifier, Signal Inspector, Correlation, Save to DBC, Value Scan | Kayıtlı log üzerinde analiz, iki log karşılaştırma, seçici replay, aktif tarayıcılar |
+| Protocols | UDS (ISO 14229), ISO-TP (ISO 15765-2), SAE J1939 | J1939 arayüzü, CANopen, XCP |
+| Platforms | Linux (test edildi), tarayıcı modu; Windows, Linux ve macOS (Apple Silicon) kurulum dosyaları | Kod imzalama, Intel Mac sürümü |
+| Experimental | NexusCloud istemcisi ve ajan: kodu repoda, **yayınlanan sürümlerde kapalı** | NexusCloud sunucusu, ajan sürümleri |
 
 ### İleride (deneysel)
 
