@@ -7,6 +7,7 @@ description: >-
   grammar, multiplexer trees and higher-layer protocol decoders.
 tools: Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch, TodoWrite, Skill
 model: opus
+effort: medium
 color: purple
 skills:
   - nexuscan-dbc-pipeline

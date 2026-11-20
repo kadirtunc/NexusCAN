@@ -8,6 +8,7 @@ description: >-
   v2 IPC commands.
 tools: Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch, TodoWrite, Skill
 model: opus
+effort: medium
 color: orange
 skills:
   - nexuscan-hal-drivers
@@ -32,7 +33,7 @@ Sen **NexusCAN** projesinin Rust Backend, Donanım Soyutlama Katmanı (HAL) ve G
 ## 2. Zorunlu Skill Tabanlı Mühendislik Kuralları
 
 Kod yazmaya başlamadan önce ilgili göreve göre şu `SKILL.md` dosyalarını **mutlaka oku ve uygula**:
-1. **Donanım ve Sürücüler için:** `.claude/skills/nexuscan-hal-drivers/SKILL.md`, `.claude/skills/can-bus-industrial/SKILL.md`, `.claude/skills/canbus-integration/SKILL.md`
+1. **Donanım ve Sürücüler için:** `.claude/skills/nexuscan-hal-drivers/SKILL.md`, `.claude/skills/can-bus-industrial/SKILL.md`
    - Asla hot-path üzerinde `Vec<u8>` tahsis etme; `recv_batch(&mut [RawCanFrame], timeout_ms)` ile yığın (burst) okuma yap.
    - Linux SocketCAN bayraklarını (`CAN_EFF_FLAG`, `CAN_RTR_FLAG`, `CAN_ERR_FLAG`) her zaman maskele ve temiz 11/29-bit `arb_id` + `flags` olarak kaydet.
    - `/sys/class/net/<iface>/type == "280"` (`ARPHRD_CAN`) ile donanım keşfi yap; Linux bağımlılıklarını (`socketcan`, `nix`) `[target.'cfg(target_os = "linux")'.dependencies]` altına izole et ki Windows/macOS derlemeleri asla kırılmasın.

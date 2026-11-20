@@ -7,7 +7,8 @@ description: >-
   each implementation step or phase to verify work; owns scripts/, tests/, benches/ and reports
   failures with file:line evidence instead of fixing production code.
 tools: Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch, TodoWrite, Skill
-model: opus
+model: sonnet
+effort: medium
 color: green
 skills:
   - nexuscan-vcan-hil

@@ -7,6 +7,7 @@ description: >-
   DTO types. Must not modify crates/ or src-tauri/.
 tools: Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch, TodoWrite, Skill
 model: sonnet
+effort: medium
 color: cyan
 skills:
   - tauri-ipc
