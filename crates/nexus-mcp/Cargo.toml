@@ -1,0 +1,44 @@
+[package]
+name = "nexus-mcp"
+description = "NexusCAN in-app, read-only, loopback-only MCP (Model Context Protocol) server (Streamable HTTP)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+# rmcp 3.x requires Rust 1.88.
+rust-version = "1.88"
+
+[dependencies]
+nexus-core = { workspace = true }
+nexus-netdb = { workspace = true }
+nexus-hal = { workspace = true }
+# Official Rust MCP SDK: server + tool macros + Streamable HTTP server transport (tower service).
+rmcp = { version = "3.11", default-features = false, features = [
+    "server",
+    "macros",
+    "transport-streamable-http-server",
+] }
+# Same major as rmcp's `schemars` dependency (1.x) so derived input schemas are accepted.
+schemars = "1"
+axum = { workspace = true }
+tokio = { workspace = true }
+tokio-util = "0.7"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+getrandom = { workspace = true }
+
+[dev-dependencies]
+base64 = { workspace = true }
+rmcp = { version = "3.11", default-features = false, features = [
+    "server",
+    "macros",
+    "transport-streamable-http-server",
+    "client",
+    "transport-streamable-http-client-reqwest",
+] }
+
+[lints]
+workspace = true

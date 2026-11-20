@@ -3,6 +3,7 @@ import { Activity, AlertTriangle, Boxes, ChevronRight, Cpu, FileSearch, FlaskCon
 import { useI18n, type TranslationKey } from '../../i18n';
 import { DIAG_DIVIDER, DiagBadge, DiagDemoBadge, DiagDot, DiagNotice } from './diagUi';
 import { sessionLabel } from './diagFormat';
+import { diagNavStore, useDiagActiveSubTab, type DiagSubTab } from '../../store/diagNavStore';
 import { diagnosticsStore, useDiagnosticsStore } from '../../store/diagnosticsStore';
 import { DiagSessionSetup } from './DiagSessionSetup';
 import { DiagSessionTabs } from './DiagSessionTabs';
@@ -19,7 +20,7 @@ import { WorkbenchPanel } from './workbench/WorkbenchPanel';
 import { openSessionFromEcu, type OpenSessionNotice } from './workspace/openSession';
 import type { EcuRecordV1 } from '../../types/diagWorkspace';
 
-export type DiagSubTab = 'ecu_registry' | 'workbench' | 'session' | 'ecu_graph' | 'dtc' | 'live_pids' | 'uds_console' | 'did_inspector' | 'flow' | 'uds_panel';
+export type { DiagSubTab };
 
 // ECU Simulator sekmesi kullanıcı kararıyla arayüzden kaldırıldı (kod korunuyor:
 // ./ecu-sim/EcuSimulator.tsx, ./ecu-sim/ecuSimStore.ts). Gerekçe ve yeniden açma kriterleri:
@@ -116,7 +117,8 @@ const SessionStrip: React.FC = () => {
 
 export const DiagnosticsView: React.FC = () => {
   const { t } = useI18n();
-  const [activeSubTab, setActiveSubTabRaw] = useState<DiagSubTab>('ecu_registry');
+  const activeSubTab = useDiagActiveSubTab();
+  const setActiveSubTabRaw = diagNavStore.setActiveSubTab;
   /** Notice shown on the Session sub-tab after "Oturum Aç" / "Simüle Et" (cleared when the user changes tab). */
   const [sessionNotice, setSessionNotice] = useState<OpenSessionNotice | null>(null);
   const [dockMaximized, setDockMaximized] = useState(false);

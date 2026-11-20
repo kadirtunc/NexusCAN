@@ -33,6 +33,7 @@ import {
   traceSessionsStore,
   useTraceSessionsStore,
 } from '../store/traceSessionsStore';
+import { traceIdFilterStore, traceIdKey, useTraceIdFilter } from '../store/traceIdFilterStore';
 import {
   MAX_CHRONO_BUFFER_ROWS,
   MIN_CHRONO_BUFFER_ROWS,
@@ -181,6 +182,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
   const header = useTelemetryHeader();
   const traceState = useTraceSessionsStore();
   const sess = traceSessionsStore.getSession(sessionId);
+  const idFilter = useTraceIdFilter(sess.id);
 
   const availableBusIds = useMemo(() => {
     const ids = new Set<number>([0, 1, 2, 3, 4, 5, 6, 7]);
@@ -487,7 +489,11 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
   };
 
   const q = filterQuery.trim().toLowerCase();
-  const isUnfiltered = q.length === 0 && dirFilter === 'ALL';
+  const isUnfiltered = q.length === 0 && dirFilter === 'ALL' && idFilter === null;
+  const idFilterSet: ReadonlySet<string> | null = useMemo(
+    () => (idFilter === null ? null : new Set(idFilter.map((e) => traceIdKey(e.arbId, e.isExtended)))),
+    [idFilter],
+  );
 
   // When unfiltered (99% case): ZERO array allocation! When filtered: compact Int32Array of ring indices.
   const filteredIndices: Int32Array | null = useMemo(() => {
@@ -501,6 +507,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
       if (dirFilter === 'RX' && (row.isTx || row.isError)) continue;
       if (dirFilter === 'TX' && (!row.isTx || row.isError)) continue;
       if (dirFilter === 'ERR' && !row.isError) continue;
+      if (idFilterSet !== null && (row.isError || !idFilterSet.has(traceIdKey(row.arbId, row.isExtended)))) continue;
 
       if (q.length > 0) {
         if (row.isError) {
@@ -556,6 +563,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
     sess.displayRing,
     dirFilter,
     q,
+    idFilterSet,
     dbState.busSchemas,
   ]);
 
@@ -1176,6 +1184,18 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
               </button>
             )}
           </div>
+
+          {idFilter !== null && (
+            <button
+              type="button"
+              onClick={() => traceIdFilterStore.set(sess.id, null)}
+              title={t('trace.idFilter.clear')}
+              className="h-[28px] px-2 border border-sky-500/60 bg-sky-950/40 text-sky-300 text-[11px] font-mono tabular-nums cursor-pointer rounded-xs flex items-center gap-1 shrink-0"
+            >
+              {t('trace.idFilter.badge', { count: idFilter.length })}
+              <X className="w-3 h-3" />
+            </button>
+          )}
 
           {/* Bus Filter */}
           <select

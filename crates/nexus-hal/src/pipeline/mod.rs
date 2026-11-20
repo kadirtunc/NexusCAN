@@ -750,6 +750,12 @@ impl PipelineEngine {
         self.registry.discover_all()
     }
 
+    /// Side-effect-free device discovery (no dead-bus reaping, no lock on `buses`): same list as
+    /// [`Self::cmd_list_devices`]. Used by read-only consumers such as the MCP server.
+    pub fn discover_devices(&self) -> Vec<DeviceDescriptorDto> {
+        self.registry.discover_all()
+    }
+
     /// Reaps any `ConnectedBusHandle` whose channel has transitioned to [`BusState::Disconnected`]
     /// (e.g. physical USB hot-unplug), disarming TX, stopping periodic jobs, closing diag taps,
     /// and joining its I/O thread outside locks so OS handles are released immediately.
@@ -1396,6 +1402,36 @@ impl PipelineEngine {
     /// 7. `cmd_get_current_schema` -> Returns the currently loaded Plane 1 `DatabaseSchemaDto`, if any.
     pub fn cmd_get_current_schema(&self) -> Option<DatabaseSchemaDto> {
         self.db_state.read().as_ref().map(|s| s.schema.clone())
+    }
+
+    /// Read-only handle to the currently loaded global compiled database (the one bound to the
+    /// `StateTable`), if any. Cheap `Arc` clone; never touches the RX / aggregator hot path.
+    /// Used by offline consumers such as the in-app MCP server (`nexus-mcp`).
+    pub fn current_compiled_database(&self) -> Option<Arc<CompiledDatabase>> {
+        self.db_state
+            .read()
+            .as_ref()
+            .map(|s| Arc::clone(&s.compiled))
+    }
+
+    /// Read-only `DatabaseInfoDto` (name / format / counts / parse diagnostics) of the currently
+    /// loaded global database, without cloning the full schema.
+    pub fn current_database_info(&self) -> Option<nexus_netdb::DatabaseInfoDto> {
+        self.db_state.read().as_ref().map(|s| s.schema.info.clone())
+    }
+
+    /// Read-only list of per-bus database bindings (`cmd_set_bus_databases`), ascending by bus
+    /// id: `(bus_id, compiled, info)`. Buses explicitly bound to "no database" (Raw Hex mode)
+    /// are omitted. `Arc` clones under a read lock; no behavior change, no hot-path access.
+    pub fn bus_databases(&self) -> Vec<(u8, Arc<CompiledDatabase>, nexus_netdb::DatabaseInfoDto)> {
+        self.bus_db_states
+            .read()
+            .iter()
+            .filter_map(|(bus, st)| {
+                st.as_ref()
+                    .map(|s| (*bus, Arc::clone(&s.compiled), s.schema.info.clone()))
+            })
+            .collect()
     }
 
     /// 8. `cmd_load_database_content` -> Decodes Base64 `.dbc` / `.kcd` bytes, compiles, and binds to `StateTable`.

@@ -39,6 +39,7 @@ import { traceSessionsStore, useTraceSessionsStore } from '../store/traceSession
 import { transmitStore } from '../store/transmitStore';
 import { workbenchStore, useWorkbenchStore } from '../store/workbenchStore';
 import { debugConsoleStore, useDebugConsoleStore } from '../store/debugConsoleStore';
+import { mcpStore, useMcpStore } from '../store/mcpStore';
 import { isToolpackEnabled } from '../types/toolpacks';
 import type { DeviceDescriptorDto } from '../types/hal';
 
@@ -125,6 +126,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   const cloudOn = useExperimentalCloud();
   const workbench = useWorkbenchStore();
   const debugConsole = useDebugConsoleStore();
+  const mcp = useMcpStore();
   const traceState = useTraceSessionsStore();
   const activeTrace = traceSessionsStore.getSession(traceState.activeSessionId);
 
@@ -1050,6 +1052,16 @@ export const TopBar: React.FC<TopBarProps> = ({
                   >
                     {workbench.dockPosition === 'right' ? t('shell.menu.view.moveDockLeft') : t('shell.menu.view.moveDockRight')}
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenMenu(null);
+                      mcpStore.setPanelOpen(true);
+                    }}
+                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-[var(--text-secondary)]"
+                  >
+                    {t('mcp.menu.item')}
+                  </button>
                   <div className="my-1.5 border-t border-[var(--border-grid)]" />
                   <div className="px-3.5 py-1 text-[11px] font-mono text-[var(--text-muted)] uppercase">
                     {t('shell.menu.view.splitViewHeader')}
@@ -1715,6 +1727,27 @@ export const TopBar: React.FC<TopBarProps> = ({
             title={t('shell.toolbar.aboutTooltip')}
           >
             <Award className="w-4 h-4 text-amber-400" />
+          </button>
+
+          {/* MCP Server indicator */}
+          <button
+            type="button"
+            onClick={() => mcpStore.setPanelOpen(true)}
+            style={{
+              backgroundColor: mcp.activity !== null ? 'rgba(14, 165, 233, 0.18)' : mcp.status?.running ? 'rgba(16, 185, 129, 0.14)' : 'var(--bg-panel)',
+              borderColor: mcp.activity !== null ? 'rgba(14, 165, 233, 0.60)' : mcp.status?.running ? 'rgba(16, 185, 129, 0.55)' : 'var(--border-strong)',
+              color: mcp.activity !== null ? '#38BDF8' : mcp.status?.running ? '#34D399' : 'var(--text-muted)',
+            }}
+            className={`h-[32px] px-2.5 border flex items-center text-[12px] font-mono tabular-nums cursor-pointer rounded-[3px] hover:text-emerald-300 transition-colors ${
+              mcp.status?.running || mcp.activity !== null ? 'font-semibold' : 'opacity-60'
+            }`}
+            title={mcp.available ? t('mcp.statusbar.tooltip') : t('mcp.unavailable')}
+          >
+            {mcp.activity !== null
+              ? mcp.activity
+              : mcp.status?.running
+                ? `${t('mcp.statusbar.label')} :${mcp.status.port ?? ''} · ${mcp.status.connectedClients}`
+                : t('mcp.statusbar.label')}
           </button>
 
           {/* Global Debug & Audit Console Toggle */}

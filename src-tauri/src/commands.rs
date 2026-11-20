@@ -32,6 +32,7 @@ use nexus_hal::{
     },
     error::HalError,
 };
+use nexus_mcp::UiBridge as _;
 use nexus_netdb::re_export::{ReDbcGenerateResult, ReSignalDraft};
 use nexus_netdb::DatabaseSchemaDto;
 use nexus_protocols::uds::dto::{
@@ -63,6 +64,9 @@ pub enum AppError {
 
     #[error("IPC channel error: {0}")]
     Ipc(String),
+
+    #[error("MCP server error: {0}")]
+    Mcp(String),
 }
 
 impl Serialize for AppError {
@@ -1346,4 +1350,169 @@ pub async fn cmd_re_dbc_generate(
             "cmd_re_dbc_generate worker failed: {join_err}"
         ))),
     }
+}
+
+// ─── In-app read-only MCP server (MCP M1) ───────────────────────────────────
+// Streamable HTTP on 127.0.0.1 only, bearer-token protected, off by default. The server only
+// calls read-only engine APIs on the blocking pool (no TX / arm / bus mode / UDS / flash /
+// replay), so it never touches the RX / aggregator hot path.
+
+/// Status of the in-app MCP server (frontend contract, camelCase).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerStatusDto {
+    pub running: bool,
+    pub port: Option<u16>,
+    /// `"http://127.0.0.1:17800/mcp"`
+    pub endpoint_url: Option<String>,
+    /// Bearer token; only while running.
+    pub token: Option<String>,
+    pub connected_clients: u32,
+    pub total_calls: u64,
+    /// M1: always `true`.
+    pub read_only: bool,
+    pub last_error: Option<String>,
+    /// `true` while a frontend is attached to the MCP UI bridge (`cmd_mcp_ui_attach`).
+    pub ui_attached: bool,
+}
+
+fn mcp_status_dto(slot: &crate::pipeline::McpSlot, ui_attached: bool) -> McpServerStatusDto {
+    match slot.handle.as_ref().map(|h| h.status()) {
+        Some(st) if st.running => McpServerStatusDto {
+            running: true,
+            port: Some(st.port),
+            endpoint_url: Some(st.endpoint_url),
+            token: Some(st.token),
+            connected_clients: st.connected_clients,
+            total_calls: st.total_calls,
+            read_only: true,
+            last_error: slot.last_error.clone(),
+            ui_attached,
+        },
+        // Stopped, or the HTTP task died (its error is surfaced via `last_error`).
+        other => McpServerStatusDto {
+            running: false,
+            port: None,
+            endpoint_url: None,
+            token: None,
+            connected_clients: 0,
+            total_calls: other
+                .as_ref()
+                .map_or(slot.last_total_calls, |st| st.total_calls),
+            read_only: true,
+            last_error: other
+                .and_then(|st| st.last_error)
+                .or_else(|| slot.last_error.clone()),
+            ui_attached,
+        },
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_mcp_start(
+    state: State<'_, AppState>,
+    port: Option<u16>,
+) -> Result<McpServerStatusDto, AppError> {
+    let port = port.unwrap_or(nexus_mcp::DEFAULT_PORT);
+    let mut slot = state.mcp_slot();
+    if port == 0 {
+        let msg = "MCP port must be between 1 and 65535".to_string();
+        slot.last_error = Some(msg.clone());
+        return Err(AppError::Mcp(msg));
+    }
+    if let Some(st) = slot.handle.as_ref().map(|h| h.status()) {
+        if st.running {
+            if st.port == port {
+                return Ok(mcp_status_dto(&slot, state.ui_bridge.attached()));
+            }
+            return Err(AppError::Mcp(format!(
+                "MCP server is already running on port {}; stop it before starting on port {port}",
+                st.port
+            )));
+        }
+        // Dead instance (HTTP task ended): keep its error/counters, then replace it.
+        slot.last_total_calls = st.total_calls;
+        if st.last_error.is_some() {
+            slot.last_error = st.last_error;
+        }
+        if let Some(old) = slot.handle.take() {
+            old.stop();
+        }
+    }
+    let rt = tauri::async_runtime::handle();
+    let ui: Arc<dyn nexus_mcp::UiBridge> = Arc::new(state.ui_bridge.clone());
+    match nexus_mcp::start_with_ui(
+        Arc::clone(&state.engine),
+        nexus_mcp::McpConfig { port },
+        Some(ui),
+        rt.inner(),
+    ) {
+        Ok(handle) => {
+            slot.handle = Some(handle);
+            slot.last_error = None;
+            Ok(mcp_status_dto(&slot, state.ui_bridge.attached()))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            slot.last_error = Some(msg.clone());
+            Err(AppError::Mcp(msg))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_mcp_stop(state: State<'_, AppState>) -> Result<McpServerStatusDto, AppError> {
+    let handle = {
+        let mut slot = state.mcp_slot();
+        if let Some(h) = &slot.handle {
+            slot.last_total_calls = h.status().total_calls;
+        }
+        slot.handle.take()
+    };
+    if let Some(h) = handle {
+        // Waits until the listener is closed so an immediate restart can reuse the port.
+        h.shutdown().await;
+    }
+    Ok(mcp_status_dto(
+        &state.mcp_slot(),
+        state.ui_bridge.attached(),
+    ))
+}
+
+#[tauri::command]
+pub async fn cmd_mcp_status(state: State<'_, AppState>) -> Result<McpServerStatusDto, AppError> {
+    Ok(mcp_status_dto(
+        &state.mcp_slot(),
+        state.ui_bridge.attached(),
+    ))
+}
+
+/// Attaches the frontend to the MCP UI bridge; a new attach replaces the previous one.
+#[tauri::command]
+pub async fn cmd_mcp_ui_attach(
+    state: State<'_, AppState>,
+    on_request: Channel<crate::pipeline::ui_bridge::UiRequestDto>,
+) -> Result<(), AppError> {
+    state
+        .ui_bridge
+        .attach_sink(Box::new(move |req| on_request.send(req).is_ok()));
+    Ok(())
+}
+
+/// Frontend answer to a UI bridge request. Unknown or late `request_id`s are ignored.
+#[tauri::command]
+pub async fn cmd_mcp_ui_respond(
+    state: State<'_, AppState>,
+    request_id: u64,
+    ok: bool,
+    result: Option<serde_json::Value>,
+    error: Option<String>,
+) -> Result<(), AppError> {
+    let res = if ok {
+        Ok(result.unwrap_or(serde_json::Value::Null))
+    } else {
+        Err(error.unwrap_or_else(|| "NexusCAN UI reported an error".to_string()))
+    };
+    let _ = state.ui_bridge.respond(request_id, res);
+    Ok(())
 }

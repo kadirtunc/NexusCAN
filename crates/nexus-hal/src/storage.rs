@@ -275,6 +275,20 @@ pub fn check_frame_count(what: &str, count: usize) -> Result<(), HalError> {
 /// Fails when the name is not a plain file name, when the resolved path would leave the
 /// canonicalized `dir`, or when an existing entry is a symlink / not a regular file.
 pub fn resolve_in_dir(dir: &Path, file_name: &str) -> Result<PathBuf, HalError> {
+    check_file_name(file_name)?;
+    create_private_dir_all(dir).map_err(io_err)?;
+    resolve_in_existing_dir(dir, file_name)
+}
+
+/// Like [`resolve_in_dir`] but strictly read-only: never creates `dir` (a missing directory
+/// is an error). For read paths that must not touch the filesystem layout (e.g. MCP).
+pub fn resolve_in_existing_dir(dir: &Path, file_name: &str) -> Result<PathBuf, HalError> {
+    check_file_name(file_name)?;
+    let canon_dir = fs::canonicalize(dir).map_err(io_err)?;
+    resolve_checked(&canon_dir, file_name)
+}
+
+fn check_file_name(file_name: &str) -> Result<(), HalError> {
     if file_name.is_empty()
         || file_name == "."
         || file_name == ".."
@@ -284,10 +298,12 @@ pub fn resolve_in_dir(dir: &Path, file_name: &str) -> Result<PathBuf, HalError> 
             "Invalid file name '{file_name}'"
         )));
     }
-    create_private_dir_all(dir).map_err(io_err)?;
-    let canon_dir = fs::canonicalize(dir).map_err(io_err)?;
+    Ok(())
+}
+
+fn resolve_checked(canon_dir: &Path, file_name: &str) -> Result<PathBuf, HalError> {
     let target = canon_dir.join(file_name);
-    if target.parent() != Some(canon_dir.as_path()) {
+    if target.parent() != Some(canon_dir) {
         return Err(HalError::InvalidInput(format!(
             "File name '{file_name}' escapes the storage directory"
         )));
