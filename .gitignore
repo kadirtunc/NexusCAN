@@ -49,6 +49,7 @@ Thumbs.db
 
 # Third-party agent skills: installed locally, not redistributed (licensing). Only NexusCAN's own skills are tracked.
 /.claude/skills/*
+/.claude/skills-archive/
 !/.claude/skills/nexus-can/
 !/.claude/skills/nexuscan-*/
 /.agents/skills/*
