@@ -36,6 +36,8 @@ pub const DEFAULT_ISOTP_PAGE: usize = 500;
 pub const MAX_ISOTP_PAGE: usize = 2_000;
 /// Default `statusMask` of `cmd_diag_read_stored_dtcs`.
 pub const DEFAULT_DTC_STATUS_MASK: u8 = 0xFF;
+/// Maximum entries returned by [`PipelineEngine::diag_session_list`].
+pub const MAX_DIAG_SESSION_LIST: usize = 32;
 
 const MAX_CLASSICAL_ISOTP_PDU: usize = 4_095;
 const MAX_FD_ISOTP_PDU: usize = 65_535;
@@ -485,6 +487,34 @@ impl PipelineEngine {
             Some((session, valid)) => Self::info_of(&session, valid),
             None => closed_info(config),
         })
+    }
+
+    /// Read-only listing of every session known to the engine (valid or invalidated), sorted
+    /// by `(busId, requestId, responseId, isExtendedId)`, at most [`MAX_DIAG_SESSION_LIST`].
+    /// Never opens, closes or touches a session's tap: the map lock is held only to clone the
+    /// `Arc`s; per-session state is read after releasing it. Not a hot path (MCP / UI listing).
+    pub fn diag_session_list(&self) -> Vec<DiagSessionInfoDto> {
+        let entries: Vec<(Arc<UdsSession>, bool)> = self
+            .diag_sessions
+            .0
+            .lock()
+            .values()
+            .map(|e| (Arc::clone(&e.session), e.is_valid()))
+            .collect();
+        let mut out: Vec<DiagSessionInfoDto> = entries
+            .iter()
+            .map(|(session, valid)| Self::info_of(session, *valid))
+            .collect();
+        out.sort_by_key(|i| {
+            (
+                i.config.bus_id,
+                i.config.request_id,
+                i.config.response_id,
+                i.config.is_extended_id,
+            )
+        });
+        out.truncate(MAX_DIAG_SESSION_LIST);
+        out
     }
 
     /// `cmd_diag_send_uds` → request PDU = `[sid] + [subFunction if Some] + data`.

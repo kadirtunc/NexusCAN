@@ -940,6 +940,19 @@ impl ReShared {
         }))
     }
 
+    /// Observer variant of [`Self::correlate`] (MCP): does NOT bump the generation, so it never
+    /// cancels a sweep the user started; a newer user `correlate` still cancels this one.
+    pub fn correlate_observer(
+        &self,
+        req: &ReCorrelateRequest,
+    ) -> Result<ReCorrelationResultDto, ReError> {
+        let gen = self.corr_gen.load(Ordering::Acquire);
+        let job = self.analyzer.lock().prepare_correlation(req)?;
+        Ok(job.run(RE_CORRELATE_BUDGET, &|| {
+            self.corr_gen.load(Ordering::Acquire) != gen
+        }))
+    }
+
     /// Publishes the analyzer's enabled state to the aggregator gate.
     pub fn sync_enabled(&self, a: &ReAnalyzer) {
         self.enabled.store(a.is_enabled(), Ordering::Relaxed);

@@ -2882,6 +2882,14 @@ impl PipelineEngine {
         self.re.correlate(&req).map_err(re_err)
     }
 
+    /// Read-only observer correlation (MCP): never cancels a correlation the user started.
+    pub fn cmd_re_correlate_observer(
+        &self,
+        req: ReCorrelateRequest,
+    ) -> Result<ReCorrelationResultDto, HalError> {
+        self.re.correlate_observer(&req).map_err(re_err)
+    }
+
     // ─── RE Toolkit R2c — Value Scan (re-toolkit-v1 §8) ─────────────────────────────────
     // Call from a blocking worker (Tauri `spawn_blocking` / bridge blocking pool), never the
     // aggregator: first / next / results run synchronously (≤ 2 s budget) and hold the analyzer

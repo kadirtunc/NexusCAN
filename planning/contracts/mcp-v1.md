@@ -1,6 +1,6 @@
 # MCP v1 — In-App Model Context Protocol Server (team-lead contract)
 
-Status: M1 DONE (QA full gate PASS). M1.1 + UI Bridge IN PROGRESS. Later phases: see §7.
+Status: M1, M1.1, UI Bridge, M2, M3 DONE (46 tools, M3 full gate PASS). Next: M3.5. Later phases: see §7.
 Out of scope forever: `crates/nexus-cli/` is NOT touched by MCP work.
 
 ## 1. Architecture
@@ -67,9 +67,9 @@ Windows: `npm run tauri build -- --runner cargo-xwin --target x86_64-pc-windows-
 | Phase | Scope |
 | :--- | :--- |
 | M2 | `app_status`, `project_list/get`, `device_list`, `driver_probe`, `bus_status`, `live_message_table`, `live_signal_values`, `periodic_tx_list`, `signal_stats`, `trace_compare`, `live_trace_window`, `debug_events_query` (live data read from snapshots only) |
-| M3 | Diagnostics read (`diag_session_info`, `diag_conversation`, `diag_isotp_frames`, `diag_passive_discovery`; gated UDS reads 0x22/0x19), RE (`re_status`, `re_markers`, `re_series`, `re_correlate`, `re_scan_results`, `re_session`, `re_scan`, `re_dbc_generate`), `run_query/get`, `flowlib_list/get` |
+| M3 | Read-only diagnostics, RE and workspace-history tools — see §9 (UDS reads 0x22/0x19, `re_session`, `re_scan` moved to M4: they transmit or mutate user state) |
 | M3.5 | UI-state tools for frontend-only data (simulation panels, ECU registry, UDS panel) via UI Bridge |
-| M4 | Gated bus actions (`tx_send`, active ECU discovery) with Armed + `ui_confirm` |
+| M4 | Gated actions with Armed + `ui_confirm`: bus (`tx_send`, active ECU discovery, UDS reads 0x22/0x19 on a user-opened session) and user-state (`re_session` start/stop/phase/mark, `re_scan` first/next/undo/reset, passive discovery start/stop) |
 Target total ≈ 45–50 tools; group related operations behind an `op` parameter instead of adding tools.
 
 ## 8. M2 — Live data + workspace (DONE — 32 tools)
@@ -87,3 +87,25 @@ Both: every tool read-only (`read_only_hint = true`), audited, ≤16 KB, §5 che
 `tests/qa_m1_gate.rs` (team-lead updates the tool list) or `server.rs` instructions text (team-lead).
 
 Approved deviation (M2): `signal_stats` / `live_trace_window` additionally read the 60 Hz snapshot stream via `engine.subscribe()` (tokio `broadcast`: sender never blocks, laggers get `Lagged`) for a bounded window (≤10 s / ≤5 s), max 2 concurrent samplers per engine — `recent_chronological` only covers the last tick (~17 ms).
+
+## 9. M3 — Diagnostics / RE / workspace history (read-only, DONE)
+Skeletons exist (team-lead): `src/server/{diag,re,runs}.rs` (`#[tool_router(..., allow_empty)]` — remove `allow_empty`
+once a tool exists) and `src/tools_{diag,re,runs}.rs`; `server.rs` / `lib.rs` already wire them. Agents do NOT edit
+`server.rs`, `lib.rs`, `tests/qa_m1_gate.rs`, other agents' files. All tools: `read_only_hint = true`, `run(...)` audited,
+§5 checklist, ≤16 KB. None may open/close a diag session, send UDS, start/stop discovery/RE/scan, or write files.
+
+| File | Agent | Tools |
+| :--- | :--- | :--- |
+| `server/diag.rs`, `tools_diag.rs`, + read-only accessor in `nexus-hal/src/pipeline/diag_session.rs` (and `diag_passive.rs` if needed) | backend-A | `diag_session_info { bus_id?, request_id?, response_id?, is_extended? }`: no addressing → list all sessions known to the engine (`PipelineEngine::diag_session_list() -> Vec<DiagSessionInfoDto>`, new, read lock + clone only; ≤32 entries); with addressing → that one (`cmd_diag_session_info`). `diag_conversation { session selector, since_seq?, limit≤100 }` (`cmd_diag_get_conversation`, next cursor = `last_seq`). `diag_isotp_frames { selector, since_seq?, limit≤200 }` (`cmd_diag_get_isotp_frames`, hex payloads, CAN-FD 64B). `diag_passive_discovery { bus_id? }`: snapshot only (`cmd_diag_passive_discovery_snapshot`; all buses with a scan when omitted); never starts/stops. Selector resolution: `bus_id` + `request_id` (+ optional `response_id`) matched against `diag_session_list()`; ambiguous/none → error listing candidates (≤8). |
+| `server/re.rs`, `tools_re.rs` | backend-B | `re_status`: `re_status()` + `cmd_re_focus_status()` + `cmd_re_scan_status()` + `cmd_re_markers()` (markers newest-first ≤50) in one object. `re_series { bus_id, id, is_extended?, candidates[]≤5, reference?, from_us?, to_us?, max_points≤500 }`: calls `cmd_re_series`, **decodes the NRS1 binary** (re_focus.rs §6.3 layout) into JSON `[{label, points:[[t_us, value]]}]`; never returns raw bytes. `re_correlate { …, top_n≤20 }` (`cmd_re_correlate`). `re_scan_results { offset?, limit≤100, sort? "id"|"changes"|"width" }`. `re_row_detail { bus_id, id, is_extended? }` (`cmd_re_row_detail` + `cmd_re_classify`). `re_dbc_generate { drafts[], base_db_id? }`: pure `re_dbc_generate`, returns DBC text + diagnostics (text clipped → `truncated: true`); never saves/loads. RE disabled → `{ "enabled": false, ... }` not an error. Focus required by series/correlate → explicit error saying the user must focus the target in the RE view (MCP never calls `cmd_re_focus_set`). |
+| `server/runs.rs`, `tools_runs.rs` | backend-C | `run_query { project_id, ecu_id?, flow_id?, status?, from?, to?, limit≤50 }` (`cmd_run_query`; summarised records: id, time, ecu, flow, status, duration, step counts — no raw step payload dumps > cap). `run_latest { project_id }` (`cmd_run_latest`, ≤50). `flowlib_list { include_deleted? }` (`cmd_flowlib_list`, ≤200, + revision count). `flowlib_get { id, revision? }`: metadata + revisions (`cmd_flowlib_revisions`) + structural summary (kind, node/step count, referenced services/DIDs) and the raw JSON only if it fits (else `truncated: true`). `id` validated against `cmd_flowlib_list(true)` (no path traversal). |
+
+M3 safety additions to §5 checklist:
+- [ ] Diag payload redaction: SecurityAccess (0x27 / 0x67) and Authentication (0x29 / 0x69) request/response data bytes beyond SID+subFunction are replaced by `"<redacted>"` with `redacted: true` in conversation and ISO-TP frame outputs (ISO-TP: redact the reassembled PDU's frames by matching conversation seq, or redact all data bytes of frames whose first PDU byte is one of those SIDs).
+- [ ] No tool calls a `cmd_diag_open/close/send/read_*`, `cmd_*_start/stop`, `cmd_re_focus_set`, `cmd_re_scan_first/next/undo/reset`, `cmd_flowlib_save/delete`, `cmd_run_append`.
+- [ ] Binary engine outputs decoded with bounds checks (truncated buffer → error, never panic).
+- [ ] Redaction fails closed: data that cannot be proven harmless (ISO-TP CF whose FF is not on the page, unparsable flow JSON) is hidden, not shown.
+- [ ] Secret redaction in structured data is allowlist-based for security blocks (`uds_security_access`, `*seed*`, `*auth*`, `*key*` types: only structural config fields visible) plus a normalised name denylist (camelCase/snake_case) elsewhere (QA-M3-01).
+- [ ] MCP never cancels or overrides user-started work (e.g. use `cmd_re_correlate_observer`, not `cmd_re_correlate`); user actions always win over MCP calls.
+
+M3 implementation notes (team-lead): 46 tools. Deviations accepted: `re_dbc_generate` rejects `base_db_id` (no engine IR accessor — backlog `PipelineEngine::database_ir`); `re_series` max 4 candidates + 1 reference (engine limit); nexus-mcp reads session DTOs via serde (no `nexus-protocols` dep).

@@ -140,7 +140,14 @@ the first frame; trace_compare diffs two recordings. LIVE (read-only, from the 6
 gives the overall picture (buses, databases, replay, panic latch); bus_status, device_list, driver_probe, \
 live_message_table, live_signal_values, signal_stats (short sampling window), live_trace_window and \
 periodic_tx_list read live state; they return live=false when no bus is streaming. WORKSPACE: \
-project_list / project_get and debug_events_query (Debug Console events). UI CO-PILOT (needs the desktop window open): ui_get_state reads what the user sees; \
+project_list / project_get and debug_events_query (Debug Console events); run_query / run_latest \
+(diagnostic flow run history) and flowlib_list / flowlib_get (saved flows, secrets redacted). \
+DIAGNOSTICS (read-only, observes sessions the user opened): diag_session_info lists them; \
+diag_conversation and diag_isotp_frames page their UDS / ISO-TP logs (SecurityAccess and \
+Authentication data redacted); diag_passive_discovery shows passive ECU discovery results. \
+REVERSE ENGINEERING (read-only, needs RE running in the app): re_status, re_scan_results, \
+re_row_detail, re_series and re_correlate (targets must already be focused by the user), and \
+re_dbc_generate (returns DBC text, saves nothing). UI CO-PILOT (needs the desktop window open): ui_get_state reads what the user sees; \
 ui_navigate, ui_select_message, ui_trace_filter and ui_plot_signals change only what is displayed; \
 ui_notify shows a short message; ui_confirm asks the user a yes/no question - use it before any \
 multi-step UI change the user did not explicitly request. SAFETY: no tool can transmit frames, arm a \
@@ -312,7 +319,10 @@ fn s64(s: &str) -> String {
     clip(s, 64)
 }
 
+mod diag;
 mod live;
+mod re;
+mod runs;
 mod workspace;
 
 // ─── Server ─────────────────────────────────────────────────────────────────
@@ -327,7 +337,12 @@ impl NexusMcpServer {
     pub fn new(ctx: Arc<Ctx>) -> Self {
         Self {
             ctx,
-            tool_router: Self::tool_router() + Self::live_router() + Self::workspace_router(),
+            tool_router: Self::tool_router()
+                + Self::live_router()
+                + Self::workspace_router()
+                + Self::diag_router()
+                + Self::re_router()
+                + Self::runs_router(),
         }
     }
 

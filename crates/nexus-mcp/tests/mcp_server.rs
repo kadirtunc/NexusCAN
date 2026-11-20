@@ -589,7 +589,28 @@ async fn e2e_tools_list_and_call_over_streamable_http() {
         "project_get",
         "trace_compare",
     ];
-    names.retain(|n| !M2_TOOLS.contains(&n.as_str()) && n != "debug_events_query");
+    // M3 tools (§9) are covered by tests/m3_*.rs.
+    const M3_TOOLS: [&str; 14] = [
+        "diag_session_info",
+        "diag_conversation",
+        "diag_isotp_frames",
+        "diag_passive_discovery",
+        "re_status",
+        "re_series",
+        "re_correlate",
+        "re_scan_results",
+        "re_row_detail",
+        "re_dbc_generate",
+        "run_query",
+        "run_latest",
+        "flowlib_list",
+        "flowlib_get",
+    ];
+    names.retain(|n| {
+        !M2_TOOLS.contains(&n.as_str())
+            && !M3_TOOLS.contains(&n.as_str())
+            && n != "debug_events_query"
+    });
     assert_eq!(names.len(), 19, "M1 + M1.1 db tools + 7 ui tools");
     names.retain(|n| {
         !n.starts_with("ui_")

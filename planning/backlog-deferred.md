@@ -175,3 +175,5 @@ Gerçek uygulama Playwright ile sürülürken (vcan0 + 4 ecusim + mock0) bulundu
 - **Cloud sekmesi** sunucu olmadan yalnızca `localhost:3000` giriş formu gösteriyor → v0.1'de deneysel bayrak arkasına alınacak.
 - **TX paneli:** "VIRTUAL"/"HW/SW LISTEN-ONLY" rozeti eklenince bus adı ("Bus 1 · mock0") "Bu…" diye kesiliyor; satır düzeni genişletilmeli. ✅ düzeltildi
 - **Proje açma onayı:** ✅ KARAR (2026-11-12): onay kalıyor. Bir dosyanın "kullanıcının kendi projesi" olduğu içerikten güvenilir biçimde anlaşılamaz (kopyalanan/indirilen dosya da aynı görünür); açılan her proje Listen-Only, otomatik bağlantısız açılır, "Connect (Listen-Only)" tek tık.
+
+- **MCP `re_dbc_generate` base merge:** add `PipelineEngine::database_ir(bus: Option<u8>) -> Option<NetworkDatabase>` so MCP can merge RE drafts into a loaded DBC (`planning/contracts/mcp-v1.md` §9).
