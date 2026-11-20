@@ -99,4 +99,9 @@ pub const APP_COMMANDS: &[&str] = &[
     "cmd_re_scan_reset",
     "cmd_re_scan_status",
     "cmd_re_scan_results",
+    "cmd_mcp_start",
+    "cmd_mcp_stop",
+    "cmd_mcp_status",
+    "cmd_mcp_ui_attach",
+    "cmd_mcp_ui_respond",
 ];

@@ -528,6 +528,8 @@ fn normalize_category(raw: &str) -> &'static str {
         "DIAG" => "DIAG",
         "WORKBENCH" => "WORKBENCH",
         "RE" => "RE",
+        // In-app MCP server audit trail (`nexus-mcp`).
+        "MCP" => "MCP",
         _ => "WORKBENCH",
     }
 }
@@ -538,6 +540,7 @@ fn normalize_source(raw: &str) -> &'static str {
         "ui" => "ui",
         "os" => "os",
         "protocol" => "protocol",
+        "mcp" => "mcp",
         _ => "backend",
     }
 }

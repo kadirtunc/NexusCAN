@@ -14,6 +14,10 @@ import { StartPageView } from './components/StartPageView';
 import { SymbolsLayoutView } from './components/SymbolsLayoutView';
 import { ToolpacksModal } from './components/ToolpacksModal';
 import { AcknowledgmentsModal } from './components/AcknowledgmentsModal';
+import { McpServerPanel } from './components/McpServerPanel';
+import { McpUiOverlay } from './components/McpUiOverlay';
+import { attachMcpUiBridge } from './services/mcpUiBridge';
+import { mcpStore } from './store/mcpStore';
 import { DiagnosticsView } from './components/diagnostics/DiagnosticsView';
 import { type StatusBanner, TopBar } from './components/TopBar';
 import { TraceView } from './components/TraceView';
@@ -184,6 +188,12 @@ export const App: React.FC = () => {
       unsubHw();
     };
   }, [applyQuickBarState, refreshDevices]);
+
+  // MCP server status: single refresh at startup (polling only while running / panel open).
+  useEffect(() => {
+    void mcpStore.refresh();
+    void attachMcpUiBridge(); // Tauri only; no-op in browser mode
+  }, []);
 
   // Dedicated debug console subscription: empty dependency array prevents re-subscription churn
   useEffect(() => {
@@ -1258,6 +1268,8 @@ export const App: React.FC = () => {
       />
 
       <AcknowledgmentsModal />
+      <McpServerPanel />
+      <McpUiOverlay />
 
       {/* Operator prompts of any flow run (Flow Editor / Diagnostics Workbench): one host for every tab. */}
       <FlowPromptHost />

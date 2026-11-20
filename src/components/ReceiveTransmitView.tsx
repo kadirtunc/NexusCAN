@@ -1671,6 +1671,8 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                               if (msgSchema) {
                                 databaseStore.selectMessageInSymbolsTab(
                                   msgSchema.messageKey,
+                                  undefined,
+                                  frame.busId,
                                 );
                               }
                             }}

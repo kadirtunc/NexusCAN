@@ -169,9 +169,10 @@ export type DebugCategory =
   | 'BUS_ERR'
   | 'DIAG'
   | 'WORKBENCH'
-  | 'RE';
+  | 'RE'
+  | 'MCP';
 
-export type DebugEventSource = 'backend' | 'ui' | 'os' | 'protocol';
+export type DebugEventSource = 'backend' | 'ui' | 'os' | 'protocol' | 'mcp';
 
 export interface DebugEventDto {
   seq: number;

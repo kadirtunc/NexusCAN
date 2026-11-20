@@ -11,6 +11,7 @@
     "diagnostics",
     "flash",
     "workspace",
-    "re"
+    "re",
+    "mcp"
   ]
 }

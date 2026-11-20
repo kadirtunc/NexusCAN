@@ -54,6 +54,8 @@ export interface DatabaseStoreState {
   signalsById: readonly (SignalSchemaDto | undefined)[];
   ecusByName: ReadonlyMap<string, EcuNodeDto>;
   selectedMessageKey: string | null;
+  /** Bus whose schema the selection came from (null = inspected DB / unknown). */
+  selectedMessageBusId: number | null;
   selectedSignalId: number | null;
   selectedSignalSeq: number;
   activeDocTab: ActiveDocumentTab;
@@ -123,6 +125,7 @@ let currentState: DatabaseStoreState = {
   signalsById: [],
   ecusByName: new Map<string, EcuNodeDto>(),
   selectedMessageKey: null,
+  selectedMessageBusId: null,
   selectedSignalId: null,
   selectedSignalSeq: 0,
   activeDocTab: initialTab,
@@ -516,19 +519,24 @@ export const databaseStore = {
     emitChange();
   },
 
-  setSelectedMessageKey(messageKey: string | null): void {
-    if (currentState.selectedMessageKey === messageKey && currentState.selectedSignalId === null) {
+  setSelectedMessageKey(messageKey: string | null, busId: number | null = null): void {
+    if (
+      currentState.selectedMessageKey === messageKey &&
+      currentState.selectedMessageBusId === busId &&
+      currentState.selectedSignalId === null
+    ) {
       return;
     }
     currentState = {
       ...currentState,
       selectedMessageKey: messageKey,
+      selectedMessageBusId: busId,
       selectedSignalId: null,
     };
     emitChange();
   },
 
-  selectMessageInSymbolsTab(messageKey: string, dbId?: string): void {
+  selectMessageInSymbolsTab(messageKey: string, dbId?: string, busId: number | null = null): void {
     let nextInspectedId = currentState.inspectedDatabaseId;
     if (dbId) {
       nextInspectedId = dbId;
@@ -552,6 +560,7 @@ export const databaseStore = {
       ...currentState,
       inspectedDatabaseId: nextInspectedId,
       selectedMessageKey: messageKey,
+      selectedMessageBusId: busId,
       selectedSignalId: null,
       activeDocTab: 'symbols',
       ...inspectorUpdates,

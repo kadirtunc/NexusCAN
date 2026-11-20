@@ -49,6 +49,11 @@ pub fn run() {
                     let app_handle = app.handle().clone();
                     win.on_window_event(move |event| {
                         if matches!(event, tauri::WindowEvent::Destroyed) {
+                            // The MCP server never outlives the main window.
+                            if let Some(state) = app_handle.try_state::<AppState>() {
+                                state.stop_mcp();
+                                state.ui_bridge.detach();
+                            }
                             if let Some(dbg_win) = app_handle.get_webview_window("debug-console") {
                                 let _ = dbg_win.close();
                             }
@@ -150,6 +155,11 @@ pub fn run() {
             commands::cmd_re_scan_reset,
             commands::cmd_re_scan_status,
             commands::cmd_re_scan_results,
+            commands::cmd_mcp_start,
+            commands::cmd_mcp_stop,
+            commands::cmd_mcp_status,
+            commands::cmd_mcp_ui_attach,
+            commands::cmd_mcp_ui_respond,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexusCAN Tauri application");

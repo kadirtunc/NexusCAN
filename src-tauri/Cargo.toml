@@ -21,11 +21,13 @@ nexus-core = { path = "../crates/nexus-core" }
 nexus-netdb = { path = "../crates/nexus-netdb" }
 nexus-hal = { path = "../crates/nexus-hal" }
 nexus-protocols = { path = "../crates/nexus-protocols" }
+# In-app read-only MCP server (Streamable HTTP on 127.0.0.1, off by default).
+nexus-mcp = { path = "../crates/nexus-mcp" }
 tauri = { version = "2", features = [] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
-tokio = { version = "1.43", features = ["rt-multi-thread", "sync"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "sync", "time", "macros"] }
 
 # WP-8 / LOW-01: hardened release profile for the shipped desktop binary.
 [profile.release]
