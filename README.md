@@ -2,6 +2,8 @@
 
 # NexusCAN
 
+**English** · [Türkçe](./README.tr.md)
+
 **Open-source CAN / CAN-FD analyzer, UDS diagnostics workbench and reverse-engineering toolkit.**<br/>
 Rust core · Tauri v2 desktop · zero-allocation hot path · 100% MIT.
 
@@ -137,7 +139,7 @@ A dedicated **Reverse Engineering** tab for finding undocumented signals. It is 
 - **Signal Inspector** — select bits on a byte × bit grid and see up to four candidate interpretations (length, byte order, signed, float32/64, factor/offset) plotted live. All bit math comes from the same compiled-DBC engine used everywhere else.
 - **Correlation search** — against an OBD-II PID decoded from responses on the bus, numeric values at your markers, or another candidate. An exhaustive sweep (every start bit × length × byte order × sign, about 6 200 candidates for a classic frame in about 0.1 s) ranks fields by |r|, fits factor/offset by least squares and finds time lags of up to ±500 ms.
 - **Save to DBC** — a found signal becomes a draft (name, scaling, range, unit, value table, plus provenance such as `RE: r=0.998 lag=+120ms ref=OBD 0x0D`) kept in the project. *Apply to bus* loads all drafts as `RE_found.dbc` so the trace, inspector and plots decode them immediately. *Export .dbc* writes a standalone file, and *Merge into DBC…* adds them to an existing database as a new file. Every generated DBC is re-parsed and verified bit-for-bit before it is offered.
-- **Value Scan** — Cheat Engine for CAN: scan for an exact, physical (with scale presets such as ×0.01 or −40 offset), range or unknown value, change something on the vehicle, then narrow with *changed / unchanged / increased / decreased / increased by N / stable for T ms* until the signal is left. Undo goes back up to eight steps, and identically moving nested fields are grouped. A million candidates are scanned in about 50 ms; any result opens in the Signal Inspector or saves to DBC.
+- **Value Scan** — Cheat Engine for CAN: scan for an exact, physical (with scale presets such as ×0.01 or −40 offset), range or unknown value, change something on the vehicle, then narrow with *changed / unchanged / increased / decreased / increased by N / stable for T ms* until the signal is left. Values can be typed in decimal or `0x` hex. Undo goes back up to eight steps, and identically moving nested fields are grouped. A million candidates are scanned in about 50 ms; any result opens in the Signal Inspector or saves to DBC.
 
 ---
 
@@ -220,7 +222,7 @@ NexusCAN is a **v0.1 preview**. What is real today and what is next, without mar
 | Reverse engineering | Sniffer heatmap, baseline/action diff, field classifier, Signal Inspector, correlation search, save to DBC, Value Scan | Offline analysis of recorded logs, two-log diff, selective replay, active scanners (gated) |
 | Protocols | UDS (ISO 14229), ISO-TP (ISO 15765-2 incl. addressing formats), SAE J1939 (PGN codec, BAM/CMDT transport, address claim, DM1/DM2) | J1939 UI, CANopen, XCP |
 | Platforms | Linux (verified), browser mode; Windows, Linux and macOS (Apple Silicon) desktop builds published automatically from CI | Code signing / notarization, Intel macOS build |
-| Experimental | NexusCloud client and headless agent: in the repo, **off by default** (enable under *View → Experimental: NexusCloud (self-hosted)*) | NexusCloud server preview, agent releases |
+| Experimental | NexusCloud client and headless agent: code in the repo, **disabled in release builds** | NexusCloud server preview, agent releases |
 
 ### Ecosystem roadmap (experimental)
 
