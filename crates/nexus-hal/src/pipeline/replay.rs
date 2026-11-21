@@ -3260,9 +3260,9 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
 1   0.000 DT 1 0101 Rx 8 11 00 00 00 00 00 00 00
 2   5.000 DT 1 0102 Rx 8 22 00 00 00 00 00 00 00
 3  10.000 DT 1 0103 Rx 8 33 00 00 00 00 00 00 00
-4 120.000 DT 1 0102 Rx 8 44 00 00 00 00 00 00 00
-5 130.000 DT 1 0102 Tx 8 55 00 00 00 00 00 00 00
-6 140.000 DT 1 0103 Rx 8 66 00 00 00 00 00 00 00
+4 2000.000 DT 1 0102 Rx 8 44 00 00 00 00 00 00 00
+5 2010.000 DT 1 0102 Tx 8 55 00 00 00 00 00 00 00
+6 2020.000 DT 1 0103 Rx 8 66 00 00 00 00 00 00 00
 ";
 
         // Start replay on armed Bus 0 (`bus_override = Some(0)`) with `Exclude: ["std:0x102"]` and `transmit_to_hardware: true`!
@@ -3286,9 +3286,23 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
         assert_eq!(status.direction_filter, "all");
         assert!(status.transmit_to_hardware);
 
-        // Wait ~35ms so frames #1 (0ms, 0x101), #2 (5ms, 0x102 - excluded!), #3 (10ms, 0x103) process while #4..#6 (120ms+) remain pending
-        thread::sleep(Duration::from_millis(35));
-        let snap_mid = engine.flush_snapshot_now().expect("flush mid replay");
+        // Wait until frames #1 (0ms, 0x101), #2 (5ms, 0x102 - excluded!), #3 (10ms, 0x103) are
+        // processed while #4..#6 (2000ms+) remain pending. Polled rather than a fixed sleep: macOS
+        // CI VMs oversleep short sleeps by 100ms+, which used to let #4 slip through early.
+        let mid_deadline = std::time::Instant::now() + Duration::from_millis(1500);
+        let snap_mid = loop {
+            let snap = engine.flush_snapshot_now().expect("flush mid replay");
+            // Counters move before the aggregator ingests the frame, so also wait for the rows.
+            let has = |id: u32| snap.frames.iter().any(|r| r.bus_id == 0 && r.arb_id == id);
+            let early_done = snap.replay.dispatched_frames >= 2
+                && snap.replay.filtered_out_frames >= 1
+                && has(0x101)
+                && has(0x103);
+            if early_done || std::time::Instant::now() >= mid_deadline {
+                break snap;
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
         assert_eq!(snap_mid.replay.dispatched_frames, 2);
         assert_eq!(snap_mid.replay.filtered_out_frames, 1);
         assert!(
@@ -3349,7 +3363,15 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
         let snap_end = loop {
             thread::sleep(Duration::from_millis(10));
             let snap = engine.flush_snapshot_now().expect("flush end replay");
-            if snap.replay.state == "completed" || std::time::Instant::now() >= deadline {
+            // "completed" can be published just before the aggregator has ingested the last
+            // dispatched frame, so also wait for the 0x102 row.
+            let has_102 = snap
+                .frames
+                .iter()
+                .any(|r| r.bus_id == 0 && r.arb_id == 0x102);
+            if (snap.replay.state == "completed" && has_102)
+                || std::time::Instant::now() >= deadline
+            {
                 break snap;
             }
         };

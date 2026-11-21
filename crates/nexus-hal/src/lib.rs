@@ -718,9 +718,11 @@ mod tests {
         // Cycle health is an instantaneous "time since last frame" classification, so a paused CI
         // VM (steal time) can briefly show `jitterWarning` although the schedule is right. A
         // wrong period never recovers, so polling for up to 2 s keeps the check meaningful.
+        // 0x101 is excluded on purpose: after the user's single-shot TX above, mock0 holds its own
+        // 0x101 generator off for 3.0 s (TX override), so 0x101 is legitimately silent and its
+        // health degrades with wall-clock time (asserted separately as the user TX row).
         let calm_ids = [
             0x201u32,
-            0x101,
             0x105,
             0x302,
             0x301,
