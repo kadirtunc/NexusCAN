@@ -42,6 +42,8 @@ import type { DeviceDescriptorDto } from '../types/hal';
 import { BitLayoutMatrix } from './BitLayoutMatrix';
 import { DatabaseExplorer } from './DatabaseExplorer';
 import { NewConnectionModal } from './NewConnectionModal';
+import { GuideInfoButton, GuideTourButton } from '../onboarding/GuideButtons';
+import { GuideStrip } from '../onboarding/GuideStrip';
 
 type FormatFilter = 'all' | 'dbc' | 'kcd';
 
@@ -334,7 +336,8 @@ export const SymbolsLayoutView: React.FC = () => {
   if (mode === 'inspect' && inspected) {
     return (
       <div className="flex flex-1 min-h-0 flex-col overflow-hidden bg-canvas">
-        <div className="flex shrink-0 min-h-[42px] flex-wrap items-center gap-2.5 border-b border-hairline bg-surface px-4 py-1.5">
+        <GuideStrip pageId="symbols" />
+        <div data-tour="symbols.inspect-bar" className="flex shrink-0 min-h-[42px] flex-wrap items-center gap-2.5 border-b border-hairline bg-surface px-4 py-1.5">
           <button
             type="button"
             onClick={() => setMode('list')}
@@ -365,9 +368,11 @@ export const SymbolsLayoutView: React.FC = () => {
 
           {/* Interactive Bus Binding Controls on Level 2 */}
           <div className="ml-auto flex flex-wrap items-center gap-2">
+            <GuideTourButton pageId="symbols" />
+            <GuideInfoButton pageId="symbols" tourAnchor="symbols.info" />
             <span className="font-mono text-[11px] uppercase text-muted mr-0.5">{t('netdb.symbols.boundBuses')}</span>
             {profiles.length === 0 ? (
-              <span className="font-mono text-[11px] text-amber-400 border border-amber-800/60 px-2 py-0.5 rounded-[2px]">
+              <span className="font-mono text-[11px] text-warn border border-[var(--status-warn-border)] px-2 py-0.5 rounded-[2px]">
                 {t('netdb.symbols.noBusesRegistered')}
               </span>
             ) : (
@@ -383,7 +388,7 @@ export const SymbolsLayoutView: React.FC = () => {
                       onClick={() => toggleBinding(inspected.id, p.id)}
                       className={`inline-flex h-[28px] cursor-pointer items-center gap-1.5 rounded-[2px] border px-2.5 font-mono text-[11.5px] tabular-nums transition-colors ${
                         isBound
-                          ? 'border-emerald-500/60 bg-emerald-950/50 text-emerald-300 font-semibold'
+                          ? 'border-[var(--status-nominal-border)] bg-[var(--status-nominal-bg)] text-nominal font-semibold'
                           : 'border-hairline bg-canvas text-muted hover:text-ink hover:border-strong opacity-75 hover:opacity-100'
                       }`}
                       title={t('netdb.symbols.busBindToggleTitle', {
@@ -393,7 +398,7 @@ export const SymbolsLayoutView: React.FC = () => {
                       })}
                     >
                       <span>Bus {p.busId + 1}</span>
-                      {isBound ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Plus className="h-3.5 w-3.5 text-muted" />}
+                      {isBound ? <Check className="h-3.5 w-3.5 text-nominal" /> : <Plus className="h-3.5 w-3.5 text-muted" />}
                     </button>
                   );
                 })
@@ -412,12 +417,13 @@ export const SymbolsLayoutView: React.FC = () => {
         {inspected.schema ? (
           <div className="flex flex-1 min-h-0 overflow-hidden">
             <div
+              data-tour="symbols.explorer"
               style={{ borderRight: '1px solid var(--border-strong)' }}
               className="w-[38%] min-w-[320px] max-w-[540px] h-full min-h-0 flex flex-col"
             >
               <DatabaseExplorer />
             </div>
-            <div className="flex-1 min-w-0 h-full min-h-0 flex flex-col">
+            <div data-tour="symbols.matrix" className="flex-1 min-w-0 h-full min-h-0 flex flex-col">
               <BitLayoutMatrix />
             </div>
           </div>
@@ -435,6 +441,7 @@ export const SymbolsLayoutView: React.FC = () => {
   // ==========================================================================
   return (
     <div className="flex-1 min-h-0 overflow-y-auto bg-canvas">
+      <GuideStrip pageId="symbols" />
       <div className="flex min-h-[42px] flex-wrap items-center justify-between gap-3 border-b border-hairline bg-surface px-4 py-2">
         <div className="flex items-center gap-2.5">
           <span className="font-mono text-[11px] uppercase tracking-wider text-muted">
@@ -444,15 +451,18 @@ export const SymbolsLayoutView: React.FC = () => {
           <h1 className="text-[14px] font-semibold text-ink">{t('netdb.symbols.title')}</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <GuideTourButton pageId="symbols" />
+          <GuideInfoButton pageId="symbols" tourAnchor="symbols.info" />
+          <div data-tour="symbols.actions" className="flex flex-wrap items-center gap-2">
           {/* CLOUD'DAN ÇEK BUTTON (experimental cloud only) */}
           {cloudOn && (
           <button
             type="button"
             disabled={busy}
             onClick={() => setCloudPullModalOpen(true)}
-            className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-sky-500/50 bg-sky-950/40 px-3 font-mono text-[12px] font-semibold uppercase tracking-wider text-sky-300 hover:bg-sky-900/50 disabled:opacity-50"
+            className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] px-3 font-mono text-[12px] font-semibold uppercase tracking-wider text-focus hover:bg-[var(--status-focus-bg)] disabled:opacity-50"
           >
-            <DownloadCloud className="h-3.5 w-3.5 text-sky-400" aria-hidden="true" />
+            <DownloadCloud className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
             {t('netdb.symbols.pullFromCloudBtn')}
           </button>
           )}
@@ -478,12 +488,13 @@ export const SymbolsLayoutView: React.FC = () => {
             type="button"
             disabled={busy}
             onClick={() => fileInputRef.current?.click()}
-            className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] px-3.5 font-mono text-[12px] font-semibold uppercase tracking-wider text-white hover:opacity-90 disabled:opacity-50"
+            className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] px-3.5 font-mono text-[12px] font-semibold uppercase tracking-wider text-on-accent hover:opacity-90 disabled:opacity-50"
             style={{ backgroundColor: 'var(--status-nominal)' }}
           >
             <UploadCloud className="h-3.5 w-3.5" aria-hidden="true" />
             {busy ? t('netdb.symbols.compiling') : t('netdb.symbols.uploadDbcKcdBtn')}
           </button>
+          </div>
         </div>
       </div>
 
@@ -523,7 +534,7 @@ export const SymbolsLayoutView: React.FC = () => {
           ))}
         </div>
 
-        <section className="rounded-[2px] border border-hairline bg-surface">
+        <section data-tour="symbols.catalog" className="rounded-[2px] border border-hairline bg-surface">
           <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-hairline bg-elevated px-3.5 py-2">
             <div className="flex items-center gap-2">
               <Database className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
@@ -596,16 +607,16 @@ export const SymbolsLayoutView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setCloudPullModalOpen(true)}
-                  className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-sky-500/50 bg-sky-950/40 px-3 font-mono text-[12px] font-semibold uppercase text-sky-300 hover:bg-sky-900/50"
+                  className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] px-3 font-mono text-[12px] font-semibold uppercase text-focus hover:bg-[var(--status-focus-bg)]"
                 >
-                  <DownloadCloud className="h-3.5 w-3.5 text-sky-400" aria-hidden="true" />
+                  <DownloadCloud className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
                   {t('netdb.symbols.pullFromCloudBtn')}
                 </button>
                 )}
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] px-3.5 font-mono text-[12px] font-semibold uppercase text-white"
+                  className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] px-3.5 font-mono text-[12px] font-semibold uppercase text-on-accent"
                   style={{ backgroundColor: 'var(--status-nominal)' }}
                 >
                   <UploadCloud className="h-3.5 w-3.5" aria-hidden="true" />
@@ -674,7 +685,7 @@ export const SymbolsLayoutView: React.FC = () => {
                                       onClick={() => toggleBinding(db.id, p.id)}
                                       className={`inline-flex h-[26px] cursor-pointer items-center gap-1 rounded-[2px] border px-2 font-mono text-[11px] tabular-nums transition-colors ${
                                         isBound
-                                          ? 'border-emerald-500/60 bg-emerald-950/50 text-emerald-300 font-semibold'
+                                          ? 'border-[var(--status-nominal-border)] bg-[var(--status-nominal-bg)] text-nominal font-semibold'
                                           : 'border-hairline bg-canvas text-muted hover:text-ink hover:border-strong opacity-75 hover:opacity-100'
                                       }`}
                                       title={t('netdb.symbols.busBindToggleTitle', {
@@ -684,7 +695,7 @@ export const SymbolsLayoutView: React.FC = () => {
                                       })}
                                     >
                                       <span>Bus {p.busId + 1}</span>
-                                      {isBound && <Check className="h-3 w-3 text-emerald-400" />}
+                                      {isBound && <Check className="h-3 w-3 text-nominal" />}
                                     </button>
                                   );
                                 })
@@ -742,7 +753,7 @@ export const SymbolsLayoutView: React.FC = () => {
       {/* FIXED BUS BINDING MODAL (PREVENTS OVERFLOW CLIPPING) */}
       {modalBindDb && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 select-none"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--bg-scrim)] select-none"
           role="dialog"
           aria-modal="true"
         >
@@ -817,7 +828,7 @@ export const SymbolsLayoutView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setModalBindDb(null)}
-                className="h-7 cursor-pointer rounded-[2px] px-4 font-mono text-[11px] font-semibold uppercase text-white bg-focus hover:opacity-90"
+                className="h-7 cursor-pointer rounded-[2px] px-4 font-mono text-[11px] font-semibold uppercase text-on-accent bg-focus hover:opacity-90"
               >
                 {t('netdb.symbols.ok')}
               </button>
@@ -829,14 +840,14 @@ export const SymbolsLayoutView: React.FC = () => {
       {/* CLOUD PULL MODAL */}
       {cloudOn && cloudPullModalOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 select-none"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[var(--bg-scrim)] select-none"
           role="dialog"
           aria-modal="true"
         >
           <div className="w-full max-w-[620px] rounded-[2px] border border-strong bg-surface shadow-2xl flex flex-col max-h-[88vh]">
             <div className="flex h-10 items-center justify-between border-b border-hairline bg-elevated px-3.5">
               <div className="flex items-center gap-2">
-                <DownloadCloud className="h-4 w-4 text-sky-400" />
+                <DownloadCloud className="h-4 w-4 text-focus" />
                 <span className="font-mono text-xs font-semibold uppercase tracking-wider text-ink">
                   {t('netdb.symbols.cloudModalTitle')}
                 </span>
@@ -864,7 +875,7 @@ export const SymbolsLayoutView: React.FC = () => {
                       setCloudPullModalOpen(false);
                       databaseStore.setActiveDocTab('cloud');
                     }}
-                    className="h-7 px-4 rounded-[2px] font-mono text-[11px] font-semibold uppercase text-white bg-sky-600 hover:bg-sky-500 cursor-pointer"
+                    className="h-7 px-4 rounded-[2px] font-mono text-[11px] font-semibold uppercase text-on-accent bg-[var(--status-focus-bg)] hover:bg-[var(--status-focus-bg)] cursor-pointer"
                   >
                     {t('netdb.symbols.goToCloudTab')}
                   </button>
@@ -879,9 +890,9 @@ export const SymbolsLayoutView: React.FC = () => {
                         type="button"
                         disabled={loadingPullable}
                         onClick={() => void refreshPullableDatabases(selectedCloudProjId)}
-                        className="font-mono text-[10px] text-sky-400 hover:underline flex items-center gap-1 cursor-pointer"
+                        className="font-mono text-[10px] text-focus hover:underline flex items-center gap-1 cursor-pointer"
                       >
-                        <RefreshCw className={`h-3 w-3 ${loadingPullable ? 'animate-spin' : ''}`} />
+                        <RefreshCw className={`h-3 w-3 ${loadingPullable ? '' : ''}`} />
                         {t('netdb.symbols.refresh')}
                       </button>
                     </div>
@@ -923,7 +934,7 @@ export const SymbolsLayoutView: React.FC = () => {
 
                     {loadingPullable ? (
                       <div className="py-8 flex items-center justify-center gap-2 font-mono text-xs text-muted">
-                        <Loader2 className="h-4 w-4 animate-spin text-sky-400" />
+                        <Loader2 className="h-4 w-4 text-focus" />
                         <span>{t('netdb.symbols.scanningDatabases')}</span>
                       </div>
                     ) : pullableDatabases.length === 0 ? (
@@ -953,7 +964,7 @@ export const SymbolsLayoutView: React.FC = () => {
                                     return next;
                                   });
                                 }}
-                                className="h-4 w-4 rounded-[2px] accent-sky-500"
+                                className="h-4 w-4 rounded-[2px] accent-focus"
                               />
                               <span className="inline-flex items-center gap-1 rounded-[2px] border border-hairline bg-surface px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase text-focus">
                                 .{item.format}
@@ -969,8 +980,8 @@ export const SymbolsLayoutView: React.FC = () => {
                               <span
                                 className={`rounded-[2px] border px-1.5 py-0.5 font-mono text-[10px] uppercase font-semibold ${
                                   existsLocally
-                                    ? 'border-amber-600/50 bg-amber-950/30 text-amber-300'
-                                    : 'border-emerald-600/50 bg-emerald-950/30 text-emerald-300'
+                                    ? 'border-[var(--status-warn-border)] bg-[var(--status-warn-bg)] text-warn'
+                                    : 'border-[var(--status-nominal-border)] bg-[var(--status-nominal-bg)] text-nominal'
                                 }`}
                               >
                                 {existsLocally ? t('netdb.symbols.updateBadge') : t('netdb.symbols.newBadge')}
@@ -1025,7 +1036,7 @@ export const SymbolsLayoutView: React.FC = () => {
                                       return next;
                                     });
                                   }}
-                                  className="h-3.5 w-3.5 rounded-[2px] accent-sky-500"
+                                  className="h-3.5 w-3.5 rounded-[2px] accent-focus"
                                 />
                                 <span className="font-mono font-semibold tabular-nums text-focus">
                                   Bus {p.busId + 1}
@@ -1077,11 +1088,11 @@ export const SymbolsLayoutView: React.FC = () => {
                   type="button"
                   disabled={pullingBusy || selectedDbKeys.size === 0}
                   onClick={() => void handleExecuteCloudPull()}
-                  className="h-7 cursor-pointer rounded-[2px] px-4 font-mono text-[11px] font-semibold uppercase text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-50 flex items-center gap-1.5"
+                  className="h-7 cursor-pointer rounded-[2px] px-4 font-mono text-[11px] font-semibold uppercase text-on-accent bg-[var(--status-focus-bg)] hover:bg-[var(--status-focus-bg)] disabled:opacity-50 flex items-center gap-1.5"
                 >
                   {pullingBusy ? (
                     <>
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <Loader2 className="h-3.5 w-3.5 " />
                       <span>{t('netdb.symbols.downloading')}</span>
                     </>
                   ) : (
@@ -1136,7 +1147,7 @@ export const SymbolsLayoutView: React.FC = () => {
                 <button
                   type="button"
                   onClick={confirmDelete}
-                  className="h-7 cursor-pointer rounded-[2px] px-3.5 font-mono text-[11px] font-semibold uppercase text-white"
+                  className="h-7 cursor-pointer rounded-[2px] px-3.5 font-mono text-[11px] font-semibold uppercase text-on-accent"
                   style={{ backgroundColor: 'var(--status-critical)' }}
                 >
                   {t('netdb.symbols.delete')}

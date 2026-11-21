@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Server, X } from 'lucide-react';
 import { useI18n } from '../i18n';
+import { GuideInfoButton } from '../onboarding/GuideButtons';
 import {
   MCP_DEFAULT_PORT,
   buildClaudeCodeCommand,
@@ -69,7 +70,7 @@ export const McpServerPanel: React.FC = () => {
   return (
     <div
       onClick={() => mcpStore.setPanelOpen(false)}
-      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 select-none"
+      className="fixed inset-0 z-50 bg-[var(--bg-scrim)] flex items-center justify-center p-4 select-none"
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -85,29 +86,32 @@ export const McpServerPanel: React.FC = () => {
           className="h-[40px] px-4 flex items-center justify-between shrink-0"
         >
           <div className="flex items-center gap-2.5 min-w-0">
-            <Server className="w-4 h-4 text-sky-400 shrink-0" />
+            <Server className="w-4 h-4 text-focus shrink-0" />
             <span className="font-semibold text-[13px] tracking-wide">{t('mcp.title')}</span>
             <span
               className={`px-2 py-0.5 rounded border font-mono text-[11px] shrink-0 ${
                 running
-                  ? 'border-emerald-500/60 bg-emerald-950/50 text-emerald-300'
+                  ? 'border-[var(--status-nominal-border)] bg-[var(--status-nominal-bg)] text-nominal'
                   : 'border-[var(--border-strong)] bg-[var(--bg-toolbar)] text-[var(--text-secondary)]'
               }`}
             >
               {running ? t('mcp.status.running') : t('mcp.status.stopped')}
             </span>
-            <span className="px-2 py-0.5 rounded border border-amber-500/50 bg-amber-950/40 text-amber-300 font-mono text-[11px] shrink-0">
+            <span className="px-2 py-0.5 rounded border border-[var(--status-warn-border)] bg-[var(--status-warn-bg)] text-warn font-mono text-[11px] shrink-0">
               {t('mcp.badge.readOnly')}
             </span>
           </div>
-          <button
-            type="button"
-            onClick={() => mcpStore.setPanelOpen(false)}
-            className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer p-1"
-            title={t('mcp.close')}
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <GuideInfoButton pageId="mcp" />
+            <button
+              type="button"
+              onClick={() => mcpStore.setPanelOpen(false)}
+              className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer p-1"
+              title={t('mcp.close')}
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {!available ? (
@@ -135,7 +139,7 @@ export const McpServerPanel: React.FC = () => {
               onChange={(e) => setPortText(e.target.value)}
               aria-invalid={portInvalid}
               className={`w-[96px] px-2 py-1 border bg-[var(--bg-row-signal)] font-mono tabular-nums text-[var(--text-primary)] disabled:opacity-60 ${
-                portInvalid ? 'border-rose-500' : 'border-[var(--border-grid)]'
+                portInvalid ? 'border-[var(--status-critical-border)]' : 'border-[var(--border-grid)]'
               }`}
             />
             <button
@@ -147,13 +151,13 @@ export const McpServerPanel: React.FC = () => {
               }}
               className={`px-3 h-[26px] border text-[12px] font-semibold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
                 running
-                  ? 'border-rose-500/60 bg-rose-950/40 text-rose-300 hover:bg-rose-950/70'
-                  : 'border-emerald-500/60 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-950/70'
+                  ? 'border-[var(--status-critical-border)] bg-[var(--status-critical-bg)] text-critical hover:bg-hover'
+                  : 'border-[var(--status-nominal-border)] bg-[var(--status-nominal-bg)] text-nominal hover:bg-[var(--status-nominal-bg)]'
               }`}
             >
               {running ? t('mcp.stop') : t('mcp.start')}
             </button>
-            {portInvalid && <span className="text-[11px] text-rose-400">{t('mcp.portHint')}</span>}
+            {portInvalid && <span className="text-[11px] text-critical">{t('mcp.portHint')}</span>}
           </div>
 
           {running && st && st.endpointUrl !== null && (
@@ -183,7 +187,7 @@ export const McpServerPanel: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => copy('cmd', buildClaudeCodeCommand(st.endpointUrl ?? '', st.token ?? ''))}
-                      className="px-3 h-[28px] border border-sky-500/50 bg-sky-950/40 text-sky-300 hover:bg-sky-950/70 cursor-pointer text-[12px] font-semibold"
+                      className="px-3 h-[28px] border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] text-focus hover:bg-hover cursor-pointer text-[12px] font-semibold"
                     >
                       {copied === 'cmd' ? t('mcp.copied') : t('mcp.copyClaudeCmd')}
                     </button>
@@ -209,7 +213,7 @@ export const McpServerPanel: React.FC = () => {
             <span
               className={`px-2 py-0.5 rounded border font-mono text-[11px] ${
                 st?.uiAttached
-                  ? 'border-emerald-500/60 bg-emerald-950/50 text-emerald-300'
+                  ? 'border-[var(--status-nominal-border)] bg-[var(--status-nominal-bg)] text-nominal'
                   : 'border-[var(--border-strong)] bg-[var(--bg-toolbar)] text-[var(--text-muted)]'
               }`}
             >
@@ -226,7 +230,7 @@ export const McpServerPanel: React.FC = () => {
                 mcp.uiActions.map((a) => (
                   <div key={a.seq} className="px-2 py-1 flex gap-3 border-b border-[var(--border-grid)] last:border-b-0">
                     <span className="text-[var(--text-muted)] shrink-0">{formatClock(a.atMs)}</span>
-                    <span className={`shrink-0 w-[96px] ${a.ok ? 'text-sky-300' : 'text-rose-300'}`}>{a.kind}</span>
+                    <span className={`shrink-0 w-[96px] ${a.ok ? 'text-focus' : 'text-critical'}`}>{a.kind}</span>
                     <span className="truncate text-[var(--text-primary)]">{a.summary}</span>
                   </div>
                 ))
@@ -237,7 +241,7 @@ export const McpServerPanel: React.FC = () => {
           <div className="text-[11.5px] leading-relaxed">{t('mcp.uiNote')}</div>
 
           {shownError !== null && (
-            <div className="px-3 py-2 border border-rose-500/60 bg-rose-950/40 text-rose-300 break-words">
+            <div className="px-3 py-2 border border-[var(--status-critical-border)] bg-[var(--status-critical-bg)] text-critical break-words">
               <span className="font-semibold">{t('mcp.error')}: </span>
               {shownError}
             </div>

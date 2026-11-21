@@ -17,11 +17,20 @@ import { flowRegEn, flowRegTr } from './shards/flowRegistry';
 import { hardwareNetdbEn, hardwareNetdbTr } from './shards/hardwareNetdb';
 import { plotterModalsEn, plotterModalsTr } from './shards/plotterModals';
 import { reEn, reTr } from './shards/re';
+import { onboardingEn, onboardingTr } from './shards/onboarding';
+import { onbConnectionsEn, onbConnectionsTr } from './shards/onbConnections';
+import { onbTraceEn, onbTraceTr } from './shards/onbTrace';
+import { onbPlotterEn, onbPlotterTr } from './shards/onbPlotter';
+import { onbSymbolsEn, onbSymbolsTr } from './shards/onbSymbols';
+import { onbPanelsEn, onbPanelsTr } from './shards/onbPanels';
+import { onbCloudEn, onbCloudTr } from './shards/onbCloud';
+import { onbMcpEn, onbMcpTr } from './shards/onbMcp';
 import { rxtxTraceEn, rxtxTraceTr } from './shards/rxtxTrace';
 import { securityEn, securityTr } from './shards/security';
 import { shellEn, shellTr } from './shards/shell';
 import { simInspectorPaletteEn, simInspectorPaletteTr } from './shards/simInspectorPalette';
 import { simWidgetsCanvasEn, simWidgetsCanvasTr } from './shards/simWidgetsCanvas';
+import { updatesEn, updatesTr } from './shards/updates';
 import { workbenchEn, workbenchTr } from './shards/workbench';
 
 export type { Locale };
@@ -44,6 +53,15 @@ export const trDictionary = {
   ...securityTr,
   ...workbenchTr,
   ...reTr,
+  ...onboardingTr,
+  ...onbConnectionsTr,
+  ...onbTraceTr,
+  ...onbPlotterTr,
+  ...onbSymbolsTr,
+  ...onbPanelsTr,
+  ...onbCloudTr,
+  ...onbMcpTr,
+  ...updatesTr,
 } as const;
 
 export type TranslationKey = keyof typeof trDictionary;
@@ -65,6 +83,15 @@ export const enDictionary: Record<TranslationKey, string> = {
   ...securityEn,
   ...workbenchEn,
   ...reEn,
+  ...onboardingEn,
+  ...onbConnectionsEn,
+  ...onbTraceEn,
+  ...onbPlotterEn,
+  ...onbSymbolsEn,
+  ...onbPanelsEn,
+  ...onbCloudEn,
+  ...onbMcpEn,
+  ...updatesEn,
 };
 
 export function translateForLocale(

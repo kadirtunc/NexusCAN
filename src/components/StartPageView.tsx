@@ -31,6 +31,7 @@ import { useExperimentalCloud } from '../store/experimentalStore';
 import type { DeviceDescriptorDto } from '../types/hal';
 import type { StatusBanner } from './TopBar';
 import { useI18n } from '../i18n';
+import { StartGuidePanel } from '../onboarding/StartGuidePanel';
 
 interface StartPageViewProps {
   devices: readonly DeviceDescriptorDto[];
@@ -280,7 +281,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
         type="button"
         onClick={() => setLocale('tr')}
         className={`h-full px-2 rounded-[2px] font-semibold cursor-pointer transition-colors ${
-          locale === 'tr' ? 'bg-sky-600 text-white font-bold' : 'text-slate-400 hover:text-white'
+          locale === 'tr' ? 'bg-focus text-on-accent font-bold' : 'text-secondary hover:text-primary'
         }`}
       >
         {t('shell.lang.tr')}
@@ -289,7 +290,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
         type="button"
         onClick={() => setLocale('en')}
         className={`h-full px-2 rounded-[2px] font-semibold cursor-pointer transition-colors ${
-          locale === 'en' ? 'bg-sky-600 text-white font-bold' : 'text-slate-400 hover:text-white'
+          locale === 'en' ? 'bg-focus text-on-accent font-bold' : 'text-secondary hover:text-primary'
         }`}
       >
         {t('shell.lang.en')}
@@ -317,7 +318,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
             <div className="flex items-center gap-3.5 flex-wrap">
               {/* Organization Selector */}
               <div className="flex items-center gap-2 font-mono text-[12px]">
-                <Building2 className="w-4 h-4 text-sky-400 shrink-0" />
+                <Building2 className="w-4 h-4 text-focus shrink-0" />
                 <span className="text-[var(--text-secondary)] font-sans">{t('shell.start.orgLabel')}</span>
                 {cloudState.organizations.length > 1 ? (
                   <select
@@ -337,10 +338,10 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                     ))}
                   </select>
                 ) : (
-                  <span className="font-semibold text-slate-100">
+                  <span className="font-semibold text-primary">
                     {activeOrg?.name ?? t('shell.start.personalOrg')}
                     {activeOrg?.myRole && (
-                      <span className="text-sky-400 text-[11px] ml-1">[{activeOrg.myRole}]</span>
+                      <span className="text-focus text-[11px] ml-1">[{activeOrg.myRole}]</span>
                     )}
                   </span>
                 )}
@@ -349,8 +350,8 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
               <div className="h-5 w-px bg-[var(--border-strong)]" />
 
               {/* Account details */}
-              <div className="flex items-center gap-2 text-[12px] font-mono text-emerald-400">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <div className="flex items-center gap-2 text-[12px] font-mono text-nominal">
+                <span className="w-2 h-2 rounded-full bg-nominal animate-pulse" />
                 <span>{cloudState.userFullName || cloudState.userEmail}</span>
               </div>
             </div>
@@ -360,9 +361,9 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('panels')}
                 style={{
-                  backgroundColor: 'rgba(6, 182, 212, 0.12)',
-                  borderColor: 'rgba(6, 182, 212, 0.45)',
-                  color: '#22d3ee',
+                  backgroundColor: 'var(--status-focus-bg)',
+                  borderColor: 'var(--status-focus-border)',
+                  color: 'var(--status-focus)',
                 }}
                 className="h-[30px] px-3 border text-[12px] font-semibold flex items-center gap-1.5 hover:opacity-90 cursor-pointer rounded-[2px]"
                 title={t('shell.start.simPanelsTooltip')}
@@ -378,10 +379,10 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                   backgroundColor: 'var(--bg-toolbar)',
                   borderColor: 'var(--border-strong)',
                 }}
-                className="h-[30px] px-3 border text-[12px] hover:border-cyan-500 text-[var(--text-secondary)] hover:text-cyan-400 flex items-center gap-1.5 cursor-pointer rounded-[2px]"
+                className="h-[30px] px-3 border text-[12px] hover:border-focus text-[var(--text-secondary)] hover:text-focus flex items-center gap-1.5 cursor-pointer rounded-[2px]"
                 title={t('shell.start.toolpacksTooltip')}
               >
-                <Boxes className="w-3.5 h-3.5 text-cyan-400" />
+                <Boxes className="w-3.5 h-3.5 text-focus" />
                 <span>{t('shell.start.toolpacksBtn', { count: projState.enabledToolpacks.length })}</span>
               </button>
 
@@ -393,11 +394,11 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                   backgroundColor: 'var(--bg-toolbar)',
                   borderColor: 'var(--border-strong)',
                 }}
-                className="h-[30px] px-3 border text-[12px] hover:border-sky-500 text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1.5 cursor-pointer rounded-[2px]"
+                className="h-[30px] px-3 border text-[12px] hover:border-focus text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1.5 cursor-pointer rounded-[2px]"
                 title={t('shell.start.refreshTooltip')}
               >
                 <RefreshCw
-                  className={`w-3.5 h-3.5 text-sky-400 ${
+                  className={`w-3.5 h-3.5 text-focus ${
                     cloudState.loadingProjects ? 'animate-spin' : ''
                   }`}
                 />
@@ -410,7 +411,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
         ) : (
           <>
             <div className="flex items-center gap-2 text-[12px] text-[var(--text-secondary)]">
-              <span className="w-2 h-2 rounded-full bg-slate-500" />
+              <span className="w-2 h-2 rounded-full bg-[var(--text-muted)]" />
               <span className="font-semibold text-[var(--text-primary)]">{t('shell.start.localWorkMode')}</span>
               {cloudOn && (
                 <span className="text-[var(--text-muted)]">{t('shell.start.cloudSignedOutNotice')}</span>
@@ -422,9 +423,9 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('panels')}
                 style={{
-                  backgroundColor: 'rgba(6, 182, 212, 0.12)',
-                  borderColor: 'rgba(6, 182, 212, 0.45)',
-                  color: '#22d3ee',
+                  backgroundColor: 'var(--status-focus-bg)',
+                  borderColor: 'var(--status-focus-border)',
+                  color: 'var(--status-focus)',
                 }}
                 className="h-[30px] px-3 border text-[12px] font-semibold flex items-center gap-1.5 hover:opacity-90 cursor-pointer rounded-[2px]"
                 title={t('shell.start.simPanelsTooltip')}
@@ -440,10 +441,10 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                   backgroundColor: 'var(--bg-toolbar)',
                   borderColor: 'var(--border-strong)',
                 }}
-                className="h-[30px] px-3 border text-[12px] hover:border-cyan-500 text-[var(--text-secondary)] hover:text-cyan-400 flex items-center gap-1.5 cursor-pointer rounded-[2px]"
+                className="h-[30px] px-3 border text-[12px] hover:border-focus text-[var(--text-secondary)] hover:text-focus flex items-center gap-1.5 cursor-pointer rounded-[2px]"
                 title={t('shell.start.toolpacksTooltip')}
               >
-                <Boxes className="w-3.5 h-3.5 text-cyan-400" />
+                <Boxes className="w-3.5 h-3.5 text-focus" />
                 <span>{t('shell.start.toolpacksBtn', { count: projState.enabledToolpacks.length })}</span>
               </button>
 
@@ -452,9 +453,9 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('cloud')}
                 style={{
-                  backgroundColor: 'rgba(56, 189, 248, 0.12)',
-                  borderColor: 'rgba(56, 189, 248, 0.45)',
-                  color: '#38BDF8',
+                  backgroundColor: 'var(--status-focus-bg)',
+                  borderColor: 'var(--status-focus-border)',
+                  color: 'var(--status-focus)',
                 }}
                 className="h-[30px] px-3.5 border text-[12px] font-semibold flex items-center gap-1.5 hover:opacity-90 cursor-pointer rounded-[2px]"
               >
@@ -469,12 +470,15 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
         )}
       </div>
 
+      <StartGuidePanel />
+
       {/* ==================================================================== */}
       {/* 2. COMMAND GRID (2 columns; 3 with experimental NexusCloud)             */}
       {/* ==================================================================== */}
-      <div className={`grid grid-cols-1 ${cloudOn ? 'lg:grid-cols-3' : 'lg:grid-cols-2'} gap-4 flex-1 min-h-0`}>
+      <div className={`grid grid-cols-1 ${cloudOn ? 'lg:grid-cols-3' : 'lg:grid-cols-2'} gap-4 flex-1 min-h-[360px]`}>
         {/* COLUMN 1: YENİ PROJE OLUŞTUR & HIZLI BAŞLAT */}
         <div
+          data-tour="start.new-project"
           style={{
             backgroundColor: 'var(--bg-panel)',
             borderColor: 'var(--border-strong)',
@@ -484,24 +488,24 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
           <div className="space-y-3.5">
             <div className="flex items-center justify-between border-b border-[var(--border-grid)] pb-2.5">
               <div className="flex items-center gap-2">
-                <FilePlus2 className="w-4 h-4 text-emerald-400" />
+                <FilePlus2 className="w-4 h-4 text-nominal" />
                 <h2 className="text-[13px] font-bold text-[var(--text-primary)] tracking-tight">
                   {t('shell.start.newProjectTitle')}
                 </h2>
               </div>
-              <Zap className="w-4 h-4 text-emerald-400/80" />
+              <Zap className="w-4 h-4 text-nominal" />
             </div>
 
             {/* Mode Segmented Button (Yerel vs Cloud) */}
             {sessionActive && (
-              <div className="flex border border-slate-800 rounded bg-[#0B0F17] p-0.5 text-[12px]">
+              <div className="flex border border-hairline rounded bg-canvas p-0.5 text-[12px]">
                 <button
                   type="button"
                   onClick={() => setCreateMode('local')}
                   className={`flex-1 h-[28px] rounded-[2px] font-medium cursor-pointer transition-colors ${
                     createMode === 'local'
-                      ? 'bg-slate-700 text-white font-semibold'
-                      : 'text-slate-400 hover:text-white'
+                      ? 'bg-elevated text-primary font-semibold'
+                      : 'text-secondary hover:text-primary'
                   }`}
                 >
                   {t('shell.start.modeLocal')}
@@ -511,8 +515,8 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                   onClick={() => setCreateMode('cloud')}
                   className={`flex-1 h-[28px] rounded-[2px] font-medium cursor-pointer transition-colors ${
                     createMode === 'cloud'
-                      ? 'bg-sky-600 text-white font-semibold'
-                      : 'text-slate-400 hover:text-white'
+                      ? 'bg-focus text-on-accent font-semibold'
+                      : 'text-secondary hover:text-primary'
                   }`}
                 >
                   {t('shell.start.modeCloud')}
@@ -536,7 +540,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="w-full h-[32px] px-3 border text-[12.5px] focus:outline-none focus:border-sky-500 rounded-[2px]"
+                  className="w-full h-[32px] px-3 border text-[12.5px] focus:outline-none focus:border-focus rounded-[2px]"
                 />
               </div>
 
@@ -557,7 +561,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                             e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, ''),
                           );
                         }}
-                        className="w-full h-[32px] px-2.5 border border-slate-700 bg-slate-900 text-sky-300 font-mono tabular-nums uppercase text-[12px] rounded-[2px]"
+                        className="w-full h-[32px] px-2.5 border border-strong bg-input text-focus font-mono tabular-nums uppercase text-[12px] rounded-[2px]"
                       />
                     </div>
 
@@ -572,7 +576,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                             e.target.value as 'CAN' | 'CAN_FD' | 'J1939',
                           )
                         }
-                        className="w-full h-[32px] px-2.5 border border-slate-700 bg-slate-900 text-slate-100 font-mono text-[12px] rounded-[2px]"
+                        className="w-full h-[32px] px-2.5 border border-strong bg-input text-primary font-mono text-[12px] rounded-[2px]"
                       >
                         <option value="CAN_FD">CAN-FD</option>
                         <option value="CAN">Klasik CAN</option>
@@ -589,7 +593,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                       <select
                         value={newProjectOrgId}
                         onChange={(e) => setNewProjectOrgId(e.target.value)}
-                        className="w-full h-[32px] px-2.5 border border-slate-700 bg-slate-900 text-slate-100 text-[12px] rounded-[2px]"
+                        className="w-full h-[32px] px-2.5 border border-strong bg-input text-primary text-[12px] rounded-[2px]"
                       >
                         {cloudState.organizations.map((org) => (
                           <option key={org.id} value={org.id}>
@@ -609,24 +613,24 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                 style={{
                   backgroundColor:
                     createMode === 'cloud'
-                      ? 'rgba(56, 189, 248, 0.20)'
-                      : 'rgba(63, 185, 128, 0.20)',
+                      ? 'var(--status-focus-bg)'
+                      : 'var(--status-nominal-bg)',
                   borderColor:
                     createMode === 'cloud'
-                      ? '#38BDF8'
-                      : 'rgba(63, 185, 128, 0.65)',
+                      ? 'var(--status-focus)'
+                      : 'var(--status-nominal-border)',
                   color: 'var(--text-primary)',
                 }}
                 className="w-full h-[34px] border flex items-center justify-center gap-2 font-semibold text-[12.5px] hover:opacity-90 cursor-pointer rounded-[2px] mt-2.5"
               >
                 {createMode === 'cloud' ? (
                   <>
-                    <UploadCloud className="w-4 h-4 text-sky-400" />
+                    <UploadCloud className="w-4 h-4 text-focus" />
                     <span>{t('shell.start.createAndPushBtn')}</span>
                   </>
                 ) : (
                   <>
-                    <FilePlus2 className="w-4 h-4 text-emerald-400" />
+                    <FilePlus2 className="w-4 h-4 text-nominal" />
                     <span>{t('shell.start.createAndStartBtn')}</span>
                   </>
                 )}
@@ -664,19 +668,19 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                   disabled={busy}
                   onClick={() => void handleResumeRecent()}
                   style={{
-                    backgroundColor: 'rgba(56, 139, 253, 0.10)',
-                    borderColor: 'rgba(56, 139, 253, 0.40)',
-                    color: '#6CB6FF',
+                    backgroundColor: 'var(--status-focus-bg)',
+                    borderColor: 'var(--status-focus-border)',
+                    color: 'var(--status-focus)',
                   }}
                   className="w-full h-[34px] px-3.5 border flex items-center justify-between text-[12px] hover:opacity-90 cursor-pointer rounded-[2px]"
                 >
                   <div className="flex items-center gap-2 truncate">
-                    <Radio className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                    <Radio className="w-3.5 h-3.5 text-focus shrink-0" />
                     <span className="truncate">
                       {t('shell.start.recentSession')} <strong>{cachedRecent.name}</strong>
                     </span>
                   </div>
-                  <span className="text-[11px] text-sky-400 shrink-0 font-mono">{t('shell.start.resumeBtn')}</span>
+                  <span className="text-[11px] text-focus shrink-0 font-mono">{t('shell.start.resumeBtn')}</span>
                 </button>
               )}
             </div>
@@ -699,7 +703,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
           <div className="flex flex-col min-h-0 flex-1">
             <div className="flex items-center justify-between border-b border-[var(--border-grid)] pb-2.5 mb-2.5">
               <div className="flex items-center gap-2">
-                <Cloud className="w-4 h-4 text-sky-400" />
+                <Cloud className="w-4 h-4 text-focus" />
                 <h2 className="text-[13px] font-bold text-[var(--text-primary)] tracking-tight">
                   {t('shell.start.cloudProjectsTitle')}
                 </h2>
@@ -714,7 +718,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                 {filteredCloudProjects.length === 0 ? (
                   <div className="py-12 text-center text-[12px] text-[var(--text-muted)] border border-dashed border-[var(--border-grid)] rounded-[2px]">
                     {t('shell.start.noCloudProjects')}
-                    <div className="text-[11px] mt-1 text-slate-500">
+                    <div className="text-[11px] mt-1 text-muted">
                       {t('shell.start.noCloudProjectsHint')}
                     </div>
                   </div>
@@ -727,10 +731,10 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                         key={p.id}
                         style={{
                           backgroundColor: 'var(--bg-input)',
-                          borderColor: isBound ? '#0284C7' : 'var(--border-grid)',
+                          borderColor: isBound ? 'var(--status-focus)' : 'var(--border-grid)',
                         }}
-                        className={`p-2.5 border rounded-[2px] flex items-center justify-between gap-2 hover:border-sky-500/60 transition-colors ${
-                          isBound ? 'bg-sky-950/20' : ''
+                        className={`p-2.5 border rounded-[2px] flex items-center justify-between gap-2 hover:border-focus transition-colors ${
+                          isBound ? 'bg-[var(--status-focus-bg)]' : ''
                         }`}
                       >
                         <div className="min-w-0 flex-1">
@@ -739,13 +743,13 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                               {p.name}
                             </span>
                             {isBound && (
-                              <span className="px-1.5 py-0.5 rounded bg-sky-950 border border-sky-800 text-sky-300 font-mono text-[10.5px] shrink-0">
+                              <span className="px-1.5 py-0.5 rounded bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-focus font-mono text-[10.5px] shrink-0">
                                 {t('shell.start.badgeActive')}
                               </span>
                             )}
                           </div>
                           <div className="text-[11px] text-[var(--text-muted)] font-mono tabular-nums flex items-center gap-1.5 mt-0.5">
-                            <span className="text-sky-400 font-semibold">[{p.code}]</span>
+                            <span className="text-focus font-semibold">[{p.code}]</span>
                             <span>· Rev #{p.latestRevisionNumber ?? 1}</span>
                             <span>· {p.defaultProtocol}</span>
                             {pOrg && <span className="truncate">· {pOrg.name}</span>}
@@ -757,9 +761,9 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                           disabled={busy}
                           onClick={() => void handlePullCloudProject(p.id, p.name, p.code)}
                           style={{
-                            backgroundColor: 'rgba(56, 189, 248, 0.12)',
-                            borderColor: 'rgba(56, 189, 248, 0.45)',
-                            color: '#38BDF8',
+                            backgroundColor: 'var(--status-focus-bg)',
+                            borderColor: 'var(--status-focus-border)',
+                            color: 'var(--status-focus)',
                           }}
                           className="h-[26px] px-2.5 border text-[11px] font-semibold flex items-center gap-1 cursor-pointer hover:opacity-90 rounded-[2px] shrink-0"
                           title={t('shell.start.pullAndOpenTooltip')}
@@ -779,7 +783,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                   <button
                     type="button"
                     onClick={() => databaseStore.setActiveDocTab('cloud')}
-                    className="text-sky-400 hover:underline text-[12px] font-medium cursor-pointer"
+                    className="text-focus hover:underline text-[12px] font-medium cursor-pointer"
                   >
                     {t('shell.start.goToCloudSignIn')}
                   </button>
@@ -819,7 +823,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
               {projState.savedProjects.length === 0 ? (
                 <div className="py-12 text-center text-[12px] text-[var(--text-muted)] border border-dashed border-[var(--border-grid)] rounded-[2px]">
                   {t('shell.start.noSavedProjects')}
-                  <div className="text-[11px] mt-1 text-slate-500">
+                  <div className="text-[11px] mt-1 text-muted">
                     {t('shell.start.noSavedProjectsHint')}
                   </div>
                 </div>
@@ -832,9 +836,9 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                       onClick={() => void handleOpenSaved(item.fileStem)}
                       style={{
                         backgroundColor: 'var(--bg-input)',
-                        borderColor: isCurrent ? '#10B981' : 'var(--border-grid)',
+                        borderColor: isCurrent ? 'var(--status-nominal)' : 'var(--border-grid)',
                       }}
-                      className="p-2.5 border rounded-[2px] flex items-center justify-between gap-2 hover:border-sky-500/60 cursor-pointer group transition-colors"
+                      className="p-2.5 border rounded-[2px] flex items-center justify-between gap-2 hover:border-focus cursor-pointer group transition-colors"
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5">
@@ -842,7 +846,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                             {item.name}
                           </span>
                           {isCurrent && (
-                            <span className="px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-800 text-emerald-300 font-mono text-[10.5px] shrink-0">
+                            <span className="px-1.5 py-0.5 rounded bg-[var(--status-nominal-bg)] border border-[var(--status-nominal-border)] text-nominal font-mono text-[10.5px] shrink-0">
                               {t('shell.start.badgeActive')}
                             </span>
                           )}
@@ -853,7 +857,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                       </div>
 
                       <div className="flex items-center gap-1.5 shrink-0">
-                        <span className="text-[11.5px] text-sky-400 group-hover:underline font-medium">
+                        <span className="text-[11.5px] text-focus group-hover:underline font-medium">
                           {t('shell.start.openBtn')}
                         </span>
                         <button
@@ -862,7 +866,7 @@ export const StartPageView: React.FC<StartPageViewProps> = ({
                             e.stopPropagation();
                             void handleDeleteSaved(item.fileStem);
                           }}
-                          className="opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-red-400 p-1 cursor-pointer transition-opacity"
+                          className="opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-critical p-1 cursor-pointer transition-opacity"
                           title={t('shell.start.deleteProjectTooltip')}
                         >
                           <Trash2 className="w-3.5 h-3.5" />

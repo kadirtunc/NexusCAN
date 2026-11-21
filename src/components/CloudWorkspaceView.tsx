@@ -62,6 +62,8 @@ import {
 } from './simulation/virtualCanPacking';
 import { apiParseDatabaseSchema } from '../services/ipcClient';
 import { useI18n } from '../i18n';
+import { GuideInfoButton, GuideTourButton } from '../onboarding/GuideButtons';
+import { GuideStrip } from '../onboarding/GuideStrip';
 
 interface CloudWorkspaceViewProps {
   quickBarState: QuickBarConnectionState;
@@ -691,6 +693,8 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
   // ==========================================================================
   if (!isLoggedIn) {
     return (
+      <div className="flex-1 min-h-0 flex flex-col">
+      <GuideStrip pageId="cloud" />
       <div
         style={{
           backgroundColor: 'var(--bg-canvas)',
@@ -698,6 +702,10 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
         }}
         className="flex-1 min-h-0 flex flex-col items-center justify-center p-6 select-none overflow-y-auto"
       >
+        <div className="w-full max-w-[760px] mb-3 flex justify-end gap-1.5 text-[12px]">
+          <GuideTourButton pageId="cloud" />
+          <GuideInfoButton pageId="cloud" tourAnchor="cloud.info" />
+        </div>
         {/* Offline Simulation Access Banner */}
         {simState.panels.length > 0 && isSimEnabled && (
           <div className="w-full max-w-[760px] mb-3 p-3 rounded-[2px] border border-cyan-500/40 bg-cyan-950/20 flex flex-wrap items-center justify-between gap-2.5">
@@ -719,6 +727,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
         )}
 
         <div
+          data-tour="cloud.login"
           style={{
             backgroundColor: 'var(--bg-panel)',
             borderColor: 'var(--border-strong)',
@@ -895,6 +904,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
           </div>
         </div>
       </div>
+      </div>
     );
   }
 
@@ -909,10 +919,12 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
       }}
       className="flex-1 min-h-0 flex flex-col select-none overflow-hidden"
     >
+      <GuideStrip pageId="cloud" />
       {/* ==================================================================== */}
       {/* 1. TOP CLOUD STATUS TOOLBAR (40px)                                   */}
       {/* ==================================================================== */}
       <div
+        data-tour="cloud.toolbar"
         style={{
           backgroundColor: 'var(--bg-toolbar)',
           borderBottom: '1px solid var(--border-strong)',
@@ -1069,6 +1081,9 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
             )}
           </div>
 
+          <GuideTourButton pageId="cloud" />
+          <GuideInfoButton pageId="cloud" tourAnchor="cloud.info" />
+
           <button
             type="button"
             onClick={() => void handleLogout()}
@@ -1093,6 +1108,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
         {/* LEFT COLUMN (250px): Projeler & Yeni Proje Ekle                    */}
         {/* ================================================================== */}
         <div
+          data-tour="cloud.projects"
           style={{
             backgroundColor: 'var(--bg-panel)',
             borderRight: '1px solid var(--border-strong)',
@@ -1357,7 +1373,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
 
                 {/* Module Selector Buttons */}
-                <div className="flex flex-wrap items-center gap-1 shrink-0">
+                <div data-tour="cloud.modules" className="flex flex-wrap items-center gap-1 shrink-0">
                   {[
                     { id: 'overview' as const, label: t('cloud.module.overview'), icon: Grid },
                     ...(isSimEnabled
@@ -1426,6 +1442,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                 {/* Quick Action: Pull to Desktop */}
                 <button
                   type="button"
+                  data-tour="cloud.pull"
                   disabled={busyAction === 'pull'}
                   onClick={() => void handlePullToDesktop()}
                   style={{
@@ -2379,7 +2396,7 @@ export const CloudWorkspaceView: React.FC<CloudWorkspaceViewProps> = ({
                     </label>
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div data-tour="cloud.sync" className="flex items-center gap-2 shrink-0">
                     <button
                       type="button"
                       disabled={busyAction === 'push'}

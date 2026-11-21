@@ -91,6 +91,8 @@ import {
 } from './instrumentGridInteractions';
 import { buildLocalCatalogEntries, makeDatabaseEntry } from './desktopDbEntries';
 import { VirtualCanFrameInspector } from './VirtualCanFrameInspector';
+import { GuideInfoButton, GuideTourButton, GuideWhyLink } from '../../onboarding/GuideButtons';
+import { GuideStrip } from '../../onboarding/GuideStrip';
 import {
   ACCENT_HEX_MAP,
   TRACE_PALETTE,
@@ -1781,6 +1783,8 @@ export function SimulationWorkbenchView({
           className="hidden"
         />
 
+        <GuideStrip pageId="panels" />
+
         {errorBanner && (
           <div
             role="alert"
@@ -1807,6 +1811,12 @@ export function SimulationWorkbenchView({
         )}
 
         <SimulationPanelListView
+          extraActions={
+            <span className="inline-flex items-center gap-2 text-[12px]">
+              <GuideTourButton pageId="panels" />
+              <GuideInfoButton pageId="panels" tourAnchor="panels.info" />
+            </span>
+          }
           canMutate={canMutate}
           allowProjectSwitch={allowProjectSwitch}
           projects={projects}
@@ -1893,6 +1903,8 @@ export function SimulationWorkbenchView({
         }}
         className="hidden"
       />
+
+      <GuideStrip pageId="panels" />
 
       {/* 1. Top Instrument Toolbar */}
       <div className="flex min-h-[42px] shrink-0 flex-wrap items-center justify-between gap-2.5 border-b border-hairline bg-surface px-3 py-1.5">
@@ -1998,6 +2010,7 @@ export function SimulationWorkbenchView({
                     type="button"
                     disabled={savingPanel}
                     onClick={() => void handleSaveActivePanel()}
+                    data-tour="panels.save"
                     title={t('simWb.toolbar.saveTitle')}
                     className="inline-flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[2px] border px-3 font-mono text-[12px] font-semibold uppercase transition-colors disabled:opacity-50"
                     style={
@@ -2052,6 +2065,10 @@ export function SimulationWorkbenchView({
 
         {/* Right: .nexuspanel.json Import/Export + [ DESIGN | RUN ] Switch */}
         <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-2 text-[12px]">
+            <GuideTourButton pageId="panels" />
+            <GuideInfoButton pageId="panels" tourAnchor="panels.info" />
+          </span>
           {canMutate && (
             <button
               type="button"
@@ -2079,6 +2096,7 @@ export function SimulationWorkbenchView({
           {/* Mode Switch: [ DESIGN ] vs [ RUN ] */}
           <div
             role="group"
+            data-tour="panels.mode"
             aria-label={t('simWb.toolbar.modeGroupAria')}
             className="inline-flex h-[30px] items-center rounded-[2px] border border-strong bg-canvas p-0.5 font-mono text-[12px] font-bold uppercase tracking-wider"
           >
@@ -2130,7 +2148,7 @@ export function SimulationWorkbenchView({
 
       {/* 2. RUN Mode Operator Sub-Toolbar (Telemetry Source + 60 FPS Readout) */}
       {workbenchMode === 'run' && activePanel && (
-        <div className="flex shrink-0 min-h-[38px] flex-wrap items-center justify-between gap-2.5 border-b border-hairline bg-elevated px-3 py-1 font-mono text-[11.5px] tabular-nums">
+        <div data-tour="panels.run-bar" className="flex shrink-0 min-h-[38px] flex-wrap items-center justify-between gap-2.5 border-b border-hairline bg-elevated px-3 py-1 font-mono text-[11.5px] tabular-nums">
           <div className="flex flex-wrap items-center gap-2.5">
             <span className="font-semibold uppercase tracking-wider text-muted">
               {t('simWb.run.telemetrySource')}
@@ -2234,6 +2252,7 @@ export function SimulationWorkbenchView({
                   <Lock className="h-3 w-3" aria-hidden="true" />
                   {isLiveBusArmed ? t('simWb.run.txArmed') : t('simWb.run.txLocked')}
                 </span>
+                <GuideWhyLink pageId="rxtx" sectionId="txSafety" />
               </div>
             )}
           </div>
