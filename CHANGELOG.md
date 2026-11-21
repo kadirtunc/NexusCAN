@@ -48,7 +48,8 @@ release and the app shows this file under **Help → Changelog**.
 - `npm run lint:theme` gate (hard-coded colours may only decrease); CI release notes now include this changelog
   section and a **What's changed** commit list.
 - CI stability: TX write-barrier and cycle-health tests no longer fail on paused macOS runners (production barrier
-  bound unchanged at 250 ms); Windows-safe temp paths in the MCP tests.
+  bound unchanged at 250 ms); `nexus-hal` timing tests run one at a time in CI; Windows-safe temp paths in the MCP
+  tests.
 
 ## [0.1.0 build 18] — 2026-11-20
 
