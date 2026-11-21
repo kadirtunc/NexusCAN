@@ -81,7 +81,7 @@ fn pipeline_50kfps_burst_zero_drops_and_60hz_pacing() {
     let t_stop = Instant::now();
     engine.cmd_disconnect_bus(0).expect("disconnect 50kfps bus");
     assert!(
-        t_stop.elapsed() < Duration::from_millis(25),
+        t_stop.elapsed() < nexus_core::testing::scaled(Duration::from_millis(25)),
         "50kfps bus shutdown must complete in < 25ms, took {:?}",
         t_stop.elapsed()
     );

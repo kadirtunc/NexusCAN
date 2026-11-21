@@ -6,6 +6,8 @@
 #![forbid(unsafe_code)]
 
 pub mod frame;
+#[doc(hidden)]
+pub mod testing;
 pub mod time;
 
 pub use frame::flags;

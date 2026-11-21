@@ -304,7 +304,7 @@ mod tests {
         }
         let local_publish_elapsed = start.elapsed();
         assert!(
-            local_publish_elapsed < Duration::from_millis(25),
+            local_publish_elapsed < nexus_core::testing::scaled(Duration::from_millis(25)),
             "Local CAN pipeline was delayed: {local_publish_elapsed:?}"
         );
 

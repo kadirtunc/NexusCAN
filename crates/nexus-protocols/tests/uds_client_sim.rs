@@ -556,7 +556,7 @@ fn tap_close_between_retries_stops_them_without_tx() {
         .expect_err("closed");
     assert_eq!(e.code, DiagErrorCode::SessionClosed);
     assert!(
-        t0.elapsed() < Duration::from_secs(2),
+        t0.elapsed() < nexus_core::testing::scaled(Duration::from_secs(2)),
         "abort is immediate, not after the delay"
     );
     assert_eq!(ctl.sent_payloads().len(), 1);

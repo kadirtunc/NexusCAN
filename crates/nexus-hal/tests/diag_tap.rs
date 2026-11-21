@@ -287,7 +287,7 @@ fn disarm_mode_change_and_disconnect_close_taps() {
     let t0 = Instant::now();
     engine.cmd_disconnect_bus(0).expect("disconnect");
     assert!(
-        t0.elapsed() < Duration::from_millis(25),
+        t0.elapsed() < nexus_core::testing::scaled(Duration::from_millis(25)),
         "bus shutdown < 25 ms with a tap open"
     );
     assert!(p4.is_closed(), "disconnect closes taps");

@@ -1113,7 +1113,7 @@ token = "nxc_tok_hwlo_test_1234567890"
         let t_stop = Instant::now();
         let final_snap = agent_handle.shutdown().await;
         assert!(
-            t_stop.elapsed() < Duration::from_secs(1),
+            t_stop.elapsed() < nexus_core::testing::scaled(Duration::from_secs(1)),
             "Agent shutdown must complete promptly"
         );
         assert_eq!(final_snap.security_violations_rejected, 1);

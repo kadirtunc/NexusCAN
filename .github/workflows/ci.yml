@@ -76,9 +76,17 @@ jobs:
       # 3-vCPU macOS VM they starve each other and fail at random, so they run one at a time
       # (~10 s). Failures are never retried: a real regression still fails deterministically.
       - name: Test workspace (except nexus-hal)
+        env:
+          # Scales wall-clock "must finish within" test budgets on the 3-vCPU macOS VM only
+          # (nexus_core::testing::scaled); Linux / Windows keep the exact budgets.
+          NEXUS_TEST_TIME_SCALE: ${{ runner.os == 'macOS' && '4' || '1' }}
         run: cargo test --workspace --no-fail-fast --exclude nexus-hal
 
       - name: Test nexus-hal (serial, timing-sensitive)
+        env:
+          # Scales wall-clock "must finish within" test budgets on the 3-vCPU macOS VM only
+          # (nexus_core::testing::scaled); Linux / Windows keep the exact budgets.
+          NEXUS_TEST_TIME_SCALE: ${{ runner.os == 'macOS' && '4' || '1' }}
         run: cargo test -p nexus-hal --no-fail-fast -- --test-threads=1
 
       - name: Test diag tap allocation (test-hooks feature)

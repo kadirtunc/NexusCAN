@@ -2634,7 +2634,7 @@ fn r2a_qa_full_classic_sweep_2000_samples_budget() {
         "evaluated {evaluated} > nominal sweep size"
     );
     assert!(
-        wall < Duration::from_millis(3_500),
+        wall < nexus_core::testing::scaled(Duration::from_millis(3_500)),
         "correlate ignored the 2 s budget: {wall:?}"
     );
     if truncated {
