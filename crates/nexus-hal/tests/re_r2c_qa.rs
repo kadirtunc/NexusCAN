@@ -2594,7 +2594,10 @@ fn r2c_qa_perf_1m_candidates_within_budget() {
     );
     assert_eq!(cands(&st), n);
     assert_eq!(st["truncated"], false);
-    assert!(fnum(&st, "elapsedMs").unwrap() < 2000.0 && wall < Duration::from_millis(2500));
+    assert!(
+        fnum(&st, "elapsedMs").unwrap() < 2000.0
+            && wall < nexus_core::testing::scaled(Duration::from_millis(2500))
+    );
     let mut rng = Lcg(4242);
     let frames: Vec<RawCanFrame> = (0..rows)
         .map(|i| {
@@ -2610,7 +2613,7 @@ fn r2c_qa_perf_1m_candidates_within_budget() {
         eprintln!("{} -> {} in {wall:?}", o["op"], cands(&st));
         assert_eq!(st["truncated"], false, "{}", o["op"]);
         assert!(
-            wall < Duration::from_millis(2500),
+            wall < nexus_core::testing::scaled(Duration::from_millis(2500)),
             "{} took {wall:?}",
             o["op"]
         );
@@ -2625,13 +2628,13 @@ fn r2c_qa_perf_1m_candidates_within_budget() {
     );
     assert_eq!(st["truncated"], false);
     assert!(
-        wall < Duration::from_millis(2500),
+        wall < nexus_core::testing::scaled(Duration::from_millis(2500)),
         "physical scan took {wall:?}"
     );
     let t0 = Instant::now();
     let _ = results(&sh, 0, RE_SCAN_MAX_RESULTS, "changes").expect("results");
     assert!(
-        t0.elapsed() < Duration::from_millis(1000),
+        t0.elapsed() < nexus_core::testing::scaled(Duration::from_millis(1000)),
         "results page took {:?}",
         t0.elapsed()
     );
@@ -2663,7 +2666,7 @@ fn r2c_qa_perf_scan_does_not_hold_analyzer_lock() {
     assert!(r.is_ok(), "scan failed: {r:?}");
     eprintln!("max analyzer lock wait during a 1 M scan: {max_wait:?} ({i} ingests)");
     assert!(
-        max_wait < Duration::from_millis(50),
+        max_wait < nexus_core::testing::scaled(Duration::from_millis(50)),
         "scan held the analyzer lock for {max_wait:?}"
     );
 }

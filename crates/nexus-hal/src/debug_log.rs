@@ -730,7 +730,7 @@ mod tests {
         let t_drop = Instant::now();
         drop(hub);
         assert!(
-            t_drop.elapsed() < Duration::from_millis(15),
+            t_drop.elapsed() < nexus_core::testing::scaled(Duration::from_millis(15)),
             "DebugEventHub Drop exceeded 15ms budget: {:?}",
             t_drop.elapsed()
         );

@@ -1828,7 +1828,10 @@ mod tests {
             Duration::from_millis(5),
             Duration::from_millis(40)
         ));
-        assert!(t0.elapsed() < Duration::from_millis(500), "bounded by cap");
+        assert!(
+            t0.elapsed() < nexus_core::testing::scaled(Duration::from_millis(500)),
+            "bounded by cap"
+        );
     }
 
     #[test]

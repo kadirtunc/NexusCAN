@@ -271,7 +271,7 @@ fn signal_stats_bounded_window_offline_and_errors() {
     let e = live_engine("stats", true);
     let t = Instant::now();
     let v = tl::signal_stats(&e, &names(&["MotorSpeedRpm"]), Some(300), None).unwrap();
-    assert!(t.elapsed() < Duration::from_secs(2));
+    assert!(t.elapsed() < nexus_core::testing::scaled(Duration::from_secs(2)));
     assert_eq!(v["live"], json!(true), "{v}");
     let s = &v["signals"][0];
     assert!(s["samples"].as_u64().unwrap() >= 2, "{v}");
@@ -287,7 +287,7 @@ fn signal_stats_bounded_window_offline_and_errors() {
     let t = Instant::now();
     assert_offline(&tl::signal_stats(&off, &names(&["MotorSpeedRpm"]), Some(5_000), None).unwrap());
     assert!(
-        t.elapsed() < Duration::from_millis(500),
+        t.elapsed() < nexus_core::testing::scaled(Duration::from_millis(500)),
         "offline returns immediately"
     );
 }

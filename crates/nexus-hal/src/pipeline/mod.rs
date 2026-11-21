@@ -4421,7 +4421,7 @@ mod tx_write_barrier_tests {
         let t0 = Instant::now();
         let stuck = wait_tx_quiesced(&[(0, idle)], TX_QUIESCE_TIMEOUT);
         assert!(stuck.is_empty() && stuck.capacity() == 0);
-        assert!(t0.elapsed() < Duration::from_millis(5));
+        assert!(t0.elapsed() < nexus_core::testing::scaled(Duration::from_millis(5)));
     }
 
     struct UnpluggableTestChannel {

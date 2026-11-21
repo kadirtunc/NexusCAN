@@ -1536,7 +1536,7 @@ mod tests {
         let t0 = Instant::now();
         let fin = e.cmd_diag_passive_discovery_stop(0).expect("stop");
         assert!(
-            t0.elapsed() < Duration::from_millis(100),
+            t0.elapsed() < nexus_core::testing::scaled(Duration::from_millis(100)),
             "{:?}",
             t0.elapsed()
         );

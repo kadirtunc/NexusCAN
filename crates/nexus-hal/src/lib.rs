@@ -138,7 +138,7 @@ mod tests {
             .cmd_disconnect_bus(0)
             .expect("clean disconnect bus 0");
         assert!(
-            t_disc.elapsed() < Duration::from_millis(25),
+            t_disc.elapsed() < nexus_core::testing::scaled(Duration::from_millis(25)),
             "bus shutdown exceeded 25ms invariant: {:?}",
             t_disc.elapsed()
         );
@@ -1579,13 +1579,9 @@ mod tests {
         assert_eq!(loaded_blf.frames[1].message_key, "STD:0x00C");
 
         // Verify clean < 25ms shutdown even with OS USB hotplug + topology watcher active!
-        // The budget is measured on Linux / Windows; the 3-vCPU macOS CI VM adds thread wake-up
-        // latency when joining every engine thread (observed 28-29 ms), so it gets 100 ms there.
-        let drop_budget = if cfg!(target_os = "macos") {
-            Duration::from_millis(100)
-        } else {
-            Duration::from_millis(25)
-        };
+        // Exact 25 ms on Linux / Windows / local runs; CI scales it on the macOS VM
+        // (NEXUS_TEST_TIME_SCALE), where joining every engine thread measured 28-29 ms.
+        let drop_budget = nexus_core::testing::scaled(Duration::from_millis(25));
         thread::sleep(Duration::from_millis(10));
         let t_drop = Instant::now();
         drop(_rx);
