@@ -7,7 +7,6 @@ import {
   Building2,
   Columns2,
   Ellipsis,
-  RefreshCw,
   FilePlus2,
   FolderOpen,
   FolderX,
@@ -19,8 +18,10 @@ import {
   PlugZap,
   Plus,
   Radio,
+  RefreshCw,
   RotateCcw,
   Save,
+  ScrollText,
   Square,
   Sun,
   Terminal,
@@ -1253,6 +1254,16 @@ export const TopBar: React.FC<TopBarProps> = ({
                     type="button"
                     onClick={() => {
                       setOpenMenu(null);
+                      updateStore.openChangelog();
+                    }}
+                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)]"
+                  >
+                    {t('upd.menu.changelog')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenMenu(null);
                       projectStore.setAcknowledgmentsModalOpen(true);
                     }}
                     className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)]"
@@ -2075,6 +2086,18 @@ export const TopBar: React.FC<TopBarProps> = ({
                     <span>{t('upd.menu.check')}</span>
                   </button>
                 )}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    updateStore.openChangelog();
+                  }}
+                  className={OVERFLOW_ITEM_CLS}
+                >
+                  <ScrollText className="w-4 h-4 text-secondary" />
+                  <span>{t('upd.menu.changelog')}</span>
+                </button>
                 <button
                   type="button"
                   role="menuitem"

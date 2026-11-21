@@ -1,4 +1,7 @@
 export const updatesTr = {
+  'upd.menu.changelog': 'Değişiklik Günlüğü…',
+  'upd.changelog.title': 'Değişiklik Günlüğü (Changelog)',
+  'upd.changelog.unreleased': 'Bu sürüm',
   'upd.status.version': 'v{version} · build {build}',
   'upd.status.dev': 'v{version} · dev',
   'upd.status.web': 'web önizleme',
@@ -38,6 +41,9 @@ export const updatesTr = {
 } as const;
 
 export const updatesEn: Record<keyof typeof updatesTr, string> = {
+  'upd.menu.changelog': 'Changelog…',
+  'upd.changelog.title': 'Changelog',
+  'upd.changelog.unreleased': 'This build',
   'upd.status.version': 'v{version} · build {build}',
   'upd.status.dev': 'v{version} · dev',
   'upd.status.web': 'web preview',

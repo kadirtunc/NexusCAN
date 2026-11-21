@@ -139,6 +139,20 @@ jobs:
 
       # 3-OS package build (unsigned), using the @tauri-apps/cli devDependency from package-lock.
       # Only on push to main (release path); PRs and development pushes stop after the checks above.
+      # update-check-v1: the bundled Help > Changelog shows this build instead of "[Unreleased]".
+      - name: Stamp changelog with build number
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          VERSION=$(node -p 'require("./src-tauri/tauri.conf.json").version')
+          node -e '
+            const fs = require("fs");
+            const [v, n, d] = process.argv.slice(1);
+            const s = fs.readFileSync("CHANGELOG.md", "utf8");
+            fs.writeFileSync("CHANGELOG.md", s.replace(/^## \[Unreleased\][ \t]*$/m, `## [${v} build ${n}] — ${d}`));
+          ' "$VERSION" "${{ github.run_number }}" "$(date -u +%F)"
+          grep -m1 '^## \[' CHANGELOG.md
+
       - name: Package (tauri build)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
@@ -238,6 +252,12 @@ jobs:
           \`xattr -cr /Applications/NexusCAN.app\` once after copying the app.
           Verify downloads with \`SHA256SUMS.txt\`.
           EOF
+          # update-check-v1: curated CHANGELOG.md [Unreleased] section goes first in the notes.
+          awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{if(f)exit} f' CHANGELOG.md > changelog_section.md
+          if [ -s changelog_section.md ]; then
+            { head -n1 notes.md; echo; cat changelog_section.md; echo; tail -n +2 notes.md; } > notes_full.md
+            mv notes_full.md notes.md
+          fi
           # update-check-v1: commit subjects since the previous build tag (shown in the in-app update dialog).
           PREV=$(git tag --list 'v*-build.*' --sort=-version:refname | grep -vx "$TAG" | head -n1 || true)
           {

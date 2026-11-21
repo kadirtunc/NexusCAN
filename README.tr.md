@@ -233,7 +233,7 @@ flowchart LR
 
 ## Durum
 
-NexusCAN şu an **v0.1 önizleme** aşamasında. Neyin hazır, neyin yolda olduğu:
+NexusCAN şu an **v0.1 önizleme** aşamasında. Neyin hazır, neyin yolda olduğu aşağıda. Her sürümdeki değişiklikler [CHANGELOG.md](CHANGELOG.md) dosyasında, uygulamada da **Yardım → Değişiklik Günlüğü** altında.
 
 | Alan | Hazır | Sırada |
 |---|---|---|

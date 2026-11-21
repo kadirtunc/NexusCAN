@@ -48,6 +48,10 @@ export function parseMarkdown(src: string): MdBlock[] {
       blocks.push({ kind: 'heading', level: h[1].length, text: h[2] });
       continue;
     }
+    if (last?.kind === 'list' && /^\s{2,}/.test(raw) && !/^[-*]\s+/.test(trimmed)) {
+      last.items[last.items.length - 1] += ` ${trimmed}`;
+      continue;
+    }
     const li = /^[-*]\s+(.*)$/.exec(trimmed);
     if (li) {
       if (last?.kind === 'list') last.items.push(li[1]);
@@ -82,7 +86,7 @@ const Inline: React.FC<{ text: string }> = ({ text }) => (
   </>
 );
 
-const Markdown: React.FC<{ source: string }> = ({ source }) => {
+export const Markdown: React.FC<{ source: string }> = ({ source }) => {
   const blocks = parseMarkdown(source);
   return (
     <div className="flex flex-col gap-1.5 text-[12px] leading-relaxed text-secondary break-words">
@@ -395,6 +399,14 @@ const DialogBody: React.FC = () => {
             className={BTN}
           >
             {t('upd.dialog.openReleases')}
+          </button>
+          <button
+            type="button"
+            onClick={() => updateStore.openChangelog()}
+            style={{ backgroundColor: 'var(--bg-panel)', borderColor: 'var(--border-strong)' }}
+            className={BTN}
+          >
+            {t('upd.menu.changelog')}
           </button>
           <button
             type="button"

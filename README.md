@@ -237,7 +237,7 @@ flowchart LR
 
 ## Status
 
-NexusCAN is a **v0.1 preview**. What is real today and what is next, without marketing:
+NexusCAN is a **v0.1 preview**. What is real today and what is next, without marketing. Every release is listed in [CHANGELOG.md](CHANGELOG.md) (also in the app under **Help → Changelog**).
 
 | Area | Available | Next |
 |---|---|---|
