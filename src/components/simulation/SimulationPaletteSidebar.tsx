@@ -223,6 +223,7 @@ export function SimulationPaletteSidebar({
 
   return (
     <aside
+      data-tour="panels.palette"
       aria-label={t('simPal.aria.palette')}
       className="flex w-full shrink-0 flex-col border-b border-hairline bg-surface lg:w-[280px] xl:w-[320px] lg:border-r lg:border-b-0"
     >
@@ -342,7 +343,7 @@ export function SimulationPaletteSidebar({
       {signalSource ? (
         <div className="flex min-h-0 flex-1 flex-col">{signalSource}</div>
       ) : (
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div data-tour="panels.signals" className="flex min-h-0 flex-1 flex-col">
         <div className="flex items-center justify-between border-b border-hairline bg-elevated px-3 py-2">
           <span className="inline-flex items-center gap-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider tabular-nums text-ink">
             <Database className="h-3.5 w-3.5 text-nominal" aria-hidden="true" />

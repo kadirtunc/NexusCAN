@@ -61,6 +61,8 @@ import {
 import type { SignalSchemaDto } from '../types/netdb';
 import { formatPcanIdHex } from '../utils/formatters';
 import { useI18n } from '../i18n';
+import { GuideInfoButton, GuideTourButton } from '../onboarding/GuideButtons';
+import { GuideStrip } from '../onboarding/GuideStrip';
 
 const TIME_PRESETS_SEC: readonly number[] = [1, 5, 10, 30, 60, 120, 300];
 const SPLIT_HEIGHT_OPTIONS: readonly { label: string; px: PlotSplitRowHeight }[] = [
@@ -585,6 +587,7 @@ export const PlotterView: React.FC = () => {
       style={{ backgroundColor: 'var(--bg-panel)' }}
       className="relative flex flex-col flex-1 min-h-0 overflow-hidden select-none"
     >
+      <GuideStrip pageId="plotter" />
       {/* ==================================================================== */}
       {/* 1. OSCILLOSCOPE COMMAND TOOLBAR (Scaled & Responsive)                */}
       {/* ==================================================================== */}
@@ -598,6 +601,7 @@ export const PlotterView: React.FC = () => {
         <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
           <button
             type="button"
+            data-tour="plotter.signals"
             onClick={() => plotStore.setPickerOpen(!pickerOpen)}
             style={{
               backgroundColor: 'var(--bg-panel)',
@@ -622,6 +626,7 @@ export const PlotterView: React.FC = () => {
 
           {/* Combined vs Split Oscilloscope Mode */}
           <div
+            data-tour="plotter.layout"
             style={{ borderColor: 'var(--border-strong)' }}
             className="h-[28px] border inline-flex items-center shrink-0 overflow-hidden"
           >
@@ -751,6 +756,7 @@ export const PlotterView: React.FC = () => {
 
           {/* Pointer Drag Tool: Pan vs Box Zoom */}
           <div
+            data-tour="plotter.tools"
             style={{ borderColor: 'var(--border-strong)' }}
             className="h-[28px] border inline-flex items-center shrink-0 overflow-hidden"
           >
@@ -867,7 +873,7 @@ export const PlotterView: React.FC = () => {
           <div className="h-4 w-[1px] bg-[var(--border-strong)] mx-0.5" />
 
           {/* Time Span Presets + Continuous Span Badge */}
-          <div className="flex items-center gap-1 font-mono tabular-nums">
+          <div data-tour="plotter.timespan" className="flex items-center gap-1 font-mono tabular-nums">
             {TIME_PRESETS_SEC.map((sec) => {
               const active = Math.abs(plotState.viewSpanSec - sec) < 0.005;
               return (
@@ -908,6 +914,7 @@ export const PlotterView: React.FC = () => {
         <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
           <button
             type="button"
+            data-tour="plotter.cursors"
             onClick={() =>
               plotStore.setDeltaCursorsEnabled(!plotState.deltaCursorsEnabled)
             }
@@ -929,6 +936,7 @@ export const PlotterView: React.FC = () => {
 
           <button
             type="button"
+            data-tour="plotter.live"
             onClick={() => plotStore.setLiveFollow(!plotState.liveFollow)}
             style={
               plotState.liveFollow
@@ -1014,6 +1022,7 @@ export const PlotterView: React.FC = () => {
 
           <button
             type="button"
+            data-tour="plotter.export"
             disabled={!hasAnySamples}
             onClick={handleExportCsv}
             style={{
@@ -1093,6 +1102,8 @@ export const PlotterView: React.FC = () => {
             </div>
           )}
 
+          <GuideTourButton pageId="plotter" />
+          <GuideInfoButton pageId="plotter" tourAnchor="plotter.info" />
           <button
             type="button"
             onClick={() => setHelpOpen((v) => !v)}
@@ -1160,6 +1171,7 @@ export const PlotterView: React.FC = () => {
         {/* Collapsible Signal Picker Tree with Message-Level Select-All Checkboxes */}
         {pickerOpen && (
           <aside
+            data-tour="plotter.picker"
             style={{ borderRight: '1px solid var(--border-strong)' }}
             className="w-[270px] lg:w-[300px] xl:w-[330px] shrink-0 flex flex-col min-h-0 overflow-hidden"
           >
@@ -1442,7 +1454,7 @@ export const PlotterView: React.FC = () => {
         )}
 
         {/* RIGHT: Delta Cursor Bar + 60 FPS Scopes + 40px Minimap */}
-        <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
+        <div data-tour="plotter.canvas" className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
           {/* Dual Measurement Cursors A & B Readout Bar (Locked 28px height) */}
           {plotState.deltaCursorsEnabled &&
             plotState.series.length > 0 &&

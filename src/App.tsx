@@ -9,6 +9,9 @@ import { PlotterView } from './components/PlotterView';
 import { ProjectExplorerDock } from './components/ProjectExplorerDock';
 import { ProjectModal } from './components/ProjectModal';
 import { BottomConnectionsDock } from './components/BottomConnectionsDock';
+import { GuideInfoDialog } from './onboarding/GuideInfoDialog';
+import { UpdateNotice, VersionStatus } from './components/UpdateNotice';
+import { updateStore } from './store/updateStore';
 import { ReceiveTransmitView } from './components/ReceiveTransmitView';
 import { StartPageView } from './components/StartPageView';
 import { SymbolsLayoutView } from './components/SymbolsLayoutView';
@@ -58,6 +61,7 @@ import {
 import type { DeviceDescriptorDto } from './types/hal';
 import { installBusDatabaseAutoSync } from './utils/busDatabaseSync';
 import { Plus, X } from 'lucide-react';
+import { TabStripScroller } from './components/TabStripScroller';
 import { FlowPromptHost } from './components/flow/FlowPromptHost';
 
 installBusDatabaseAutoSync();
@@ -122,6 +126,9 @@ export const App: React.FC = () => {
       // Backend bridge may still be starting
     }
   }, []);
+
+  // Update notification: automatic check 5 s after startup (silent on failure; notification only).
+  useEffect(() => updateStore.startAutoCheck(), []);
 
   useEffect(() => {
     if (devices.length === 0) return;
@@ -674,13 +681,18 @@ export const App: React.FC = () => {
               backgroundColor: 'var(--bg-header)',
               borderBottom: '1px solid var(--border-strong)',
             }}
-            className="h-[40px] px-2.5 flex items-end justify-between shrink-0"
+            className="h-[40px] px-2.5 flex flex-nowrap items-end justify-between gap-2 shrink-0 min-w-0"
           >
-            <div className="flex items-end h-full pt-1 gap-1 overflow-x-auto no-scrollbar">
+            <TabStripScroller
+              activeKey={`${dbState.activeDocTab}:${traceState.activeSessionId}`}
+              leftTitle={t('shell.tabs.scrollLeft')}
+              rightTitle={t('shell.tabs.scrollRight')}
+            >
               {/* 1. Workspace */}
               <button
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('start')}
+                data-tab-active={dbState.activeDocTab === 'start' ? 'true' : undefined}
                 style={{
                   backgroundColor: dbState.activeDocTab === 'start' ? 'var(--bg-panel)' : 'transparent',
                   borderColor: dbState.activeDocTab === 'start' ? 'var(--border-strong)' : 'transparent',
@@ -698,6 +710,7 @@ export const App: React.FC = () => {
               <button
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('rxtx')}
+                data-tab-active={dbState.activeDocTab === 'rxtx' ? 'true' : undefined}
                 style={{
                   backgroundColor: dbState.activeDocTab === 'rxtx' ? 'var(--bg-panel)' : 'transparent',
                   borderColor: dbState.activeDocTab === 'rxtx' ? 'var(--border-strong)' : 'transparent',
@@ -718,6 +731,7 @@ export const App: React.FC = () => {
                 return (
                   <div
                     key={sess.id}
+                    data-tab-active={isActive ? 'true' : undefined}
                     onClick={() => {
                       traceSessionsStore.setActiveSession(sess.id);
                       databaseStore.setActiveDocTab('trace');
@@ -735,10 +749,10 @@ export const App: React.FC = () => {
                     <span
                       className={`w-2.5 h-2.5 rounded-full shrink-0 ${
                         sess.state === 'recording'
-                          ? 'bg-red-500 animate-pulse shadow-[0_0_6px_rgba(239,68,68,0.7)]'
+                          ? 'bg-critical animate-pulse'
                           : sess.state === 'paused'
-                            ? 'bg-amber-400'
-                            : 'bg-slate-500'
+                            ? 'bg-warn'
+                            : 'bg-muted'
                       }`}
                       title={
                         sess.state === 'recording'
@@ -761,7 +775,7 @@ export const App: React.FC = () => {
                           e.stopPropagation();
                           traceSessionsStore.closeSession(sess.id);
                         }}
-                        className="w-4 h-4 rounded flex items-center justify-center hover:bg-red-500/20 hover:text-red-400 text-[var(--text-muted)] ml-1 text-[12px]"
+                        className="w-4 h-4 rounded flex items-center justify-center hover:bg-[var(--status-critical-bg)] hover:text-critical text-[var(--text-muted)] ml-1 text-[12px]"
                         title={t('shell.trace.closeSessionTooltip', { name: sess.name })}
                       >
                         ×
@@ -775,6 +789,7 @@ export const App: React.FC = () => {
               <button
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('plotter')}
+                data-tab-active={dbState.activeDocTab === 'plotter' ? 'true' : undefined}
                 style={{
                   backgroundColor: dbState.activeDocTab === 'plotter' ? 'var(--bg-panel)' : 'transparent',
                   borderColor: dbState.activeDocTab === 'plotter' ? 'var(--border-strong)' : 'transparent',
@@ -792,6 +807,7 @@ export const App: React.FC = () => {
               <button
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('symbols')}
+                data-tab-active={dbState.activeDocTab === 'symbols' ? 'true' : undefined}
                 style={{
                   backgroundColor: dbState.activeDocTab === 'symbols' ? 'var(--bg-panel)' : 'transparent',
                   borderColor: dbState.activeDocTab === 'symbols' ? 'var(--border-strong)' : 'transparent',
@@ -809,6 +825,7 @@ export const App: React.FC = () => {
               <button
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('connections')}
+                data-tab-active={dbState.activeDocTab === 'connections' ? 'true' : undefined}
                 style={{
                   backgroundColor: dbState.activeDocTab === 'connections' ? 'var(--bg-panel)' : 'transparent',
                   borderColor: dbState.activeDocTab === 'connections' ? 'var(--border-strong)' : 'transparent',
@@ -827,10 +844,11 @@ export const App: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => databaseStore.setActiveDocTab('panels')}
+                  data-tab-active={dbState.activeDocTab === 'panels' ? 'true' : undefined}
                   style={{
                     backgroundColor: dbState.activeDocTab === 'panels' ? 'var(--bg-panel)' : 'transparent',
                     borderColor: dbState.activeDocTab === 'panels' ? 'var(--border-strong)' : 'transparent',
-                    color: dbState.activeDocTab === 'panels' ? '#FBBF24' : 'var(--text-secondary)',
+                    color: dbState.activeDocTab === 'panels' ? 'var(--status-warn)' : 'var(--text-secondary)',
                     borderBottomColor: dbState.activeDocTab === 'panels' ? 'var(--bg-panel)' : 'transparent',
                   }}
                   className={`h-full px-3.5 xl:px-4 text-[13px] font-sans border-t border-l border-r cursor-pointer shrink-0 rounded-t-[3px] transition-colors ${
@@ -846,10 +864,11 @@ export const App: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => databaseStore.setActiveDocTab('diagnostics')}
+                  data-tab-active={dbState.activeDocTab === 'diagnostics' ? 'true' : undefined}
                   style={{
                     backgroundColor: dbState.activeDocTab === 'diagnostics' ? 'var(--bg-panel)' : 'transparent',
                     borderColor: dbState.activeDocTab === 'diagnostics' ? 'var(--border-strong)' : 'transparent',
-                    color: dbState.activeDocTab === 'diagnostics' ? '#67E8F9' : 'var(--text-secondary)',
+                    color: dbState.activeDocTab === 'diagnostics' ? 'var(--status-focus)' : 'var(--text-secondary)',
                     borderBottomColor: dbState.activeDocTab === 'diagnostics' ? 'var(--bg-panel)' : 'transparent',
                   }}
                   className={`h-full px-3.5 xl:px-4 text-[13px] font-sans border-t border-l border-r cursor-pointer shrink-0 rounded-t-[3px] transition-colors ${
@@ -864,10 +883,11 @@ export const App: React.FC = () => {
               <button
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('re')}
+                data-tab-active={dbState.activeDocTab === 're' ? 'true' : undefined}
                 style={{
                   backgroundColor: dbState.activeDocTab === 're' ? 'var(--bg-panel)' : 'transparent',
                   borderColor: dbState.activeDocTab === 're' ? 'var(--border-strong)' : 'transparent',
-                  color: dbState.activeDocTab === 're' ? '#34D399' : 'var(--text-secondary)',
+                  color: dbState.activeDocTab === 're' ? 'var(--status-nominal)' : 'var(--text-secondary)',
                   borderBottomColor: dbState.activeDocTab === 're' ? 'var(--bg-panel)' : 'transparent',
                 }}
                 className={`h-full px-3.5 xl:px-4 text-[13px] font-sans border-t border-l border-r cursor-pointer shrink-0 rounded-t-[3px] transition-colors ${
@@ -882,6 +902,7 @@ export const App: React.FC = () => {
               <button
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('cloud')}
+                data-tab-active={dbState.activeDocTab === 'cloud' ? 'true' : undefined}
                 style={{
                   backgroundColor: dbState.activeDocTab === 'cloud' ? 'var(--bg-panel)' : 'transparent',
                   borderColor: dbState.activeDocTab === 'cloud' ? 'var(--border-strong)' : 'transparent',
@@ -895,18 +916,18 @@ export const App: React.FC = () => {
                 {cloudTabLabel}
               </button>
               )}
-            </div>
+            </TabStripScroller>
 
             {/* Right side: Split Indicator + Telemetry FPS */}
-            <div className="flex items-center gap-2 pb-1">
+            <div className="flex items-center gap-2 pb-1 shrink-0">
               {isSplitActive && (
                 <button
                   type="button"
                   onClick={() => workbenchStore.setSplitSecondaryTab(null)}
                   style={{
-                    backgroundColor: 'rgba(56, 189, 248, 0.12)',
-                    borderColor: 'rgba(56, 189, 248, 0.40)',
-                    color: '#38BDF8',
+                    backgroundColor: 'var(--status-focus-bg)',
+                    borderColor: 'var(--status-focus-border)',
+                    color: 'var(--status-focus)',
                   }}
                   className="h-[26px] px-2.5 border text-[12px] font-mono flex items-center gap-1.5 hover:opacity-90 cursor-pointer rounded-[3px]"
                   title={t('shell.app.closeSplitTooltip')}
@@ -965,7 +986,7 @@ export const App: React.FC = () => {
                 {/* Draggable Vertical Splitter Bar */}
                 <div
                   onMouseDown={handleSplitMouseDown}
-                  className="w-[5px] shrink-0 bg-[var(--border-strong)] hover:bg-sky-500 active:bg-sky-500 cursor-col-resize transition-colors z-20 flex items-center justify-center"
+                  className="w-[5px] shrink-0 bg-[var(--border-strong)] hover:bg-focus active:bg-focus cursor-col-resize transition-colors z-20 flex items-center justify-center"
                   title={t('shell.app.splitterResizeTooltip')}
                 >
                   <div className="w-[1px] h-6 bg-[var(--text-muted)]" />
@@ -982,7 +1003,7 @@ export const App: React.FC = () => {
                     className="h-[32px] px-2.5 flex items-center justify-between text-[12px] font-mono select-none shrink-0"
                   >
                     <div className="flex items-center gap-2">
-                      <span className="text-sky-400 font-semibold uppercase text-[11px] tracking-wide">{t('shell.app.splitPaneLabel')}</span>
+                      <span className="text-focus font-semibold uppercase text-[11px] tracking-wide">{t('shell.app.splitPaneLabel')}</span>
                       <select
                         value={workbench.splitSecondaryTab ?? ''}
                         onChange={(e) =>
@@ -1041,7 +1062,7 @@ export const App: React.FC = () => {
                                 message: t('shell.app.secondaryTraceStarted', { name: created.name }),
                               });
                             }}
-                            className="h-[24px] px-2 border border-dashed border-sky-500/60 text-sky-400 hover:bg-sky-500/20 text-[11px] font-mono flex items-center gap-1 rounded-[3px] cursor-pointer"
+                            className="h-[24px] px-2 border border-dashed border-[var(--status-focus-border)] text-focus hover:bg-[var(--status-focus-bg)] text-[11px] font-mono flex items-center gap-1 rounded-[3px] cursor-pointer"
                             title={t('shell.app.secondaryNewTraceTooltip')}
                           >
                             <Plus className="w-3 h-3" />
@@ -1054,7 +1075,7 @@ export const App: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => workbenchStore.setSplitSecondaryTab(null)}
-                      className="h-[24px] w-[24px] flex items-center justify-center text-[var(--text-muted)] hover:text-red-400 cursor-pointer rounded-[3px]"
+                      className="h-[24px] w-[24px] flex items-center justify-center text-[var(--text-muted)] hover:text-critical cursor-pointer rounded-[3px]"
                       title={t('shell.app.closeSplitTooltip')}
                     >
                       <X className="w-3.5 h-3.5" />
@@ -1099,11 +1120,11 @@ export const App: React.FC = () => {
         {debugConsole.dockOpen && !debugConsole.detachedOpen && debugConsole.dockLayout === 'right' && (
           <aside
             style={{ width: `${debugConsole.rightWidthPx}px`, minWidth: '280px', maxWidth: '60vw' }}
-            className="shrink-0 h-full flex flex-col border-l border-[var(--border-strong)] relative overflow-hidden bg-[#0B0F17]"
+            className="shrink-0 h-full flex flex-col border-l border-[var(--border-strong)] relative overflow-hidden bg-canvas"
           >
             <div
               onMouseDown={handleRightResizeStart}
-              className="w-1 cursor-col-resize hover:bg-sky-500/50 bg-[var(--border-strong)] transition-colors shrink-0 select-none absolute left-0 top-0 bottom-0 z-20"
+              className="w-1 cursor-col-resize hover:bg-[var(--status-focus-bg)] bg-[var(--border-strong)] transition-colors shrink-0 select-none absolute left-0 top-0 bottom-0 z-20"
               title="Resize Debug Console"
             />
             <div className="flex-1 min-h-0 min-w-0 pl-1 flex flex-col overflow-hidden">
@@ -1117,11 +1138,11 @@ export const App: React.FC = () => {
       {debugConsole.dockOpen && !debugConsole.detachedOpen && debugConsole.dockLayout === 'bottom' && (
         <div
           style={{ height: `${debugConsole.bottomHeightPx}px`, maxHeight: '60vh' }}
-          className="shrink-0 flex flex-col border-t border-[var(--border-strong)] relative overflow-hidden bg-[#0B0F17]"
+          className="shrink-0 flex flex-col border-t border-[var(--border-strong)] relative overflow-hidden bg-canvas"
         >
           <div
             onMouseDown={handleBottomResizeStart}
-            className="h-1 cursor-row-resize hover:bg-sky-500/50 bg-[var(--border-strong)] transition-colors shrink-0 select-none z-20"
+            className="h-1 cursor-row-resize hover:bg-[var(--status-focus-bg)] bg-[var(--border-strong)] transition-colors shrink-0 select-none z-20"
             title="Resize Debug Console"
           />
           <div className="flex-1 min-h-0 min-w-0 flex flex-col overflow-hidden">
@@ -1141,15 +1162,15 @@ export const App: React.FC = () => {
             height: `min(${debugConsole.floatingRect.h}px, calc(100vh - 60px))`,
             zIndex: 40,
           }}
-          className="border border-slate-700 shadow-2xl rounded-xs overflow-hidden flex flex-col bg-[#0B0F17]"
+          className="border border-strong shadow-2xl rounded-xs overflow-hidden flex flex-col bg-canvas"
         >
           <div
             onMouseDown={handleFloatingDragStart}
-            className="h-4 bg-slate-900 border-b border-slate-800 cursor-move flex items-center justify-between px-2 shrink-0 select-none"
+            className="h-4 bg-panel border-b border-hairline cursor-move flex items-center justify-between px-2 shrink-0 select-none"
             title="Drag to reposition Debug Console"
           >
-            <span className="text-[10px] text-slate-400 font-mono tracking-wider font-semibold">DEBUG &amp; AUDIT CONSOLE</span>
-            <span className="text-[10px] text-slate-500 font-mono">⠿</span>
+            <span className="text-[10px] text-secondary font-mono tracking-wider font-semibold">DEBUG &amp; AUDIT CONSOLE</span>
+            <span className="text-[10px] text-muted font-mono">⠿</span>
           </div>
           <div className="flex-1 min-h-0 min-w-0 flex flex-col overflow-hidden">
             <DebugConsolePanel />
@@ -1170,9 +1191,9 @@ export const App: React.FC = () => {
           <span
             className={`truncate ${
               statusBanner?.kind === 'error'
-                ? 'text-red-500 font-semibold'
+                ? 'text-critical font-semibold'
                 : statusBanner?.kind === 'success'
-                  ? 'text-emerald-500'
+                  ? 'text-nominal'
                   : 'text-[var(--text-muted)]'
             }`}
           >
@@ -1187,26 +1208,26 @@ export const App: React.FC = () => {
             onClick={() => debugConsoleStore.toggleDockOpen()}
             className={`h-[20px] px-2 rounded-xs border text-[11px] font-mono flex items-center gap-1.5 cursor-pointer transition-colors ${
               debugConsole.detachedOpen
-                ? 'bg-sky-950/80 border-sky-500/70 text-sky-300 font-semibold'
+                ? 'bg-[var(--status-focus-bg)] border-[var(--status-focus-border)] text-focus font-semibold'
                 : debugConsole.dockOpen
-                  ? 'bg-slate-800 border-slate-600 text-slate-200'
-                  : 'bg-transparent border-slate-700/60 text-slate-400 hover:text-slate-200 hover:border-slate-600'
+                  ? 'bg-elevated border-strong text-primary'
+                  : 'bg-transparent border-strong text-secondary hover:text-primary hover:border-strong'
             }`}
             title={t('debug.console.statusTooltip')}
           >
-            <span className="text-sky-400 font-bold">&gt;_</span>
+            <span className="text-focus font-bold">&gt;_</span>
             <span>{t('debug.console.statusBtn')}</span>
             {debugConsole.detachedOpen ? (
-              <span className="text-[10px] text-sky-400 font-sans">↗ {t('debug.console.undockedBadge')}</span>
+              <span className="text-[10px] text-focus font-sans">↗ {t('debug.console.undockedBadge')}</span>
             ) : (
               <>
                 {debugConsole.unreadErrorCount > 0 && (
-                  <span className="px-1 py-0.2 rounded-xs bg-rose-950 border border-rose-600 text-rose-300 text-[9.5px] font-bold">
+                  <span className="px-1 py-0.2 rounded-xs bg-[var(--status-critical-bg)] border border-[var(--status-critical-border)] text-critical text-[9.5px] font-bold">
                     {debugConsole.unreadErrorCount}
                   </span>
                 )}
                 {debugConsole.unreadWarnCount > 0 && (
-                  <span className="px-1 py-0.2 rounded-xs bg-amber-950 border border-amber-600 text-amber-300 text-[9.5px] font-bold">
+                  <span className="px-1 py-0.2 rounded-xs bg-[var(--status-warn-bg)] border border-[var(--status-warn-border)] text-warn text-[9.5px] font-bold">
                     {debugConsole.unreadWarnCount}
                   </span>
                 )}
@@ -1235,6 +1256,7 @@ export const App: React.FC = () => {
               {header.totalFramesTx.toLocaleString('en-US')}
             </span>
           </span>
+          <VersionStatus />
         </div>
       </footer>
 
@@ -1268,6 +1290,8 @@ export const App: React.FC = () => {
       />
 
       <AcknowledgmentsModal />
+      <GuideInfoDialog />
+      <UpdateNotice />
       <McpServerPanel />
       <McpUiOverlay />
 

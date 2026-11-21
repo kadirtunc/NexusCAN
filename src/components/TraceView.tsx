@@ -66,6 +66,8 @@ import {
 } from '../utils/canErrorDecoder';
 import { QuickPlotButton } from './PlotterView';
 import type { StatusBanner } from './TopBar';
+import { GuideInfoButton, GuideTourButton } from '../onboarding/GuideButtons';
+import { GuideStrip } from '../onboarding/GuideStrip';
 
 const ROW_HEIGHT = 28;
 const OVERSCAN = 14;
@@ -966,6 +968,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
       style={{ backgroundColor: 'var(--bg-panel)' }}
       className="flex flex-col flex-1 min-h-0 select-none"
     >
+      <GuideStrip pageId="trace" />
       {/* Hidden file input for opening .trc / .asc / .log / .csv / .blf from disk */}
       <input
         ref={fileInputRef}
@@ -984,7 +987,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
         className="shrink-0 h-[38px] px-2.5 flex items-center justify-between gap-3 text-[11px] select-none"
       >
         {/* Sol Grup: Oturum, Kayıt Butonları, Temizle, Dosya Aç/Kaydet & Plotter */}
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div data-tour="trace.toolbar-left" className="flex items-center gap-1.5 shrink-0">
           {/* Multi-Session Selector or Name Badge */}
           {traceState.sessions.length > 1 ? (
             <select
@@ -1159,7 +1162,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
         </div>
 
         {/* Orta Grup: Hızlı Arama & Hat/Yön Filtresi */}
-        <div className="flex items-center gap-1.5 min-w-0 flex-shrink">
+        <div data-tour="trace.filter" className="flex items-center gap-1.5 min-w-0 flex-shrink">
           {/* Filter Query */}
           <div className="relative flex items-center min-w-0">
             <input
@@ -1272,7 +1275,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
         {/* Sağ Grup: Ayarlar ▾ ve Dışa Aktar ▾ Popover Menüleri */}
         <div className="flex items-center gap-1.5 shrink-0 relative">
           {/* Settings Popover Button */}
-          <div ref={settingsMenuRef} className="relative">
+          <div ref={settingsMenuRef} data-tour="trace.settings" className="relative">
             <button
               type="button"
               onClick={() => {
@@ -1416,7 +1419,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
           </div>
 
           {/* Export Popover Button */}
-          <div ref={exportMenuRef} className="relative">
+          <div ref={exportMenuRef} data-tour="trace.export" className="relative">
             <button
               type="button"
               disabled={sess.count === 0}
@@ -1535,12 +1538,15 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
               </div>
             )}
           </div>
+          <GuideTourButton pageId="trace" />
+          <GuideInfoButton pageId="trace" tourAnchor="trace.info" />
         </div>
       </div>
 
       {/* PCAN-Style Trace Replay Transport Bar — Responsive min-h-[40px], flex-wrap, zero-overflow */}
       {showReplayTransport && (
         <div
+          data-tour="trace.replay"
           style={{
             backgroundColor: 'var(--bg-toolbar)',
             borderBottom: '1px solid var(--border-strong)',
@@ -2134,6 +2140,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
 
       {/* Fixed Header Industrial Trace Window */}
       <div
+        data-tour="trace.table"
         style={{
           backgroundColor: 'var(--bg-header)',
           borderBottom: '1px solid var(--border-strong)',
@@ -2577,6 +2584,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
 
       {/* Bottom 22px PCAN Trace Status Bar (Direct answer to "Trace kayıt yeri nerede?") */}
       <div
+        data-tour="trace.status"
         style={{
           backgroundColor: 'var(--bg-header)',
           borderTop: '1px solid var(--border-strong)',

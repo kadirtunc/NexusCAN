@@ -16,6 +16,8 @@ import {
   X,
 } from 'lucide-react';
 import { useI18n, type TranslationKey } from '../i18n';
+import { GuideInfoButton, GuideTourButton, GuideWhyLink } from '../onboarding/GuideButtons';
+import { GuideStrip } from '../onboarding/GuideStrip';
 import {
   CAN_ERR_MASK,
   decodeCanErrorFields,
@@ -1371,6 +1373,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
 
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden select-none">
+      <GuideStrip pageId="rxtx" />
       {/* MAIN DRAG-RESIZABLE RECEIVE (TOP) + TRANSMIT (BOTTOM) WORKSPACE */}
       <div
         ref={splitContainerRef}
@@ -1400,6 +1403,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
           <div className="flex flex-col flex-1 min-w-0 min-h-0">
             {/* Slim Receive Sub-Toolbar (Scaled & Responsive) */}
             <div
+              data-tour="rxtx.rx-toolbar"
               style={{
                 backgroundColor: 'var(--bg-toolbar)',
                 borderBottom: '1px solid var(--border-strong)',
@@ -1566,12 +1570,14 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                   <Copy className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
                   <span>{t('rxtx.rx.copyToTx')}</span>
                 </button>
+                <GuideTourButton pageId="rxtx" />
+                <GuideInfoButton pageId="rxtx" tourAnchor="rxtx.info" />
                 <ShortcutsHelp />
               </div>
             </div>
 
             {/* Flat Dense PCAN Receive Grid (table-layout: fixed, locked 26px rows) */}
-            <div className="flex-1 min-h-0 overflow-auto flex flex-col">
+            <div data-tour="rxtx.rx-table" className="flex-1 min-h-0 overflow-auto flex flex-col">
               <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums">
                 <colgroup>
                   <col style={{ width: '26px' }} />
@@ -1986,6 +1992,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
               <div className="flex items-center gap-1.5 flex-wrap">
                 <button
                   type="button"
+                  data-tour="rxtx.tx-new"
                   onClick={() => setModalState({ open: true, editing: null })}
                   style={{
                     backgroundColor: 'var(--bg-panel)',
@@ -2134,7 +2141,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
 
                 if (targetBusId === null || !targetBus) {
                   return (
-                    <div className="flex items-center gap-1.5 text-[11px] font-mono text-[var(--text-muted)]">
+                    <div data-tour="rxtx.tx-mode" className="flex items-center gap-1.5 text-[11px] font-mono text-[var(--text-muted)]">
                       <span>{t('rxtx.tx.noActiveBus')}</span>
                     </div>
                   );
@@ -2143,7 +2150,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                 const isReady = Boolean(!targetBus.listenOnly && targetBus.txArmed);
 
                 return (
-                  <div className="flex items-center gap-2">
+                  <div data-tour="rxtx.tx-mode" className="flex items-center gap-2">
                     <span className="font-mono text-[11.5px] text-[var(--text-secondary)]">
                       Bus {targetBus.busId + 1} ({targetBus.channelName}):
                     </span>
@@ -2157,6 +2164,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                         <span className="text-[var(--text-muted)] text-[11.5px]">
                           {targetBus.listenOnly ? t('rxtx.tx.listenOnly') : t('rxtx.tx.txDisarmed')}
                         </span>
+                        <GuideWhyLink pageId="rxtx" sectionId="txSafety" />
                         <button
                           type="button"
                           onClick={() => void onSwitchToActiveTx(targetBus.busId)}

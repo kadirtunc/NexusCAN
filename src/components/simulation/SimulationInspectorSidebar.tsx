@@ -679,6 +679,7 @@ export function SimulationInspectorSidebar({
 
   return (
     <aside
+      data-tour="panels.inspector"
       aria-label={t('simInsp.aside.aria')}
       className="flex w-full shrink-0 flex-col border-t border-hairline bg-surface lg:w-[340px] xl:w-[380px] lg:border-t-0 lg:border-l"
     >

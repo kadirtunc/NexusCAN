@@ -72,6 +72,8 @@ import { BusStateBadge } from './BusStateBadge';
 import { EnforcementBadge } from './EnforcementBadge';
 import type { StatusBanner } from './TopBar';
 import { DatabaseBindingPicker } from './DatabaseBindingPicker';
+import { GuideInfoButton, GuideTourButton } from '../onboarding/GuideButtons';
+import { GuideStrip } from '../onboarding/GuideStrip';
 import { useDatabaseStore } from '../store/databaseStore';
 
 interface ConnectionsViewProps {
@@ -1609,11 +1611,12 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
       style={{ backgroundColor: 'var(--bg-panel)' }}
       className="flex flex-col flex-1 min-h-0 overflow-hidden select-none"
     >
+      <GuideStrip pageId="connections" />
       {softwareOnlyBuses.map((b) => (
         <div
           key={`sw-lo-${b.busId}`}
           role="alert"
-          className="shrink-0 px-3 py-1.5 border-b border-amber-500/70 bg-amber-900/20 text-amber-200 text-[11.5px]"
+          className="shrink-0 px-3 py-1.5 border-b border-[var(--status-warn-border)] bg-[var(--status-warn-bg)] text-warn text-[11.5px]"
         >
           {t('sec.enf.softwareWarn', { bus: b.busId + 1, channel: b.channelName })}{' '}
           {t('sec.hwlo.softwareHint')}
@@ -1627,6 +1630,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
         className="shrink-0"
       >
         <div
+          data-tour="connections.driver-strip"
           style={{
             backgroundColor: 'var(--bg-toolbar)',
             borderBottom:
@@ -1652,7 +1656,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   : `Host OS: ${connState.probeReport?.hostOs ?? 'Unknown'}`
               }
             >
-              <Laptop className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <Laptop className="w-3.5 h-3.5 text-focus shrink-0" />
               <span className="text-[var(--text-muted)] font-sans">
                 {t('conn.bar.osBadge')}
               </span>
@@ -1670,7 +1674,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   : (connState.probeReport?.hostOs ?? 'HOST').toUpperCase()}
               </span>
               {hostEnv?.isWsl && (
-                <span className="bg-sky-950/80 text-sky-300 border border-sky-500/50 px-1 text-[10px] font-semibold">
+                <span className="bg-[var(--status-focus-bg)] text-focus border border-[var(--status-focus-border)] px-1 text-[10px] font-semibold">
                   {t('conn.bar.wslBadge')}
                 </span>
               )}
@@ -1678,8 +1682,8 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 <span
                   className={
                     hostEnv.udevRulesPresent
-                      ? 'text-emerald-400 border border-emerald-500/40 px-1 text-[10px]'
-                      : 'text-amber-400 border border-amber-500/40 px-1 text-[10px]'
+                      ? 'text-nominal border border-[var(--status-nominal-border)] px-1 text-[10px]'
+                      : 'text-warn border border-[var(--status-warn-border)] px-1 text-[10px]'
                   }
                   title={
                     hostEnv.udevRulesPresent
@@ -1694,10 +1698,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
 
             {/* Real-time Hardware Auto-Watch Badge */}
             <div
-              className="flex items-center gap-1.5 font-mono text-[10px] px-2 py-0.5 border border-emerald-500/40 bg-emerald-950/40 text-emerald-300 shrink-0"
+              className="flex items-center gap-1.5 font-mono text-[10px] px-2 py-0.5 border border-[var(--status-nominal-border)] bg-[var(--status-nominal-bg)] text-nominal shrink-0"
               title={t('conn.bar.autoWatchHotplug')}
             >
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="w-1.5 h-1.5 rounded-full bg-[var(--status-nominal-bg)] " />
               <span className="font-semibold uppercase tracking-wider">
                 {t('conn.bar.autoWatchHotplug')}
               </span>
@@ -1729,7 +1733,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
 
                   if (isInstalled) {
                     statusBadge = (
-                      <span className="text-emerald-500 font-semibold">✓</span>
+                      <span className="text-nominal font-semibold">✓</span>
                     );
                     pillClass = 'text-[var(--text-primary)]';
                     tooltip = `${fam.displayName}: ${fam.detectedLibraryOrModule ?? t('conn.status.ready')}`;
@@ -1743,11 +1747,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     tooltip = `${fam.displayName}: ${t('conn.status.osUnsupported')}`;
                   } else if (isHwPresent) {
                     statusBadge = (
-                      <span className="text-amber-400 font-bold bg-amber-950/70 border border-amber-500/60 px-1 text-[10px]">
+                      <span className="text-warn font-bold bg-[var(--status-warn-bg)] border border-[var(--status-warn-border)] px-1 text-[10px]">
                         HW!
                       </span>
                     );
-                    pillClass = 'text-amber-300 font-semibold';
+                    pillClass = 'text-warn font-semibold';
                     tooltip = `${fam.displayName}: ${t('conn.status.hwPresentNeedsDriver')} — ${fam.installHint}`;
                   } else {
                     statusBadge = (
@@ -1810,7 +1814,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
             >
               <RefreshCw
                 className={`w-3.5 h-3.5 text-[var(--text-secondary)] ${
-                  probing ? 'animate-spin' : ''
+                  probing ? '' : ''
                 }`}
               />
               <span>{t('conn.bar.rescan')}</span>
@@ -1828,7 +1832,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
             className="min-h-[36px] px-3 py-1.5 flex flex-wrap items-center gap-2 text-[12px]"
           >
             <span className="font-semibold text-[var(--text-secondary)] flex items-center gap-1.5 shrink-0">
-              <Plug className="w-3.5 h-3.5 text-emerald-400" />
+              <Plug className="w-3.5 h-3.5 text-nominal" />
               <span>{t('conn.bar.quickAttachTitle')}</span>
             </span>
 
@@ -1847,20 +1851,20 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   style={{
                     backgroundColor: 'var(--bg-panel)',
                     borderColor: isDfu
-                      ? '#f59e0b'
+                      ? 'var(--status-warn)'
                       : dev.driverBound
-                        ? '#10b981'
+                        ? 'var(--status-nominal)'
                         : 'var(--border-strong)',
                   }}
-                  className="h-[28px] px-2.5 border font-mono text-[12px] hover:border-sky-400 cursor-pointer flex items-center gap-1.5 text-left"
+                  className="h-[28px] px-2.5 border font-mono text-[12px] hover:border-[var(--status-focus-border)] cursor-pointer flex items-center gap-1.5 text-left"
                   title={`VID:PID ${dev.vidPid} · Vendor: ${dev.vendorName} · Family: ${dev.matchedFamily}${dev.suggestedChannel ? ` · Channel: ${dev.suggestedChannel}` : ''}${dev.locationInfo ? ` · Loc: ${dev.locationInfo}` : ''}${dev.serialNumber ? ` · S/N: ${dev.serialNumber}` : ''}\nStatus: ${dev.accessStatus}`}
                 >
-                  <Usb className="w-3 h-3 text-sky-400 shrink-0" />
+                  <Usb className="w-3 h-3 text-focus shrink-0" />
                   <span className="font-semibold text-[var(--text-primary)]">
                     {dev.vidPid}
                   </span>
                   {dev.suggestedChannel && (
-                    <span className="px-1 py-0.5 bg-sky-950/70 text-sky-300 border border-sky-500/40 text-[10px] font-mono font-semibold shrink-0">
+                    <span className="px-1 py-0.5 bg-[var(--status-focus-bg)] text-focus border border-[var(--status-focus-border)] text-[10px] font-mono font-semibold shrink-0">
                       {dev.suggestedChannel}
                     </span>
                   )}
@@ -1885,11 +1889,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   <span
                     className={
                       isDfu
-                        ? 'text-amber-400 font-bold text-[10px] border border-amber-500/50 px-1 shrink-0'
+                        ? 'text-warn font-bold text-[10px] border border-[var(--status-warn-border)] px-1 shrink-0'
                         : dev.driverBound
-                          ? 'text-emerald-400 font-bold text-[10px] border border-emerald-500/50 px-1 shrink-0'
+                          ? 'text-nominal font-bold text-[10px] border border-[var(--status-nominal-border)] px-1 shrink-0'
                           : isWinUsbNeeded
-                            ? 'text-amber-300 font-bold text-[10px] border border-amber-500/50 px-1 shrink-0'
+                            ? 'text-warn font-bold text-[10px] border border-[var(--status-warn-border)] px-1 shrink-0'
                             : 'text-[var(--text-muted)] text-[10px] shrink-0'
                     }
                   >
@@ -1915,10 +1919,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   backgroundColor: 'var(--bg-panel)',
                   borderColor: 'var(--border-strong)',
                 }}
-                className="h-[28px] px-2.5 border font-mono text-[12px] hover:border-sky-400 cursor-pointer flex items-center gap-1"
+                className="h-[28px] px-2.5 border font-mono text-[12px] hover:border-[var(--status-focus-border)] cursor-pointer flex items-center gap-1"
                 title={t('conn.bar.selectPortTitle', { port: sp.portName })}
               >
-                <Plug className="w-3 h-3 text-sky-400 shrink-0" />
+                <Plug className="w-3 h-3 text-focus shrink-0" />
                 <span className="font-semibold text-[var(--text-primary)]">
                   {sp.portName}
                 </span>
@@ -1958,7 +1962,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     {hostEnv.nativeStacks.map((stack) => (
                       <span
                         key={stack}
-                        className="px-1.5 py-0.2 border border-sky-500/40 bg-sky-950/30 text-sky-300 font-mono text-[10.5px]"
+                        className="px-1.5 py-0.2 border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] text-focus font-mono text-[10.5px]"
                       >
                         {stack}
                       </span>
@@ -1982,11 +1986,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                               : 'var(--bg-panel)',
                           borderColor:
                             drawerOsTab === tab
-                              ? '#38bdf8'
+                              ? 'var(--status-focus)'
                               : 'var(--border-strong)',
                           color:
                             drawerOsTab === tab
-                              ? '#38bdf8'
+                              ? 'var(--status-focus)'
                               : 'var(--text-secondary)',
                         }}
                         className="px-2 py-0.5 border text-[10.5px] uppercase font-medium cursor-pointer"
@@ -2003,7 +2007,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   <div className="space-y-1 text-[var(--text-secondary)] font-mono text-[11px]">
                     {hostEnv.osNotes.map((note, i) => (
                       <div key={i} className="flex items-start gap-1.5">
-                        <span className="text-sky-400 shrink-0">•</span>
+                        <span className="text-focus shrink-0">•</span>
                         <span>{note}</span>
                       </div>
                     ))}
@@ -2011,7 +2015,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 )}
 
                 {hostEnv.serialPermissionHint && (
-                  <div className="p-1.5 bg-amber-950/30 border border-amber-500/50 text-amber-300 flex items-center justify-between gap-2">
+                  <div className="p-1.5 bg-[var(--status-warn-bg)] border border-[var(--status-warn-border)] text-warn flex items-center justify-between gap-2">
                     <span className="font-mono text-[11px]">
                       {hostEnv.serialPermissionHint}
                     </span>
@@ -2023,10 +2027,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                           'serialPermHint',
                         )
                       }
-                      className="px-1.5 py-0.5 border border-amber-500/60 bg-amber-950/60 hover:bg-amber-900/60 text-[10px] flex items-center gap-1 shrink-0 cursor-pointer"
+                      className="px-1.5 py-0.5 border border-[var(--status-warn-border)] bg-[var(--status-warn-bg)] hover:bg-[var(--status-warn-bg)] text-[10px] flex items-center gap-1 shrink-0 cursor-pointer"
                     >
                       {copiedKey === 'serialPermHint' ? (
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                        <CheckCircle2 className="w-3 h-3 text-nominal" />
                       ) : (
                         <Copy className="w-3 h-3" />
                       )}
@@ -2095,7 +2099,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                         <td>
                           <div className="pcan-cell font-sans text-[12px]">
                             {fam.installed ? (
-                              <span className="inline-flex items-center gap-1 text-emerald-500 font-medium text-[12px]">
+                              <span className="inline-flex items-center gap-1 text-nominal font-medium text-[12px]">
                                 <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                                 <span className="truncate">
                                   {fam.statusLabel || t('conn.status.ready')}
@@ -2108,7 +2112,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                                 </span>
                               </span>
                             ) : fam.hardwarePresent ? (
-                              <span className="inline-flex items-center gap-1 text-amber-400 font-semibold text-[12px]">
+                              <span className="inline-flex items-center gap-1 text-warn font-semibold text-[12px]">
                                 <TriangleAlert className="w-3.5 h-3.5 shrink-0" />
                                 <span className="truncate">
                                   {t('conn.status.hwPresentNeedsDriver')}
@@ -2130,7 +2134,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                               {fam.detectedLibraryOrModule ?? '—'}
                             </span>
                             {fam.architectureNote && (
-                              <span className="inline-block bg-amber-950/60 border border-amber-500/50 text-amber-300 text-[10px] px-1 font-sans">
+                              <span className="inline-block bg-[var(--status-warn-bg)] border border-[var(--status-warn-border)] text-warn text-[10px] px-1 font-sans">
                                 {fam.architectureNote}
                               </span>
                             )}
@@ -2197,6 +2201,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               <button
                 type="button"
                 onClick={handleCreateNewProfile}
+                data-tour="connections.new"
                 style={{
                   backgroundColor: 'var(--bg-panel)',
                   borderColor: 'var(--border-strong)',
@@ -2250,17 +2255,19 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   className="h-[28px] px-2.5 border flex items-center gap-1.5 font-medium text-[12px] hover:text-[var(--text-primary)] hover:border-[var(--text-secondary)] cursor-pointer"
                   title={t('conn.btn.editTitle')}
                 >
-                  <Pencil className="w-3.5 h-3.5 text-sky-400" />
+                  <Pencil className="w-3.5 h-3.5 text-focus" />
                   <span>{t('conn.editor.title')}</span>
                 </button>
               )}
               <span className="text-[var(--text-muted)] text-[12px]">
                 {t('conn.bar.profilesCount', { count: connState.profiles.length })}
               </span>
+              <GuideTourButton pageId="connections" />
+              <GuideInfoButton pageId="connections" tourAnchor="connections.info" />
             </div>
           </div>
 
-          <div className="flex-1 min-h-0 overflow-auto">
+          <div data-tour="connections.table" className="flex-1 min-h-0 overflow-auto">
             <table className="pcan-grid pcan-grid-fixed font-mono tabular-nums">
               <colgroup>
                 <col style={{ width: '36px' }} />
@@ -2284,7 +2291,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   <th className="font-sans">{t('conn.th.driver')}</th>
                   <th>{t('conn.th.portChannel')}</th>
                   <th>{t('conn.th.bitrateFd')}</th>
-                  <th className="font-sans">{t('conn.th.safety')}</th>
+                  <th data-tour="connections.th-safety" className="font-sans">{t('conn.th.safety')}</th>
                   <th className="font-sans">{t('conn.th.hostLib')}</th>
                   <th className="font-sans">{t('conn.th.liveStatus')}</th>
                   <th className="font-sans">{t('conn.th.actions')}</th>
@@ -2295,7 +2302,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   <tr>
                     <td colSpan={10} className="p-0">
                       <div className="p-8 flex flex-col items-center justify-center text-center gap-3 bg-[var(--bg-panel)]">
-                        <div className="w-12 h-12 rounded border border-[var(--border-strong)] bg-[var(--bg-toolbar)] flex items-center justify-center text-cyan-400">
+                        <div className="w-12 h-12 rounded border border-[var(--border-strong)] bg-[var(--bg-toolbar)] flex items-center justify-center text-focus">
                           <Cpu className="w-6 h-6" />
                         </div>
                         <div>
@@ -2310,7 +2317,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                           <button
                             type="button"
                             onClick={handleCreateNewProfile}
-                            className="h-[30px] px-3.5 border border-emerald-500/60 bg-emerald-950/40 text-emerald-300 rounded font-medium text-[12px] hover:bg-emerald-900/50 cursor-pointer flex items-center gap-1.5"
+                            className="h-[30px] px-3.5 border border-[var(--status-nominal-border)] bg-[var(--status-nominal-bg)] text-nominal rounded font-medium text-[12px] hover:bg-[var(--status-nominal-bg)] cursor-pointer flex items-center gap-1.5"
                           >
                             <Plus className="w-3.5 h-3.5" />
                             <span>{t('conn.empty.addConnBtn')}</span>
@@ -2318,7 +2325,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                           <button
                             type="button"
                             onClick={handleAddMockProfile}
-                            className="h-[30px] px-3.5 border border-cyan-500/40 bg-cyan-950/30 text-cyan-300 rounded text-[12px] hover:bg-cyan-900/40 cursor-pointer flex items-center gap-1.5"
+                            className="h-[30px] px-3.5 border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] text-focus rounded text-[12px] hover:bg-[var(--status-focus-bg)] cursor-pointer flex items-center gap-1.5"
                             title={t('conn.btn.addSimulatorTitle')}
                           >
                             <Cpu className="w-3.5 h-3.5" />
@@ -2373,7 +2380,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                               onChange={() =>
                                 void handleConnectOrDisconnectProfile(prof)
                               }
-                              className="accent-emerald-600 cursor-pointer h-4 w-4"
+                              className="accent-nominal cursor-pointer h-4 w-4"
                               title={
                                 Boolean(liveBus)
                                   ? t('conn.row.connectedTooltip', {
@@ -2457,11 +2464,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                         <td>
                           <div className="pcan-cell font-sans text-[12px]">
                             {prof.listenOnly ? (
-                              <span className="text-emerald-500 font-medium">
+                              <span className="text-nominal font-medium">
                                 {t('conn.row.listenOnly')}
                               </span>
                             ) : (
-                              <span className="text-amber-500 font-semibold">
+                              <span className="text-warn font-semibold">
                                 {t('conn.row.activeCan')}
                               </span>
                             )}
@@ -2473,7 +2480,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                             {famStatus === undefined ? (
                               <span className="text-[var(--text-muted)]">—</span>
                             ) : famStatus.installed ? (
-                              <span className="text-emerald-500 font-semibold">
+                              <span className="text-nominal font-semibold">
                                 {t('conn.status.ready')}
                               </span>
                             ) : famStatus.osSupported === false ? (
@@ -2482,7 +2489,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                               </span>
                             ) : (
                               <span
-                                className="text-amber-500 font-semibold"
+                                className="text-warn font-semibold"
                                 title={famStatus.installHint}
                               >
                                 {t('conn.row.missing')}
@@ -2516,9 +2523,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                               }
                               style={{
                                 backgroundColor: liveBus
-                                  ? 'rgba(220, 38, 38, 0.14)'
-                                  : 'rgba(16, 185, 129, 0.16)',
-                                borderColor: liveBus ? '#dc2626' : '#10b981',
+                                  ? 'var(--status-critical-bg)'
+                                  : 'var(--status-nominal-bg)',
+                                borderColor: liveBus ? 'var(--status-critical)' : 'var(--status-nominal)',
                               }}
                               className="h-[26px] px-2.5 border text-[11.5px] font-semibold cursor-pointer"
                             >
@@ -2538,16 +2545,16 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                                 }
                                 style={{
                                   backgroundColor: liveBus.txArmed
-                                    ? 'rgba(245, 158, 11, 0.2)'
+                                    ? 'var(--status-warn-bg)'
                                     : 'var(--bg-toolbar)',
                                   borderColor: liveBus.txArmed
-                                    ? '#f59e0b'
+                                    ? 'var(--status-warn)'
                                     : 'var(--border-strong)',
                                 }}
                                 className="h-[26px] px-2 border text-[11.5px] cursor-pointer"
                                 title={t('conn.btn.armDisarmTitle')}
                               >
-                                <Unlock className="w-3 h-3 inline text-amber-500" />
+                                <Unlock className="w-3 h-3 inline text-warn" />
                               </button>
                             )}
 
@@ -2562,10 +2569,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                                 backgroundColor: 'var(--bg-toolbar)',
                                 borderColor: 'var(--border-strong)',
                               }}
-                              className="h-[26px] px-2 border text-[11.5px] cursor-pointer hover:border-sky-500/60"
+                              className="h-[26px] px-2 border text-[11.5px] cursor-pointer hover:border-[var(--status-focus-border)]"
                               title={t('conn.btn.editTitle')}
                             >
-                              <Pencil className="w-3 h-3 text-sky-400" />
+                              <Pencil className="w-3 h-3 text-focus" />
                             </button>
 
                             <button
@@ -2591,7 +2598,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                                   backgroundColor: 'var(--bg-toolbar)',
                                   borderColor: 'var(--border-strong)',
                                 }}
-                                className="h-[26px] px-2 border text-[11.5px] text-[var(--text-secondary)] hover:text-red-400 cursor-pointer"
+                                className="h-[26px] px-2 border text-[11.5px] text-[var(--text-secondary)] hover:text-critical cursor-pointer"
                                 title={t('conn.btn.deleteTitle')}
                               >
                                 <Trash2 className="w-3 h-3" />
@@ -2629,7 +2636,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               <button
                 type="button"
                 onClick={() => setEditorOpen(false)}
-                className="h-[24px] px-2 text-[11px] border border-[var(--border-strong)] bg-[var(--bg-panel)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-slate-500 flex items-center gap-1 cursor-pointer rounded-xs shrink-0"
+                className="h-[24px] px-2 text-[11px] border border-[var(--border-strong)] bg-[var(--bg-panel)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-strong flex items-center gap-1 cursor-pointer rounded-xs shrink-0"
                 title={t('conn.editor.close')}
               >
                 <X className="w-3.5 h-3.5" />
@@ -2749,7 +2756,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               (draftDriverStatus.installed ? (
                 <div className="flex items-center justify-between text-[12px] text-[var(--text-secondary)] font-mono">
                   <span>
-                    <span className="text-emerald-500 mr-1.5 font-bold">✓</span>
+                    <span className="text-nominal mr-1.5 font-bold">✓</span>
                     {draftDriverStatus.detectedLibraryOrModule ??
                       draftDriverStatus.displayName}
                   </span>
@@ -2771,11 +2778,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 <div
                   style={{
                     backgroundColor: 'var(--bg-row-alt)',
-                    borderColor: 'rgba(245, 158, 11, 0.6)',
+                    borderColor: 'var(--status-warn-border)',
                   }}
                   className="p-2 border text-[12px] space-y-1"
                 >
-                  <div className="font-semibold text-amber-400 flex items-center gap-1">
+                  <div className="font-semibold text-warn flex items-center gap-1">
                     <TriangleAlert className="w-3.5 h-3.5" />
                     <span>{t('conn.status.hwPresentNeedsDriver')}</span>
                   </div>
@@ -2787,11 +2794,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 <div
                   style={{
                     backgroundColor: 'var(--bg-row-alt)',
-                    borderColor: 'rgba(217, 155, 38, 0.55)',
+                    borderColor: 'var(--status-warn-border)',
                   }}
                   className="p-2.5 border text-[12px] space-y-1"
                 >
-                  <div className="font-semibold text-amber-400">
+                  <div className="font-semibold text-warn">
                     {t('conn.editor.driverNotInstalled', {
                       name: draftDriverStatus.displayName,
                     })}
@@ -2812,7 +2819,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     {t('conn.editor.detectedChannels')} (
                     {detectedChannelDetails.length})
                   </span>
-                  <span className="font-mono text-[10px] text-sky-400">
+                  <span className="font-mono text-[10px] text-focus">
                     Live Subsystem
                   </span>
                 </label>
@@ -2865,12 +2872,12 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   <div
                     style={{
                       backgroundColor: 'var(--bg-row-alt)',
-                      borderColor: 'rgba(56, 189, 248, 0.4)',
+                      borderColor: 'var(--status-focus-border)',
                     }}
                     className="p-2 border font-mono text-[11px] space-y-1.5"
                   >
                     <div className="flex items-center justify-between text-[var(--text-secondary)]">
-                      <span className="font-sans font-medium text-sky-400 flex items-center gap-1">
+                      <span className="font-sans font-medium text-focus flex items-center gap-1">
                         <Terminal className="w-3.5 h-3.5" />
                         {t('conn.editor.runHintCmd')}
                       </span>
@@ -2882,10 +2889,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                             'hintCmd',
                           )
                         }
-                        className="px-2 py-0.5 border border-sky-500/50 bg-sky-950/40 text-sky-300 hover:bg-sky-900/50 flex items-center gap-1 cursor-pointer text-[10px]"
+                        className="px-2 py-0.5 border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] text-focus hover:bg-[var(--status-focus-bg)] flex items-center gap-1 cursor-pointer text-[10px]"
                       >
                         {copiedKey === 'hintCmd' ? (
-                          <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                          <CheckCircle2 className="w-3 h-3 text-nominal" />
                         ) : (
                           <Copy className="w-3 h-3" />
                         )}
@@ -2915,7 +2922,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 }}
                 className="p-2.5 border space-y-2.5"
               >
-                <div className="font-semibold text-sky-500 flex items-center gap-1.5 text-[12px]">
+                <div className="font-semibold text-focus flex items-center gap-1.5 text-[12px]">
                   <Usb className="w-4 h-4" />
                   <span>{t('conn.editor.slcanConfig')}</span>
                 </div>
@@ -2982,7 +2989,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                         backgroundColor: 'var(--bg-input)',
                         borderColor:
                           draft.serialPort.trim().length === 0
-                            ? '#ef4444'
+                            ? 'var(--status-critical)'
                             : 'var(--border-strong)',
                         color: 'var(--text-primary)',
                       }}
@@ -3026,7 +3033,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     onChange={(e) =>
                       setDraft((p) => ({ ...p, serialDtrRts: e.target.checked }))
                     }
-                    className="accent-emerald-600 h-4 w-4"
+                    className="accent-nominal h-4 w-4"
                   />
                   <span>{t('conn.editor.assertDtrRts')}</span>
                 </label>
@@ -3388,7 +3395,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   onChange={(e) =>
                     setDraft((p) => ({ ...p, enableFd: e.target.checked }))
                   }
-                  className="accent-sky-600 h-4 w-4"
+                  className="accent-focus h-4 w-4"
                 />
                 <span>{t('conn.editor.enableCanFd')}</span>
               </label>
@@ -3409,7 +3416,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   onChange={(e) =>
                     setDraft((p) => ({ ...p, listenOnly: e.target.checked }))
                   }
-                  className="accent-emerald-600 h-4 w-4"
+                  className="accent-nominal h-4 w-4"
                 />
                 <span>{t('conn.editor.listenOnlySafe')}</span>
               </label>
@@ -3425,7 +3432,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     onChange={(e) =>
                       setDraft((p) => ({ ...p, requireHardwareListenOnly: e.target.checked }))
                     }
-                    className="accent-emerald-600 h-4 w-4"
+                    className="accent-nominal h-4 w-4"
                   />
                   <span>{t('sec.hwlo.require')}</span>
                 </label>
@@ -3441,7 +3448,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                       autoConnectOnProjectLoad: e.target.checked,
                     }))
                   }
-                  className="accent-sky-600 h-4 w-4"
+                  className="accent-focus h-4 w-4"
                 />
                 <span>{t('conn.editor.autoConnect')}</span>
               </label>
@@ -3491,7 +3498,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
             >
               <div className="flex items-center justify-between gap-1 flex-wrap">
                 <span className="font-semibold text-[var(--text-primary)] flex items-center gap-1.5">
-                  <BookOpen className="w-3.5 h-3.5 text-sky-400" />
+                  <BookOpen className="w-3.5 h-3.5 text-focus" />
                   <span>{t('conn.guide.title')}</span>
                 </span>
 
@@ -3510,11 +3517,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                               : 'var(--bg-panel)',
                           borderColor:
                             guideOsPreview === osKey
-                              ? '#38bdf8'
+                              ? 'var(--status-focus)'
                               : 'var(--border-grid)',
                           color:
                             guideOsPreview === osKey
-                              ? '#38bdf8'
+                              ? 'var(--status-focus)'
                               : 'var(--text-secondary)',
                         }}
                         className="px-1.5 py-0.5 border cursor-pointer uppercase font-medium"
@@ -3571,7 +3578,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                             href={step.docUrl}
                             target="_blank"
                             rel="noreferrer"
-                            className="text-sky-400 hover:underline flex items-center gap-0.5 text-[10px]"
+                            className="text-focus hover:underline flex items-center gap-0.5 text-[10px]"
                           >
                             <ExternalLink className="w-2.5 h-2.5" />
                             {t('conn.guide.openDoc')}
@@ -3594,10 +3601,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                                 `step-${idx}`,
                               )
                             }
-                            className="shrink-0 px-1.5 py-0.5 border border-[var(--border-strong)] hover:border-sky-400 text-sky-400 bg-[var(--bg-panel)] text-[10px] flex items-center gap-0.5 cursor-pointer"
+                            className="shrink-0 px-1.5 py-0.5 border border-[var(--border-strong)] hover:border-[var(--status-focus-border)] text-focus bg-[var(--bg-panel)] text-[10px] flex items-center gap-0.5 cursor-pointer"
                           >
                             {copiedKey === `step-${idx}` ? (
-                              <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />
+                              <CheckCircle2 className="w-2.5 h-2.5 text-nominal" />
                             ) : (
                               <Copy className="w-2.5 h-2.5" />
                             )}
@@ -3644,13 +3651,13 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               type="button"
               onClick={() => void handleSaveAndConnect()}
               style={{
-                backgroundColor: 'rgba(63, 185, 128, 0.16)',
-                borderColor: 'rgba(63, 185, 128, 0.65)',
+                backgroundColor: 'var(--status-nominal-bg)',
+                borderColor: 'var(--status-nominal-border)',
                 color: 'var(--text-primary)',
               }}
               className="h-[30px] px-3.5 border flex items-center gap-1.5 text-[12px] font-semibold hover:opacity-90 cursor-pointer"
             >
-              <Plug className="w-3.5 h-3.5 text-emerald-500" />
+              <Plug className="w-3.5 h-3.5 text-nominal" />
               <span>{t('conn.editor.saveAndConnect')}</span>
             </button>
           </div>

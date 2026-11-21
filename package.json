@@ -34,10 +34,15 @@
     "test:re-r2b-qa": "esbuild src/components/re/re.r2b.qa.test.ts --bundle --platform=node --format=esm | node --input-type=module",
     "test:re-r2c": "esbuild src/components/re/re.r2c.test.ts --bundle --platform=node --format=esm | node --input-type=module",
     "test:re-r2c-qa": "esbuild src/components/re/re.r2c.qa.test.ts --bundle --platform=node --format=esm | node --input-type=module",
-    "test:re-hardening": "esbuild src/components/re/re.hardening.test.ts --bundle --platform=node --format=esm | node --input-type=module"
+    "test:re-hardening": "esbuild src/components/re/re.hardening.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "lint:theme": "node scripts/check-theme-tokens.mjs",
+    "lint:theme:strict": "node scripts/check-theme-tokens.mjs --strict",
+    "test:onboarding": "esbuild src/onboarding/onboarding.test.ts --bundle --platform=node --format=esm | node --input-type=module",
+    "test:updates": "esbuild src/store/updateStore.test.ts --bundle --platform=node --format=esm | node --input-type=module"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.2.0",
+    "driver.js": "^1.14.0",
     "lucide-react": "^0.475.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

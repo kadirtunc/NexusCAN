@@ -319,6 +319,7 @@ export function SimulationPanelListView<P extends SimulationPanelDto = Simulatio
                 type="button"
                 disabled={savingPanel}
                 onClick={onOpenGenerateFromDbcModal}
+                data-tour="panels.from-dbc"
                 className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[2px] border border-strong bg-elevated px-3 font-mono text-[11px] font-semibold uppercase text-ink hover:bg-hover disabled:opacity-50"
               >
                 <Database
@@ -334,6 +335,7 @@ export function SimulationPanelListView<P extends SimulationPanelDto = Simulatio
                 type="button"
                 disabled={savingPanel}
                 onClick={onOpenCreateModal}
+                data-tour="panels.new"
                 className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-[2px] px-3.5 font-mono text-[11px] font-semibold uppercase text-white disabled:opacity-50"
                 style={{ backgroundColor: 'var(--status-focus)' }}
               >
@@ -426,7 +428,7 @@ export function SimulationPanelListView<P extends SimulationPanelDto = Simulatio
         </div>
 
         {/* 3. Panel Directory Table / Empty State */}
-        <div className="rounded-[2px] border border-hairline bg-surface">
+        <div data-tour="panels.list" className="rounded-[2px] border border-hairline bg-surface">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-hairline bg-elevated px-4 py-2.5">
             <div className="flex items-center gap-2 font-mono text-[12px] font-semibold uppercase tracking-wider tabular-nums text-ink">
               <span>{t('simWb.list.tableHeader', { count: filteredPanels.length })}</span>
