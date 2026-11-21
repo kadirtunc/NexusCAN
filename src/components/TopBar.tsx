@@ -6,6 +6,8 @@ import {
   Boxes,
   Building2,
   Columns2,
+  Ellipsis,
+  RefreshCw,
   FilePlus2,
   FolderOpen,
   FolderX,
@@ -25,7 +27,8 @@ import {
   Unplug,
   UploadCloud,
 } from 'lucide-react';
-import { apiControlTraceReplay, apiDisconnectAllBuses } from '../services/ipcClient';
+import { apiControlTraceReplay, apiDisconnectAllBuses, isTauri } from '../services/ipcClient';
+import { updateStore } from '../store/updateStore';
 import { cloudBridgeStore, useCloudBridgeHeader } from '../store/cloudBridgeStore';
 import { useExperimentalCloud } from '../store/experimentalStore';
 import { databaseStore, useDatabaseStore, type ActiveDocumentTab } from '../store/databaseStore';
@@ -40,6 +43,9 @@ import { transmitStore } from '../store/transmitStore';
 import { workbenchStore, useWorkbenchStore } from '../store/workbenchStore';
 import { debugConsoleStore, useDebugConsoleStore } from '../store/debugConsoleStore';
 import { mcpStore, useMcpStore } from '../store/mcpStore';
+import { UI_SCALE_OPTIONS, uiScaleStore, useUiScale } from '../store/uiScaleStore';
+import { onboardingStore } from '../store/onboardingStore';
+import { guidePageForTab } from '../onboarding/registry';
 import { isToolpackEnabled } from '../types/toolpacks';
 import type { DeviceDescriptorDto } from '../types/hal';
 
@@ -100,7 +106,11 @@ type MenuKey =
   | 'trace'
   | 'cloud'
   | 'view'
-  | 'help';
+  | 'help'
+  | 'overflow';
+
+const OVERFLOW_ITEM_CLS =
+  'w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)] flex items-center gap-2 disabled:opacity-50';
 
 interface TopBarProps {
   devices: readonly DeviceDescriptorDto[];
@@ -121,6 +131,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   const { t, locale, setLocale } = useI18n();
   const header = useTelemetryHeader();
   const dbState = useDatabaseStore();
+  const guidePage = guidePageForTab(dbState.activeDocTab);
   const projState = useProjectStore();
   const cloudHeader = useCloudBridgeHeader();
   const cloudOn = useExperimentalCloud();
@@ -131,6 +142,11 @@ export const TopBar: React.FC<TopBarProps> = ({
   const activeTrace = traceSessionsStore.getSession(traceState.activeSessionId);
 
   const [openMenu, setOpenMenu] = useState<MenuKey | null>(null);
+  const uiScale = useUiScale();
+
+  useEffect(() => {
+    uiScaleStore.init();
+  }, []);
 
   const connectedBuses = header.buses.filter((b) => b.connected);
   const connectedBusCount = connectedBuses.length;
@@ -394,7 +410,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   };
 
   return (
-    <header className="shrink-0 select-none text-[12px] flex flex-col border-b border-[var(--border-strong)]">
+    <header className="@container shrink-0 min-w-0 select-none text-[12px] flex flex-col border-b border-[var(--border-strong)]">
       {/* Hidden file input for opening trace files from TopBar */}
       <input
         ref={topBarTraceFileInputRef}
@@ -411,17 +427,17 @@ export const TopBar: React.FC<TopBarProps> = ({
           backgroundColor: 'var(--bg-header)',
           borderBottom: '1px solid var(--border-grid)',
         }}
-        className="h-[36px] px-3 flex items-center justify-between gap-2"
+        className="h-[36px] px-3 flex flex-nowrap items-center justify-between gap-2 min-w-0"
       >
         {/* Left: Backend status + Logo + Project Title + Desktop Menus */}
-        <div className="flex items-center gap-1.5 min-w-0">
+        <div className="flex flex-nowrap items-center gap-1.5 min-w-0 flex-1">
           <span
             className={`w-2.5 h-2.5 rounded-full shrink-0 ${
               connectedBusCount > 0
-                ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.6)]'
+                ? 'bg-nominal'
                 : header.transportConnected
-                  ? 'bg-slate-400'
-                  : 'bg-amber-500'
+                  ? 'bg-muted'
+                  : 'bg-warn'
             }`}
             title={
               connectedBusCount > 0
@@ -434,16 +450,16 @@ export const TopBar: React.FC<TopBarProps> = ({
           <img
             src="/logo.png"
             alt="NexusCAN Logo"
-            className="w-[18px] h-[18px] rounded-[2px] border border-[#0E7490]/60 shrink-0 mx-1"
+            className="w-[18px] h-[18px] rounded-[2px] border border-[var(--status-focus)]/60 shrink-0 mx-1"
             width={18}
             height={18}
           />
-          <span className="font-bold tracking-tight text-[var(--text-primary)] text-[13px] truncate max-w-[220px] pr-2.5 border-r border-[var(--border-grid)]">
+          <span className="font-bold tracking-tight text-[var(--text-primary)] text-[13px] truncate min-w-0 shrink max-w-[220px] @max-[1500px]:max-w-[140px] pr-2.5 border-r border-[var(--border-grid)]" title={projState.currentName}>
             {projState.currentName}
           </span>
 
           {/* Menus Container */}
-          <nav className="flex items-center gap-1 text-[13px] font-sans">
+          <nav className="flex flex-nowrap items-center gap-1 text-[13px] font-sans shrink-0 whitespace-nowrap">
             {/* 1. File Menu */}
             <div className="relative" data-menubar-item>
               <button
@@ -506,7 +522,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                       setOpenMenu(null);
                       void handleCloseProject();
                     }}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-red-400 disabled:opacity-40 disabled:hover:bg-transparent"
+                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-critical disabled:opacity-40 disabled:hover:bg-transparent"
                   >
                     {t('shell.menu.file.close')}
                   </button>
@@ -541,7 +557,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                       setOpenMenu(null);
                       workbenchStore.setNewConnectionModalOpen(true);
                     }}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-emerald-400 font-medium"
+                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-nominal font-medium"
                   >
                     {t('shell.menu.connections.add')}
                   </button>
@@ -563,7 +579,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                       setOpenMenu(null);
                       void handleDisconnectAll();
                     }}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-red-400 disabled:opacity-40 disabled:hover:bg-transparent font-medium"
+                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-critical disabled:opacity-40 disabled:hover:bg-transparent font-medium"
                   >
                     {t('shell.menu.connections.disconnectAll', { count: connectedBusCount })}
                   </button>
@@ -609,7 +625,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                       setOpenMenu(null);
                       databaseStore.setActiveDocTab('symbols');
                     }}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-sky-400"
+                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-focus"
                   >
                     {t('shell.menu.dbcStudio.pullCloud')}
                   </button>
@@ -677,7 +693,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                       setOpenMenu(null);
                       void onPanicStop();
                     }}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-red-500 font-semibold flex items-center justify-between"
+                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-critical font-semibold flex items-center justify-between"
                   >
                     <span>{t('shell.menu.transmit.panicStop')}</span>
                     <span className="text-[11px] font-mono">Ctrl+Shift+Space</span>
@@ -714,7 +730,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                       handleToggleTraceRecording();
                     }}
                     className={`w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] font-medium flex items-center justify-between ${
-                      activeTrace.state === 'recording' ? 'text-red-400' : 'text-emerald-400'
+                      activeTrace.state === 'recording' ? 'text-critical' : 'text-nominal'
                     }`}
                   >
                     <span>
@@ -731,7 +747,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                       setOpenMenu(null);
                       handleSpawnNewTraceSession();
                     }}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-sky-400 font-medium flex items-center justify-between"
+                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-focus font-medium flex items-center justify-between"
                   >
                     <span>{t('shell.menu.trace.spawnNew')}</span>
                     <span className="text-[11px] font-mono text-[var(--text-muted)]">Ctrl+Shift+T</span>
@@ -751,7 +767,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                           }),
                         });
                       }}
-                      className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-amber-400"
+                      className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-warn"
                     >
                       {t('shell.menu.trace.pauseRec')}
                     </button>
@@ -780,7 +796,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                       setOpenMenu(null);
                       topBarTraceFileInputRef.current?.click();
                     }}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-amber-400 font-medium"
+                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-warn font-medium"
                   >
                     {t('shell.menu.trace.openFromFile')}
                   </button>
@@ -792,7 +808,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                       setOpenMenu(null);
                       void handleSaveActiveTraceToDisk();
                     }}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-emerald-400 font-medium disabled:opacity-40"
+                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-nominal font-medium disabled:opacity-40"
                   >
                     {t('shell.menu.trace.saveToDisk')}
                   </button>
@@ -804,7 +820,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                       setOpenMenu(null);
                       void handleToggleTraceReplay();
                     }}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-cyan-400 font-medium disabled:opacity-40"
+                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-focus font-medium disabled:opacity-40"
                   >
                     {header.replay && header.replay.state !== 'idle'
                       ? t('shell.menu.trace.stopReplay')
@@ -852,7 +868,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                   <div className="px-3.5 py-1 text-[11px] font-mono text-[var(--text-muted)] uppercase flex items-center justify-between">
                     <span>{t('shell.menu.trace.sessionsHeader', { count: traceState.sessions.length })}</span>
                     {traceState.recordingCount > 0 && (
-                      <span className="text-red-400 font-bold">{traceState.recordingCount} REC</span>
+                      <span className="text-critical font-bold">{traceState.recordingCount} REC</span>
                     )}
                   </div>
                   {traceState.sessions.map((sess) => {
@@ -867,21 +883,21 @@ export const TopBar: React.FC<TopBarProps> = ({
                           databaseStore.setActiveDocTab('trace');
                         }}
                         className={`w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] flex items-center justify-between ${
-                          isSelected ? 'bg-[var(--bg-row-selected)] text-sky-400 font-semibold' : 'text-[var(--text-primary)]'
+                          isSelected ? 'bg-[var(--bg-row-selected)] text-focus font-semibold' : 'text-[var(--text-primary)]'
                         }`}
                       >
                         <span className="flex items-center gap-1.5 truncate">
                           <span
                             className={`w-2.5 h-2.5 rounded-full shrink-0 ${
                               sess.state === 'recording'
-                                ? 'bg-red-500 animate-pulse'
+                                ? 'bg-critical animate-pulse'
                                 : sess.state === 'paused'
-                                  ? 'bg-amber-400'
-                                  : 'bg-slate-500'
+                                  ? 'bg-warn'
+                                  : 'bg-muted'
                             }`}
                           />
                           <span className="truncate">{sess.name}</span>
-                          {isSelected && <span className="text-[11px] text-sky-400">{t('shell.menu.trace.active')}</span>}
+                          {isSelected && <span className="text-[11px] text-focus">{t('shell.menu.trace.active')}</span>}
                         </span>
                         <span className="font-mono text-[11px] text-[var(--text-muted)] tabular-nums pl-2">
                           {t('shell.menu.trace.framesCount', { count: sess.count.toLocaleString('en-US') })}
@@ -901,7 +917,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                         message: t('shell.topbar.traceDirCopied', { path: traceState.tracesDir }),
                       });
                     }}
-                    className="px-3.5 py-2 bg-[var(--bg-toolbar)] text-[11px] font-mono text-emerald-400 cursor-pointer hover:bg-[var(--bg-row-hover)] flex items-center justify-between"
+                    className="px-3.5 py-2 bg-[var(--bg-toolbar)] text-[11px] font-mono text-nominal cursor-pointer hover:bg-[var(--bg-row-hover)] flex items-center justify-between"
                     title={t('shell.menu.trace.copyDirTooltip')}
                   >
                     <span className="truncate">📁 {traceState.tracesDir}</span>
@@ -950,7 +966,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                         setOpenMenu(null);
                         databaseStore.setActiveDocTab('panels');
                       }}
-                      className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-amber-400 font-medium"
+                      className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-warn font-medium"
                     >
                       {t('shell.menu.cloud.simWorkbench')}
                     </button>
@@ -963,7 +979,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                           setOpenMenu(null);
                           void handlePushActiveProject();
                         }}
-                        className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-sky-400 font-medium"
+                        className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-focus font-medium"
                       >
                         {t('shell.menu.cloud.pushProject')}
                       </button>
@@ -973,7 +989,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                           setOpenMenu(null);
                           void handleToggleLiveStream();
                         }}
-                        className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-emerald-400 font-medium"
+                        className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-nominal font-medium"
                       >
                         {isStreaming ? t('shell.menu.cloud.stopStream') : t('shell.menu.cloud.startStream')}
                       </button>
@@ -988,7 +1004,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                             message: t('shell.topbar.cloudSignedOut'),
                           });
                         }}
-                        className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-red-400"
+                        className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-critical"
                       >
                         {t('shell.menu.cloud.signOut', { email: cloudHeader.userEmail })}
                       </button>
@@ -1000,7 +1016,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                         setOpenMenu(null);
                         databaseStore.setActiveDocTab('cloud');
                       }}
-                      className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-sky-400"
+                      className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-focus"
                     >
                       {t('shell.menu.cloud.signIn')}
                     </button>
@@ -1074,7 +1090,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                     }}
                     className={`w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] ${
                       workbench.splitSecondaryTab === null
-                        ? 'text-sky-400 font-semibold'
+                        ? 'text-focus font-semibold'
                         : 'text-[var(--text-primary)]'
                     }`}
                   >
@@ -1088,7 +1104,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                     }}
                     className={`w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] ${
                       workbench.splitSecondaryTab === 'trace'
-                        ? 'text-sky-400 font-semibold'
+                        ? 'text-focus font-semibold'
                         : 'text-[var(--text-primary)]'
                     }`}
                   >
@@ -1102,7 +1118,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                     }}
                     className={`w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] ${
                       workbench.splitSecondaryTab === 'plotter'
-                        ? 'text-sky-400 font-semibold'
+                        ? 'text-focus font-semibold'
                         : 'text-[var(--text-primary)]'
                     }`}
                   >
@@ -1116,7 +1132,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                     }}
                     className={`w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] ${
                       workbench.splitSecondaryTab === 'symbols'
-                        ? 'text-sky-400 font-semibold'
+                        ? 'text-focus font-semibold'
                         : 'text-[var(--text-primary)]'
                     }`}
                   >
@@ -1131,7 +1147,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                       }}
                       className={`w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] ${
                         workbench.splitSecondaryTab === 'panels'
-                          ? 'text-amber-400 font-semibold'
+                          ? 'text-warn font-semibold'
                           : 'text-[var(--text-primary)]'
                       }`}
                     >
@@ -1149,6 +1165,27 @@ export const TopBar: React.FC<TopBarProps> = ({
                   >
                     {dbState.theme === 'dark' ? t('shell.menu.view.switchToLight') : t('shell.menu.view.switchToDark')}
                   </button>
+                  <div className="my-1.5 border-t border-[var(--border-grid)]" />
+                  <div className="px-3.5 py-1 text-[11px] font-mono text-[var(--text-muted)] uppercase">
+                    {t('shell.menu.view.uiScale')}
+                  </div>
+                  <div className="px-3.5 pb-1.5 pt-0.5 flex items-center gap-1" role="group" aria-label={t('shell.menu.view.uiScale')}>
+                    {UI_SCALE_OPTIONS.map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        onClick={() => uiScaleStore.set(pct)}
+                        aria-pressed={uiScale === pct}
+                        className={`flex-1 h-[28px] border rounded-[3px] font-mono tabular-nums text-[12px] cursor-pointer ${
+                          uiScale === pct
+                            ? 'border-[var(--status-focus-border)] bg-[var(--bg-row-selected)] text-focus font-semibold'
+                            : 'border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                        }`}
+                      >
+                        {pct}%
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -1183,11 +1220,35 @@ export const TopBar: React.FC<TopBarProps> = ({
                     className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)] flex items-center justify-between"
                   >
                     <span>{t('shell.menu.help.toolpacks')}</span>
-                    <span className="font-mono text-[10.5px] px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800">
+                    <span className="font-mono text-[10.5px] px-1.5 py-0.5 rounded bg-[var(--status-focus-bg)] text-focus border border-[var(--status-focus-border)]">
                       {projState.enabledToolpacks.length}/7
                     </span>
                   </button>
+                  {guidePage !== null && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenMenu(null);
+                        onboardingStore.openDialog(guidePage.id);
+                      }}
+                      className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)]"
+                    >
+                      {t('onb.menu.thisPage')}
+                    </button>
+                  )}
                   <div className="my-1.5 border-t border-[var(--border-grid)]" />
+                  {isTauri && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenMenu(null);
+                        updateStore.openDialog(true);
+                      }}
+                      className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)]"
+                    >
+                      {t('upd.menu.check')}
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => {
@@ -1205,7 +1266,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         </div>
 
         {/* Right Corner of Menu Bar: Fixed Organization & Cloud Identity & Language Switcher */}
-        <div className="flex items-center gap-2 shrink-0 text-[12px] font-mono tabular-nums">
+        <div className="flex flex-nowrap items-center gap-2 shrink-0 text-[12px] font-mono tabular-nums">
           {!cloudOn ? null : cloudHeader.isAuthenticated ? (
             <>
               {/* Organization Indicator / Selector */}
@@ -1218,14 +1279,14 @@ export const TopBar: React.FC<TopBarProps> = ({
                   }}
                   title={t('shell.topbar.activeOrgTooltip', { name: cloudHeader.selectedOrgName || '—' })}
                 >
-                  <Building2 className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                  <Building2 className="w-3.5 h-3.5 text-focus shrink-0" />
                   <select
                     value={cloudHeader.selectedOrgId ?? ''}
                     onChange={(e) => cloudBridgeStore.selectOrganization(e.target.value)}
-                    className="bg-transparent border-0 outline-none text-[12px] font-mono cursor-pointer py-0 pr-0.5 max-w-[140px] truncate text-[var(--text-primary)]"
+                    className="bg-transparent border-0 outline-none text-[12px] font-mono cursor-pointer py-0 pr-0.5 max-w-[140px] @max-[1500px]:max-w-[90px] truncate text-[var(--text-primary)]"
                   >
                     {cloudHeader.organizations.map((org) => (
-                      <option key={org.id} value={org.id} className="bg-slate-900 text-slate-100">
+                      <option key={org.id} value={org.id} className="bg-panel text-primary">
                         {org.name} ({org.myRole})
                       </option>
                     ))}
@@ -1244,12 +1305,12 @@ export const TopBar: React.FC<TopBarProps> = ({
                     role: cloudHeader.selectedOrgRole || 'engineer',
                   })}
                 >
-                  <Building2 className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                  <span className="truncate max-w-[130px] text-[var(--text-primary)] font-medium">
+                  <Building2 className="w-3.5 h-3.5 text-focus shrink-0" />
+                  <span className="truncate max-w-[130px] @max-[1500px]:max-w-[80px] text-[var(--text-primary)] font-medium">
                     {cloudHeader.selectedOrgName || t('shell.topbar.orgLoading')}
                   </span>
                   {cloudHeader.selectedOrgRole && (
-                    <span className="text-[11px] text-[var(--text-muted)]">
+                    <span className="text-[11px] text-[var(--text-muted)] @max-[1500px]:hidden">
                       [{cloudHeader.selectedOrgRole}]
                     </span>
                   )}
@@ -1265,20 +1326,21 @@ export const TopBar: React.FC<TopBarProps> = ({
                 }}
                 style={{
                   backgroundColor: isStreaming
-                    ? 'rgba(16, 185, 129, 0.15)'
-                    : 'rgba(56, 189, 248, 0.12)',
-                  borderColor: isStreaming ? '#10B981' : 'rgba(56, 189, 248, 0.45)',
-                  color: isStreaming ? '#34D399' : '#38BDF8',
+                    ? 'var(--status-nominal-bg)'
+                    : 'var(--status-focus-bg)',
+                  borderColor: isStreaming ? 'var(--status-nominal)' : 'var(--status-focus-border)',
+                  color: isStreaming ? 'var(--status-nominal)' : 'var(--status-focus)',
                 }}
                 className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[12px] font-semibold hover:opacity-90 cursor-pointer shrink-0 rounded-[3px]"
                 title={t('shell.topbar.cloudBadgeTooltip')}
+                aria-label={t('shell.topbar.cloudBadgeTooltip')}
               >
                 <span
                   className={`w-2 h-2 rounded-full shrink-0 ${
-                    isStreaming ? 'bg-emerald-400 animate-pulse' : 'bg-sky-400'
+                    isStreaming ? 'bg-nominal animate-pulse' : 'bg-focus'
                   }`}
                 />
-                <span>
+                <span className="@max-[1400px]:hidden">
                   {isStreaming
                     ? `LIVE ${cloudHeader.targetHz}Hz`
                     : `☁ ${projState.cloudBinding?.projectCode ?? 'Cloud'}`}
@@ -1296,9 +1358,10 @@ export const TopBar: React.FC<TopBarProps> = ({
               }}
               className="h-[28px] px-2.5 border flex items-center gap-1.5 text-[12px] hover:text-[var(--text-primary)] cursor-pointer shrink-0 rounded-[3px]"
               title={t('shell.topbar.localModeBtnTooltip')}
+              aria-label={t('shell.topbar.localModeBtnTooltip')}
             >
-              <span className="w-2 h-2 rounded-full bg-slate-500 shrink-0" />
-              <span>{t('shell.topbar.localModeBtn')}</span>
+              <span className="w-2 h-2 rounded-full bg-muted shrink-0" />
+              <span className="@max-[1400px]:hidden">{t('shell.topbar.localModeBtn')}</span>
             </button>
           )}
 
@@ -1316,10 +1379,10 @@ export const TopBar: React.FC<TopBarProps> = ({
               onClick={() => setLocale('tr')}
               style={{
                 backgroundColor: locale === 'tr' ? 'var(--bg-row-selected)' : 'transparent',
-                color: locale === 'tr' ? '#38BDF8' : 'var(--text-muted)',
+                color: locale === 'tr' ? 'var(--status-focus)' : 'var(--text-muted)',
               }}
               className={`h-full px-2 rounded-[2px] font-semibold cursor-pointer transition-colors ${
-                locale === 'tr' ? 'border border-sky-500/50' : 'hover:text-[var(--text-primary)]'
+                locale === 'tr' ? 'border border-[var(--status-focus-border)]' : 'hover:text-[var(--text-primary)]'
               }`}
             >
               {t('shell.lang.tr')}
@@ -1329,10 +1392,10 @@ export const TopBar: React.FC<TopBarProps> = ({
               onClick={() => setLocale('en')}
               style={{
                 backgroundColor: locale === 'en' ? 'var(--bg-row-selected)' : 'transparent',
-                color: locale === 'en' ? '#38BDF8' : 'var(--text-muted)',
+                color: locale === 'en' ? 'var(--status-focus)' : 'var(--text-muted)',
               }}
               className={`h-full px-2 rounded-[2px] font-semibold cursor-pointer transition-colors ${
-                locale === 'en' ? 'border border-sky-500/50' : 'hover:text-[var(--text-primary)]'
+                locale === 'en' ? 'border border-[var(--status-focus-border)]' : 'hover:text-[var(--text-primary)]'
               }`}
             >
               {t('shell.lang.en')}
@@ -1348,10 +1411,10 @@ export const TopBar: React.FC<TopBarProps> = ({
         style={{
           backgroundColor: 'var(--bg-toolbar)',
         }}
-        className="min-h-[42px] py-1 px-3 flex items-center justify-between gap-2 flex-wrap"
+        className="h-[42px] px-3 flex flex-nowrap items-center justify-between gap-2 min-w-0"
       >
         {/* Left: Engineering Icon Groups */}
-        <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+        <div className="flex flex-nowrap items-center gap-1.5 min-w-0 flex-1 overflow-hidden whitespace-nowrap [&>*]:shrink-0">
           {/* GROUP 1: PROJECT ACTIONS */}
           <button
             type="button"
@@ -1364,7 +1427,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             className="h-[32px] w-[34px] border flex items-center justify-center hover:text-[var(--text-primary)] hover:border-[var(--text-secondary)] cursor-pointer rounded-[3px]"
             title={t('shell.toolbar.newProjectTooltip')}
           >
-            <FilePlus2 className="w-4 h-4 text-emerald-400" />
+            <FilePlus2 className="w-4 h-4 text-nominal" />
           </button>
           <button
             type="button"
@@ -1377,7 +1440,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             className="h-[32px] w-[34px] border flex items-center justify-center hover:text-[var(--text-primary)] hover:border-[var(--text-secondary)] cursor-pointer rounded-[3px]"
             title={t('shell.toolbar.openProjectsTooltip')}
           >
-            <FolderOpen className="w-4 h-4 text-amber-400" />
+            <FolderOpen className="w-4 h-4 text-warn" />
           </button>
           <button
             type="button"
@@ -1390,7 +1453,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             className="h-[32px] w-[34px] border flex items-center justify-center hover:text-[var(--text-primary)] hover:border-[var(--text-secondary)] cursor-pointer rounded-[3px]"
             title={t('shell.toolbar.saveProjectTooltip')}
           >
-            <Save className="w-4 h-4 text-sky-400" />
+            <Save className="w-4 h-4 text-focus" />
           </button>
           {projState.hasActiveWorkspace && (
             <button
@@ -1401,10 +1464,10 @@ export const TopBar: React.FC<TopBarProps> = ({
                 borderColor: 'var(--border-strong)',
                 color: 'var(--text-secondary)',
               }}
-              className="h-[32px] w-[34px] border flex items-center justify-center hover:text-red-400 hover:border-red-500/50 cursor-pointer rounded-[3px]"
+              className="h-[32px] w-[34px] border flex items-center justify-center hover:text-critical hover:border-[var(--status-critical-border)] cursor-pointer rounded-[3px]"
               title={t('shell.toolbar.closeProjectTooltip')}
             >
-              <FolderX className="w-4 h-4 text-red-400" />
+              <FolderX className="w-4 h-4 text-critical" />
             </button>
           )}
 
@@ -1419,11 +1482,11 @@ export const TopBar: React.FC<TopBarProps> = ({
               borderColor: 'var(--border-strong)',
               color: 'var(--text-primary)',
             }}
-            className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12.5px] font-semibold hover:border-emerald-500 cursor-pointer rounded-[3px]"
+            className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12.5px] font-semibold hover:border-nominal cursor-pointer rounded-[3px]"
             title={t('shell.toolbar.addConnectionTooltip')}
           >
-            <Plus className="w-3.5 h-3.5 text-emerald-400" />
-            <PlugZap className="w-4 h-4 text-emerald-400" />
+            <Plus className="w-3.5 h-3.5 text-nominal" />
+            <PlugZap className="w-4 h-4 text-nominal" />
           </button>
           <button
             type="button"
@@ -1432,9 +1495,9 @@ export const TopBar: React.FC<TopBarProps> = ({
             style={{
               backgroundColor: 'var(--bg-panel)',
               borderColor: 'var(--border-strong)',
-              color: connectedBusCount === 0 ? 'var(--text-muted)' : '#F87171',
+              color: connectedBusCount === 0 ? 'var(--text-muted)' : 'var(--status-critical)',
             }}
-            className="h-[32px] w-[34px] border flex items-center justify-center hover:border-red-500 cursor-pointer rounded-[3px] disabled:opacity-40 disabled:cursor-not-allowed"
+            className="h-[32px] w-[34px] border flex items-center justify-center hover:border-critical cursor-pointer rounded-[3px] disabled:opacity-40 disabled:cursor-not-allowed"
             title={t('shell.toolbar.disconnectAllTooltip', { count: connectedBusCount })}
           >
             <Unplug className="w-4 h-4" />
@@ -1464,9 +1527,9 @@ export const TopBar: React.FC<TopBarProps> = ({
               style={
                 activeTrace.state === 'recording'
                   ? {
-                      backgroundColor: 'rgba(239, 68, 68, 0.16)',
-                      borderColor: '#EF4444',
-                      color: '#FCA5A5',
+                      backgroundColor: 'var(--status-critical-bg)',
+                      borderColor: 'var(--status-critical)',
+                      color: 'var(--status-critical)',
                     }
                   : {
                       backgroundColor: 'var(--bg-panel)',
@@ -1476,8 +1539,8 @@ export const TopBar: React.FC<TopBarProps> = ({
               }
               className={`h-[32px] px-3 border flex items-center gap-2 text-[12.5px] font-semibold cursor-pointer rounded-[3px] transition-colors ${
                 activeTrace.state === 'recording'
-                  ? 'hover:bg-red-900/60 shadow-[0_0_8px_rgba(239,68,68,0.35)]'
-                  : 'hover:border-red-500/80 hover:text-red-400'
+                  ? 'hover:bg-[var(--status-critical-bg)]'
+                  : 'hover:border-[var(--status-critical-border)] hover:text-critical'
               }`}
               title={
                 activeTrace.state === 'recording'
@@ -1487,13 +1550,14 @@ export const TopBar: React.FC<TopBarProps> = ({
                     })
                   : t('shell.toolbar.startRecordingTooltip', { name: activeTrace.name })
               }
+              aria-label={t('shell.toolbar.startRecordingTooltip', { name: activeTrace.name })}
             >
               {activeTrace.state === 'recording' ? (
                 <>
-                  <Square className="w-3.5 h-3.5 fill-current text-red-400 shrink-0" />
-                  <span className="font-semibold text-red-200">{t('shell.toolbar.stopRecording')}</span>
-                  <span className="font-mono tabular-nums text-[11.5px] text-red-300 inline-flex items-center gap-0.5">
-                    <span>· {activeTrace.name}</span>
+                  <Square className="w-3.5 h-3.5 fill-current text-critical shrink-0" />
+                  <span className="font-semibold text-critical @max-[1500px]:hidden">{t('shell.toolbar.stopRecording')}</span>
+                  <span className="font-mono tabular-nums text-[11.5px] text-critical inline-flex items-center gap-0.5">
+                    <span className="@max-[2100px]:hidden">· {activeTrace.name}</span>
                     <span>(</span>
                     <span className="inline-block min-w-[3.5ch] text-right font-mono tabular-nums">
                       {activeTrace.count.toLocaleString('en-US')}
@@ -1503,9 +1567,9 @@ export const TopBar: React.FC<TopBarProps> = ({
                 </>
               ) : (
                 <>
-                  <span className="w-2.5 h-2.5 rounded-full bg-red-500 shrink-0 shadow-[0_0_6px_rgba(239,68,68,0.7)]" />
-                  <span>{t('shell.toolbar.startRecording')}</span>
-                  <span className="font-mono tabular-nums text-[11.5px] text-[var(--text-muted)] hidden sm:inline">
+                  <span className="w-2.5 h-2.5 rounded-full bg-critical shrink-0" />
+                  <span className="@max-[1500px]:hidden">{t('shell.toolbar.startRecording')}</span>
+                  <span className="font-mono tabular-nums text-[11.5px] text-[var(--text-muted)] @max-[2100px]:hidden">
                     ({activeTrace.name})
                   </span>
                 </>
@@ -1521,32 +1585,33 @@ export const TopBar: React.FC<TopBarProps> = ({
                 borderColor: 'var(--border-strong)',
                 color: 'var(--text-primary)',
               }}
-              className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12.5px] font-medium hover:border-sky-500 hover:text-sky-400 cursor-pointer rounded-[3px]"
+              className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12.5px] font-medium hover:border-focus hover:text-focus cursor-pointer rounded-[3px]"
               title={t('shell.toolbar.spawnTraceTooltip')}
+              aria-label={t('shell.toolbar.spawnTraceTooltip')}
             >
-              <Plus className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-              <span className="hidden sm:inline">{t('shell.toolbar.spawnTraceBtn')}</span>
+              <Plus className="w-3.5 h-3.5 text-focus shrink-0" />
+              <span className="@max-[2100px]:hidden">{t('shell.toolbar.spawnTraceBtn')}</span>
             </button>
 
             {/* Multi-recording badge */}
             {traceState.recordingCount > 1 && (
               <span
-                className="h-[32px] px-2.5 border border-red-500/70 bg-red-950/70 text-red-300 font-mono text-[11.5px] font-bold flex items-center gap-1.5 rounded-[3px] animate-pulse shrink-0"
+                className="h-[32px] px-2.5 border border-[var(--status-critical-border)] bg-[var(--status-critical-bg)] text-critical font-mono text-[11.5px] font-bold flex items-center gap-1.5 rounded-[3px] animate-pulse shrink-0"
                 title={t('shell.toolbar.multiRecordingTooltip', { count: traceState.recordingCount })}
               >
-                <span className="w-2 h-2 rounded-full bg-red-400" />
+                <span className="w-2 h-2 rounded-full bg-critical" />
                 <span>{traceState.recordingCount} REC</span>
               </span>
             )}
 
             {/* Live Replay Status & Controls Pill */}
             {header.replay && header.replay.state !== 'idle' && (
-              <div className="flex items-center gap-2 px-2.5 h-[32px] bg-cyan-950/70 border border-cyan-500/60 rounded-[3px] text-[12.5px] shrink-0">
-                <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse shrink-0 shadow-xs shadow-cyan-400/50" />
-                <span className="font-bold text-cyan-300 uppercase text-[11.5px] truncate max-w-[130px]">
+              <div className="flex items-center gap-2 px-2.5 h-[32px] bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] rounded-[3px] text-[12.5px] shrink-0">
+                <span className="w-2.5 h-2.5 rounded-full bg-focus animate-pulse shrink-0 shadow-xs" />
+                <span className="font-bold text-focus uppercase text-[11.5px] truncate max-w-[130px]">
                   {t('shell.toolbar.replayStatus', { source: header.replay.sourceName || 'Trace' })}
                 </span>
-                <span className="font-mono tabular-nums text-[11.5px] text-cyan-200 inline-block w-[5ch] text-right">
+                <span className="font-mono tabular-nums text-[11.5px] text-focus inline-block w-[5ch] text-right">
                   {Math.round((header.replay.currentIndex / Math.max(1, header.replay.totalFrames)) * 100)}%
                 </span>
                 <button
@@ -1556,7 +1621,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                       action: header.replay.state === 'playing' ? 'pause' : 'resume',
                     })
                   }
-                  className="p-1 hover:text-cyan-200 text-cyan-400 cursor-pointer"
+                  className="p-1 hover:text-focus text-focus cursor-pointer"
                   title={header.replay.state === 'playing' ? t('shell.toolbar.replayPause') : t('shell.toolbar.replayResume')}
                 >
                   {header.replay.state === 'playing' ? (
@@ -1571,7 +1636,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                     void apiControlTraceReplay({ action: 'stop' });
                     traceSessionsStore.setReplayingSessionId(null);
                   }}
-                  className="p-1 hover:text-red-300 text-red-400 cursor-pointer"
+                  className="p-1 hover:text-critical text-critical cursor-pointer"
                   title={t('shell.toolbar.replayStop')}
                 >
                   <Square className="w-3.5 h-3.5 fill-current" />
@@ -1580,6 +1645,8 @@ export const TopBar: React.FC<TopBarProps> = ({
             )}
           </div>
 
+          {/* TIER 3 (<1660px container): moves to the overflow menu */}
+          <div className="flex flex-nowrap items-center gap-1.5 @max-[1660px]:hidden">
           <div className="h-5 w-px bg-[var(--border-strong)] mx-1" />
 
           {/* GROUP 3: CLOUD & LIVE BRIDGE */}
@@ -1594,11 +1661,11 @@ export const TopBar: React.FC<TopBarProps> = ({
                   borderColor: 'var(--border-strong)',
                   color: 'var(--text-secondary)',
                 }}
-                className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12.5px] hover:text-[var(--text-primary)] hover:border-sky-500 cursor-pointer rounded-[3px] disabled:opacity-50"
+                className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12.5px] hover:text-[var(--text-primary)] hover:border-focus cursor-pointer rounded-[3px] disabled:opacity-50"
                 title={t('shell.toolbar.pushCloudTooltip', { code: projState.cloudBinding?.projectCode ?? 'New' })}
               >
-                <UploadCloud className="w-4 h-4 text-sky-400" />
-                <span className="hidden sm:inline">
+                <UploadCloud className="w-4 h-4 text-focus" />
+                <span className="@max-[2100px]:hidden">
                   {cloudHeader.syncingWorkspace ? t('shell.toolbar.pushingBtn') : t('shell.toolbar.pushBtn')}
                 </span>
               </button>
@@ -1608,23 +1675,23 @@ export const TopBar: React.FC<TopBarProps> = ({
                 onClick={() => void handleToggleLiveStream()}
                 style={{
                   backgroundColor: isStreaming
-                    ? 'rgba(239, 68, 68, 0.12)'
-                    : 'rgba(16, 185, 129, 0.12)',
-                  borderColor: isStreaming ? 'rgba(239, 68, 68, 0.45)' : 'rgba(16, 185, 129, 0.5)',
-                  color: isStreaming ? '#F87171' : '#34D399',
+                    ? 'var(--status-critical-bg)'
+                    : 'var(--status-nominal-bg)',
+                  borderColor: isStreaming ? 'var(--status-critical-border)' : 'var(--status-nominal-border)',
+                  color: isStreaming ? 'var(--status-critical)' : 'var(--status-nominal)',
                 }}
                 className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12.5px] font-semibold hover:opacity-90 cursor-pointer rounded-[3px]"
                 title={isStreaming ? t('shell.toolbar.stopLiveStreamTooltip') : t('shell.toolbar.startLiveStreamTooltip')}
               >
                 {isStreaming ? (
                   <>
-                    <Square className="w-3.5 h-3.5 fill-current text-red-400" />
-                    <span>{t('shell.toolbar.stopLiveStream')}</span>
+                    <Square className="w-3.5 h-3.5 fill-current text-critical" />
+                    <span className="@max-[2100px]:hidden">{t('shell.toolbar.stopLiveStream')}</span>
                   </>
                 ) : (
                   <>
-                    <Radio className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>{t('shell.toolbar.startLiveStream')}</span>
+                    <Radio className="w-3.5 h-3.5 text-nominal" />
+                    <span className="@max-[2100px]:hidden">{t('shell.toolbar.startLiveStream')}</span>
                   </>
                 )}
               </button>
@@ -1636,7 +1703,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           {/* GROUP 4: VIEW & SPLIT CONTROLS */}
           <div className="flex items-center gap-1.5 text-[12px] font-mono text-[var(--text-muted)]">
             <Columns2 className="w-4 h-4 text-[var(--text-secondary)]" />
-            <span className="hidden md:inline">{t('shell.toolbar.splitLabel')}</span>
+            <span className="@max-[2100px]:hidden">{t('shell.toolbar.splitLabel')}</span>
             <select
               value={workbench.splitSecondaryTab ?? ''}
               onChange={(e) =>
@@ -1672,9 +1739,9 @@ export const TopBar: React.FC<TopBarProps> = ({
             title={dbState.theme === 'dark' ? t('shell.toolbar.themeLight') : t('shell.toolbar.themeDark')}
           >
             {dbState.theme === 'dark' ? (
-              <Sun className="w-4 h-4 text-amber-400" />
+              <Sun className="w-4 h-4 text-warn" />
             ) : (
-              <Moon className="w-4 h-4 text-sky-400" />
+              <Moon className="w-4 h-4 text-focus" />
             )}
           </button>
 
@@ -1688,15 +1755,19 @@ export const TopBar: React.FC<TopBarProps> = ({
               borderColor: workbench.dockOpen
                 ? 'var(--border-strong)'
                 : 'var(--border-strong)',
-              color: workbench.dockOpen ? '#38BDF8' : 'var(--text-secondary)',
+              color: workbench.dockOpen ? 'var(--status-focus)' : 'var(--text-secondary)',
             }}
             className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12.5px] font-medium hover:text-[var(--text-primary)] cursor-pointer rounded-[3px]"
             title={t('shell.toolbar.explorerDockTooltip')}
           >
             <PanelRight className="w-4 h-4" />
-            <span className="hidden lg:inline text-[12px] font-mono">{t('shell.toolbar.explorerDockLabel')}</span>
+            <span className="@max-[2100px]:hidden text-[12px] font-mono">{t('shell.toolbar.explorerDockLabel')}</span>
           </button>
 
+          </div>
+
+          {/* TIER 2 (<1900px container): moves to the overflow menu */}
+          <div className="flex flex-nowrap items-center gap-1.5 @max-[1900px]:hidden">
           <button
             type="button"
             onClick={() => projectStore.setToolpacksModalOpen(true)}
@@ -1705,12 +1776,12 @@ export const TopBar: React.FC<TopBarProps> = ({
               borderColor: 'var(--border-strong)',
               color: 'var(--text-secondary)',
             }}
-            className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12.5px] font-medium hover:text-cyan-400 hover:border-cyan-500/50 cursor-pointer rounded-[3px]"
+            className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12.5px] font-medium hover:text-focus hover:border-[var(--status-focus-border)] cursor-pointer rounded-[3px]"
             title={t('shell.toolbar.toolpacksTooltip', { count: projState.enabledToolpacks.length })}
           >
-            <Boxes className="w-4 h-4 text-cyan-400" />
-            <span className="hidden xl:inline text-[12px] font-mono">{t('shell.toolbar.toolpacksLabel')}</span>
-            <span className="px-1.5 py-0.5 rounded bg-cyan-950/70 border border-cyan-800/60 text-cyan-300 font-mono text-[11px]">
+            <Boxes className="w-4 h-4 text-focus" />
+            <span className="@max-[2100px]:hidden text-[12px] font-mono">{t('shell.toolbar.toolpacksLabel')}</span>
+            <span className="px-1.5 py-0.5 rounded bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-focus font-mono text-[11px]">
               {projState.enabledToolpacks.length}/7
             </span>
           </button>
@@ -1723,10 +1794,10 @@ export const TopBar: React.FC<TopBarProps> = ({
               borderColor: 'var(--border-strong)',
               color: 'var(--text-secondary)',
             }}
-            className="h-[32px] w-[34px] border flex items-center justify-center hover:text-amber-300 hover:border-amber-500/50 cursor-pointer rounded-[3px]"
+            className="h-[32px] w-[34px] border flex items-center justify-center hover:text-warn hover:border-[var(--status-warn-border)] cursor-pointer rounded-[3px]"
             title={t('shell.toolbar.aboutTooltip')}
           >
-            <Award className="w-4 h-4 text-amber-400" />
+            <Award className="w-4 h-4 text-warn" />
           </button>
 
           {/* MCP Server indicator */}
@@ -1734,11 +1805,11 @@ export const TopBar: React.FC<TopBarProps> = ({
             type="button"
             onClick={() => mcpStore.setPanelOpen(true)}
             style={{
-              backgroundColor: mcp.activity !== null ? 'rgba(14, 165, 233, 0.18)' : mcp.status?.running ? 'rgba(16, 185, 129, 0.14)' : 'var(--bg-panel)',
-              borderColor: mcp.activity !== null ? 'rgba(14, 165, 233, 0.60)' : mcp.status?.running ? 'rgba(16, 185, 129, 0.55)' : 'var(--border-strong)',
-              color: mcp.activity !== null ? '#38BDF8' : mcp.status?.running ? '#34D399' : 'var(--text-muted)',
+              backgroundColor: mcp.activity !== null ? 'var(--status-focus-bg)' : mcp.status?.running ? 'var(--status-nominal-bg)' : 'var(--bg-panel)',
+              borderColor: mcp.activity !== null ? 'var(--status-focus-border)' : mcp.status?.running ? 'var(--status-nominal-border)' : 'var(--border-strong)',
+              color: mcp.activity !== null ? 'var(--status-focus)' : mcp.status?.running ? 'var(--status-nominal)' : 'var(--text-muted)',
             }}
-            className={`h-[32px] px-2.5 border flex items-center text-[12px] font-mono tabular-nums cursor-pointer rounded-[3px] hover:text-emerald-300 transition-colors ${
+            className={`h-[32px] px-2.5 border flex items-center text-[12px] font-mono tabular-nums cursor-pointer rounded-[3px] hover:text-nominal transition-colors ${
               mcp.status?.running || mcp.activity !== null ? 'font-semibold' : 'opacity-60'
             }`}
             title={mcp.available ? t('mcp.statusbar.tooltip') : t('mcp.unavailable')}
@@ -1756,61 +1827,288 @@ export const TopBar: React.FC<TopBarProps> = ({
             onClick={() => debugConsoleStore.toggleDockOpen()}
             style={{
               backgroundColor: debugConsole.detachedOpen
-                ? 'rgba(14, 165, 233, 0.18)'
+                ? 'var(--status-focus-bg)'
                 : debugConsole.dockOpen
                   ? 'var(--bg-row-selected)'
                   : 'var(--bg-panel)',
               borderColor: debugConsole.detachedOpen
-                ? 'rgba(14, 165, 233, 0.60)'
+                ? 'var(--status-focus-border)'
                 : debugConsole.dockOpen
                   ? 'var(--border-strong)'
                   : 'var(--border-strong)',
               color: debugConsole.detachedOpen
-                ? '#38BDF8'
+                ? 'var(--status-focus)'
                 : debugConsole.dockOpen
-                  ? '#38BDF8'
+                  ? 'var(--status-focus)'
                   : 'var(--text-secondary)',
             }}
-            className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12px] font-mono cursor-pointer rounded-[3px] hover:text-sky-300 transition-colors"
+            className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12px] font-mono cursor-pointer rounded-[3px] hover:text-focus transition-colors"
             title={t('debug.console.statusTooltip')}
           >
-            <Terminal className="w-3.5 h-3.5 text-sky-400" />
-            <span className="font-semibold">&gt;_ {t('debug.console.statusBtn')}</span>
+            <Terminal className="w-3.5 h-3.5 text-focus" />
+            <span className="font-semibold @max-[2100px]:hidden">&gt;_ {t('debug.console.statusBtn')}</span>
             {debugConsole.detachedOpen ? (
-              <span className="px-1 py-0.2 rounded-xs bg-sky-950 border border-sky-500/50 text-[10px] text-sky-300">
+              <span className="px-1 py-0.2 rounded-xs bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-[10px] text-focus">
                 ↗ {t('debug.console.undockedBadge')}
               </span>
             ) : debugConsole.unreadErrorCount > 0 ? (
-              <span className="px-1 py-0.2 rounded-xs bg-rose-950 border border-rose-500 text-[10px] text-rose-300 font-bold animate-pulse">
+              <span className="px-1 py-0.2 rounded-xs bg-[var(--status-critical-bg)] border border-critical text-[10px] text-critical font-bold animate-pulse">
                 {debugConsole.unreadErrorCount}
               </span>
             ) : debugConsole.unreadWarnCount > 0 ? (
-              <span className="px-1 py-0.2 rounded-xs bg-amber-950 border border-amber-500 text-[10px] text-amber-300 font-bold">
+              <span className="px-1 py-0.2 rounded-xs bg-[var(--status-warn-bg)] border border-warn text-[10px] text-warn font-bold">
                 {debugConsole.unreadWarnCount}
               </span>
             ) : null}
           </button>
+          </div>
         </div>
 
-        {/* Right Corner: Fixed Panic / Emergency Stop Safety Switch */}
+        {/* Right Corner: overflow menu + fixed Panic / Emergency Stop Safety Switch (never hidden) */}
         <div className="flex items-center gap-1.5 shrink-0">
+          {/* Overflow "..." menu: visible only when tier 2 is collapsed (<1900px container) */}
+          <div className="relative hidden @max-[1900px]:block" data-menubar-item>
+            <button
+              type="button"
+              onClick={() => setOpenMenu(openMenu === 'overflow' ? null : 'overflow')}
+              style={{
+                backgroundColor: openMenu === 'overflow' ? 'var(--bg-row-selected)' : 'var(--bg-panel)',
+                borderColor: 'var(--border-strong)',
+                color: 'var(--text-secondary)',
+              }}
+              className="relative h-[32px] w-[34px] border flex items-center justify-center hover:text-[var(--text-primary)] cursor-pointer rounded-[3px]"
+              title={t('shell.toolbar.moreTooltip')}
+              aria-label={t('shell.toolbar.moreTooltip')}
+              aria-haspopup="menu"
+              aria-expanded={openMenu === 'overflow'}
+            >
+              <Ellipsis className="w-4 h-4" />
+              {(debugConsole.unreadErrorCount > 0 || debugConsole.unreadWarnCount > 0) && (
+                <span
+                  className={`absolute top-0.5 right-0.5 w-2 h-2 rounded-full ${
+                    debugConsole.unreadErrorCount > 0 ? 'bg-critical' : 'bg-warn'
+                  }`}
+                />
+              )}
+            </button>
+            {openMenu === 'overflow' && (
+              <div
+                role="menu"
+                style={{
+                  backgroundColor: 'var(--bg-panel)',
+                  borderColor: 'var(--border-strong)',
+                }}
+                className="absolute right-0 top-[38px] z-50 border shadow-2xl py-1.5 rounded-[3px] min-w-[260px] text-[12.5px]"
+              >
+                {/* Tier 3 items (inline again at >=1660px) */}
+                <div className="@min-[1660px]:hidden">
+                  {cloudOn && cloudHeader.isAuthenticated && (
+                    <>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={cloudHeader.syncingWorkspace}
+                        onClick={() => {
+                          setOpenMenu(null);
+                          void handlePushActiveProject();
+                        }}
+                        className={OVERFLOW_ITEM_CLS}
+                      >
+                        <UploadCloud className="w-4 h-4 text-focus" />
+                        <span>{t('shell.toolbar.pushBtn')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setOpenMenu(null);
+                          void handleToggleLiveStream();
+                        }}
+                        className={OVERFLOW_ITEM_CLS}
+                      >
+                        {isStreaming ? (
+                          <Square className="w-4 h-4 fill-current text-critical" />
+                        ) : (
+                          <Radio className="w-4 h-4 text-nominal" />
+                        )}
+                        <span>
+                          {isStreaming ? t('shell.toolbar.stopLiveStream') : t('shell.toolbar.startLiveStream')}
+                        </span>
+                      </button>
+                    </>
+                  )}
+                  <div className="px-3.5 py-1 text-[11px] font-mono text-[var(--text-muted)] uppercase flex items-center gap-1.5">
+                    <Columns2 className="w-3.5 h-3.5" />
+                    <span>{t('shell.menu.view.splitViewHeader')}</span>
+                  </div>
+                  <div className="px-3.5 pb-1.5">
+                    <select
+                      value={workbench.splitSecondaryTab ?? ''}
+                      onChange={(e) => {
+                        workbenchStore.setSplitSecondaryTab(
+                          e.target.value ? (e.target.value as ActiveDocumentTab) : null,
+                        );
+                        setOpenMenu(null);
+                      }}
+                      style={{
+                        backgroundColor: 'var(--bg-panel)',
+                        borderColor: 'var(--border-strong)',
+                        color: 'var(--text-primary)',
+                      }}
+                      className="w-full h-[30px] px-2 border text-[12px] font-mono cursor-pointer rounded-[3px] focus:outline-none"
+                      title={t('shell.toolbar.splitSelectTooltip')}
+                    >
+                      <option value="">{t('shell.toolbar.splitSinglePane')}</option>
+                      <option value="trace">+ {t('shell.tab.trace')}</option>
+                      <option value="plotter">+ {t('shell.tab.plotter')}</option>
+                      <option value="symbols">+ {t('shell.tab.dbcStudio')}</option>
+                      {isSimEnabled && <option value="panels">+ {t('shell.tab.panels')}</option>}
+                    </select>
+                  </div>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setOpenMenu(null);
+                      databaseStore.toggleTheme();
+                    }}
+                    className={OVERFLOW_ITEM_CLS}
+                  >
+                    {dbState.theme === 'dark' ? (
+                      <Sun className="w-4 h-4 text-warn" />
+                    ) : (
+                      <Moon className="w-4 h-4 text-focus" />
+                    )}
+                    <span>
+                      {dbState.theme === 'dark'
+                        ? t('shell.menu.view.switchToLight')
+                        : t('shell.menu.view.switchToDark')}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setOpenMenu(null);
+                      workbenchStore.toggleDock();
+                    }}
+                    className={OVERFLOW_ITEM_CLS}
+                  >
+                    <PanelRight className="w-4 h-4" />
+                    <span>{workbench.dockOpen ? t('shell.menu.view.hideDock') : t('shell.menu.view.showDock')}</span>
+                  </button>
+                  <div className="my-1.5 border-t border-[var(--border-grid)]" />
+                </div>
+
+                {/* Tier 2 items */}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    projectStore.setToolpacksModalOpen(true);
+                  }}
+                  className={OVERFLOW_ITEM_CLS}
+                  title={t('shell.toolbar.toolpacksTooltip', { count: projState.enabledToolpacks.length })}
+                >
+                  <Boxes className="w-4 h-4 text-focus" />
+                  <span className="flex-1">{t('shell.toolbar.toolpacksLabel')}</span>
+                  <span className="font-mono tabular-nums text-[11px] text-focus">
+                    {projState.enabledToolpacks.length}/7
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    mcpStore.setPanelOpen(true);
+                  }}
+                  className={OVERFLOW_ITEM_CLS}
+                  title={mcp.available ? t('mcp.statusbar.tooltip') : t('mcp.unavailable')}
+                >
+                  <span
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                      mcp.activity !== null ? 'bg-focus' : mcp.status?.running ? 'bg-nominal' : 'bg-muted'
+                    }`}
+                  />
+                  <span className="flex-1">{t('mcp.menu.item')}</span>
+                  {mcp.status?.running && (
+                    <span className="font-mono tabular-nums text-[11px] text-nominal">
+                      :{mcp.status.port ?? ''} · {mcp.status.connectedClients}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    debugConsoleStore.toggleDockOpen();
+                  }}
+                  className={OVERFLOW_ITEM_CLS}
+                  title={t('debug.console.statusTooltip')}
+                >
+                  <Terminal className="w-4 h-4 text-focus" />
+                  <span className="flex-1 font-mono">&gt;_ {t('debug.console.statusBtn')}</span>
+                  {debugConsole.unreadErrorCount > 0 ? (
+                    <span className="font-mono tabular-nums text-[11px] text-critical font-bold">
+                      {debugConsole.unreadErrorCount}
+                    </span>
+                  ) : debugConsole.unreadWarnCount > 0 ? (
+                    <span className="font-mono tabular-nums text-[11px] text-warn font-bold">
+                      {debugConsole.unreadWarnCount}
+                    </span>
+                  ) : null}
+                </button>
+                {isTauri && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setOpenMenu(null);
+                      updateStore.openDialog(true);
+                    }}
+                    className={OVERFLOW_ITEM_CLS}
+                  >
+                    <RefreshCw className="w-4 h-4 text-focus" />
+                    <span>{t('upd.menu.check')}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpenMenu(null);
+                    projectStore.setAcknowledgmentsModalOpen(true);
+                  }}
+                  className={OVERFLOW_ITEM_CLS}
+                  title={t('shell.toolbar.aboutTooltip')}
+                >
+                  <Award className="w-4 h-4 text-warn" />
+                  <span>{t('shell.menu.help.about')}</span>
+                </button>
+              </div>
+            )}
+          </div>
           <TxModeControl />
           <button
             type="button"
+            data-tour="topbar.panic"
             onClick={() => void onPanicStop()}
             style={
               isUrgentStop
                 ? undefined
                 : {
-                    backgroundColor: 'rgba(185, 28, 28, 0.12)',
-                    borderColor: 'rgba(185, 28, 28, 0.45)',
-                    color: dbState.theme === 'dark' ? '#F87171' : '#B91C1C',
+                    backgroundColor: 'var(--status-critical-bg)',
+                    borderColor: 'var(--status-critical-border)',
+                    color: dbState.theme === 'dark' ? 'var(--status-critical)' : 'var(--status-critical)',
                   }
             }
             className={`h-[32px] px-3.5 border flex items-center gap-1.5 text-[12.5px] font-bold cursor-pointer rounded-[3px] ${
               isUrgentStop
-                ? 'bg-red-700 hover:bg-red-600 text-white border-red-500'
-                : 'hover:border-red-500'
+                ? 'bg-critical hover:bg-critical/85 text-on-accent border-critical'
+                : 'hover:border-critical'
             }`}
             title={t('shell.toolbar.panicStopTooltip')}
           >
