@@ -119,6 +119,10 @@ export const shellTr = {
   'shell.menu.view.splitSimulation': 'Bölünmüş Görünüm: + Simülasyon',
   'shell.menu.view.switchToLight': 'Açık Temaya Geç',
   'shell.menu.view.switchToDark': 'Koyu Temaya Geç',
+  'shell.menu.view.uiScale': 'UI Ölçeği',
+  'shell.toolbar.moreTooltip': 'Diğer araçlar',
+  'shell.tabs.scrollLeft': 'Sekmeleri sola kaydır',
+  'shell.tabs.scrollRight': 'Sekmeleri sağa kaydır',
 
   'shell.menu.help': 'Yardım',
   'shell.menu.help.toolpacks': 'Mühendislik Paketleri (Toolpacks)…',
@@ -653,6 +657,10 @@ export const shellEn: Record<keyof typeof shellTr, string> = {
   'shell.menu.view.splitSimulation': 'Split View: + Simulation',
   'shell.menu.view.switchToLight': 'Switch to Light Theme',
   'shell.menu.view.switchToDark': 'Switch to Dark Theme',
+  'shell.menu.view.uiScale': 'UI Scale',
+  'shell.toolbar.moreTooltip': 'More tools',
+  'shell.tabs.scrollLeft': 'Scroll tabs left',
+  'shell.tabs.scrollRight': 'Scroll tabs right',
 
   'shell.menu.help': 'Help',
   'shell.menu.help.toolpacks': 'Engineering Toolpacks…',
