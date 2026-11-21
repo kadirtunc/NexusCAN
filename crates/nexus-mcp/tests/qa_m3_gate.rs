@@ -784,6 +784,36 @@ fn qa_m3_flowlib_seedkey_constant_and_script_not_leaked() {
 
 // ─── 6. Diag redaction (mock0, armed, multi-frame) ──────────────────────────
 
+/// Concatenated STRING values of a JSON page (bytes always travel as hex strings). Numeric
+/// fields are skipped on purpose: a secret whose hex is all digits (e.g. `94 95 96` ->
+/// "949596") would otherwise "match" a timestamp such as `"t_us":949596` (macOS CI flake).
+fn string_values(page: &str) -> String {
+    fn walk(v: &Value, out: &mut String) {
+        match v {
+            Value::String(s) => {
+                out.push_str(s);
+                out.push('\u{1}');
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            Value::Object(o) => o.iter().for_each(|(k, x)| {
+                out.push_str(k);
+                out.push('\u{1}');
+                walk(x, out);
+            }),
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<Value>(page) {
+        Ok(v) => {
+            let mut out = String::new();
+            walk(&v, &mut out);
+            out
+        }
+        // Not JSON: keep the strict whole-text check.
+        Err(_) => page.to_string(),
+    }
+}
+
 fn windows_of(key: &[u8], n: usize) -> Vec<String> {
     key.windows(n)
         .map(|w| w.iter().map(|b| format!("{b:02X}")).collect::<String>())
@@ -922,8 +952,9 @@ fn qa_m3_diag_security_access_and_auth_never_leak_across_pages() {
         for secret in [&key, &auth, &seed] {
             for w in windows_of(secret, 3) {
                 for (i, p) in pages.iter().enumerate() {
+                    let text = string_values(p);
                     assert!(
-                        !p.contains(&w) && !p.contains(&w.to_ascii_lowercase()),
+                        !text.contains(&w) && !text.contains(&w.to_ascii_lowercase()),
                         "{label} page {i} leaks secret window {w}: {p}"
                     );
                 }
@@ -954,7 +985,7 @@ fn qa_m3_diag_security_access_and_auth_never_leak_across_pages() {
         .chain(windows_of(&seed, 3))
         .chain(windows_of(&auth, 3))
     {
-        assert!(!big.contains(&w), "big page leaks {w}");
+        assert!(!string_values(&big).contains(&w), "big page leaks {w}");
     }
     // Starting mid-stream (since_seq inside the CF run) must still fail closed.
     let first_cf_seq = raw
@@ -978,7 +1009,10 @@ fn qa_m3_diag_security_access_and_auth_never_leak_across_pages() {
     .unwrap()
     .to_string();
     for w in windows_of(&key, 3).into_iter().chain(windows_of(&seed, 3)) {
-        assert!(!mid.contains(&w), "mid-stream page leaks {w}");
+        assert!(
+            !string_values(&mid).contains(&w),
+            "mid-stream page leaks {w}"
+        );
     }
 }
 
