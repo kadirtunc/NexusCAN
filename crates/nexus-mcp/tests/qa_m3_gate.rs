@@ -255,10 +255,16 @@ fn fs_snapshot(dir: &Path) -> BTreeMap<String, (u64, SystemTime)> {
             let path = ent.path();
             let rel = path.strip_prefix(base).unwrap().display().to_string();
             let md = ent.metadata().unwrap();
-            out.insert(
-                rel,
-                (md.len(), md.modified().unwrap_or(SystemTime::UNIX_EPOCH)),
-            );
+            // Directories: presence only. NTFS updates a directory's LastWriteTime lazily after
+            // files inside were written (seed step), which showed up as a false "write" on
+            // Windows CI. Every file is still compared by size + mtime, and added / removed
+            // entries (files or directories) are still detected.
+            let meta = if md.is_dir() {
+                (0, SystemTime::UNIX_EPOCH)
+            } else {
+                (md.len(), md.modified().unwrap_or(SystemTime::UNIX_EPOCH))
+            };
+            out.insert(rel, meta);
             if md.is_dir() {
                 walk(base, &path, out);
             }

@@ -3296,6 +3296,7 @@ Index,Time_s,Bus,Protocol,ID_Hex,Direction,DLC,Symbol,Data_Hex,Decoded_Signals
             let has = |id: u32| snap.frames.iter().any(|r| r.bus_id == 0 && r.arb_id == id);
             let early_done = snap.replay.dispatched_frames >= 2
                 && snap.replay.filtered_out_frames >= 1
+                && snap.replay.hw_tx_frames >= 2
                 && has(0x101)
                 && has(0x103);
             if early_done || std::time::Instant::now() >= mid_deadline {
