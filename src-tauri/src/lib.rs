@@ -6,6 +6,7 @@
 pub mod app_commands;
 pub mod commands;
 pub mod pipeline;
+pub mod update_check;
 
 use nexus_hal::storage::DataRoot;
 use pipeline::AppState;
@@ -35,6 +36,9 @@ fn resolve_data_root<R: tauri::Runtime>(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Rust-side `OpenerExt` only (cmd_open_release_page). No `opener:*` permission is granted in
+        // any capability, so the webview cannot open URLs through the plugin's JS commands.
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_root = resolve_data_root(app.handle())?;
             data_root.ensure_dirs()?;
@@ -160,6 +164,9 @@ pub fn run() {
             commands::cmd_mcp_status,
             commands::cmd_mcp_ui_attach,
             commands::cmd_mcp_ui_respond,
+            commands::cmd_get_app_version,
+            commands::cmd_check_for_update,
+            commands::cmd_open_release_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexusCAN Tauri application");

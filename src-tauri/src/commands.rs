@@ -67,6 +67,9 @@ pub enum AppError {
 
     #[error("MCP server error: {0}")]
     Mcp(String),
+
+    #[error(transparent)]
+    Update(#[from] crate::update_check::UpdateCheckError),
 }
 
 impl Serialize for AppError {
@@ -1515,4 +1518,43 @@ pub async fn cmd_mcp_ui_respond(
     };
     let _ = state.ui_bridge.respond(request_id, res);
     Ok(())
+}
+
+// ─── GitHub release update check (update-check-v1) ─────────────────────────
+// Check + notify only. Logic lives in `crate::update_check`; no `EngineState`, no hot path.
+
+/// Installed version + embedded CI build number (no network); feeds the status-bar label.
+#[tauri::command]
+pub fn cmd_get_app_version() -> crate::update_check::AppVersionDto {
+    crate::update_check::app_version()
+}
+
+/// Queries the GitHub Releases API (8 s timeout) on the blocking pool.
+#[tauri::command]
+pub async fn cmd_check_for_update() -> Result<crate::update_check::UpdateCheckDto, AppError> {
+    match tauri::async_runtime::spawn_blocking(crate::update_check::check_for_update_blocking).await
+    {
+        Ok(res) => res.map_err(AppError::from),
+        Err(join_err) => Err(AppError::Ipc(format!(
+            "cmd_check_for_update worker failed: {join_err}"
+        ))),
+    }
+}
+
+/// Opens the GitHub Releases page (or a whitelisted URL below it) in the system browser.
+#[tauri::command]
+pub async fn cmd_open_release_page(
+    app: tauri::AppHandle,
+    url: Option<String>,
+) -> Result<(), AppError> {
+    use tauri_plugin_opener::OpenerExt as _;
+    let target = crate::update_check::resolve_release_url(url)?;
+    match tauri::async_runtime::spawn_blocking(move || app.opener().open_url(target, None::<&str>))
+        .await
+    {
+        Ok(res) => res.map_err(|e| AppError::Ipc(format!("failed to open browser: {e}"))),
+        Err(join_err) => Err(AppError::Ipc(format!(
+            "cmd_open_release_page worker failed: {join_err}"
+        ))),
+    }
 }

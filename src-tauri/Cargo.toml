@@ -28,6 +28,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1.43", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# GitHub release check (update-check-v1). src-tauri is its own workspace, so this mirrors the
+# root `[workspace.dependencies]` ureq spec instead of `workspace = true`.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+# Opens the GitHub Releases page in the system browser via the Rust API only (no JS permission).
+tauri-plugin-opener = "2"
 
 # WP-8 / LOW-01: hardened release profile for the shipped desktop binary.
 [profile.release]

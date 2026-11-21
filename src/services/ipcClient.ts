@@ -14,6 +14,7 @@ import type {
 } from '../types/hal';
 import { t } from '../i18n';
 import type { DatabaseSchemaDto } from '../types/netdb';
+import type { AppVersionDto, OpenReleasePageArgs, UpdateCheckDto } from '../types/update';
 import type { FlowLibCommandMap, FlowLibEntryDto, FlowLibRevisionDto } from '../types/flowLibrary';
 import type { ComputeKeyResultDto, KeyProviderSpecDto, SeedKeyProfileDto } from '../types/seedkey';
 import type {
@@ -1084,4 +1085,28 @@ export function apiFlowLibSave(fileJson: string): Promise<FlowLibEntryDto> {
 /** Soft delete (revisions stay loadable). */
 export async function apiFlowLibDelete(id: string): Promise<void> {
   await flowLibCall('cmd_flowlib_delete', { id });
+}
+
+// ============================================================================
+// Update check (notification only; no auto-download). Desktop (Tauri) only:
+// browser mode is silently disabled (callers gate on `isTauri`).
+// ============================================================================
+
+export const UPDATES_UNSUPPORTED = 'updates-unsupported';
+
+export function apiGetAppVersion(): Promise<AppVersionDto> {
+  if (!isTauri) return Promise.reject(new Error(UPDATES_UNSUPPORTED));
+  return invoke<AppVersionDto>('cmd_get_app_version');
+}
+
+export function apiCheckForUpdate(): Promise<UpdateCheckDto> {
+  if (!isTauri) return Promise.reject(new Error(UPDATES_UNSUPPORTED));
+  return invoke<UpdateCheckDto>('cmd_check_for_update');
+}
+
+/** `url` omitted opens the Releases page; the backend rejects anything outside the repo's releases URL. */
+export function apiOpenReleasePage(url?: string): Promise<void> {
+  if (!isTauri) return Promise.reject(new Error(UPDATES_UNSUPPORTED));
+  const args: OpenReleasePageArgs = url === undefined ? {} : { url };
+  return invoke<void>('cmd_open_release_page', { ...args });
 }
