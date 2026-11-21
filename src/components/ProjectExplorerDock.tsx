@@ -345,7 +345,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                 workbenchStore.setBottomTab('watch');
                 workbenchStore.setDockOpen(true);
               }}
-              className="w-5 h-5 flex items-center justify-center rounded-full bg-sky-500/20 text-sky-400 text-[10px] font-mono font-bold cursor-pointer hover:bg-sky-500/30"
+              className="w-5 h-5 flex items-center justify-center rounded-full bg-[var(--status-focus-bg)] text-focus text-[10px] font-mono font-bold cursor-pointer hover:bg-[var(--status-focus-bg)]"
               title={t('shell.dock.watchCountTooltip', { count: workbench.watchSignals.length })}
             >
               {workbench.watchSignals.length}
@@ -356,10 +356,10 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
           <div
             className={`w-2 h-2 rounded-full ${
               cloudHeader.status === 'streaming'
-                ? 'bg-emerald-400 shadow-xs shadow-emerald-400/50'
+                ? 'bg-nominal shadow-xs '
                 : cloudHeader.isAuthenticated
-                  ? 'bg-sky-400'
-                  : 'bg-slate-600'
+                  ? 'bg-focus'
+                  : 'bg-hover'
             }`}
             title={`Cloud: ${cloudHeader.status}`}
           />
@@ -389,7 +389,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
       <div
         onPointerDown={handleResizePointerDown}
         style={{ cursor: 'col-resize' }}
-        className={`absolute top-0 bottom-0 w-[4px] z-30 hover:bg-[#58A6FF]/50 transition-colors ${
+        className={`absolute top-0 bottom-0 w-[4px] z-30 hover:bg-focus/50 transition-colors ${
           isRight ? 'left-0' : 'right-0'
         }`}
         title={t('shell.dock.resizeTooltip')}
@@ -417,7 +417,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
           className="h-[34px] px-2.5 flex items-center justify-between shrink-0 text-[12.5px]"
         >
           <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-[var(--text-primary)]">
-            <FolderKanban className="w-4 h-4 text-sky-400" />
+            <FolderKanban className="w-4 h-4 text-focus" />
             <span>{t('shell.dock.title')}</span>
           </div>
 
@@ -437,7 +437,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
               className="p-1 hover:text-[var(--text-primary)] hover:bg-[var(--bg-toolbar)] rounded-xs cursor-pointer"
               title={t('shell.dock.loadDbTooltip')}
             >
-              <Database className="w-3.5 h-3.5 text-amber-400" />
+              <Database className="w-3.5 h-3.5 text-warn" />
             </button>
 
             <button
@@ -480,7 +480,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
         >
           {cloudHeader.isAuthenticated ? (
             <div className="flex items-center gap-1.5 min-w-0 flex-1">
-              <Building2 className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <Building2 className="w-3.5 h-3.5 text-focus shrink-0" />
               {cloudHeader.organizations.length > 1 ? (
                 <select
                   value={cloudHeader.selectedOrgId ?? ''}
@@ -520,7 +520,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
               <button
                 type="button"
                 onClick={() => databaseStore.setActiveDocTab('cloud')}
-                className="text-[11px] text-sky-400 hover:underline cursor-pointer shrink-0 font-medium"
+                className="text-[11px] text-focus hover:underline cursor-pointer shrink-0 font-medium"
               >
                 {t('shell.dock.signIn')}
               </button>
@@ -536,7 +536,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
             <div
               onClick={() => workbenchStore.setSelection({ kind: 'project' })}
               className={`flex items-center justify-between px-2 h-[28px] rounded-xs cursor-pointer text-[12px] hover:bg-[var(--bg-row-hover)] ${
-                workbench.selection.kind === 'project' ? 'bg-[var(--bg-row-selected)] text-sky-400 font-semibold' : 'text-[var(--text-primary)]'
+                workbench.selection.kind === 'project' ? 'bg-[var(--bg-row-selected)] text-focus font-semibold' : 'text-[var(--text-primary)]'
               }`}
             >
               <div className="flex items-center gap-1.5 min-w-0">
@@ -550,7 +550,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                 >
                   {treeExpanded.project ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
                 </button>
-                <FolderKanban className="w-4 h-4 text-amber-400 shrink-0" />
+                <FolderKanban className="w-4 h-4 text-warn shrink-0" />
                 <span className="truncate">{projState.currentName}</span>
               </div>
               <span className="text-[11px] font-mono text-[var(--text-muted)] shrink-0">
@@ -568,7 +568,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                   >
                     <div className="flex items-center gap-1.5 min-w-0">
                       {treeExpanded.connections ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                      <Plug className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <Plug className="w-4 h-4 text-nominal shrink-0" />
                       <span>{t('shell.dock.connections')}</span>
                       <span className="text-[11px] font-mono text-[var(--text-muted)]">({connState.profiles.length})</span>
                     </div>
@@ -578,7 +578,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                         e.stopPropagation();
                         workbenchStore.setNewConnectionModalOpen(true);
                       }}
-                      className="p-1 text-[var(--text-muted)] hover:text-emerald-400 cursor-pointer"
+                      className="p-1 text-[var(--text-muted)] hover:text-nominal cursor-pointer"
                       title={t('shell.dock.addBusTooltip')}
                     >
                       <Plus className="w-3.5 h-3.5" />
@@ -605,13 +605,13 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                               }}
                               onDoubleClick={() => databaseStore.setActiveDocTab('connections')}
                               className={`flex items-center justify-between px-2 h-[28px] rounded-xs cursor-pointer text-[12px] hover:bg-[var(--bg-row-hover)] ${
-                                isSelected ? 'bg-[var(--bg-row-selected)] text-sky-400 font-medium' : 'text-[var(--text-primary)]'
+                                isSelected ? 'bg-[var(--bg-row-selected)] text-focus font-medium' : 'text-[var(--text-primary)]'
                               }`}
                             >
                               <div className="flex items-center gap-1.5 min-w-0">
                                 <span
                                   className={`w-2 h-2 rounded-full shrink-0 ${
-                                    isOnline ? 'bg-emerald-400 shadow-xs shadow-emerald-400/50' : 'bg-slate-600'
+                                    isOnline ? 'bg-nominal shadow-xs ' : 'bg-hover'
                                   }`}
                                 />
                                 <span className="truncate">Bus {p.busId + 1} · {p.name}</span>
@@ -635,7 +635,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                   >
                     <div className="flex items-center gap-1.5 min-w-0">
                       {treeExpanded.databases ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                      <Database className="w-4 h-4 text-amber-400 shrink-0" />
+                      <Database className="w-4 h-4 text-warn shrink-0" />
                       <span>{t('shell.dock.databases')}</span>
                       <span className="text-[11px] font-mono text-[var(--text-muted)]">({dbState.databases.length})</span>
                     </div>
@@ -646,7 +646,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                           e.stopPropagation();
                           fileInputRef.current?.click();
                         }}
-                        className="p-1 text-[var(--text-muted)] hover:text-amber-400 cursor-pointer"
+                        className="p-1 text-[var(--text-muted)] hover:text-warn cursor-pointer"
                         title={t('shell.dock.loadDbTooltip')}
                       >
                         <Plus className="w-3.5 h-3.5" />
@@ -673,11 +673,11 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                               }}
                               onDoubleClick={() => databaseStore.setActiveDocTab('symbols')}
                               className={`flex items-center justify-between px-2 h-[28px] rounded-xs cursor-pointer text-[12px] hover:bg-[var(--bg-row-hover)] ${
-                                isSelected ? 'bg-[var(--bg-row-selected)] text-sky-400 font-medium' : 'text-[var(--text-primary)]'
+                                isSelected ? 'bg-[var(--bg-row-selected)] text-focus font-medium' : 'text-[var(--text-primary)]'
                               }`}
                             >
                               <div className="flex items-center gap-1.5 min-w-0">
-                                <Database className="w-3.5 h-3.5 text-amber-400/80 shrink-0" />
+                                <Database className="w-3.5 h-3.5 text-warn/80 shrink-0" />
                                 <span className="truncate">{db.fileName}</span>
                               </div>
                               <span className="text-[11px] font-mono text-[var(--text-muted)] shrink-0 ml-1">
@@ -699,7 +699,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                   >
                     <div className="flex items-center gap-1.5 min-w-0">
                       {treeExpanded.traces ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                      <Disc className="w-4 h-4 text-rose-400 shrink-0" />
+                      <Disc className="w-4 h-4 text-critical shrink-0" />
                       <span>{t('shell.dock.traces')}</span>
                       <span className="text-[11px] font-mono text-[var(--text-muted)]">({traceState.sessions.length})</span>
                     </div>
@@ -716,7 +716,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                             message: t('shell.dock.traceSpawned', { name: s.name }),
                           });
                         }}
-                        className="p-1 text-[var(--text-muted)] hover:text-rose-400 cursor-pointer"
+                        className="p-1 text-[var(--text-muted)] hover:text-critical cursor-pointer"
                         title={t('shell.dock.spawnTraceTooltip')}
                       >
                         <Plus className="w-3.5 h-3.5" />
@@ -736,7 +736,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                             void navigator.clipboard.writeText(traceState.tracesDir);
                             onStatusMessage({ kind: 'info', message: t('shell.dock.traceDirCopied', { path: traceState.tracesDir }) });
                           }}
-                          className="p-1 hover:text-sky-400 cursor-pointer shrink-0 ml-1"
+                          className="p-1 hover:text-focus cursor-pointer shrink-0 ml-1"
                           title={t('shell.dock.copyTracesDir')}
                         >
                           <Copy className="w-3 h-3" />
@@ -755,17 +755,17 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                             }}
                             onDoubleClick={() => databaseStore.setActiveDocTab('trace')}
                             className={`flex items-center justify-between px-2 h-[28px] rounded-xs cursor-pointer text-[12px] hover:bg-[var(--bg-row-hover)] ${
-                              isSelected ? 'bg-[var(--bg-row-selected)] text-sky-400 font-medium' : 'text-[var(--text-primary)]'
+                              isSelected ? 'bg-[var(--bg-row-selected)] text-focus font-medium' : 'text-[var(--text-primary)]'
                             }`}
                           >
                             <div className="flex items-center gap-1.5 min-w-0">
                               <span
                                 className={`w-2 h-2 rounded-full shrink-0 ${
                                   s.state === 'recording'
-                                    ? 'bg-rose-500 animate-pulse shadow-xs shadow-rose-500/50'
+                                    ? 'bg-critical animate-pulse shadow-xs '
                                     : s.state === 'paused'
-                                      ? 'bg-amber-400'
-                                      : 'bg-slate-500'
+                                      ? 'bg-warn'
+                                      : 'bg-muted'
                                 }`}
                                 title={`Durum: ${s.state}`}
                               />
@@ -786,10 +786,10 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                                     databaseStore.setActiveDocTab('trace');
                                     onStatusMessage({ kind: 'info', message: t('shell.dock.traceReplaying', { name: s.name }) });
                                   }}
-                                  className="p-1 text-[var(--text-muted)] hover:text-cyan-400 cursor-pointer"
+                                  className="p-1 text-[var(--text-muted)] hover:text-focus cursor-pointer"
                                   title={t('shell.dock.replaySessionTooltip')}
                                 >
-                                  <Play className="w-3 h-3 fill-current text-cyan-400" />
+                                  <Play className="w-3 h-3 fill-current text-focus" />
                                 </button>
                               )}
                             </div>
@@ -801,7 +801,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       <div className="pt-1.5 mt-1 border-t border-[var(--border-grid)]">
                         <div className="flex items-center justify-between px-1.5 text-[11px] font-semibold text-[var(--text-secondary)] uppercase">
                           <span className="flex items-center gap-1.5">
-                            <FolderOpen className="w-3.5 h-3.5 text-amber-400" />
+                            <FolderOpen className="w-3.5 h-3.5 text-warn" />
                             <span>{t('shell.dock.savedDiskRecordings')}</span>
                           </span>
                           <span className="font-mono text-[10px] text-[var(--text-muted)]">
@@ -824,8 +824,8 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                                   <span
                                     className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-xs uppercase ${
                                       f.format.toLowerCase() === 'blf'
-                                        ? 'bg-purple-500/25 text-purple-300 border border-purple-500/30'
-                                        : 'bg-amber-500/20 text-amber-300'
+                                        ? 'bg-[var(--status-focus-bg)] text-focus border border-[var(--status-focus-border)]'
+                                        : 'bg-[var(--status-warn-bg)] text-warn'
                                     }`}
                                   >
                                     {f.format}
@@ -851,7 +851,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                                       void traceSessionsStore.openSavedTraceFile(f.fileName);
                                       onStatusMessage({ kind: 'info', message: t('shell.dock.traceOpened', { name: f.fileName }) });
                                     }}
-                                    className="p-1 hover:text-sky-400 text-[var(--text-muted)] cursor-pointer"
+                                    className="p-1 hover:text-focus text-[var(--text-muted)] cursor-pointer"
                                     title={t('shell.dock.openInTraceTab')}
                                   >
                                     <FolderOpen className="w-3.5 h-3.5" />
@@ -865,10 +865,10 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                                         onStatusMessage({ kind: 'info', message: t('shell.dock.traceReplaying', { name: f.fileName }) });
                                       });
                                     }}
-                                    className="p-1 hover:text-cyan-400 text-[var(--text-muted)] cursor-pointer"
+                                    className="p-1 hover:text-focus text-[var(--text-muted)] cursor-pointer"
                                     title={t('shell.dock.startReplay')}
                                   >
-                                    <Play className="w-3.5 h-3.5 fill-current text-cyan-400" />
+                                    <Play className="w-3.5 h-3.5 fill-current text-focus" />
                                   </button>
 
                                   <button
@@ -877,10 +877,10 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                                       void traceSessionsStore.deleteSavedTraceFile(f.fileName);
                                       onStatusMessage({ kind: 'info', message: t('shell.dock.traceDeleted', { name: f.fileName }) });
                                     }}
-                                    className="p-1 hover:text-red-400 text-[var(--text-muted)] cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity"
+                                    className="p-1 hover:text-critical text-[var(--text-muted)] cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity"
                                     title={t('shell.dock.deleteFromDisk')}
                                   >
-                                    <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                                    <Trash2 className="w-3.5 h-3.5 text-critical" />
                                   </button>
                                 </div>
                               </div>
@@ -901,7 +901,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                     >
                       <div className="flex items-center gap-1.5 min-w-0">
                         {treeExpanded.panels ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                        <Sliders className="w-4 h-4 text-purple-400 shrink-0" />
+                        <Sliders className="w-4 h-4 text-focus shrink-0" />
                         <span>{t('shell.dock.simPanels')}</span>
                         <span className="text-[11px] font-mono text-[var(--text-muted)]">({simPanels.panels.length})</span>
                       </div>
@@ -923,7 +923,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                                 onClick={() => workbenchStore.setSelection({ kind: 'panel', panelId: p.id })}
                                 onDoubleClick={() => databaseStore.setActiveDocTab('panels')}
                                 className={`flex items-center justify-between px-2 h-[28px] rounded-xs cursor-pointer text-[12px] hover:bg-[var(--bg-row-hover)] ${
-                                  isSelected ? 'bg-[var(--bg-row-selected)] text-amber-400 font-medium' : 'text-[var(--text-primary)]'
+                                  isSelected ? 'bg-[var(--bg-row-selected)] text-warn font-medium' : 'text-[var(--text-primary)]'
                                 }`}
                               >
                                 <span className="truncate">{p.name}</span>
@@ -947,7 +947,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                   >
                     <div className="flex items-center gap-1.5 min-w-0">
                       {treeExpanded.signals ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                      <Radio className="w-4 h-4 text-cyan-400 shrink-0" />
+                      <Radio className="w-4 h-4 text-focus shrink-0" />
                       <span>{t('shell.dock.signals')}</span>
                       <span className="text-[11px] font-mono text-[var(--text-muted)]">({allBoundSignals.length})</span>
                     </div>
@@ -1005,7 +1005,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                                   })
                                 }
                                 className={`group flex items-center justify-between px-2 h-[28px] rounded-xs cursor-pointer text-[12px] hover:bg-[var(--bg-row-hover)] ${
-                                  isSelected ? 'bg-[var(--bg-row-selected)] text-sky-400 font-medium' : 'text-[var(--text-primary)]'
+                                  isSelected ? 'bg-[var(--bg-row-selected)] text-focus font-medium' : 'text-[var(--text-primary)]'
                                 }`}
                               >
                                 <div className="flex items-center gap-1.5 min-w-0">
@@ -1034,7 +1034,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                                       });
                                     }}
                                     className={`p-1 rounded-xs cursor-pointer ${
-                                      isWatched ? 'text-sky-400 opacity-100' : 'text-[var(--text-muted)] hover:text-sky-400'
+                                      isWatched ? 'text-focus opacity-100' : 'text-[var(--text-muted)] hover:text-focus'
                                     }`}
                                     title={isWatched ? t('shell.dock.unwatchTooltip') : t('shell.dock.watchTooltip')}
                                   >
@@ -1047,7 +1047,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                                       e.stopPropagation();
                                       plotStore.toggleSignal(busId, schema);
                                     }}
-                                    className="p-0.5 text-[var(--text-muted)] hover:text-emerald-400 rounded-xs cursor-pointer"
+                                    className="p-0.5 text-[var(--text-muted)] hover:text-nominal rounded-xs cursor-pointer"
                                     title={t('shell.dock.togglePlotterTooltip')}
                                   >
                                     <LineChart className="w-2.5 h-2.5" />
@@ -1065,14 +1065,14 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                 {/* Branch 5: Engineering Toolpacks */}
                 <div
                   onClick={() => projectStore.setToolpacksModalOpen(true)}
-                  className="flex items-center justify-between px-2 h-[28px] rounded-xs cursor-pointer text-[12px] text-[var(--text-secondary)] hover:text-cyan-400 hover:bg-[var(--bg-row-hover)]"
+                  className="flex items-center justify-between px-2 h-[28px] rounded-xs cursor-pointer text-[12px] text-[var(--text-secondary)] hover:text-focus hover:bg-[var(--bg-row-hover)]"
                   title={t('shell.toolbar.toolpacksTooltip', { count: projState.enabledToolpacks.length })}
                 >
                   <div className="flex items-center gap-1.5 min-w-0">
-                    <Boxes className="w-4 h-4 text-cyan-400 shrink-0" />
+                    <Boxes className="w-4 h-4 text-focus shrink-0" />
                     <span>{t('shell.dock.toolpacks')}</span>
                   </div>
-                  <span className="px-1.5 py-0.5 rounded bg-cyan-950/70 border border-cyan-800/60 text-cyan-300 font-mono text-[11px] shrink-0">
+                  <span className="px-1.5 py-0.5 rounded bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-focus font-mono text-[11px] shrink-0">
                     {projState.enabledToolpacks.length}/7
                   </span>
                 </div>
@@ -1095,7 +1095,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
           className="h-[34px] px-2.5 flex items-center justify-between shrink-0 text-[12.5px]"
         >
           <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-[var(--text-primary)]">
-            <Settings2 className="w-4 h-4 text-cyan-400" />
+            <Settings2 className="w-4 h-4 text-focus" />
             <span>{t('shell.dock.properties')}</span>
           </div>
 
@@ -1179,9 +1179,9 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                     borderColor: 'var(--border-strong)',
                     color: 'var(--text-primary)',
                   }}
-                  className="h-[28px] px-2.5 border text-[12px] font-semibold flex items-center gap-1 hover:border-sky-500 cursor-pointer rounded-xs"
+                  className="h-[28px] px-2.5 border text-[12px] font-semibold flex items-center gap-1 hover:border-focus cursor-pointer rounded-xs"
                 >
-                  <Save className="w-3.5 h-3.5 text-sky-400" />
+                  <Save className="w-3.5 h-3.5 text-focus" />
                   <span>{t('shell.dock.saveProject')}</span>
                 </button>
 
@@ -1215,9 +1215,9 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       }
                     }}
                     style={{
-                      backgroundColor: 'rgba(56, 139, 253, 0.12)',
-                      borderColor: 'rgba(56, 139, 253, 0.40)',
-                      color: '#58A6FF',
+                      backgroundColor: 'var(--status-focus-bg)',
+                      borderColor: 'var(--status-focus-border)',
+                      color: 'var(--status-focus)',
                     }}
                     className="h-[28px] px-2.5 border text-[12px] font-semibold flex items-center gap-1 hover:opacity-90 cursor-pointer rounded-xs"
                   >
@@ -1231,11 +1231,11 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                     type="button"
                     onClick={() => void projectStore.closeCurrentProject(onApplyQuickBar)}
                     style={{
-                      backgroundColor: 'rgba(239, 68, 68, 0.10)',
-                      borderColor: 'rgba(239, 68, 68, 0.35)',
-                      color: '#F87171',
+                      backgroundColor: 'var(--status-critical-bg)',
+                      borderColor: 'var(--status-critical-border)',
+                      color: 'var(--status-critical)',
                     }}
-                    className="h-[28px] px-2.5 border text-[12px] font-semibold hover:border-red-500 cursor-pointer ml-auto rounded-xs"
+                    className="h-[28px] px-2.5 border text-[12px] font-semibold hover:border-critical cursor-pointer ml-auto rounded-xs"
                   >
                     {t('shell.dock.closeProject')}
                   </button>
@@ -1269,9 +1269,9 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       type="checkbox"
                       checked={isOnline}
                       onChange={() => void handleToggleProfileOnline(prof)}
-                      className="accent-emerald-500 cursor-pointer"
+                      className="accent-nominal cursor-pointer"
                     />
-                    <span className={`text-[10px] font-mono font-semibold ${isOnline ? 'text-emerald-400' : 'text-[var(--text-muted)]'}`}>
+                    <span className={`text-[10px] font-mono font-semibold ${isOnline ? 'text-nominal' : 'text-[var(--text-muted)]'}`}>
                       {isOnline ? t('shell.dock.onlineConnected') : t('shell.dock.offline')}
                     </span>
                   </label>
@@ -1335,7 +1335,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       type="checkbox"
                       checked={isListenOnly}
                       onChange={() => void handleToggleListenOnly(prof)}
-                      className="accent-amber-500 cursor-pointer"
+                      className="accent-warn cursor-pointer"
                     />
                     <span className="text-[11px] text-[var(--text-muted)]">
                       {isListenOnly ? t('shell.dock.listenOnlyActive') : t('shell.dock.listenOnlyDisabled')}
@@ -1351,7 +1351,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
-                        className="text-[11px] text-sky-400 hover:underline flex items-center gap-1 cursor-pointer"
+                        className="text-[11px] text-focus hover:underline flex items-center gap-1 cursor-pointer"
                       >
                         <Plus className="w-3.5 h-3.5" />
                         <span>{t('shell.dock.uploadDbcKcd')}</span>
@@ -1371,7 +1371,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                                 connectionStore.upsertProfile({ ...prof, databaseIds: nextIds });
                                 void syncAllBusDatabasesWithBackend();
                               }}
-                              className="accent-sky-500 cursor-pointer"
+                              className="accent-focus cursor-pointer"
                             />
                             <span className="truncate">{db.fileName}</span>
                           </label>
@@ -1422,7 +1422,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
 
                 <div className="grid grid-cols-[85px_1fr] items-center gap-1.5 py-0.5 border-b border-[var(--border-grid)]">
                   <span className="text-[var(--text-secondary)]">{t('shell.dock.propFormat')}</span>
-                  <span className="font-mono text-[10px] text-amber-400 font-bold uppercase">
+                  <span className="font-mono text-[10px] text-warn font-bold uppercase">
                     {db.format}
                   </span>
                 </div>
@@ -1455,7 +1455,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                                 connectionStore.upsertProfile({ ...p, databaseIds: nextIds });
                                 void syncAllBusDatabasesWithBackend();
                               }}
-                              className="accent-sky-500 cursor-pointer"
+                              className="accent-focus cursor-pointer"
                             />
                             <span className="truncate">Bus {p.busId + 1} · {p.name}</span>
                           </label>
@@ -1477,7 +1477,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-primary)',
                     }}
-                    className="h-[28px] px-2.5 border text-[12px] hover:border-sky-500 cursor-pointer rounded-xs"
+                    className="h-[28px] px-2.5 border text-[12px] hover:border-focus cursor-pointer rounded-xs"
                   >
                     {t('shell.dock.symbolBitMatrix')}
                   </button>
@@ -1493,11 +1493,11 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       });
                     }}
                     style={{
-                      backgroundColor: 'rgba(239, 68, 68, 0.10)',
-                      borderColor: 'rgba(239, 68, 68, 0.35)',
-                      color: '#F87171',
+                      backgroundColor: 'var(--status-critical-bg)',
+                      borderColor: 'var(--status-critical-border)',
+                      color: 'var(--status-critical)',
                     }}
-                    className="h-[28px] px-2.5 border text-[12px] hover:border-red-500 cursor-pointer ml-auto rounded-xs"
+                    className="h-[28px] px-2.5 border text-[12px] hover:border-critical cursor-pointer ml-auto rounded-xs"
                   >
                     {t('shell.dock.deleteFromCatalog')}
                   </button>
@@ -1545,7 +1545,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                 <div className="grid grid-cols-[85px_1fr] items-center gap-1.5 py-0.5 border-b border-[var(--border-grid)]">
                   <span className="text-[var(--text-secondary)]">{t('shell.dock.propLocation')}</span>
                   <span
-                    className="font-mono text-[10px] text-emerald-400 truncate flex items-center justify-between"
+                    className="font-mono text-[10px] text-nominal truncate flex items-center justify-between"
                     title={sess.savedFilePath || `${traceState.tracesDir}/${sess.fileName}`}
                   >
                     <span className="truncate">
@@ -1560,7 +1560,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                           void navigator.clipboard.writeText(filePath);
                           onStatusMessage({ kind: 'info', message: t('shell.dock.filePathCopied', { path: filePath }) });
                         }}
-                        className="hover:text-emerald-300 p-0.5 shrink-0 ml-1 cursor-pointer"
+                        className="hover:text-nominal p-0.5 shrink-0 ml-1 cursor-pointer"
                         title={t('shell.dock.copyPath')}
                       >
                         <Copy className="w-2.5 h-2.5" />
@@ -1575,19 +1575,19 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                     <span
                       className={`text-[10px] font-semibold uppercase flex items-center gap-1 ${
                         sess.state === 'recording'
-                          ? 'text-rose-400'
+                          ? 'text-critical'
                           : sess.state === 'paused'
-                            ? 'text-amber-400'
-                            : 'text-slate-400'
+                            ? 'text-warn'
+                            : 'text-secondary'
                       }`}
                     >
                       <span
                         className={`w-2 h-2 rounded-full ${
                           sess.state === 'recording'
-                            ? 'bg-rose-500 animate-pulse'
+                            ? 'bg-critical animate-pulse'
                             : sess.state === 'paused'
-                              ? 'bg-amber-400'
-                              : 'bg-slate-500'
+                              ? 'bg-warn'
+                              : 'bg-muted'
                         }`}
                       />
                       {sess.state}
@@ -1597,7 +1597,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                         <button
                           type="button"
                           onClick={() => traceSessionsStore.startRecording(sess.id, false)}
-                          className="h-[18px] px-1.5 text-[9px] bg-rose-500/20 text-rose-300 border border-rose-500/40 rounded-xs hover:bg-rose-500/30 cursor-pointer"
+                          className="h-[18px] px-1.5 text-[9px] bg-[var(--status-critical-bg)] text-critical border border-[var(--status-critical-border)] rounded-xs hover:bg-[var(--status-critical-bg)] cursor-pointer"
                         >
                           {t('shell.dock.btnStart')}
                         </button>
@@ -1605,7 +1605,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                         <button
                           type="button"
                           onClick={() => traceSessionsStore.pauseRecording(sess.id)}
-                          className="h-[18px] px-1.5 text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded-xs hover:bg-amber-500/30 cursor-pointer"
+                          className="h-[18px] px-1.5 text-[9px] bg-[var(--status-warn-bg)] text-warn border border-[var(--status-warn-border)] rounded-xs hover:bg-[var(--status-warn-bg)] cursor-pointer"
                         >
                           {t('shell.dock.btnPause')}
                         </button>
@@ -1614,7 +1614,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                         <button
                           type="button"
                           onClick={() => traceSessionsStore.stopRecording(sess.id)}
-                          className="h-[18px] px-1.5 text-[9px] bg-slate-700 text-slate-300 border border-slate-600 rounded-xs hover:bg-slate-600 cursor-pointer"
+                          className="h-[18px] px-1.5 text-[9px] bg-strong text-primary border border-strong rounded-xs hover:bg-hover cursor-pointer"
                         >
                           {t('shell.dock.btnStop')}
                         </button>
@@ -1695,10 +1695,10 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                     }}
                     style={{
                       backgroundColor: 'var(--bg-toolbar)',
-                      borderColor: sess.savedFilePath && !sess.dirtySinceSave ? '#10B981' : 'var(--border-strong)',
-                      color: sess.savedFilePath && !sess.dirtySinceSave ? '#34D399' : 'var(--text-primary)',
+                      borderColor: sess.savedFilePath && !sess.dirtySinceSave ? 'var(--status-nominal)' : 'var(--border-strong)',
+                      color: sess.savedFilePath && !sess.dirtySinceSave ? 'var(--status-nominal)' : 'var(--text-primary)',
                     }}
-                    className="h-[28px] px-2.5 border text-[12px] rounded-xs disabled:opacity-40 cursor-pointer hover:border-emerald-500 font-medium"
+                    className="h-[28px] px-2.5 border text-[12px] rounded-xs disabled:opacity-40 cursor-pointer hover:border-nominal font-medium"
                     title={t('shell.dock.saveToDiskTooltip')}
                   >
                     {t('shell.dock.saveToDisk')}
@@ -1714,9 +1714,9 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       });
                     }}
                     style={{
-                      backgroundColor: 'rgba(6, 182, 212, 0.15)',
-                      borderColor: '#06B6D4',
-                      color: '#22D3EE',
+                      backgroundColor: 'var(--status-focus-bg)',
+                      borderColor: 'var(--status-focus)',
+                      color: 'var(--status-focus)',
                     }}
                     className="h-[28px] px-2.5 border text-[12px] rounded-xs disabled:opacity-40 cursor-pointer hover:opacity-90 font-semibold flex items-center gap-1.5"
                     title={t('shell.dock.replaySessionTooltip')}
@@ -1737,7 +1737,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-primary)',
                     }}
-                    className="h-[28px] px-2 border text-[12px] rounded-xs disabled:opacity-40 cursor-pointer hover:border-sky-500"
+                    className="h-[28px] px-2 border text-[12px] rounded-xs disabled:opacity-40 cursor-pointer hover:border-focus"
                     title={t('shell.dock.exportTrcTooltip')}
                   >
                     💾 .trc
@@ -1754,7 +1754,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-primary)',
                     }}
-                    className="h-[28px] px-2 border text-[12px] rounded-xs disabled:opacity-40 cursor-pointer hover:border-sky-500"
+                    className="h-[28px] px-2 border text-[12px] rounded-xs disabled:opacity-40 cursor-pointer hover:border-focus"
                     title={t('shell.dock.exportAscTooltip')}
                   >
                     💾 .asc
@@ -1771,7 +1771,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-primary)',
                     }}
-                    className="h-[28px] px-2 border text-[12px] rounded-xs disabled:opacity-40 cursor-pointer hover:border-sky-500"
+                    className="h-[28px] px-2 border text-[12px] rounded-xs disabled:opacity-40 cursor-pointer hover:border-focus"
                     title={t('shell.dock.exportCsvTooltip')}
                   >
                     💾 .csv
@@ -1803,11 +1803,11 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                         onStatusMessage({ kind: 'info', message: t('shell.dock.traceSessionClosed', { name: sess.name }) });
                       }}
                       style={{
-                        backgroundColor: 'rgba(239, 68, 68, 0.10)',
-                        borderColor: 'rgba(239, 68, 68, 0.35)',
-                        color: '#F87171',
+                        backgroundColor: 'var(--status-critical-bg)',
+                        borderColor: 'var(--status-critical-border)',
+                        color: 'var(--status-critical)',
                       }}
-                      className="h-[28px] px-2.5 border text-[12px] rounded-xs hover:border-red-500 cursor-pointer ml-auto"
+                      className="h-[28px] px-2.5 border text-[12px] rounded-xs hover:border-critical cursor-pointer ml-auto"
                       title={t('shell.dock.closeSessionTooltip')}
                     >
                       {t('shell.dock.closeSession')}
@@ -1887,9 +1887,9 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       })
                     }
                     style={{
-                      backgroundColor: isWatched ? 'rgba(56, 139, 253, 0.15)' : 'var(--bg-toolbar)',
-                      borderColor: isWatched ? 'rgba(56, 139, 253, 0.50)' : 'var(--border-strong)',
-                      color: isWatched ? '#58A6FF' : 'var(--text-primary)',
+                      backgroundColor: isWatched ? 'var(--status-focus-bg)' : 'var(--bg-toolbar)',
+                      borderColor: isWatched ? 'var(--status-focus-border)' : 'var(--border-strong)',
+                      color: isWatched ? 'var(--status-focus)' : 'var(--text-primary)',
                     }}
                     className="h-[28px] px-2.5 border text-[12px] font-semibold flex items-center gap-1.5 cursor-pointer rounded-xs"
                   >
@@ -1908,9 +1908,9 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-primary)',
                     }}
-                    className="h-[28px] px-2.5 border text-[12px] flex items-center gap-1.5 hover:border-emerald-500 cursor-pointer rounded-xs"
+                    className="h-[28px] px-2.5 border text-[12px] flex items-center gap-1.5 hover:border-nominal cursor-pointer rounded-xs"
                   >
-                    <LineChart className="w-3.5 h-3.5 text-emerald-400" />
+                    <LineChart className="w-3.5 h-3.5 text-nominal" />
                     <span>{t('shell.dock.plotInPlotter')}</span>
                   </button>
                 </div>
@@ -1960,7 +1960,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-primary)',
                     }}
-                    className="h-[28px] px-3 border text-[12px] font-medium hover:border-amber-500 hover:text-amber-400 cursor-pointer rounded-xs"
+                    className="h-[28px] px-3 border text-[12px] font-medium hover:border-warn hover:text-warn cursor-pointer rounded-xs"
                   >
                     {t('shell.dock.openSimPanels')}
                   </button>
@@ -1987,12 +1987,12 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
             type="button"
             onClick={() => workbenchStore.setBottomTab('watch')}
             style={{
-              borderBottom: workbench.bottomTab === 'watch' ? '2px solid #58A6FF' : '2px solid transparent',
+              borderBottom: workbench.bottomTab === 'watch' ? '2px solid var(--status-focus)' : '2px solid transparent',
               color: workbench.bottomTab === 'watch' ? 'var(--text-primary)' : 'var(--text-secondary)',
             }}
             className="h-full px-3 font-medium flex items-center gap-1.5 cursor-pointer hover:text-[var(--text-primary)] transition-colors"
           >
-            <Eye className="w-3.5 h-3.5 text-sky-400" />
+            <Eye className="w-3.5 h-3.5 text-focus" />
             <span>{t('shell.dock.tabWatch')}</span>
             <span className="text-[11px] font-mono text-[var(--text-muted)]">
               ({workbench.watchSignals.length + 1})
@@ -2004,15 +2004,15 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
             type="button"
             onClick={() => workbenchStore.setBottomTab('cloud')}
             style={{
-              borderBottom: workbench.bottomTab === 'cloud' ? '2px solid #58A6FF' : '2px solid transparent',
+              borderBottom: workbench.bottomTab === 'cloud' ? '2px solid var(--status-focus)' : '2px solid transparent',
               color: workbench.bottomTab === 'cloud' ? 'var(--text-primary)' : 'var(--text-secondary)',
             }}
             className="h-full px-3 font-medium flex items-center gap-1.5 cursor-pointer hover:text-[var(--text-primary)] transition-colors"
           >
-            <Cloud className="w-3.5 h-3.5 text-emerald-400" />
+            <Cloud className="w-3.5 h-3.5 text-nominal" />
             <span>{t('shell.dock.tabCloudLive')}</span>
             {cloudHeader.status === 'streaming' && (
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse ml-0.5" />
+              <span className="w-2 h-2 rounded-full bg-nominal animate-pulse ml-0.5" />
             )}
           </button>
           )}
@@ -2037,16 +2037,16 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                 <span className="text-right pr-2 text-[var(--text-primary)] font-semibold font-mono tabular-nums">
                   {header.estimatedBusLoadPct.toFixed(1)} %
                 </span>
-                <div className="w-full bg-slate-800 h-2.5 rounded-xs overflow-hidden">
+                <div className="w-full bg-elevated h-2.5 rounded-xs overflow-hidden">
                   <div
                     style={{
                       width: `${Math.min(100, Math.max(0, header.estimatedBusLoadPct))}%`,
                       backgroundColor:
                         header.estimatedBusLoadPct > 85
-                          ? '#EF4444'
+                          ? 'var(--status-critical)'
                           : header.estimatedBusLoadPct > 70
-                            ? '#F59E0B'
-                            : '#10B981',
+                            ? 'var(--status-warn)'
+                            : 'var(--status-nominal)',
                     }}
                     className="h-full transition-all duration-300"
                   />
@@ -2087,7 +2087,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
 
                     <div className="text-right pr-2 truncate">
                       {liveVal !== null ? (
-                        <span className="text-sky-400 font-semibold">
+                        <span className="text-focus font-semibold">
                           {Number.isInteger(liveVal) ? liveVal : liveVal.toFixed(2)}
                           {w.unit ? ` ${w.unit}` : ''}
                         </span>
@@ -2097,16 +2097,16 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1">
-                      <div className="w-full bg-slate-800 h-2 rounded-xs overflow-hidden">
+                      <div className="w-full bg-elevated h-2 rounded-xs overflow-hidden">
                         <div
-                          style={{ width: `${pct}%`, backgroundColor: '#38BDF8' }}
+                          style={{ width: `${pct}%`, backgroundColor: 'var(--status-focus)' }}
                           className="h-full transition-all duration-200"
                         />
                       </div>
                       <button
                         type="button"
                         onClick={() => workbenchStore.removeWatchSignal(w.key)}
-                        className="opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-red-400 cursor-pointer shrink-0"
+                        className="opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-critical cursor-pointer shrink-0"
                         title={t('shell.dock.removeWatch')}
                       >
                         <X className="w-3 h-3" />
@@ -2128,7 +2128,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
             <div className="p-2 font-sans text-[11px] space-y-2">
               {!cloudHeader.isAuthenticated ? (
                 <div className="space-y-2 text-center p-2">
-                  <div className="flex items-center justify-center gap-1.5 text-sky-400 font-bold">
+                  <div className="flex items-center justify-center gap-1.5 text-focus font-bold">
                     <Cloud className="w-4 h-4" />
                     <span>{t('shell.dock.cloudOffline')}</span>
                   </div>
@@ -2139,9 +2139,9 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                     type="button"
                     onClick={() => databaseStore.setActiveDocTab('cloud')}
                     style={{
-                      backgroundColor: 'rgba(56, 139, 253, 0.15)',
-                      borderColor: 'rgba(56, 139, 253, 0.45)',
-                      color: '#58A6FF',
+                      backgroundColor: 'var(--status-focus-bg)',
+                      borderColor: 'var(--status-focus-border)',
+                      color: 'var(--status-focus)',
                     }}
                     className="h-[28px] px-3.5 border font-semibold text-[12px] rounded-xs cursor-pointer hover:opacity-90"
                   >
@@ -2163,7 +2163,7 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                           message: t('shell.dock.cloudLoggedOut'),
                         });
                       }}
-                      className="text-[10px] text-red-400 hover:underline flex items-center gap-1 cursor-pointer shrink-0"
+                      className="text-[10px] text-critical hover:underline flex items-center gap-1 cursor-pointer shrink-0"
                     >
                       <LogOut className="w-3 h-3" />
                       <span>{t('shell.dock.cloudSignOut')}</span>
@@ -2207,9 +2207,9 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                         type="button"
                         onClick={() => cloudBridgeStore.stopLiveStream()}
                         style={{
-                          backgroundColor: 'rgba(239, 68, 68, 0.15)',
-                          borderColor: 'rgba(239, 68, 68, 0.50)',
-                          color: '#F87171',
+                          backgroundColor: 'var(--status-critical-bg)',
+                          borderColor: 'var(--status-critical-border)',
+                          color: 'var(--status-critical)',
                         }}
                         className="w-full h-[24px] border font-semibold text-[11px] flex items-center justify-center gap-1.5 hover:opacity-90 cursor-pointer"
                       >
@@ -2230,9 +2230,9 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                           }
                         }}
                         style={{
-                          backgroundColor: 'rgba(16, 185, 129, 0.15)',
-                          borderColor: 'rgba(16, 185, 129, 0.50)',
-                          color: '#34D399',
+                          backgroundColor: 'var(--status-nominal-bg)',
+                          borderColor: 'var(--status-nominal-border)',
+                          color: 'var(--status-nominal)',
                         }}
                         className="w-full h-[24px] border font-semibold text-[11px] flex items-center justify-center gap-1.5 hover:opacity-90 cursor-pointer"
                       >

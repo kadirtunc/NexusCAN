@@ -34,7 +34,7 @@ export const AcknowledgmentsModal: React.FC = () => {
   return (
     <div
       onClick={() => projectStore.setAcknowledgmentsModalOpen(false)}
-      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 select-none"
+      className="fixed inset-0 z-50 bg-[var(--bg-scrim)] flex items-center justify-center p-4 select-none"
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -54,7 +54,7 @@ export const AcknowledgmentsModal: React.FC = () => {
           className="h-[40px] px-4 flex items-center justify-between shrink-0"
         >
           <div className="flex items-center gap-2.5 min-w-0">
-            <Award className="w-4 h-4 text-amber-400 shrink-0" />
+            <Award className="w-4 h-4 text-warn shrink-0" />
             <span className="font-semibold text-[13px] text-[var(--text-primary)] tracking-wide">
               {t('modal.ack.title')}
             </span>
@@ -76,7 +76,7 @@ export const AcknowledgmentsModal: React.FC = () => {
         <div className="flex-1 overflow-y-auto p-5 space-y-5 text-[var(--text-secondary)] text-[12px] leading-relaxed">
           {/* Mission intro */}
           <div className="p-3.5 bg-[var(--bg-row-signal)] border border-[var(--border-grid)] flex items-start gap-3">
-            <Heart className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+            <Heart className="w-5 h-5 text-critical shrink-0 mt-0.5" />
             <div>
               <p className="font-medium text-[var(--text-primary)] mb-1">
                 {t('modal.ack.introHeading')}
@@ -90,7 +90,7 @@ export const AcknowledgmentsModal: React.FC = () => {
           {/* Section 1: CAN Pioneers */}
           <div>
             <div className="flex items-center gap-2 mb-2 pb-1 border-b border-[var(--border-grid)]">
-              <BookOpen className="w-4 h-4 text-cyan-400" />
+              <BookOpen className="w-4 h-4 text-focus" />
               <h3 className="font-semibold text-[13px] text-[var(--text-primary)] uppercase tracking-wide">
                 {t('modal.ack.sec1Heading')}
               </h3>
@@ -138,7 +138,7 @@ export const AcknowledgmentsModal: React.FC = () => {
           {/* Section 2: Rust Core Engine */}
           <div>
             <div className="flex items-center gap-2 mb-2 pb-1 border-b border-[var(--border-grid)]">
-              <Code2 className="w-4 h-4 text-emerald-400" />
+              <Code2 className="w-4 h-4 text-nominal" />
               <h3 className="font-semibold text-[13px] text-[var(--text-primary)] uppercase tracking-wide">
                 {t('modal.ack.sec2Heading')}
               </h3>
@@ -153,7 +153,7 @@ export const AcknowledgmentsModal: React.FC = () => {
           {/* Section 3: Web & UI Stack */}
           <div>
             <div className="flex items-center gap-2 mb-2 pb-1 border-b border-[var(--border-grid)]">
-              <Scale className="w-4 h-4 text-sky-400" />
+              <Scale className="w-4 h-4 text-focus" />
               <h3 className="font-semibold text-[13px] text-[var(--text-primary)] uppercase tracking-wide">
                 {t('modal.ack.sec3Heading')}
               </h3>

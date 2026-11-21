@@ -10,7 +10,6 @@ import {
   formatMuxRanges,
   formatPcanIdHex,
   formatPhysicalValue,
-  getSignalColor,
 } from '../utils/formatters';
 import { QuickPlotButton } from './PlotterView';
 
@@ -22,6 +21,23 @@ interface SwitchDescriptor {
   isSubSwitch: boolean;
   level: number;
   branchValues: readonly number[];
+}
+
+interface SignalPalette {
+  bg: string;
+  bgActive: string;
+  text: string;
+  solid: string;
+}
+
+function signalPalette(i: number): SignalPalette {
+  const v = `var(--series-${(Math.abs(i) % 8) + 1})`;
+  return {
+    bg: `color-mix(in srgb, ${v} 12%, transparent)`,
+    bgActive: `color-mix(in srgb, ${v} 28%, transparent)`,
+    text: v,
+    solid: v,
+  };
 }
 
 const BIT_COLUMNS: readonly number[] = [7, 6, 5, 4, 3, 2, 1, 0];
@@ -59,10 +75,10 @@ export const BitLayoutMatrix: React.FC = () => {
     : undefined;
 
   const signalColorMap = useMemo(() => {
-    const map = new Map<number, ReturnType<typeof getSignalColor>>();
+    const map = new Map<number, SignalPalette>();
     if (!selectedMessage) return map;
     selectedMessage.signalIds.forEach((sigId, idx) => {
-      map.set(sigId, getSignalColor(idx));
+      map.set(sigId, signalPalette(idx));
     });
     return map;
   }, [selectedMessage]);
@@ -444,7 +460,7 @@ export const BitLayoutMatrix: React.FC = () => {
         </div>
 
         {selectedMessage.isMultiplexed && (
-          <span className="px-2 h-[22px] leading-[20px] text-[11px] font-mono font-bold border border-amber-500/50 bg-amber-500/15 text-amber-500 shrink-0">
+          <span className="px-2 h-[22px] leading-[20px] text-[11px] font-mono font-bold border border-[var(--status-warn-border)] bg-[var(--status-warn-bg)] text-warn shrink-0">
             {subSwitchCount > 0 ? t('netdb.matrix.cascadedMuxBadge') : t('netdb.matrix.multiplexedBadge')}
           </span>
         )}
@@ -545,7 +561,7 @@ export const BitLayoutMatrix: React.FC = () => {
               </span>
               <span>
                 {t('netdb.matrix.summarySwitches')}{' '}
-                <strong className="text-amber-400">
+                <strong className="text-warn">
                   {masterSwitchCount} M
                   {subSwitchCount > 0 ? ` + ${subSwitchCount} Sub-M` : ''}
                 </strong>
@@ -593,11 +609,11 @@ export const BitLayoutMatrix: React.FC = () => {
                     key={desc.signal.signalId}
                     className={`flex flex-wrap items-center gap-1.5 ${
                       desc.level > 0
-                        ? 'pl-4 border-l-2 border-amber-500/50'
+                        ? 'pl-4 border-l-2 border-[var(--status-warn-border)]'
                         : ''
                     }`}
                   >
-                    <span className="font-mono text-[11px] font-semibold text-amber-500">
+                    <span className="font-mono text-[11px] font-semibold text-warn">
                       {desc.isSubSwitch
                         ? t('netdb.matrix.levelSubSwitch', { level: desc.level + 1, ranges: formatMuxRanges(desc.signal.muxRanges) })
                         : t('netdb.matrix.levelMaster')}
@@ -631,10 +647,10 @@ export const BitLayoutMatrix: React.FC = () => {
                           }
                           style={{
                             backgroundColor: isSelected
-                              ? 'rgba(245, 158, 11, 0.22)'
+                              ? 'var(--status-warn-bg)'
                               : 'var(--bg-panel)',
                             borderColor: isSelected
-                              ? '#f59e0b'
+                              ? 'var(--status-warn)'
                               : 'var(--border-strong)',
                             color: isSelected
                               ? 'var(--text-primary)'
@@ -682,12 +698,12 @@ export const BitLayoutMatrix: React.FC = () => {
                         isActiveSw ? 'text-[var(--text-primary)]' : 'text-[var(--text-muted)]'
                       }`}
                     >
-                      <span className="text-amber-400 font-semibold mr-1">
+                      <span className="text-warn font-semibold mr-1">
                         {desc.isSubSwitch ? '[Sub-M]' : '[M]'}
                       </span>
                       {desc.signal.name} ={' '}
                       {isActiveSw && liveVal !== undefined ? (
-                        <strong className="text-emerald-500">
+                        <strong className="text-nominal">
                           m{liveVal}
                           {enumName ? ` (${enumName})` : ''}
                         </strong>
@@ -706,6 +722,7 @@ export const BitLayoutMatrix: React.FC = () => {
       {/* Scrollable Bit Matrix + Flat Variables & Signals Table */}
       <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
         <div
+          data-tour="symbols.bit-grid"
           style={{ borderColor: 'var(--border-strong)' }}
           className="border overflow-x-auto"
         >
@@ -775,7 +792,7 @@ export const BitLayoutMatrix: React.FC = () => {
                       const sigSchema = dbState.signalsById[primaryCell.signalId];
                       const palette =
                         signalColorMap.get(primaryCell.signalId) ??
-                        getSignalColor(primaryCell.signalId);
+                        signalPalette(primaryCell.signalId);
                       const isHighlighted =
                         hoveredSignalId === primaryCell.signalId ||
                         dbState.selectedSignalId === primaryCell.signalId;
@@ -797,19 +814,23 @@ export const BitLayoutMatrix: React.FC = () => {
                             )
                           }
                           title={formatCellTooltip(byteIdx, bitInByte, matchingCells)}
-                          className={`cursor-pointer ${
-                            isHighlighted ? palette.bgActive : palette.bg
-                          }`}
+                          className="cursor-pointer"
+                          style={{
+                            backgroundColor: isHighlighted
+                              ? palette.bgActive
+                              : palette.bg,
+                          }}
                         >
                           <div
                             className={`pcan-cell justify-between gap-1 text-[11px] ${
                               isSwitchCell
-                                ? 'px-1 border border-dashed border-amber-500/80'
+                                ? 'px-1 border border-dashed border-[var(--status-warn-border)]'
                                 : ''
                             }`}
                           >
                             <span
-                              className={`font-semibold truncate text-[11.5px] ${palette.text}`}
+                              className="font-semibold truncate text-[11.5px]"
+                              style={{ color: palette.text }}
                             >
                               {sigSchema
                                 ? sigSchema.name.slice(0, 10)
@@ -817,11 +838,11 @@ export const BitLayoutMatrix: React.FC = () => {
                             </span>
 
                             {isConflictOverlay ? (
-                              <span className="px-1.5 h-[16px] leading-[14px] text-[10px] font-bold border border-amber-500/60 bg-amber-500/20 text-amber-500 shrink-0">
+                              <span className="px-1.5 h-[16px] leading-[14px] text-[10px] font-bold border border-[var(--status-warn-border)] bg-[var(--status-warn-bg)] text-warn shrink-0">
                                 MUX ×{matchingCells.length}
                               </span>
                             ) : isSwitchCell ? (
-                              <span className="px-1.5 h-[16px] leading-[14px] text-[10px] font-bold bg-amber-500/20 text-amber-500 shrink-0">
+                              <span className="px-1.5 h-[16px] leading-[14px] text-[10px] font-bold bg-[var(--status-warn-bg)] text-warn shrink-0">
                                 {isSubSwitchCell ? 'Sub-M' : 'M'}
                               </span>
                             ) : (
@@ -938,7 +959,7 @@ export const BitLayoutMatrix: React.FC = () => {
               {displayedTableSignalIds.map((sigId) => {
                 const sig = dbState.signalsById[sigId];
                 if (!sig) return null;
-                const palette = signalColorMap.get(sigId) ?? getSignalColor(sigId);
+                const palette = signalColorMap.get(sigId) ?? signalPalette(sigId);
                 const isHovered =
                   hoveredSignalId === sigId || dbState.selectedSignalId === sigId;
                 const liveEntry = liveSignalsMap.get(sigId);
@@ -960,14 +981,15 @@ export const BitLayoutMatrix: React.FC = () => {
                         sig.signalId,
                       )
                     }
-                    className={`group cursor-pointer ${isHovered ? palette.bgActive : ''}`}
+                    className="group cursor-pointer"
+                    style={isHovered ? { backgroundColor: palette.bgActive } : undefined}
                   >
                     <td>
                       <div className="pcan-cell justify-between gap-1 font-sans">
                         <div className="flex items-center min-w-0">
                           <span
                             className="inline-block w-2 h-2 mr-1.5 shrink-0"
-                            style={{ backgroundColor: palette.hex }}
+                            style={{ backgroundColor: palette.solid }}
                           />
                           <span className="font-medium truncate" title={sig.name}>
                             {sig.name}
@@ -988,12 +1010,12 @@ export const BitLayoutMatrix: React.FC = () => {
                     <td>
                       <div className="pcan-cell text-[11px]">
                         {sig.muxRole === 'masterSwitch' ? (
-                          <span className="text-amber-500 font-semibold truncate">
+                          <span className="text-warn font-semibold truncate">
                             {t('netdb.matrix.sigMasterSwitch')}
                           </span>
                         ) : isSubSw ? (
                           <span
-                            className="text-amber-400 font-semibold truncate"
+                            className="text-warn font-semibold truncate"
                             title={`Sub-Switch [m${formatMuxRanges(sig.muxRanges)} -> M] gated by ${parentSw?.name ?? 'Switch'}`}
                           >
                             {t('netdb.matrix.sigSubSwitch', { ranges: formatMuxRanges(sig.muxRanges) })}
@@ -1006,11 +1028,11 @@ export const BitLayoutMatrix: React.FC = () => {
                             <span
                               className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                                 isActiveOnSelectedPage
-                                  ? 'bg-emerald-500'
+                                  ? 'bg-[var(--status-nominal-bg)]'
                                   : 'bg-[var(--text-muted)] opacity-40'
                               }`}
                             />
-                            <span className="text-sky-500 truncate">
+                            <span className="text-focus truncate">
                               Mux m{formatMuxRanges(sig.muxRanges)}
                               {parentSw ? ` (${parentSw.name})` : ''}
                             </span>

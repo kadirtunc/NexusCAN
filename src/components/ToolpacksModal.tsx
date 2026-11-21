@@ -97,38 +97,29 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
   return (
     <div
       onClick={() => projectStore.setToolpacksModalOpen(false)}
-      className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4 select-none"
+      className="fixed inset-0 z-50 bg-[var(--bg-scrim)] flex items-center justify-center p-4 select-none"
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        style={{
-          backgroundColor: '#0F1623',
-          borderColor: '#1E293B',
-          color: '#F1F5F9',
-        }}
-        className="w-full max-w-[840px] max-h-[88vh] border shadow-2xl flex flex-col text-[12px] font-sans"
+        className="w-full max-w-[840px] max-h-[88vh] border border-hairline bg-panel text-primary shadow-2xl flex flex-col text-[12px] font-sans"
       >
         {/* Header (38px) */}
         <div
-          style={{
-            backgroundColor: '#0B0F17',
-            borderBottom: '1px solid #1E293B',
-          }}
-          className="h-[38px] px-3.5 flex items-center justify-between shrink-0"
+          className="h-[38px] px-3.5 bg-canvas border-b border-hairline flex items-center justify-between shrink-0"
         >
           <div className="flex items-center gap-2.5 min-w-0">
-            <Boxes className="w-4 h-4 text-cyan-400 shrink-0" />
-            <span className="font-semibold text-[13px] text-slate-100 tracking-wide">
+            <Boxes className="w-4 h-4 text-focus shrink-0" />
+            <span className="font-semibold text-[13px] text-primary tracking-wide">
               {t('modal.toolpacks.title')}
             </span>
-            <span className="px-2 py-0.5 rounded bg-cyan-950/70 border border-cyan-700/60 text-cyan-300 font-mono tabular-nums text-[11px] font-medium shrink-0">
+            <span className="px-2 py-0.5 rounded bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-focus font-mono tabular-nums text-[11px] font-medium shrink-0">
               {t('modal.toolpacks.activeCount', { enabled: enabledCount, total: totalCount })}
             </span>
           </div>
           <button
             type="button"
             onClick={() => projectStore.setToolpacksModalOpen(false)}
-            className="text-slate-400 hover:text-slate-200 cursor-pointer p-1 transition-colors"
+            className="text-secondary hover:text-primary cursor-pointer p-1 transition-colors"
             title={t('modal.toolpacks.closeTitle')}
           >
             <X className="w-4 h-4" />
@@ -136,8 +127,8 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
         </div>
 
         {/* Info Banner */}
-        <div className="px-4 py-2.5 bg-slate-950/60 border-b border-slate-800/80 flex items-start gap-2 text-slate-300 text-[11.5px] leading-relaxed shrink-0">
-          <Info className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+        <div className="px-4 py-2.5 bg-canvas border-b border-hairline flex items-start gap-2 text-primary text-[11.5px] leading-relaxed shrink-0">
+          <Info className="w-4 h-4 text-focus shrink-0 mt-0.5" />
           <div>{t('modal.toolpacks.infoBanner')}</div>
         </div>
 
@@ -152,74 +143,74 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
                 key={pack.id}
                 className={`p-3.5 border transition-colors ${
                   isEnabled
-                    ? 'bg-slate-900/90 border-slate-700'
-                    : 'bg-slate-950/40 border-slate-800/60 opacity-70 hover:opacity-90'
+                    ? 'bg-surface border-strong'
+                    : 'bg-canvas border-hairline opacity-70 hover:opacity-90'
                 }`}
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap mb-1">
-                      <span className="font-semibold text-[13px] text-slate-100">
+                      <span className="font-semibold text-[13px] text-primary">
                         {pack.title}
                       </span>
-                      <span className="px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 font-mono tabular-nums text-[10px] uppercase tracking-wider">
+                      <span className="px-1.5 py-0.2 rounded bg-elevated text-primary font-mono tabular-nums text-[10px] uppercase tracking-wider">
                         {pack.shortBadge}
                       </span>
-                      <span className="px-1.5 py-0.2 rounded bg-slate-800/80 text-slate-400 text-[10px]">
+                      <span className="px-1.5 py-0.2 rounded bg-elevated text-secondary text-[10px]">
                         {pack.category}
                       </span>
 
                       {/* Release Stage Badge */}
                       {pack.releaseStage === 'active' && (
-                        <span className="px-1.5 py-0.2 rounded bg-emerald-950/70 border border-emerald-700/60 text-emerald-300 text-[10px] font-medium">
+                        <span className="px-1.5 py-0.2 rounded bg-[var(--status-nominal-bg)] border border-[var(--status-nominal-border)] text-nominal text-[10px] font-medium">
                           {t('modal.toolpacks.stageActive')}
                         </span>
                       )}
                       {pack.releaseStage === 'phase_2' && (
-                        <span className="px-1.5 py-0.2 rounded bg-amber-950/70 border border-amber-700/60 text-amber-300 text-[10px] font-medium">
+                        <span className="px-1.5 py-0.2 rounded bg-elevated border border-strong text-secondary text-[10px] font-medium">
                           {t('modal.toolpacks.stagePhase2')}
                         </span>
                       )}
                       {pack.releaseStage === 'phase_3' && (
-                        <span className="px-1.5 py-0.2 rounded bg-indigo-950/70 border border-indigo-700/60 text-indigo-300 text-[10px] font-medium">
+                        <span className="px-1.5 py-0.2 rounded bg-elevated border border-strong text-secondary text-[10px] font-medium">
                           {t('modal.toolpacks.stagePhase3')}
                         </span>
                       )}
                     </div>
 
-                    <p className="text-slate-300 text-[11.5px] leading-relaxed mb-2">
+                    <p className="text-primary text-[11.5px] leading-relaxed mb-2">
                       {pack.description}
                     </p>
 
-                    <div className="text-[11px] text-slate-400 mb-2">
-                      <span className="text-slate-500 font-medium">
+                    <div className="text-[11px] text-secondary mb-2">
+                      <span className="text-muted font-medium">
                         {t('modal.toolpacks.targetAudienceLabel')}
                       </span>{' '}
                       {pack.targetAudience}
                     </div>
 
                     {/* Module tags */}
-                    <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-800/60">
-                      <span className="text-[10px] text-slate-400 font-medium mr-1">
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-hairline">
+                      <span className="text-[10px] text-secondary font-medium mr-1">
                         {t('modal.toolpacks.clientModulesLabel')}
                       </span>
                       {pack.clientModules.map((mod) => (
                         <span
                           key={mod}
-                          className="px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-300 font-mono text-[10px]"
+                          className="px-1.5 py-0.5 rounded bg-elevated text-primary font-mono text-[10px]"
                         >
                           {mod}
                         </span>
                       ))}
                       {cloudOn && pack.cloudModules.length > 0 && (
                         <>
-                          <span className="text-[10px] text-sky-400 font-medium ml-2 mr-1">
+                          <span className="text-[10px] text-focus font-medium ml-2 mr-1">
                             {t('modal.toolpacks.cloudModulesLabel')}
                           </span>
                           {pack.cloudModules.map((cMod) => (
                             <span
                               key={cMod}
-                              className="px-1.5 py-0.5 rounded bg-sky-950/50 border border-sky-800/40 text-sky-300 font-mono text-[10px]"
+                              className="px-1.5 py-0.5 rounded bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-focus font-mono text-[10px]"
                             >
                               {cMod}
                             </span>
@@ -234,9 +225,9 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
                     {isCore ? (
                       <div
                         title={t('modal.toolpacks.coreLockedTitle')}
-                        className="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 text-slate-400 text-[11px] font-medium cursor-not-allowed select-none"
+                        className="flex items-center gap-1 px-2.5 py-1 rounded bg-elevated text-secondary text-[11px] font-medium cursor-not-allowed select-none"
                       >
-                        <Lock className="w-3.5 h-3.5 text-slate-400" />
+                        <Lock className="w-3.5 h-3.5 text-secondary" />
                         <span>{t('modal.toolpacks.coreLockedLabel')}</span>
                       </div>
                     ) : (
@@ -245,8 +236,8 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
                         onClick={() => handleToggle(pack.id)}
                         className={`flex items-center gap-1.5 px-3 py-1.5 rounded font-mono text-[11px] font-medium transition-colors cursor-pointer ${
                           isEnabled
-                            ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                            : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                            ? 'bg-nominal hover:opacity-90 text-on-accent'
+                            : 'bg-elevated hover:bg-hover text-primary'
                         }`}
                       >
                         {isEnabled ? (
@@ -268,22 +259,18 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
 
         {/* Footer (46px) */}
         <div
-          style={{
-            backgroundColor: '#0B0F17',
-            borderTop: '1px solid #1E293B',
-          }}
-          className="px-4 py-2.5 flex items-center justify-between gap-3 shrink-0"
+          className="px-4 py-2.5 bg-canvas border-t border-hairline flex items-center justify-between gap-3 shrink-0"
         >
-          <div className="flex items-center gap-2 text-slate-400 text-[11.5px] min-w-0">
+          <div className="flex items-center gap-2 text-secondary text-[11.5px] min-w-0">
             {cloudOn && isCloudBound ? (
               <>
-                <Cloud className="w-4 h-4 text-sky-400 shrink-0" />
+                <Cloud className="w-4 h-4 text-focus shrink-0" />
                 <span className="truncate">
                   {t('modal.toolpacks.cloudBoundPrefix')}{' '}
-                  <strong className="text-slate-200">{projState.currentName}</strong>
+                  <strong className="text-primary">{projState.currentName}</strong>
                 </span>
                 {syncFeedback && (
-                  <span className="ml-2 px-1.5 py-0.5 rounded bg-slate-800 text-cyan-300 font-mono text-[10.5px]">
+                  <span className="ml-2 px-1.5 py-0.5 rounded bg-elevated text-focus font-mono text-[10.5px]">
                     {syncFeedback}
                   </span>
                 )}
@@ -299,7 +286,7 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
                 type="button"
                 onClick={handleSyncToCloud}
                 disabled={cloudSyncing}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-sky-700 hover:bg-sky-600 text-white font-medium text-[11.5px] cursor-pointer disabled:opacity-50 transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-focus hover:opacity-90 text-on-accent font-medium text-[11.5px] cursor-pointer disabled:opacity-50 transition-colors"
                 title={t('modal.toolpacks.syncButtonTitle')}
               >
                 {cloudSyncing ? (
@@ -314,7 +301,7 @@ export const ToolpacksModal: React.FC<ToolpacksModalProps> = ({
             <button
               type="button"
               onClick={() => projectStore.setToolpacksModalOpen(false)}
-              className="px-4 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-[11.5px] cursor-pointer transition-colors"
+              className="px-4 py-1.5 rounded bg-elevated hover:bg-hover text-primary font-medium text-[11.5px] cursor-pointer transition-colors"
             >
               {t('modal.toolpacks.btnDone')}
             </button>

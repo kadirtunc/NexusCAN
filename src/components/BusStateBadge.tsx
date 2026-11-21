@@ -33,43 +33,43 @@ export function formatBusStateLabel(
     case 'active':
       return {
         label: 'ERR-ACTIVE',
-        dotClass: 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]',
-        textClass: 'text-emerald-400 font-semibold',
-        borderClass: 'border-emerald-500/40',
-        bgClass: 'bg-emerald-500/10',
+        dotClass: 'bg-nominal shadow-[0_0_6px_rgba(16,185,129,0.5)]',
+        textClass: 'text-nominal font-semibold',
+        borderClass: 'border-[var(--status-nominal-border)]',
+        bgClass: 'bg-[var(--status-nominal-bg)]',
       };
     case 'warning':
       return {
         label: 'ERR-WARN',
-        dotClass: 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)]',
-        textClass: 'text-amber-400 font-semibold',
-        borderClass: 'border-amber-500/40',
-        bgClass: 'bg-amber-500/10',
+        dotClass: 'bg-warn shadow-[0_0_6px_rgba(251,191,36,0.5)]',
+        textClass: 'text-warn font-semibold',
+        borderClass: 'border-[var(--status-warn-border)]',
+        bgClass: 'bg-[var(--status-warn-bg)]',
       };
     case 'passive':
       return {
         label: 'ERR-PASSIVE',
-        dotClass: 'bg-orange-500 shadow-[0_0_6px_rgba(249,115,22,0.5)]',
-        textClass: 'text-orange-400 font-semibold',
-        borderClass: 'border-orange-500/40',
-        bgClass: 'bg-orange-500/10',
+        dotClass: 'bg-warn shadow-[0_0_6px_rgba(249,115,22,0.5)]',
+        textClass: 'text-warn font-semibold',
+        borderClass: 'border-[var(--status-warn-border)]',
+        bgClass: 'bg-[var(--status-warn-bg)]',
       };
     case 'busoff':
     case 'bus-off':
       return {
         label: 'BUS-OFF',
-        dotClass: 'bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.7)] animate-pulse',
-        textClass: 'text-red-400 font-bold',
-        borderClass: 'border-red-500/60',
-        bgClass: 'bg-red-500/15',
+        dotClass: 'bg-critical shadow-[0_0_6px_rgba(239,68,68,0.7)] animate-pulse',
+        textClass: 'text-critical font-bold',
+        borderClass: 'border-[var(--status-critical-border)]',
+        bgClass: 'bg-[var(--status-critical-bg)]',
       };
     default:
       return {
         label: busState.toUpperCase(),
-        dotClass: 'bg-sky-400',
-        textClass: 'text-sky-300 font-medium',
-        borderClass: 'border-sky-500/40',
-        bgClass: 'bg-sky-500/10',
+        dotClass: 'bg-focus',
+        textClass: 'text-focus font-medium',
+        borderClass: 'border-[var(--status-focus-border)]',
+        bgClass: 'bg-[var(--status-focus-bg)]',
       };
   }
 }

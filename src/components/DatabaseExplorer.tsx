@@ -288,7 +288,7 @@ export const DatabaseExplorer: React.FC = () => {
                         >
                           <span className="font-medium truncate">{msg.name}</span>
                           {msg.isMultiplexed && (
-                            <span className="px-1.5 h-[18px] leading-[16px] text-[10px] font-mono font-bold border border-amber-500/50 bg-amber-500/15 text-amber-500 shrink-0">
+                            <span className="px-1.5 h-[18px] leading-[16px] text-[10px] font-mono font-bold border border-[var(--status-warn-border)] bg-[var(--status-warn-bg)] text-warn shrink-0">
                               {hasCascadedMux ? 'MUX²' : 'MUX'}
                             </span>
                           )}
@@ -390,9 +390,9 @@ export const DatabaseExplorer: React.FC = () => {
                             </td>
 
                             <td colSpan={4}>
-                              <div className="pcan-cell pl-2.5 border-l-2 border-emerald-500/40 font-sans justify-between gap-2 text-[12px]">
+                              <div className="pcan-cell pl-2.5 border-l-2 border-[var(--status-nominal-border)] font-sans justify-between gap-2 text-[12px]">
                                 <div className="flex items-center min-w-0">
-                                  <span className="text-emerald-500 font-mono font-bold mr-1.5 shrink-0">
+                                  <span className="text-nominal font-mono font-bold mr-1.5 shrink-0">
                                     ~
                                   </span>
                                   <span className="truncate font-medium">
@@ -407,17 +407,17 @@ export const DatabaseExplorer: React.FC = () => {
 
                                 {/* Multiplexer Role Badge */}
                                 {sig.muxRole === 'masterSwitch' && (
-                                  <span className="px-1.5 h-[18px] leading-[16px] text-[10.5px] font-mono font-bold border border-amber-500/60 bg-amber-500/15 text-amber-500 shrink-0">
+                                  <span className="px-1.5 h-[18px] leading-[16px] text-[10.5px] font-mono font-bold border border-[var(--status-warn-border)] bg-[var(--status-warn-bg)] text-warn shrink-0">
                                     [M]
                                   </span>
                                 )}
                                 {sig.muxRole === 'multiplexed' && isSubSwitch && (
-                                  <span className="px-1.5 h-[18px] leading-[16px] text-[10.5px] font-mono font-bold border border-amber-500/60 bg-violet-500/15 text-amber-400 shrink-0">
+                                  <span className="px-1.5 h-[18px] leading-[16px] text-[10.5px] font-mono font-bold border border-[var(--status-warn-border)] bg-[var(--status-focus-bg)] text-warn shrink-0">
                                     [m{formatCompactMuxRanges(sig.muxRanges)} · M]
                                   </span>
                                 )}
                                 {sig.muxRole === 'multiplexed' && !isSubSwitch && (
-                                  <span className="px-1.5 h-[18px] leading-[16px] text-[10.5px] font-mono border border-sky-500/50 bg-sky-500/10 text-sky-500 shrink-0">
+                                  <span className="px-1.5 h-[18px] leading-[16px] text-[10.5px] font-mono border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] text-focus shrink-0">
                                     [m{formatCompactMuxRanges(sig.muxRanges)}]
                                   </span>
                                 )}
@@ -499,7 +499,7 @@ const DiagnosticsTable: React.FC<{ diagnostics: readonly ParseDiagnosticDto[] }>
 
   if (diagnostics.length === 0) {
     return (
-      <div className="p-6 text-center text-[12px] text-emerald-500 font-medium">
+      <div className="p-6 text-center text-[12px] text-nominal font-medium">
         {t('netdb.explorer.diagClean')}
       </div>
     );
@@ -528,9 +528,9 @@ const DiagnosticsTable: React.FC<{ diagnostics: readonly ParseDiagnosticDto[] }>
               <div
                 className={`pcan-cell font-semibold uppercase ${
                   d.severity === 'error'
-                    ? 'text-red-500'
+                    ? 'text-critical'
                     : d.severity === 'warning'
-                      ? 'text-amber-500'
+                      ? 'text-warn'
                       : ''
                 }`}
               >

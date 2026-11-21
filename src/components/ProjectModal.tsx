@@ -328,7 +328,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
   return (
     <div
       onClick={onClose}
-      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 select-none"
+      className="fixed inset-0 z-50 bg-[var(--bg-scrim)] flex items-center justify-center p-4 select-none"
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -352,14 +352,14 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
             {sessionActive && (
               <div className="flex items-center gap-1.5 text-[11px] font-normal">
                 <span className="text-[var(--text-muted)]">|</span>
-                <span className="text-slate-300 font-mono text-[10px]">
+                <span className="text-primary font-mono text-[10px]">
                   {cloudState.userFullName || cloudState.userEmail}
                 </span>
                 {activeOrg && (
-                  <span className="px-1.5 py-0.5 rounded bg-sky-950/60 border border-sky-800/60 text-sky-300 font-mono text-[10px] flex items-center gap-1">
-                    <Building2 className="w-2.5 h-2.5 text-sky-400 shrink-0" />
+                  <span className="px-1.5 py-0.5 rounded bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-focus font-mono text-[10px] flex items-center gap-1">
+                    <Building2 className="w-2.5 h-2.5 text-focus shrink-0" />
                     <span>{activeOrg.name}</span>
-                    <span className="text-sky-400/70">[{activeOrg.myRole}]</span>
+                    <span className="text-focus/70">[{activeOrg.myRole}]</span>
                   </span>
                 )}
               </div>
@@ -457,43 +457,43 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
             {sessionActive && (
               <div
                 style={{
-                  backgroundColor: '#0B0F17',
+                  backgroundColor: 'var(--bg-canvas)',
                   borderColor: 'var(--border-strong)',
                 }}
                 className="p-2.5 border space-y-2 rounded-sm"
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-1.5 text-[11px]">
-                    <Cloud className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                    <span className="font-semibold text-slate-200">
+                    <Cloud className="w-3.5 h-3.5 text-focus shrink-0" />
+                    <span className="font-semibold text-primary">
                       {t('modal.project.cloudHeader')}
                     </span>
-                    <span className="font-mono text-emerald-400">
+                    <span className="font-mono text-nominal">
                       {t('modal.project.cloudConnected', { url: cloudState.cloudBaseUrl })}
                     </span>
                   </div>
                   {projState.cloudBinding ? (
-                    <span className="px-1.5 py-0.5 rounded bg-sky-950/70 border border-sky-800/60 text-sky-300 font-mono text-[10px] tabular-nums">
+                    <span className="px-1.5 py-0.5 rounded bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-focus font-mono text-[10px] tabular-nums">
                       {t('modal.project.cloudBoundCode', {
                         code: projState.cloudBinding.projectCode,
                         rev: projState.cloudBinding.baseRevisionNumber ?? 1,
                       })}
                     </span>
                   ) : (
-                    <span className="px-1.5 py-0.5 rounded bg-amber-950/50 border border-amber-800/50 text-amber-300 font-mono text-[10px]">
+                    <span className="px-1.5 py-0.5 rounded bg-[var(--status-warn-bg)] border border-[var(--status-warn-border)] text-warn font-mono text-[10px]">
                       {t('modal.project.localOnlyBadge')}
                     </span>
                   )}
                 </div>
 
                 {/* Explicit Organization Row */}
-                <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-800/80">
-                  <span className="text-slate-400 font-medium">
+                <div className="flex items-center justify-between text-[11px] pt-1 border-t border-hairline">
+                  <span className="text-secondary font-medium">
                     {t('modal.project.orgLabel')}
                   </span>
                   {projState.cloudBinding ? (
-                    <div className="flex items-center gap-1.5 font-mono text-[11px] text-slate-200">
-                      <Building2 className="w-3 h-3 text-sky-400 shrink-0" />
+                    <div className="flex items-center gap-1.5 font-mono text-[11px] text-primary">
+                      <Building2 className="w-3 h-3 text-focus shrink-0" />
                       <span>
                         {projState.cloudBinding.orgName ||
                           cloudState.organizations.find(
@@ -502,14 +502,14 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                           t('modal.project.unknownOrg')}
                       </span>
                       {projState.cloudBinding.orgSlug && (
-                        <span className="text-slate-400">
+                        <span className="text-secondary">
                           (@{projState.cloudBinding.orgSlug})
                         </span>
                       )}
                     </div>
                   ) : (
                     <div className="flex items-center gap-1.5">
-                      <Building2 className="w-3 h-3 text-sky-400 shrink-0" />
+                      <Building2 className="w-3 h-3 text-focus shrink-0" />
                       <select
                         value={selectedOrgId}
                         onChange={(e) => {
@@ -517,7 +517,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                           cloudBridgeStore.selectOrganization(e.target.value);
                         }}
                         style={{
-                          backgroundColor: '#0F1623',
+                          backgroundColor: 'var(--bg-panel)',
                           borderColor: 'var(--border-strong)',
                           color: 'var(--text-primary)',
                         }}
@@ -565,9 +565,9 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                             setBusy(false);
                           }
                         }}
-                        className="h-[24px] px-2.5 border border-sky-500/60 bg-sky-950/40 text-sky-300 hover:bg-sky-900/50 text-[11px] font-semibold flex items-center gap-1 cursor-pointer rounded-sm"
+                        className="h-[24px] px-2.5 border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] text-focus hover:bg-[var(--status-focus-bg)] text-[11px] font-semibold flex items-center gap-1 cursor-pointer rounded-sm"
                       >
-                        <UploadCloud className="w-3 h-3 text-sky-400" />
+                        <UploadCloud className="w-3 h-3 text-focus" />
                         <span>{t('modal.project.pushToCloud')}</span>
                       </button>
                       <button
@@ -579,7 +579,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                             message: t('modal.project.statusUnlinked'),
                           });
                         }}
-                        className="h-[24px] px-2 border border-slate-700 hover:border-slate-500 text-slate-400 hover:text-slate-200 text-[11px] flex items-center gap-1 cursor-pointer rounded-sm"
+                        className="h-[24px] px-2 border border-strong hover:border-strong text-secondary hover:text-primary text-[11px] flex items-center gap-1 cursor-pointer rounded-sm"
                         title={t('modal.project.unlinkTitle')}
                       >
                         <Unlink className="w-3 h-3" />
@@ -596,9 +596,9 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                           projectName: projState.currentName,
                         });
                       }}
-                      className="h-[24px] px-2.5 border border-amber-600/60 bg-amber-950/40 text-amber-300 hover:bg-amber-900/50 text-[11px] font-semibold flex items-center gap-1 cursor-pointer rounded-sm"
+                      className="h-[24px] px-2.5 border border-[var(--status-warn-border)] bg-[var(--status-warn-bg)] text-warn hover:bg-[var(--status-warn-bg)] text-[11px] font-semibold flex items-center gap-1 cursor-pointer rounded-sm"
                     >
-                      <UploadCloud className="w-3 h-3 text-amber-400" />
+                      <UploadCloud className="w-3 h-3 text-warn" />
                       <span>{t('modal.project.pushToCloudPrompt')}</span>
                     </button>
                   )}
@@ -625,12 +625,12 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                   </button>
 
                   {sessionActive && (
-                    <label className="flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer select-none">
+                    <label className="flex items-center gap-1.5 text-[11px] text-primary cursor-pointer select-none">
                       <input
                         type="checkbox"
                         checked={newProjectPushToCloud}
                         onChange={(e) => setNewProjectPushToCloud(e.target.checked)}
-                        className="h-3.5 w-3.5 rounded accent-sky-500 cursor-pointer"
+                        className="h-3.5 w-3.5 rounded accent-focus cursor-pointer"
                       />
                       <span>{t('modal.project.pushNewToCloud')}</span>
                     </label>
@@ -681,10 +681,10 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                       borderColor: 'var(--border-strong)',
                       color: 'var(--text-secondary)',
                     }}
-                    className="h-[25px] px-2.5 border flex items-center gap-1 text-[11px] hover:text-red-400 hover:border-red-500/50 cursor-pointer"
+                    className="h-[25px] px-2.5 border flex items-center gap-1 text-[11px] hover:text-critical hover:border-[var(--status-critical-border)] cursor-pointer"
                     title={t('modal.project.closeProjectTitle')}
                   >
-                    <FolderX className="w-3.5 h-3.5 text-red-400" />
+                    <FolderX className="w-3.5 h-3.5 text-critical" />
                     <span>{t('modal.project.closeProject')}</span>
                   </button>
                 )}
@@ -695,13 +695,13 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                 disabled={busy}
                 onClick={() => void handleSave()}
                 style={{
-                  backgroundColor: 'rgba(63, 185, 128, 0.16)',
-                  borderColor: 'rgba(63, 185, 128, 0.65)',
+                  backgroundColor: 'var(--status-nominal-bg)',
+                  borderColor: 'var(--status-nominal-border)',
                   color: 'var(--text-primary)',
                 }}
                 className="h-[25px] px-3.5 border flex items-center gap-1.5 text-[11px] font-semibold hover:opacity-90 cursor-pointer"
               >
-                <Save className="w-3.5 h-3.5 text-emerald-500" />
+                <Save className="w-3.5 h-3.5 text-nominal" />
                 <span>{t('modal.project.saveProject')}</span>
               </button>
             </div>
@@ -751,7 +751,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                           projState.cloudBinding.orgName ||
                           projState.cloudBinding.orgSlug ||
                           'Cloud';
-                        orgBadgeClass = 'text-sky-400 font-semibold';
+                        orgBadgeClass = 'text-focus font-semibold';
                       } else {
                         const matchingCloud = cloudState.projects.find(
                           (p) =>
@@ -763,7 +763,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                             (o) => o.id === matchingCloud.orgId,
                           );
                           orgDisplay = matchingCloudOrg?.name || matchingCloud.code;
-                          orgBadgeClass = 'text-slate-300';
+                          orgBadgeClass = 'text-primary';
                         }
                       }
 
@@ -773,7 +773,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                             <div className="pcan-cell font-sans font-semibold flex items-center gap-1.5">
                               <span className="truncate">{item.name}</span>
                               {isCurrent && (
-                                <span className="px-1 py-0.2 rounded bg-emerald-950/70 border border-emerald-800/60 text-emerald-300 font-mono text-[9px]">
+                                <span className="px-1 py-0.2 rounded bg-[var(--status-nominal-bg)] border border-[var(--status-nominal-border)] text-nominal font-mono text-[9px]">
                                   {t('modal.project.activeBadge')}
                                 </span>
                               )}
@@ -830,7 +830,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                                   backgroundColor: 'var(--bg-toolbar)',
                                   borderColor: 'var(--border-strong)',
                                 }}
-                                className="h-[18px] px-1.5 border text-[10px] text-[var(--text-secondary)] hover:text-red-400 cursor-pointer"
+                                className="h-[18px] px-1.5 border text-[10px] text-[var(--text-secondary)] hover:text-critical cursor-pointer"
                                 title={t('modal.project.btnDeleteTitle')}
                               >
                                 <Trash2 className="w-2.5 h-2.5" />
@@ -851,7 +851,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
             <div>
               <div className="flex items-center justify-between text-[11px] font-semibold text-[var(--text-secondary)] mb-1">
                 <div className="flex items-center gap-1.5">
-                  <Cloud className="w-3.5 h-3.5 text-sky-400" />
+                  <Cloud className="w-3.5 h-3.5 text-focus" />
                   <span>{t('modal.project.cloudProjectsHeading')}</span>
                   <span className="font-mono text-[10px] text-[var(--text-muted)]">
                     ({filteredCloudProjects.length} / {cloudState.projects.length})
@@ -892,7 +892,7 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                     title={t('modal.project.refreshCloudProjectsTitle')}
                   >
                     <RefreshCw
-                      className={`w-2.5 h-2.5 text-sky-400 ${
+                      className={`w-2.5 h-2.5 text-focus ${
                         cloudState.loadingProjects ? 'animate-spin' : ''
                       }`}
                     />
@@ -945,14 +945,14 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                               <div className="pcan-cell font-sans font-semibold flex items-center gap-1.5">
                                 <span className="truncate">{p.name}</span>
                                 {isBound && (
-                                  <span className="px-1 py-0.2 rounded bg-sky-950/70 border border-sky-800/60 text-sky-300 font-mono text-[9px]">
+                                  <span className="px-1 py-0.2 rounded bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-focus font-mono text-[9px]">
                                     {t('modal.project.activeBoundBadge')}
                                   </span>
                                 )}
                               </div>
                             </td>
                             <td>
-                              <div className="pcan-cell text-[11px] text-sky-300">
+                              <div className="pcan-cell text-[11px] text-focus">
                                 [{p.code}]{' '}
                                 {p.latestRevisionNumber
                                   ? `Rev #${p.latestRevisionNumber}`
@@ -1006,9 +1006,9 @@ export const ProjectModal: React.FC<ProjectModalProps> = ({
                                     }
                                   }}
                                   style={{
-                                    backgroundColor: 'rgba(56, 189, 248, 0.12)',
-                                    borderColor: 'rgba(56, 189, 248, 0.45)',
-                                    color: '#38BDF8',
+                                    backgroundColor: 'var(--status-focus-bg)',
+                                    borderColor: 'var(--status-focus-border)',
+                                    color: 'var(--status-focus)',
                                   }}
                                   className="h-[20px] px-2 border text-[10px] font-semibold hover:opacity-90 flex items-center gap-1 cursor-pointer"
                                   title={t('modal.project.pullAndOpenTitle')}

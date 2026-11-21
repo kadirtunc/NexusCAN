@@ -4,9 +4,9 @@ import { mcpUiOverlayStore, useMcpUiOverlay } from '../store/mcpUiOverlayStore';
 import type { UiNotifyLevel } from '../types/mcp';
 
 const LEVEL_CLASS: Record<UiNotifyLevel, string> = {
-  info: 'border-sky-500/60 text-sky-200',
-  warn: 'border-amber-500/60 text-amber-200',
-  success: 'border-emerald-500/60 text-emerald-200',
+  info: 'border-[var(--status-focus-border)] text-focus',
+  warn: 'border-[var(--status-warn-border)] text-warn',
+  success: 'border-[var(--status-nominal-border)] text-nominal',
 };
 
 /** Toasts and Yes/No dialog requested by Claude through the MCP UI bridge. */
@@ -45,7 +45,7 @@ export const McpUiOverlay: React.FC = () => {
       {confirm && (
         <div
           onClick={() => mcpUiOverlayStore.answerConfirm(false)}
-          className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4 select-none"
+          className="fixed inset-0 z-[70] bg-[var(--bg-scrim)] flex items-center justify-center p-4 select-none"
         >
           <div
             onClick={(e) => e.stopPropagation()}
@@ -62,7 +62,7 @@ export const McpUiOverlay: React.FC = () => {
               style={{ backgroundColor: 'var(--bg-header)', borderBottom: '1px solid var(--border-strong)' }}
               className="h-[40px] px-4 flex items-center gap-2.5 shrink-0"
             >
-              <span className="px-2 py-0.5 rounded border border-sky-500/60 bg-sky-950/40 text-sky-300 font-mono text-[11px]">
+              <span className="px-2 py-0.5 rounded border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] text-focus font-mono text-[11px]">
                 {t('mcp.ui.claudeAsks')}
               </span>
               <span className="font-semibold text-[13px] truncate">{confirm.title}</span>
@@ -81,7 +81,7 @@ export const McpUiOverlay: React.FC = () => {
               <button
                 type="button"
                 onClick={() => mcpUiOverlayStore.answerConfirm(true)}
-                className="px-3 h-[28px] border border-sky-500/60 bg-sky-950/40 text-sky-300 hover:bg-sky-950/70 cursor-pointer text-[12px] font-semibold"
+                className="px-3 h-[28px] border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] text-focus hover:bg-hover cursor-pointer text-[12px] font-semibold"
               >
                 {confirm.confirmLabel ?? t('mcp.ui.yes')}
               </button>

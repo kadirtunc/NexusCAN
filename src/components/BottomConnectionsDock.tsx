@@ -228,6 +228,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
   if (workbench.bottomConnectionsCollapsed) {
     return (
       <footer
+        data-tour="connections.dock"
         style={{
           backgroundColor: 'var(--bg-toolbar)',
           borderTop: '1px solid var(--border-strong)',
@@ -246,7 +247,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
           </button>
           <span
             className={`w-2 h-2 rounded-full ${
-              connectedCount > 0 ? 'bg-emerald-500' : 'bg-slate-500'
+              connectedCount > 0 ? 'bg-nominal' : 'bg-muted'
             }`}
           />
           <span className="font-semibold text-[var(--text-primary)]">
@@ -270,6 +271,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
   // Expanded Industrial Connections Dock
   return (
     <footer
+      data-tour="connections.dock"
       style={{
         backgroundColor: 'var(--bg-panel)',
         borderTop: '1px solid var(--border-strong)',
@@ -302,8 +304,8 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
             <span
               className={`w-2 h-2 rounded-full ${
                 connectedCount > 0
-                  ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]'
-                  : 'bg-slate-500'
+                  ? 'bg-nominal shadow-[0_0_6px_var(--status-nominal-border)]'
+                  : 'bg-muted'
               }`}
             />
             <span className="font-semibold text-[var(--text-primary)]">
@@ -313,7 +315,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
             <button
               type="button"
               onClick={() => workbenchStore.setNewConnectionModalOpen(true)}
-              className="h-[24px] px-2 border border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 text-[11.5px] font-semibold flex items-center gap-1 cursor-pointer rounded-[2px]"
+              className="h-[24px] px-2 border border-[var(--status-nominal-border)] bg-[var(--status-nominal-bg)] text-nominal hover:bg-[var(--status-nominal-bg)] text-[11.5px] font-semibold flex items-center gap-1 cursor-pointer rounded-[2px]"
             >
               <Plus className="w-3 h-3" />
               <span>{t('rxtx.dock.addConn')}</span>
@@ -323,7 +325,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
               <button
                 type="button"
                 onClick={() => void handleDisconnectAll()}
-                className="h-[24px] px-2 border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 text-[11.5px] font-medium flex items-center gap-1 cursor-pointer rounded-[2px]"
+                className="h-[24px] px-2 border border-[var(--status-critical-border)] bg-[var(--status-critical-bg)] text-critical hover:bg-[var(--status-critical-bg)] text-[11.5px] font-medium flex items-center gap-1 cursor-pointer rounded-[2px]"
                 title={t('rxtx.dock.disconnectAllTooltip')}
               >
                 <Unplug className="w-3 h-3" />
@@ -421,7 +423,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
                               void handleConnectProfile(prof);
                             }
                           }}
-                          className="accent-emerald-600 cursor-pointer"
+                          className="accent-nominal cursor-pointer"
                           title={
                             row.isConnected
                               ? t('rxtx.dock.connectedTooltip', { bus: row.busId + 1 })
@@ -476,8 +478,8 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
                         <span
                           className={`px-1.5 rounded text-[10px] font-mono cursor-pointer whitespace-nowrap hover:opacity-80 ${
                             dbCount > 0
-                              ? 'bg-sky-950/70 border border-sky-800/60 text-sky-300'
-                              : 'bg-slate-900 border border-slate-700 text-slate-500'
+                              ? 'bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-focus'
+                              : 'bg-panel border border-strong text-muted'
                           }`}
                           title={t('rxtx.dock.dbBadgeTooltip', { count: dbCount })}
                         >
@@ -496,11 +498,11 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
                               disabled={isBusy}
                               onClick={() => void handleSwitchToActiveTx(bus.busId)}
                               style={{
-                                backgroundColor: 'rgba(217, 155, 38, 0.12)',
-                                borderColor: 'rgba(217, 155, 38, 0.50)',
+                                backgroundColor: 'var(--status-warn-bg)',
+                                borderColor: 'var(--status-warn-border)',
                                 color: 'var(--status-warn)',
                               }}
-                              className="h-[18px] max-w-full truncate px-1.5 border text-[10px] font-semibold hover:border-amber-400 cursor-pointer rounded-[1px]"
+                              className="h-[18px] max-w-full truncate px-1.5 border text-[10px] font-semibold hover:border-warn cursor-pointer rounded-[1px]"
                               title="Click to Switch to Active TX Armed"
                             >
                               {t('rxtx.dock.switchToTx')}
@@ -512,7 +514,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
                               onClick={() => void handleToggleArmTx(bus.busId, Boolean(bus.txArmed))}
                               style={{
                                 backgroundColor: bus.txArmed
-                                  ? 'rgba(217, 155, 38, 0.22)'
+                                  ? 'var(--status-warn-bg)'
                                   : 'var(--bg-panel)',
                                 borderColor: bus.txArmed ? 'var(--status-warn)' : 'var(--border-strong)',
                                 color: bus.txArmed ? 'var(--status-warn)' : 'var(--text-muted)',
@@ -557,7 +559,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
                       <div
                         className={`pcan-cell pcan-cell-right ${
                           row.isConnected && header.droppedFrames > 0
-                            ? 'text-red-500 font-bold'
+                            ? 'text-critical font-bold'
                             : 'text-[var(--text-muted)]'
                         }`}
                       >
@@ -570,15 +572,15 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
                       <div className="pcan-cell">
                         {row.isConnected ? (
                           <div className="flex items-center gap-1.5 w-full pr-1 font-mono text-[10px] tabular-nums">
-                            <div className="flex-1 h-[7px] bg-slate-800 border border-slate-700 rounded-[1px] overflow-hidden">
+                            <div className="flex-1 h-[7px] bg-elevated border border-strong rounded-[1px] overflow-hidden">
                               <div
                                 style={{ width: `${Math.min(100, Math.max(0, busLoadPct))}%` }}
                                 className={`h-full ${
                                   busLoadPct > 80
-                                    ? 'bg-red-500'
+                                    ? 'bg-critical'
                                     : busLoadPct > 50
-                                      ? 'bg-amber-400'
-                                      : 'bg-emerald-400'
+                                      ? 'bg-warn'
+                                      : 'bg-nominal'
                                 }`}
                               />
                             </div>

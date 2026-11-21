@@ -66,6 +66,16 @@
   --canvas-grid: rgba(139, 148, 160, 0.12);
   --canvas-axis: #8b94a0;
   --canvas-crosshair: rgba(220, 226, 234, 0.45);
+  /* theme-tokens-v1: text on solid accent/status fills + plot series (only source of chart colors) */
+  --text-on-accent: #ffffff;
+  --series-1: #3fa7e0;
+  --series-2: #3fb950;
+  --series-3: #e3b341;
+  --series-4: #f47067;
+  --series-5: #6cb6ff;
+  --series-6: #8ce09a;
+  --series-7: #d29922;
+  --series-8: #9099a6;
 }
 
 [data-theme="light"] {
@@ -131,6 +141,15 @@
   --canvas-grid: rgba(87, 96, 106, 0.14);
   --canvas-axis: #57606a;
   --canvas-crosshair: rgba(27, 31, 36, 0.4);
+  --text-on-accent: #ffffff;
+  --series-1: #0969da;
+  --series-2: #1a7f37;
+  --series-3: #9a6700;
+  --series-4: #cf222e;
+  --series-5: #0550ae;
+  --series-6: #116329;
+  --series-7: #bc4c00;
+  --series-8: #57606a;
 }
 
 @theme inline {
@@ -147,6 +166,24 @@
   --color-focus: var(--status-focus);
   --color-warn: var(--status-warn);
   --color-critical: var(--status-critical);
+  --color-app: var(--bg-app);
+  --color-panel: var(--bg-panel);
+  --color-header: var(--bg-header);
+  --color-toolbar: var(--bg-toolbar);
+  --color-strip: var(--bg-strip);
+  --color-input: var(--bg-input);
+  --color-grid: var(--border-grid);
+  --color-primary: var(--text-primary);
+  --color-secondary: var(--text-secondary);
+  --color-on-accent: var(--text-on-accent);
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --color-series-4: var(--series-4);
+  --color-series-5: var(--series-5);
+  --color-series-6: var(--series-6);
+  --color-series-7: var(--series-7);
+  --color-series-8: var(--series-8);
 }
 
 @layer base {
