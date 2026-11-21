@@ -141,6 +141,32 @@ A dedicated **Reverse Engineering** tab for finding undocumented signals. It is 
 - **Save to DBC** — a found signal becomes a draft (name, scaling, range, unit, value table, plus provenance such as `RE: r=0.998 lag=+120ms ref=OBD 0x0D`) kept in the project. *Apply to bus* loads all drafts as `RE_found.dbc` so the trace, inspector and plots decode them immediately. *Export .dbc* writes a standalone file, and *Merge into DBC…* adds them to an existing database as a new file. Every generated DBC is re-parsed and verified bit-for-bit before it is offered.
 - **Value Scan** — Cheat Engine for CAN: scan for an exact, physical (with scale presets such as ×0.01 or −40 offset), range or unknown value, change something on the vehicle, then narrow with *changed / unchanged / increased / decreased / increased by N / stable for T ms* until the signal is left. Values can be typed in decimal or `0x` hex. Undo goes back up to eight steps, and identically moving nested fields are grouped. A million candidates are scanned in about 50 ms; any result opens in the Signal Inspector or saves to DBC.
 
+### AI co-pilot (MCP server)
+
+NexusCAN has a built-in [Model Context Protocol](https://modelcontextprotocol.io) server, so an AI assistant such as Claude Code can read what the analyzer sees and answer questions about it: *"Which IDs are the busiest on bus 0?"*, *"Summarise BMS_Status over the last 10 s"*, *"Interpret the DTC responses in this session"*, *"Compare the last two recordings"*.
+
+It is **off by default**. Start it from the `MCP` indicator in the status bar, then connect your client with the command the panel copies for you:
+
+```bash
+claude mcp add --transport http nexuscan http://127.0.0.1:17800/mcp \
+  --header "Authorization: Bearer <TOKEN>"
+```
+
+**46 read-only tools** in eight groups:
+
+| Group | Tools | What the assistant can do |
+| :--- | :---: | :--- |
+| Live | 9 | App and bus status, devices and drivers, live message table, live signal values and statistics, periodic TX list, recent trace window |
+| Trace | 4 | List, summarise and query recordings, extract a signal as a time series |
+| Database | 8 | Loaded DBC/KCD info, signal search, messages and ECUs, decode / encode a frame, parser diagnostics |
+| Diagnostics | 4 | UDS session info, request/response conversation, ISO-TP frames, passive ECU discovery |
+| Reverse engineering | 6 | Heatmap status, bit series, correlation, Value Scan results, generate a DBC draft |
+| Workspace | 4 | Projects, trace comparison, Debug Console events |
+| Runs & flows | 4 | Workbench run history, flow library |
+| UI co-pilot | 7 | Read the UI state, switch tabs, select a message, set the Trace filter, add signals to the Plotter, show a notification, ask you a yes/no question |
+
+**Safety.** No MCP tool can transmit, arm a bus, change the bus mode, run UDS services, flash, compute seed/keys, start a replay or write files; Listen-Only and Panic Stop are untouched. The server binds to `127.0.0.1` only, requires a fresh random token on every start, rejects non-loopback `Host`/`Origin`, logs every call to the Debug Console (category `MCP`) and redacts SecurityAccess / Authentication data. It stops when the main window closes. Click ⓘ in the MCP panel for the full tool list with descriptions.
+
 ---
 
 ## Try it in five minutes, no hardware needed
