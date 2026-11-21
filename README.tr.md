@@ -138,6 +138,32 @@ Dokümantasyonu olmayan sinyalleri bulmak için ayrı bir sekme. Tamamen pasif �
 - **Save to DBC**: Bulduğunuz sinyali isim, ölçek, birim ve değer tablosuyla taslak olarak kaydediyorsunuz. *Apply to bus* ile taslaklar `RE_found.dbc` olarak yükleniyor, trace ve grafiklerde hemen çözümleniyor. Ayrı bir `.dbc` dosyası olarak dışa aktarabilir veya mevcut DBC'nize yeni dosya olarak ekleyebilirsiniz.
 - **Value Scan**: Cheat Engine'deki gibi çalışıyor. Bir değer arıyorsunuz (örneğin 80 km/h), araçta bir şeyi değiştiriyorsunuz, sonra *arttı / azaldı / değişti / değişmedi* diye daraltıyorsunuz. Birkaç adımda doğru sinyal kalıyor. Değerleri ondalık veya `0x` hex girebilirsiniz. Son sekiz adım geri alınabiliyor. Bir milyon aday yaklaşık 50 ms'de taranıyor.
 
+### AI Co-pilot (MCP Server)
+
+Uygulamanın içinde bir [Model Context Protocol](https://modelcontextprotocol.io) sunucusu var. Claude Code gibi bir AI asistanı bu sayede analizörün gördüğü veriyi okuyup sorularınıza cevap verebiliyor: *"Bus 0'da en yoğun ID'ler hangileri?"*, *"BMS_Status sinyalini son 10 saniye için özetle"*, *"Bu oturumdaki DTC cevaplarını yorumla"*, *"Son iki kaydı karşılaştır"*.
+
+Sunucu **varsayılan olarak kapalı**. Durum çubuğundaki `MCP` göstergesinden başlatıyorsunuz, panelin kopyaladığı komutla da istemcinizi bağlıyorsunuz:
+
+```bash
+claude mcp add --transport http nexuscan http://127.0.0.1:17800/mcp \
+  --header "Authorization: Bearer <TOKEN>"
+```
+
+Sekiz grupta **46 salt-okunur araç** var:
+
+| Grup | Araç | Asistan ne yapabiliyor |
+| :--- | :---: | :--- |
+| Live | 9 | Uygulama ve bus durumu, cihazlar ve sürücüler, canlı mesaj tablosu, canlı sinyal değerleri ve istatistikleri, periyodik TX listesi, son trace penceresi |
+| Trace | 4 | Kayıtları listeleme, özetleme ve sorgulama, bir sinyali zaman serisi olarak çıkarma |
+| Database | 8 | Yüklü DBC/KCD bilgisi, sinyal arama, mesajlar ve ECU'lar, frame çözme / kodlama, parser uyarıları |
+| Diagnostics | 4 | UDS oturum bilgisi, istek/cevap akışı, ISO-TP frame'leri, pasif ECU keşfi |
+| Reverse Engineering | 6 | Heatmap durumu, bit serileri, korelasyon, Value Scan sonuçları, DBC taslağı üretme |
+| Workspace | 4 | Projeler, trace karşılaştırma, Debug Console olayları |
+| Runs & Flows | 4 | Workbench çalıştırma geçmişi, flow kütüphanesi |
+| UI Co-pilot | 7 | Arayüz durumunu okuma, sekme değiştirme, mesaj seçme, Trace filtresi, Plotter'a sinyal ekleme, bildirim gösterme, size evet/hayır sorusu sorma |
+
+**Güvenlik.** Hiçbir MCP aracı hatta veri gönderemiyor, bus'ı arm edemiyor, bus modunu değiştiremiyor, UDS servisi çalıştıramıyor, flash yapamıyor, seed/key hesaplayamıyor, replay başlatamıyor veya dosya yazamıyor. Listen-Only ve Panic Stop'a dokunulmuyor. Sunucu yalnızca `127.0.0.1`'i dinliyor, her başlatmada yeni ve rastgele bir token istiyor, loopback olmayan `Host`/`Origin` başlıklarını reddediyor. Her çağrı Debug Console'a (`MCP` kategorisi) yazılıyor, SecurityAccess / Authentication verisi gizleniyor. Ana pencere kapanınca sunucu da duruyor. Açıklamalarıyla tam araç listesi için MCP panelindeki ⓘ butonuna tıklayın.
+
 ---
 
 ## Donanım olmadan denemek
