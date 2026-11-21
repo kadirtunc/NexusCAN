@@ -56,6 +56,7 @@ Rust ile geliştirme nedenimiz **sıfır kod tekrarıyla her işletim sistemi ve
    - Renk değerleri **yalnızca** `src/index.css` içindeki `[data-theme="dark"]` / `[data-theme="light"]` token'larında tanımlanır. Başka hiçbir dosyada Tailwind renk paleti sınıfı (`slate-*`, `sky-*`, `cyan-*`, `emerald-*`, `amber-*`, `white`, `black` …), hex veya `rgb()/hsl()` literal kullanılamaz; yalnızca `var(--token)` ve `@theme` takma ad sınıfları (`bg-panel`, `text-focus` …). Canvas renkleri `src/utils/themeTokens.ts` üzerinden okunur.
    - Yeni renk/token eklemek ya da mevcut değeri değiştirmek **kullanıcı açıkça istemedikçe yasaktır.** Sözlük ve eşleme: `planning/contracts/theme-tokens-v1.md`.
    - Kapı: `node scripts/check-theme-tokens.mjs` (ratchet, sayılar yalnız azalır) her frontend teslimatında PASS olmalı; hedef `--strict`.
+7. **Changelog Disiplini:** Kullanıcıya görünen her değişiklik aynı commit'te `CHANGELOG.md` → `## [Unreleased]` altına (`Added` / `Changed` / `Fixed` / `Security` / `Developer`) kısa ve kullanıcı diliyle eklenir. CI bu bölümü release notlarının başına koyar ve uygulamadaki **Help → Changelog** için build numarasıyla damgalar. Bir release yayınlandıktan sonra repodaki `[Unreleased]` başlığı yayınlanan build'e (`## [0.1.0 build N] — tarih`) çevrilir ve üste yeni boş bir `## [Unreleased]` açılır.
 
 ---
 

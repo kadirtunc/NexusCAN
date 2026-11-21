@@ -18,6 +18,8 @@ export interface UpdatesPersisted {
 
 export interface UpdatesState extends UpdatesPersisted {
   dialogOpen: boolean;
+  /** Help > Changelog dialog (bundled CHANGELOG.md, works offline and in browser mode). */
+  changelogOpen: boolean;
   checking: boolean;
   /** Installed version (status bar); null until loaded / browser mode. */
   appVersion: AppVersionDto | null;
@@ -99,7 +101,7 @@ function load(): UpdatesPersisted {
   }
 }
 
-let state: UpdatesState = { ...load(), dialogOpen: false, checking: false, appVersion: null, result: null, error: null };
+let state: UpdatesState = { ...load(), dialogOpen: false, changelogOpen: false, checking: false, appVersion: null, result: null, error: null };
 const listeners = new Set<() => void>();
 
 function commit(next: UpdatesState, persist: boolean): void {
@@ -153,6 +155,13 @@ export const updateStore = {
   openDialog(check: boolean): void {
     commit({ ...state, dialogOpen: true, error: check ? null : state.error }, false);
     if (check) void updateStore.runCheck(true);
+  },
+  openChangelog(): void {
+    commit({ ...state, changelogOpen: true }, false);
+  },
+  closeChangelog(): void {
+    if (!state.changelogOpen) return;
+    commit({ ...state, changelogOpen: false }, false);
   },
   closeDialog(): void {
     if (!state.dialogOpen) return;

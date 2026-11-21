@@ -10,6 +10,7 @@ import { ProjectExplorerDock } from './components/ProjectExplorerDock';
 import { ProjectModal } from './components/ProjectModal';
 import { BottomConnectionsDock } from './components/BottomConnectionsDock';
 import { GuideInfoDialog } from './onboarding/GuideInfoDialog';
+import { ChangelogDialog } from './components/ChangelogDialog';
 import { UpdateNotice, VersionStatus } from './components/UpdateNotice';
 import { updateStore } from './store/updateStore';
 import { ReceiveTransmitView } from './components/ReceiveTransmitView';
@@ -1292,6 +1293,7 @@ export const App: React.FC = () => {
       <AcknowledgmentsModal />
       <GuideInfoDialog />
       <UpdateNotice />
+      <ChangelogDialog />
       <McpServerPanel />
       <McpUiOverlay />
 
