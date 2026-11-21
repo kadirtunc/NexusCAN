@@ -715,7 +715,10 @@ mod tests {
             "expected calm 0x201 period ~250ms, got {}ms",
             row_201_calm.cycle_ms
         );
-        for db_arb_id in [
+        // Cycle health is an instantaneous "time since last frame" classification, so a paused CI
+        // VM (steal time) can briefly show `jitterWarning` although the schedule is right. A
+        // wrong period never recovers, so polling for up to 2 s keeps the check meaningful.
+        let calm_ids = [
             0x201u32,
             0x101,
             0x105,
@@ -724,17 +727,26 @@ mod tests {
             0x303,
             0x18FF_50E5,
             0x18F0_0900,
-        ] {
-            let row = calm_snap
-                .frames
-                .iter()
-                .find(|r| r.arb_id == db_arb_id)
-                .unwrap_or_else(|| panic!("missing 0x{db_arb_id:X} in calm snapshot"));
-            assert_eq!(
-                row.cycle_health, "nominal",
-                "0x{db_arb_id:X} should be nominal in CalmTrackableSchedule, got {}",
-                row.cycle_health
-            );
+        ];
+        let first_non_nominal = |snap: &TelemetrySnapshotDto| -> Option<(u32, String)> {
+            calm_ids.iter().find_map(|&db_arb_id| {
+                let row = snap
+                    .frames
+                    .iter()
+                    .find(|r| r.arb_id == db_arb_id)
+                    .unwrap_or_else(|| panic!("missing 0x{db_arb_id:X} in calm snapshot"));
+                (row.cycle_health != "nominal").then(|| (db_arb_id, row.cycle_health.to_string()))
+            })
+        };
+        let mut non_nominal = first_non_nominal(&calm_snap);
+        let health_deadline = Instant::now() + Duration::from_secs(2);
+        while non_nominal.is_some() && Instant::now() < health_deadline {
+            thread::sleep(Duration::from_millis(50));
+            let snap = engine.flush_snapshot_now().expect("re-flush calm snapshot");
+            non_nominal = first_non_nominal(&snap);
+        }
+        if let Some((db_arb_id, health)) = non_nominal {
+            panic!("0x{db_arb_id:X} should be nominal in CalmTrackableSchedule, got {health}");
         }
 
         let _ = engine.cmd_panic_stop_tx();

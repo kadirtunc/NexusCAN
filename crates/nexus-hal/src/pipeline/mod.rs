@@ -250,6 +250,10 @@ pub struct PipelineEngine {
     tx_panic_latched: Arc<AtomicBool>,
     /// WP-4: bumped by Panic Stop / reset session; see [`TxDispatchRequest::epoch`].
     tx_epoch: Arc<AtomicU64>,
+    /// Bound for the per-bus disarm write barrier. Always [`TX_QUIESCE_TIMEOUT`] in production;
+    /// the race tests raise it so a paused CI VM cannot turn the bounded wait into a false
+    /// "returned early" (the barrier logic itself is unchanged).
+    disarm_quiesce_timeout: Duration,
     engine_stop: Arc<AtomicBool>,
     snapshot_bcast_tx: broadcast::Sender<TelemetrySnapshotDto>,
     latest_snapshot: Arc<RwLock<Option<TelemetrySnapshotDto>>>,
@@ -429,6 +433,7 @@ impl PipelineEngine {
             dropped_frames,
             tx_panic_latched,
             tx_epoch,
+            disarm_quiesce_timeout: TX_QUIESCE_TIMEOUT,
             engine_stop,
             snapshot_bcast_tx,
             latest_snapshot,
@@ -677,7 +682,7 @@ impl PipelineEngine {
     /// Returns `Err` if that does not happen within [`TX_QUIESCE_TIMEOUT`]; the bus stays
     /// disarmed either way.
     fn quiesce_bus_after_disarm(&self, bus_id: BusId, b: DisarmBarrier) -> Result<(), HalError> {
-        let deadline = Instant::now() + TX_QUIESCE_TIMEOUT;
+        let deadline = Instant::now() + self.disarm_quiesce_timeout;
         // A dead io thread (channel closed) never drains, but it cannot write either.
         let io_alive =
             || BusState::from_u8(b.bus_state.load(Ordering::Acquire)) != BusState::Disconnected;
@@ -693,7 +698,7 @@ impl PipelineEngine {
             Err(HalError::SafetyLock(format!(
                 "{TX_IN_FLIGHT_TIMEOUT_PREFIX} bus {bus_id} is disarmed, but a driver write or \
                  queued TX request from before the disarm was not settled within {} ms",
-                TX_QUIESCE_TIMEOUT.as_millis()
+                self.disarm_quiesce_timeout.as_millis()
             )))
         }
     }
@@ -4082,6 +4087,9 @@ mod tx_write_barrier_tests {
     use crate::drivers::mock_drv::MOCK0_DEVICE_ID;
     use crate::traits::{AdapterCapabilities, BusHealthSnapshot, CanFilter};
 
+    /// Disarm barrier bound for the race tests (production keeps [`TX_QUIESCE_TIMEOUT`]).
+    const RACE_TEST_QUIESCE_BOUND: Duration = Duration::from_secs(10);
+
     /// mock0 wrapper: `send_frame` reports entry, then blocks until released (or `hold`).
     struct GatedSendChannel {
         inner: Box<dyn CanChannel>,
@@ -4287,7 +4295,10 @@ mod tx_write_barrier_tests {
 
     #[test]
     fn disarm_waits_for_in_flight_write_and_reports_timeout() {
-        let r = rig(Duration::from_secs(3));
+        let mut r = rig(Duration::from_secs(3));
+        // Part 1 checks that disarm WAITS; a generous bound keeps a paused CI VM (steal time)
+        // from turning the bounded wait into a false "returned early".
+        r.engine.disarm_quiesce_timeout = RACE_TEST_QUIESCE_BOUND;
         thread::scope(|s| {
             s.spawn(|| one_shot(&r.engine));
             r.entered
@@ -4309,7 +4320,8 @@ mod tx_write_barrier_tests {
             assert!(r.completed.lock()[0] <= returned_at);
         });
 
-        // Blocking driver: disarm still disarms, but reports the stuck write.
+        // Blocking driver: disarm still disarms, but reports the stuck write (production bound).
+        r.engine.disarm_quiesce_timeout = TX_QUIESCE_TIMEOUT;
         r.engine.cmd_arm_active_bus(0, true).expect("re-arm");
         thread::scope(|s| {
             s.spawn(|| one_shot(&r.engine));
@@ -4332,7 +4344,10 @@ mod tx_write_barrier_tests {
 
     #[test]
     fn request_queued_before_disarm_never_reaches_driver_after_fast_rearm() {
-        let r = rig(Duration::from_secs(3));
+        let mut r = rig(Duration::from_secs(3));
+        // The property under test is "disarm never returns Ok while a pre-disarm request is
+        // pending"; the bound only has to outlast any CI scheduling pause.
+        r.engine.disarm_quiesce_timeout = RACE_TEST_QUIESCE_BOUND;
         let epoch = r.engine.tx_epoch.load(Ordering::SeqCst);
         // A's ack channel is pre-filled, so after A's write returns (in-flight already 0) the
         // io thread parks in `ack.send` BEFORE it drains B: a deterministic pause exactly
