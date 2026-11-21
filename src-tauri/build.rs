@@ -136,6 +136,8 @@ fn verify_command_lists() {
 }
 
 fn main() {
+    // update-check-v1: CI embeds the GitHub run number (read via `option_env!`).
+    println!("cargo:rerun-if-env-changed=NEXUS_BUILD_NUMBER");
     println!("cargo:rerun-if-changed=src/app_commands.rs");
     verify_command_lists();
     tauri_build::try_build(

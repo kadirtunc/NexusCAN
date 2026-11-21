@@ -141,6 +141,9 @@ jobs:
       # Only on push to main (release path); PRs and development pushes stop after the checks above.
       - name: Package (tauri build)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          # update-check-v1: compiled into the app (option_env!) so it can compare against GitHub releases.
+          NEXUS_BUILD_NUMBER: ${{ github.run_number }}
         run: npm run tauri -- build --ci
 
       - name: Upload bundle
@@ -199,6 +202,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # full history + tags for the "What's changed" section
 
       - uses: actions/download-artifact@v8
         with:
@@ -233,6 +238,18 @@ jobs:
           \`xattr -cr /Applications/NexusCAN.app\` once after copying the app.
           Verify downloads with \`SHA256SUMS.txt\`.
           EOF
+          # update-check-v1: commit subjects since the previous build tag (shown in the in-app update dialog).
+          PREV=$(git tag --list 'v*-build.*' --sort=-version:refname | grep -vx "$TAG" | head -n1 || true)
+          {
+            echo
+            echo "## What's changed"
+            echo
+            if [ -n "$PREV" ]; then
+              git log --no-merges --pretty='- %s (%h)' "${PREV}..HEAD" | head -n 60
+            else
+              git log --no-merges --pretty='- %s (%h)' -n 30
+            fi
+          } >> notes.md
           gh release create "$TAG" dist-release/* \
             --target "$GITHUB_SHA" \
             --title "NexusCAN ${VERSION} (build ${GITHUB_RUN_NUMBER})" \

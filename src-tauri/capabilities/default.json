@@ -12,6 +12,7 @@
     "flash",
     "workspace",
     "re",
-    "mcp"
+    "mcp",
+    "updates"
   ]
 }

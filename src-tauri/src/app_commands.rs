@@ -104,4 +104,7 @@ pub const APP_COMMANDS: &[&str] = &[
     "cmd_mcp_status",
     "cmd_mcp_ui_attach",
     "cmd_mcp_ui_respond",
+    "cmd_get_app_version",
+    "cmd_check_for_update",
+    "cmd_open_release_page",
 ];
