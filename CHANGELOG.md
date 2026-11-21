@@ -6,6 +6,8 @@ release and the app shows this file under **Help → Changelog**.
 
 ## [Unreleased]
 
+## [0.1.0 build 38] — 2026-11-21
+
 ### Added
 - **AI co-pilot (MCP server).** A built-in, read-only Model Context Protocol (MCP)
   server lets an assistant such as Claude Code read live bus data, traces, the loaded DBC, diagnostics, RE results
