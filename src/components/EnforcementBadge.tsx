@@ -8,10 +8,10 @@ export const EnforcementBadge: React.FC<{ kind: ListenOnlyEnforcementKind | null
   if (kind === null) return null;
   const cfg =
     kind === 'hardware'
-      ? { text: t('sec.enf.hardware'), cls: 'text-emerald-400 border-emerald-600/60', tip: undefined }
+      ? { text: t('sec.enf.hardware'), cls: 'text-nominal border-[var(--status-nominal-border)]', tip: undefined }
       : kind === 'softwareOnly'
-        ? { text: t('sec.enf.softwareOnly'), cls: 'text-amber-300 border-amber-500', tip: t('sec.enf.softwareTip') }
-        : { text: t('sec.enf.virtual'), cls: 'text-slate-300 border-slate-600', tip: undefined };
+        ? { text: t('sec.enf.softwareOnly'), cls: 'text-warn border-[var(--status-warn-border)]', tip: t('sec.enf.softwareTip') }
+        : { text: t('sec.enf.virtual'), cls: 'text-secondary border-strong', tip: undefined };
   return (
     <span
       title={cfg.tip}

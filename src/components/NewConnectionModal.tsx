@@ -401,7 +401,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
   return (
     <div
       onClick={onClose}
-      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 select-none"
+      className="fixed inset-0 z-50 bg-[var(--bg-scrim)] flex items-center justify-center p-4 select-none"
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -421,7 +421,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
           className="h-[32px] px-3 flex items-center justify-between text-[12px] font-semibold"
         >
           <div className="flex items-center gap-2">
-            <Plug className="w-3.5 h-3.5 text-emerald-500" />
+            <Plug className="w-3.5 h-3.5 text-nominal" />
             <span>{t('conn.modal.title')}</span>
           </div>
           <button
@@ -756,7 +756,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                               }
                               className={`px-1.5 py-0.2 border rounded cursor-pointer ${
                                 isCurrent
-                                  ? 'bg-emerald-950/60 border-emerald-500/60 text-emerald-300 font-bold'
+                                  ? 'bg-[var(--status-nominal-bg)] border-[var(--status-nominal-border)] text-nominal font-bold'
                                   : 'bg-[var(--bg-panel)] border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                               }`}
                             >
@@ -812,7 +812,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                     checked={enableFd && driverFamily !== 'slcan'}
                     disabled={driverFamily === 'slcan'}
                     onChange={(e) => setEnableFd(e.target.checked)}
-                    className="accent-emerald-600 cursor-pointer"
+                    className="accent-nominal cursor-pointer"
                   />
                   <span>FD</span>
                 </label>
@@ -863,9 +863,9 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                   onClick={() => setListenOnly(false)}
                   style={{
                     backgroundColor: !listenOnly
-                      ? 'rgba(217, 155, 38, 0.20)'
+                      ? 'var(--status-warn-bg)'
                       : 'var(--bg-input)',
-                    color: !listenOnly ? '#E3B341' : 'var(--text-muted)',
+                    color: !listenOnly ? 'var(--status-warn)' : 'var(--text-muted)',
                     borderLeft: '1px solid var(--border-strong)',
                   }}
                   className="flex-1 h-full text-[11px] font-medium cursor-pointer"
@@ -969,13 +969,13 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
               disabled={busy}
               onClick={() => void handleSaveAndConnect()}
               style={{
-                backgroundColor: 'rgba(63, 185, 128, 0.18)',
-                borderColor: 'rgba(63, 185, 128, 0.65)',
+                backgroundColor: 'var(--status-nominal-bg)',
+                borderColor: 'var(--status-nominal-border)',
                 color: 'var(--text-primary)',
               }}
               className="h-[26px] px-3.5 border flex items-center gap-1.5 text-[11px] font-semibold hover:opacity-90 cursor-pointer"
             >
-              <Plug className="w-3 h-3 text-emerald-500" />
+              <Plug className="w-3 h-3 text-nominal" />
               <span>{t('conn.modal.saveAndConnect')}</span>
             </button>
           </div>

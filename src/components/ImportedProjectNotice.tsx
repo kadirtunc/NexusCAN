@@ -19,7 +19,7 @@ export const ImportedProjectNotice: React.FC = () => {
   return (
     <div
       role="alert"
-      className="shrink-0 flex flex-wrap items-center gap-2 px-3 py-1.5 border-b border-amber-500/70 bg-amber-900/20 text-amber-200 text-[11.5px]"
+      className="shrink-0 flex flex-wrap items-center gap-2 px-3 py-1.5 border-b border-[var(--status-warn-border)] bg-[var(--status-warn-bg)] text-warn text-[11.5px]"
     >
       {count > 0 && (
         <>
@@ -31,7 +31,7 @@ export const ImportedProjectNotice: React.FC = () => {
               setBusy(true);
               void projectStore.connectImportedProfiles().finally(() => setBusy(false));
             }}
-            className={`${btn} border-emerald-500 text-emerald-300`}
+            className={`${btn} border-[var(--status-nominal-border)] text-nominal`}
           >
             {t('sec.import.connect')}
           </button>
@@ -43,7 +43,7 @@ export const ImportedProjectNotice: React.FC = () => {
           <button
             type="button"
             onClick={() => projectStore.adoptImportedCloudBinding()}
-            className={`${btn} border-amber-400 text-amber-200`}
+            className={`${btn} border-[var(--status-warn-border)] text-warn`}
           >
             {t('sec.import.cloudAdopt')}
           </button>
@@ -58,7 +58,7 @@ export const ImportedProjectNotice: React.FC = () => {
       <button
         type="button"
         onClick={() => projectStore.dismissImportNotice()}
-        className={`${btn} border-slate-500 text-slate-300`}
+        className={`${btn} border-strong text-secondary`}
       >
         {t('sec.import.dismiss')}
       </button>

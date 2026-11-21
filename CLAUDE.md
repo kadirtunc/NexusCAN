@@ -52,6 +52,10 @@ Rust ile geliştirme nedenimiz **sıfır kod tekrarıyla her işletim sistemi ve
 5. **Endüstriyel HMI Ergonomisi:**
    - Tüm sayısal/hex alanlarda `font-mono tabular-nums` zorunludur.
    - `backdrop-blur`, ağır DOM animasyonları ve `any` tipleri yasaktır; grafikler HTML5 Canvas/WebGL ile, büyük trace/log tabloları satır sanallaştırma ile çizilir.
+6. **Tek Kaynaklı Renk Sistemi (Kullanıcı Kuralı — onaysız değiştirilemez):**
+   - Renk değerleri **yalnızca** `src/index.css` içindeki `[data-theme="dark"]` / `[data-theme="light"]` token'larında tanımlanır. Başka hiçbir dosyada Tailwind renk paleti sınıfı (`slate-*`, `sky-*`, `cyan-*`, `emerald-*`, `amber-*`, `white`, `black` …), hex veya `rgb()/hsl()` literal kullanılamaz; yalnızca `var(--token)` ve `@theme` takma ad sınıfları (`bg-panel`, `text-focus` …). Canvas renkleri `src/utils/themeTokens.ts` üzerinden okunur.
+   - Yeni renk/token eklemek ya da mevcut değeri değiştirmek **kullanıcı açıkça istemedikçe yasaktır.** Sözlük ve eşleme: `planning/contracts/theme-tokens-v1.md`.
+   - Kapı: `node scripts/check-theme-tokens.mjs` (ratchet, sayılar yalnız azalır) her frontend teslimatında PASS olmalı; hedef `--strict`.
 
 ---
 

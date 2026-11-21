@@ -124,11 +124,11 @@ export const TxModeControl: React.FC = () => {
 
   const tone =
     kind === 'active'
-      ? { bg: 'rgba(245, 158, 11, 0.9)', border: '#fbbf24', color: '#111827' }
+      ? { bg: 'var(--status-warn)', border: 'var(--status-warn)', color: 'var(--text-on-accent)' }
       : kind === 'locked'
-        ? { bg: 'rgba(185, 28, 28, 0.25)', border: '#ef4444', color: '#fca5a5' }
+        ? { bg: 'var(--status-critical-bg)', border: 'var(--status-critical)', color: 'var(--status-critical)' }
         : kind === 'passive'
-          ? { bg: 'rgba(16, 185, 129, 0.14)', border: 'rgba(16, 185, 129, 0.6)', color: '#34d399' }
+          ? { bg: 'var(--status-nominal-bg)', border: 'var(--status-nominal-border)', color: 'var(--status-nominal)' }
           : { bg: 'var(--bg-panel)', border: 'var(--border-strong)', color: 'var(--text-secondary)' };
 
   const busLabel = (b: BusHealthDto): string =>
@@ -136,16 +136,17 @@ export const TxModeControl: React.FC = () => {
 
   const modeBadge = (b: BusHealthDto): { text: string; cls: string } =>
     b.txArmed
-      ? { text: t('shell.tx.mode.active'), cls: 'bg-amber-500 text-slate-900 border-amber-300' }
+      ? { text: t('shell.tx.mode.active'), cls: 'bg-warn text-on-accent border-warn' }
       : b.listenOnly
-        ? { text: t('shell.tx.mode.listenOnly'), cls: 'text-emerald-400 border-emerald-600/60' }
-        : { text: t('shell.tx.mode.passive'), cls: 'text-slate-300 border-slate-600' };
+        ? { text: t('shell.tx.mode.listenOnly'), cls: 'text-nominal border-[var(--status-nominal-border)]' }
+        : { text: t('shell.tx.mode.passive'), cls: 'text-primary border-strong' };
 
   return (
     <div ref={rootRef} className="relative shrink-0">
       <button
         ref={btnRef}
         type="button"
+        data-tour="topbar.txmode"
         onClick={() => (open ? close() : setOpen(true))}
         aria-haspopup="dialog"
         aria-expanded={open}
@@ -178,7 +179,7 @@ export const TxModeControl: React.FC = () => {
               <button
                 type="button"
                 onClick={() => void onDisarmAll()}
-                className="h-[24px] px-2 border border-amber-500 text-amber-300 text-[11px] font-bold cursor-pointer rounded-[3px]"
+                className="h-[24px] px-2 border border-warn text-warn text-[11px] font-bold cursor-pointer rounded-[3px]"
               >
                 {t('shell.tx.disarmAll')}
               </button>
@@ -186,13 +187,13 @@ export const TxModeControl: React.FC = () => {
           </div>
 
           {latched && (
-            <div className="mb-2 flex items-center gap-2 px-2 py-1.5 border border-red-500/60 bg-red-900/20 text-red-300 text-[11.5px]">
+            <div className="mb-2 flex items-center gap-2 px-2 py-1.5 border border-[var(--status-critical-border)] bg-[var(--status-critical-bg)] text-critical text-[11.5px]">
               <span className="font-mono tabular-nums font-bold">{t('sec.tx.panicLatched')}</span>
               <span className="flex-1">{t('sec.tx.clearLatchFirst')}</span>
               <button
                 type="button"
                 onClick={() => void onClearPanic()}
-                className="h-[24px] px-2 border border-red-400 text-red-200 text-[11px] font-bold cursor-pointer rounded-[3px]"
+                className="h-[24px] px-2 border border-critical text-critical text-[11px] font-bold cursor-pointer rounded-[3px]"
               >
                 {t('sec.tx.clearPanic')}
               </button>
@@ -234,14 +235,14 @@ export const TxModeControl: React.FC = () => {
                       </span>
                       {isPending ? (
                         <Loader2
-                          className="w-4 h-4 animate-spin text-amber-400"
+                          className="w-4 h-4 animate-spin text-warn"
                           aria-label={t('shell.tx.pending')}
                         />
                       ) : b.txArmed ? (
                         <button
                           type="button"
                           onClick={() => void applyMode(b.busId, false)}
-                          className="h-[24px] px-2 border border-emerald-600 text-emerald-300 text-[11px] font-bold cursor-pointer rounded-[3px]"
+                          className="h-[24px] px-2 border border-[var(--status-nominal-border)] text-nominal text-[11px] font-bold cursor-pointer rounded-[3px]"
                         >
                           {t('shell.tx.disarm')}
                         </button>
@@ -252,7 +253,7 @@ export const TxModeControl: React.FC = () => {
                             onClick={() => setConfirmBus(b.busId)}
                             disabled={latched}
                             title={latched ? t('sec.tx.clearLatchFirst') : undefined}
-                            className="h-[24px] px-2 border border-amber-500 text-amber-300 text-[11px] font-bold cursor-pointer rounded-[3px] disabled:cursor-not-allowed disabled:opacity-40"
+                            className="h-[24px] px-2 border border-warn text-warn text-[11px] font-bold cursor-pointer rounded-[3px] disabled:cursor-not-allowed disabled:opacity-40"
                           >
                             {t('shell.tx.arm')}
                           </button>
@@ -271,8 +272,8 @@ export const TxModeControl: React.FC = () => {
                       </span>
                     </div>
                     {confirming && !isPending && (
-                      <div className="border border-amber-500/70 bg-amber-900/20 p-2 flex flex-col gap-1.5">
-                        <div className="text-amber-200 text-[11.5px]">
+                      <div className="border border-[var(--status-warn-border)] bg-[var(--status-warn-bg)] p-2 flex flex-col gap-1.5">
+                        <div className="text-warn text-[11.5px]">
                           {t('shell.tx.confirmText', { bus: b.busId + 1 })}
                         </div>
                         <div className="flex gap-1.5">
@@ -281,7 +282,7 @@ export const TxModeControl: React.FC = () => {
                             autoFocus
                             disabled={latched}
                             onClick={() => void applyMode(b.busId, true)}
-                            className="h-[24px] px-2 bg-amber-500 text-slate-900 text-[11px] font-bold cursor-pointer rounded-[3px]"
+                            className="h-[24px] px-2 bg-warn text-on-accent text-[11px] font-bold cursor-pointer rounded-[3px]"
                           >
                             {t('shell.tx.confirm', { bus: b.busId + 1 })}
                           </button>
@@ -298,7 +299,7 @@ export const TxModeControl: React.FC = () => {
                     {errors[b.busId] !== undefined && (
                       <div
                         role="alert"
-                        className={`${errors[b.busId] === t('sec.tx.inFlightDisarmed') ? 'text-amber-300' : 'text-red-400'} text-[11px] font-mono tabular-nums break-words`}
+                        className={`${errors[b.busId] === t('sec.tx.inFlightDisarmed') ? 'text-warn' : 'text-critical'} text-[11px] font-mono tabular-nums break-words`}
                       >
                         {errors[b.busId] === t('sec.tx.inFlightDisarmed')
                           ? errors[b.busId]

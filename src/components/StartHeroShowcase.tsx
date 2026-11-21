@@ -19,6 +19,7 @@ const LOCAL_STORAGE_KEY = 'nexuscan_hero_concept';
 interface NexusCanVectorLogoProps {
   size?: number;
   className?: string;
+  /** Deprecated: glow effects removed by theme-tokens-v1; prop kept for call-site compatibility. */
   glow?: boolean;
   replayNonce?: number;
   chipPins?: boolean;
@@ -28,7 +29,6 @@ interface NexusCanVectorLogoProps {
 export const NexusCanVectorLogo: React.FC<NexusCanVectorLogoProps> = ({
   size = 88,
   className = '',
-  glow = true,
   replayNonce = 0,
   chipPins = false,
   animated = true,
@@ -42,7 +42,7 @@ export const NexusCanVectorLogo: React.FC<NexusCanVectorLogoProps> = ({
       {animated && (
         <div
           key={`ring-${replayNonce}`}
-          className="absolute inset-0 rounded-lg border-2 border-cyan-400 pointer-events-none animate-[nexusLockRingExpand_0.65s_var(--ease-out)_0.48s_forwards]"
+          className="absolute inset-0 rounded-lg border-2 border-focus pointer-events-none animate-[nexusLockRingExpand_0.65s_var(--ease-out)_0.48s_forwards]"
           style={{ opacity: 0 }}
         />
       )}
@@ -56,60 +56,33 @@ export const NexusCanVectorLogo: React.FC<NexusCanVectorLogoProps> = ({
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
       >
-        <defs>
-          {/* Gradient for continuous square wave: Electric Cyan -> Emerald Green */}
-          <linearGradient id="nexusWaveGrad" x1="4" y1="10" x2="28" y2="17" gradientUnits="userSpaceOnUse">
-            <stop offset="0%" stopColor="#00D8FF" />
-            <stop offset="50%" stopColor="#06B6D4" />
-            <stop offset="100%" stopColor="#10E88A" />
-          </linearGradient>
-
-          {/* Carrier light pulse gradient */}
-          <linearGradient id="nexusCarrierGrad" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor="transparent" />
-            <stop offset="50%" stopColor="#FFFFFF" />
-            <stop offset="100%" stopColor="transparent" />
-          </linearGradient>
-
-          {/* Subtle radial inner glow */}
-          <radialGradient id="nexusInnerGlow" cx="50%" cy="45%" r="60%">
-            <stop offset="0%" stopColor="rgba(6, 182, 212, 0.16)" />
-            <stop offset="100%" stopColor="rgba(11, 15, 23, 0)" />
-          </radialGradient>
-
-          {/* Glow filter for active pulses */}
-          <filter id="nexusGlowFilter" x="-20%" y="-20%" width="140%" height="140%">
-            <feGaussianBlur stdDeviation="1.1" result="blur" />
-            <feComposite in="SourceGraphic" in2="blur" operator="over" />
-          </filter>
-        </defs>
 
         {/* QFN Micro-lead Pins (Used in Concept 02: Silicon ECU) */}
         {chipPins && (
-          <g stroke="#144B5B" strokeWidth="1.2" strokeLinecap="square">
+          <g stroke="var(--border-strong)" strokeWidth="1.2" strokeLinecap="square">
             {/* Left 4 pins */}
-            <line x1="-2.5" y1="8" x2="1" y2="8" stroke="#00D8FF" strokeOpacity="0.8" />
-            <line x1="-2.5" y1="13" x2="1" y2="13" stroke="#00D8FF" strokeOpacity="0.8" />
-            <line x1="-2.5" y1="19" x2="1" y2="19" stroke="#10E88A" strokeOpacity="0.8" />
-            <line x1="-2.5" y1="24" x2="1" y2="24" stroke="#10E88A" strokeOpacity="0.8" />
+            <line x1="-2.5" y1="8" x2="1" y2="8" stroke="var(--status-focus)" strokeOpacity="0.8" />
+            <line x1="-2.5" y1="13" x2="1" y2="13" stroke="var(--status-focus)" strokeOpacity="0.8" />
+            <line x1="-2.5" y1="19" x2="1" y2="19" stroke="var(--status-nominal)" strokeOpacity="0.8" />
+            <line x1="-2.5" y1="24" x2="1" y2="24" stroke="var(--status-nominal)" strokeOpacity="0.8" />
 
             {/* Right 4 pins */}
-            <line x1="31" y1="8" x2="34.5" y2="8" stroke="#00D8FF" strokeOpacity="0.8" />
-            <line x1="31" y1="13" x2="34.5" y2="13" stroke="#00D8FF" strokeOpacity="0.8" />
-            <line x1="31" y1="19" x2="34.5" y2="19" stroke="#10E88A" strokeOpacity="0.8" />
-            <line x1="31" y1="24" x2="34.5" y2="24" stroke="#10E88A" strokeOpacity="0.8" />
+            <line x1="31" y1="8" x2="34.5" y2="8" stroke="var(--status-focus)" strokeOpacity="0.8" />
+            <line x1="31" y1="13" x2="34.5" y2="13" stroke="var(--status-focus)" strokeOpacity="0.8" />
+            <line x1="31" y1="19" x2="34.5" y2="19" stroke="var(--status-nominal)" strokeOpacity="0.8" />
+            <line x1="31" y1="24" x2="34.5" y2="24" stroke="var(--status-nominal)" strokeOpacity="0.8" />
 
             {/* Top 4 pins */}
-            <line x1="8" y1="-2.5" x2="8" y2="1" stroke="#0E7490" strokeOpacity="0.7" />
-            <line x1="13" y1="-2.5" x2="13" y2="1" stroke="#0E7490" strokeOpacity="0.7" />
-            <line x1="19" y1="-2.5" x2="19" y2="1" stroke="#0E7490" strokeOpacity="0.7" />
-            <line x1="24" y1="-2.5" x2="24" y2="1" stroke="#0E7490" strokeOpacity="0.7" />
+            <line x1="8" y1="-2.5" x2="8" y2="1" stroke="var(--border-strong)" strokeOpacity="0.7" />
+            <line x1="13" y1="-2.5" x2="13" y2="1" stroke="var(--border-strong)" strokeOpacity="0.7" />
+            <line x1="19" y1="-2.5" x2="19" y2="1" stroke="var(--border-strong)" strokeOpacity="0.7" />
+            <line x1="24" y1="-2.5" x2="24" y2="1" stroke="var(--border-strong)" strokeOpacity="0.7" />
 
             {/* Bottom 4 pins */}
-            <line x1="8" y1="31" x2="8" y2="34.5" stroke="#0E7490" strokeOpacity="0.7" />
-            <line x1="13" y1="31" x2="13" y2="34.5" stroke="#0E7490" strokeOpacity="0.7" />
-            <line x1="19" y1="31" x2="19" y2="34.5" stroke="#0E7490" strokeOpacity="0.7" />
-            <line x1="24" y1="31" x2="24" y2="34.5" stroke="#0E7490" strokeOpacity="0.7" />
+            <line x1="8" y1="31" x2="8" y2="34.5" stroke="var(--border-strong)" strokeOpacity="0.7" />
+            <line x1="13" y1="31" x2="13" y2="34.5" stroke="var(--border-strong)" strokeOpacity="0.7" />
+            <line x1="19" y1="31" x2="19" y2="34.5" stroke="var(--border-strong)" strokeOpacity="0.7" />
+            <line x1="24" y1="31" x2="24" y2="34.5" stroke="var(--border-strong)" strokeOpacity="0.7" />
           </g>
         )}
 
@@ -121,8 +94,8 @@ export const NexusCanVectorLogo: React.FC<NexusCanVectorLogoProps> = ({
           width="30"
           height="30"
           rx="3"
-          fill="#0B0F17"
-          stroke="#0E7490"
+          fill="var(--bg-canvas)"
+          stroke="var(--status-focus)"
           strokeWidth="1.8"
           pathLength={100}
           strokeDasharray="100"
@@ -130,19 +103,16 @@ export const NexusCanVectorLogo: React.FC<NexusCanVectorLogoProps> = ({
           className={animated ? 'animate-[nexusDrawPath_0.32s_var(--ease-out)_forwards]' : undefined}
         />
 
-        {/* Inner subtle glow fill */}
-        <rect x="2" y="2" width="28" height="28" rx="2" fill="url(#nexusInnerGlow)" />
-
         {/* Pin 1 orientation chamfer mark in top-left */}
         {chipPins && (
-          <circle cx="4.5" cy="4.5" r="1.1" fill="#00D8FF" fillOpacity="0.75" />
+          <circle cx="4.5" cy="4.5" r="1.1" fill="var(--status-focus)" fillOpacity="0.75" />
         )}
 
         {/* 2. Double-Stepped Square Wave Path (Pulse 1 mid, Valley, Pulse 2 CAN-FD BRS high) */}
         {/* Stage 2: Wave drawn left-to-right (0.14s–0.62s) */}
         <path
           d="M 3 15.5 H 6 V 10.5 H 14 V 15.5 H 18 V 9.5 H 25 V 15.5 H 29"
-          stroke="url(#nexusWaveGrad)"
+          stroke="var(--status-focus)"
           strokeWidth="1.8"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -150,21 +120,19 @@ export const NexusCanVectorLogo: React.FC<NexusCanVectorLogoProps> = ({
           strokeDasharray="100"
           strokeDashoffset={animated ? 100 : 0}
           className={animated ? 'animate-[nexusDrawPath_0.48s_var(--ease-out)_0.14s_forwards]' : undefined}
-          filter={glow ? 'url(#nexusGlowFilter)' : undefined}
         />
 
         {/* Glowing carrier signal pulse continuously traveling along the wave */}
         {animated && (
           <path
             d="M 3 15.5 H 6 V 10.5 H 14 V 15.5 H 18 V 9.5 H 25 V 15.5 H 29"
-            stroke="#FFFFFF"
+            stroke="var(--text-primary)"
             strokeWidth="2.2"
             strokeLinecap="round"
             strokeLinejoin="round"
             pathLength={100}
             strokeDasharray="18 82"
             className="animate-[nexusCarrierPulse_1.8s_linear_infinite]"
-            filter="url(#nexusGlowFilter)"
           />
         )}
 
@@ -176,10 +144,9 @@ export const NexusCanVectorLogo: React.FC<NexusCanVectorLogoProps> = ({
           width="8"
           height="1.8"
           rx="0.5"
-          fill="#10B981"
+          fill="var(--status-nominal)"
           style={{ clipPath: animated ? 'inset(0 100% 0 0)' : undefined }}
           className={animated ? 'animate-[nexusBarReveal_0.32s_var(--ease-out)_0.36s_forwards]' : undefined}
-          filter={glow ? 'url(#nexusGlowFilter)' : undefined}
         />
 
         {/* 4. Lower Horizontal Emerald Reference Bar 2 (Under Pulse 2, stepped 1px lower!) */}
@@ -190,10 +157,9 @@ export const NexusCanVectorLogo: React.FC<NexusCanVectorLogoProps> = ({
           width="7"
           height="1.8"
           rx="0.5"
-          fill="#10B981"
+          fill="var(--status-nominal)"
           style={{ clipPath: animated ? 'inset(0 100% 0 0)' : undefined }}
           className={animated ? 'animate-[nexusBarReveal_0.32s_var(--ease-out)_0.45s_forwards]' : undefined}
-          filter={glow ? 'url(#nexusGlowFilter)' : undefined}
         />
       </svg>
     </div>
@@ -208,13 +174,13 @@ interface ConceptSignalLockProps {
 }
 
 const DECODED_BADGES = [
-  { label: '0x101', cls: 'bg-cyan-950/60 text-cyan-300 border-cyan-500/40 font-bold' },
-  { label: 'SOF', cls: 'bg-[#171A1E] text-slate-300 border-slate-700' },
-  { label: 'FDF', cls: 'bg-cyan-950/60 text-cyan-400 border-cyan-500/30 font-bold' },
-  { label: 'BRS ↑ 2M', cls: 'bg-emerald-950/60 text-emerald-300 border-emerald-500/40 font-bold' },
-  { label: 'DLC:64', cls: 'bg-[#171A1E] text-slate-300 border-slate-700' },
-  { label: 'CRC:21', cls: 'bg-amber-950/60 text-amber-300 border-amber-500/40' },
-  { label: 'ACK', cls: 'bg-emerald-950/60 text-emerald-400 border-emerald-500/40 font-bold' },
+  { label: '0x101', cls: 'bg-[var(--status-focus-bg)] text-focus border-[var(--status-focus-border)] font-bold' },
+  { label: 'SOF', cls: 'bg-panel text-primary border-strong' },
+  { label: 'FDF', cls: 'bg-[var(--status-focus-bg)] text-focus border-[var(--status-focus-border)] font-bold' },
+  { label: 'BRS ↑ 2M', cls: 'bg-[var(--status-nominal-bg)] text-nominal border-[var(--status-nominal-border)] font-bold' },
+  { label: 'DLC:64', cls: 'bg-panel text-primary border-strong' },
+  { label: 'CRC:21', cls: 'bg-[var(--status-warn-bg)] text-warn border-[var(--status-warn-border)]' },
+  { label: 'ACK', cls: 'bg-[var(--status-nominal-bg)] text-nominal border-[var(--status-nominal-border)] font-bold' },
 ];
 
 const ConceptSignalLock: React.FC<ConceptSignalLockProps> = ({ replayNonce }) => {
@@ -232,20 +198,20 @@ const ConceptSignalLock: React.FC<ConceptSignalLockProps> = ({ replayNonce }) =>
     <div
       ref={containerRef}
       onMouseMove={handleMouseMove}
-      className="relative w-full h-[220px] rounded-lg overflow-hidden border border-[#0E7490]/40 bg-[#080D14] flex flex-col justify-between p-4 cursor-crosshair select-none"
+      className="relative w-full h-[220px] rounded-lg overflow-hidden border border-strong bg-canvas flex flex-col justify-between p-4 cursor-crosshair select-none"
     >
       {/* Oscilloscope Reticle Grid (20px cells with center tick lines) */}
       <svg className="absolute inset-0 w-full h-full pointer-events-none opacity-20">
         <defs>
           <pattern id="reticleGrid" width="24" height="24" patternUnits="userSpaceOnUse">
-            <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#0E7490" strokeWidth="0.8" />
-            <circle cx="12" cy="12" r="0.8" fill="#00D8FF" opacity="0.6" />
+            <path d="M 24 0 L 0 0 0 24" fill="none" stroke="var(--border-strong)" strokeWidth="0.8" />
+            <circle cx="12" cy="12" r="0.8" fill="var(--status-focus)" opacity="0.6" />
           </pattern>
         </defs>
         <rect width="100%" height="100%" fill="url(#reticleGrid)" />
         {/* Center horizontal and vertical major axes */}
-        <line x1="0" y1="50%" x2="100%" y2="50%" stroke="#00D8FF" strokeWidth="0.9" strokeDasharray="2 4" opacity="0.6" />
-        <line x1="50%" y1="0" x2="50%" y2="100%" stroke="#00D8FF" strokeWidth="0.9" strokeDasharray="2 4" opacity="0.6" />
+        <line x1="0" y1="50%" x2="100%" y2="50%" stroke="var(--status-focus)" strokeWidth="0.9" strokeDasharray="2 4" opacity="0.6" />
+        <line x1="50%" y1="0" x2="50%" y2="100%" stroke="var(--status-focus)" strokeWidth="0.9" strokeDasharray="2 4" opacity="0.6" />
       </svg>
 
       {/* Dynamic Reticle Trigger Marker Cursor (Follows cursor smoothly) */}
@@ -254,34 +220,34 @@ const ConceptSignalLock: React.FC<ConceptSignalLockProps> = ({ replayNonce }) =>
           transform: `translateX(${triggerX}px)`,
           transition: 'transform 60ms linear',
         }}
-        className="absolute top-0 bottom-0 w-[1px] bg-cyan-400/35 pointer-events-none z-10 flex flex-col items-center justify-between"
+        className="absolute top-0 bottom-0 w-[1px] bg-focus pointer-events-none z-10 flex flex-col items-center justify-between"
       >
-        <span className="text-[9px] font-mono font-bold text-cyan-300 bg-[#080D14]/90 px-1 border border-cyan-500/50 rounded-sm -mt-1">
+        <span className="text-[9px] font-mono font-bold text-focus bg-canvas px-1 border border-[var(--status-focus-border)] rounded-sm -mt-1">
           T:{(triggerX * 1.6).toFixed(0)}ns
         </span>
-        <span className="text-[8px] font-mono text-cyan-400/80 mb-1">TRIG</span>
+        <span className="text-[8px] font-mono text-focus mb-1">TRIG</span>
       </div>
 
       {/* Top Oscilloscope Instrumentation Status Bar */}
-      <div className="relative z-20 flex items-center justify-between text-[10px] font-mono tabular-nums border-b border-[#0E7490]/30 pb-1.5">
+      <div className="relative z-20 flex items-center justify-between text-[10px] font-mono tabular-nums border-b border-hairline pb-1.5">
         <div className="flex items-center gap-3">
-          <span className="flex items-center gap-1 text-emerald-400 font-semibold">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+          <span className="flex items-center gap-1 text-nominal font-semibold">
+            <span className="w-1.5 h-1.5 rounded-full bg-nominal animate-ping inline-block" />
             TRIG: LOCKED
           </span>
-          <span className="text-[#9099A6]">
-            CH1: <strong className="text-cyan-300 font-mono">CAN_H 3.50V</strong>
+          <span className="text-secondary">
+            CH1: <strong className="text-focus font-mono">CAN_H 3.50V</strong>
           </span>
-          <span className="text-[#9099A6]">
-            CH2: <strong className="text-emerald-400 font-mono">CAN_L 1.50V</strong>
+          <span className="text-secondary">
+            CH2: <strong className="text-nominal font-mono">CAN_L 1.50V</strong>
           </span>
-          <span className="text-[#9099A6] hidden sm:inline">
-            DIFF: <strong className="text-[#E6EDF5]">2.00V (RECESSIVE 0V)</strong>
+          <span className="text-secondary hidden sm:inline">
+            DIFF: <strong className="text-primary">2.00V (RECESSIVE 0V)</strong>
           </span>
         </div>
-        <div className="flex items-center gap-3 text-[#9099A6]">
+        <div className="flex items-center gap-3 text-secondary">
           <span>500ns / div</span>
-          <span className="text-cyan-400 border border-cyan-500/30 px-1.5 py-0.2 rounded bg-cyan-950/40">
+          <span className="text-focus border border-[var(--status-focus-border)] px-1.5 py-0.2 rounded bg-[var(--status-focus-bg)]">
             BRS 2.0M ARMED
           </span>
         </div>
@@ -293,7 +259,7 @@ const ConceptSignalLock: React.FC<ConceptSignalLockProps> = ({ replayNonce }) =>
         <div className="flex-1 flex flex-col justify-center gap-2 overflow-hidden pr-1">
           {/* CAN_H Differential Line */}
           <div className="flex items-center gap-2">
-            <span className="text-[10px] font-mono text-cyan-400 shrink-0 font-bold w-12">CAN_H</span>
+            <span className="text-[10px] font-mono text-focus shrink-0 font-bold w-12">CAN_H</span>
             <svg
               className="flex-1 h-[22px] overflow-visible"
               viewBox="0 0 160 22"
@@ -303,7 +269,7 @@ const ConceptSignalLock: React.FC<ConceptSignalLockProps> = ({ replayNonce }) =>
               {/* Underlying static guide trace */}
               <path
                 d="M 0 14 H 28 V 5 H 56 V 14 H 84 V 3 H 116 V 14 H 160"
-                stroke="#0E7490"
+                stroke="var(--border-strong)"
                 strokeWidth="1.2"
                 strokeOpacity="0.4"
                 strokeLinecap="round"
@@ -312,21 +278,20 @@ const ConceptSignalLock: React.FC<ConceptSignalLockProps> = ({ replayNonce }) =>
               {/* Traveling high-speed optical beam */}
               <path
                 d="M 0 14 H 28 V 5 H 56 V 14 H 84 V 3 H 116 V 14 H 160"
-                stroke="#00D8FF"
+                stroke="var(--status-focus)"
                 strokeWidth="1.8"
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 pathLength={100}
                 strokeDasharray="14 26"
                 className="animate-[nexusBeamFlow_1.6s_linear_infinite]"
-                filter="url(#nexusGlowFilter)"
               />
             </svg>
           </div>
 
           {/* CAN_L Complementary Differential Line */}
           <div className="flex items-center gap-2">
-            <span className="text-[10px] font-mono text-emerald-400 shrink-0 font-bold w-12">CAN_L</span>
+            <span className="text-[10px] font-mono text-nominal shrink-0 font-bold w-12">CAN_L</span>
             <svg
               className="flex-1 h-[22px] overflow-visible"
               viewBox="0 0 160 22"
@@ -336,7 +301,7 @@ const ConceptSignalLock: React.FC<ConceptSignalLockProps> = ({ replayNonce }) =>
               {/* Underlying static guide trace */}
               <path
                 d="M 0 8 H 28 V 17 H 56 V 8 H 84 V 19 H 116 V 8 H 160"
-                stroke="#0E7490"
+                stroke="var(--border-strong)"
                 strokeWidth="1.2"
                 strokeOpacity="0.4"
                 strokeLinecap="round"
@@ -345,14 +310,13 @@ const ConceptSignalLock: React.FC<ConceptSignalLockProps> = ({ replayNonce }) =>
               {/* Traveling high-speed optical beam */}
               <path
                 d="M 0 8 H 28 V 17 H 56 V 8 H 84 V 19 H 116 V 8 H 160"
-                stroke="#10E88A"
+                stroke="var(--status-nominal)"
                 strokeWidth="1.8"
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 pathLength={100}
                 strokeDasharray="14 26"
                 className="animate-[nexusBeamFlow_1.6s_linear_infinite]"
-                filter="url(#nexusGlowFilter)"
               />
             </svg>
           </div>
@@ -360,7 +324,7 @@ const ConceptSignalLock: React.FC<ConceptSignalLockProps> = ({ replayNonce }) =>
 
         {/* Center: Glowing NexusCAN Official Vector Logo */}
         <div className="relative flex flex-col items-center shrink-0">
-          <div className="relative p-2 rounded-lg bg-[#0B0F17]/95 border border-cyan-500/50 shadow-[0_0_28px_rgba(6,182,212,0.24)]">
+          <div className="relative p-2 rounded-lg bg-panel border border-[var(--status-focus-border)]">
             <NexusCanVectorLogo size={84} glow={true} replayNonce={replayNonce} animated={true} />
           </div>
         </div>
@@ -382,28 +346,28 @@ const ConceptSignalLock: React.FC<ConceptSignalLockProps> = ({ replayNonce }) =>
             ))}
           </div>
 
-          <div className="flex items-center gap-2 text-[11px] font-mono text-[#9099A6]">
-            <span className="text-emerald-400 font-bold">PHASE LOCK:</span>
+          <div className="flex items-center gap-2 text-[11px] font-mono text-secondary">
+            <span className="text-nominal font-bold">PHASE LOCK:</span>
             <span>0.00° / ZERO HORIZONTAL JITTER</span>
           </div>
         </div>
       </div>
 
       {/* Bottom Brand Bar with Shimmer Reveal */}
-      <div className="relative z-20 flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[#0E7490]/30 text-[11px]">
+      <div className="relative z-20 flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-hairline text-[11px]">
         <div className="flex items-center gap-2.5">
-          <h1 className="text-[17px] font-bold tracking-tight text-[#E6EDF5] font-sans">
+          <h1 className="text-[17px] font-bold tracking-tight text-primary font-sans">
             NexusCAN
           </h1>
-          <span className="px-2 py-0.5 border border-emerald-500/40 bg-emerald-950/40 text-emerald-400 font-mono text-[10px] font-bold rounded-sm">
+          <span className="px-2 py-0.5 border border-[var(--status-nominal-border)] bg-[var(--status-nominal-bg)] text-nominal font-mono text-[10px] font-bold rounded-sm">
             v1.0 INDUSTRIAL
           </span>
-          <span className="text-[11px] text-[#9099A6] hidden md:inline">
+          <span className="text-[11px] text-secondary hidden md:inline">
             Deterministic Multi-Bus CAN / CAN-FD Analyzer & 60 FPS Telemetry
           </span>
         </div>
-        <div className="flex items-center gap-2 font-mono text-[10px] text-cyan-400/90">
-          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+        <div className="flex items-center gap-2 font-mono text-[10px] text-focus">
+          <span className="w-1.5 h-1.5 rounded-full bg-focus animate-pulse" />
           <span>SYNC: 16.6ms CLOCK</span>
         </div>
       </div>
@@ -420,22 +384,22 @@ interface ConceptSiliconEcuProps {
 
 const ConceptSiliconEcu: React.FC<ConceptSiliconEcuProps> = ({ replayNonce }) => {
   return (
-    <div className="relative w-full h-[220px] rounded-lg overflow-hidden border border-[#0E7490]/50 bg-[#070A0F] flex flex-col justify-between p-4 select-none">
+    <div className="relative w-full h-[220px] rounded-lg overflow-hidden border border-strong bg-canvas flex flex-col justify-between p-4 select-none">
       {/* PCB Solder Mask & 45-Degree Copper Traces Background */}
       <svg className="absolute inset-0 w-full h-full pointer-events-none opacity-30">
         <defs>
           <pattern id="pcbDots" width="16" height="16" patternUnits="userSpaceOnUse">
-            <circle cx="8" cy="8" r="0.6" fill="#0E7490" />
+            <circle cx="8" cy="8" r="0.6" fill="var(--border-strong)" />
           </pattern>
         </defs>
         <rect width="100%" height="100%" fill="url(#pcbDots)" />
         {/* PCB Silkscreen Labels & Alignment Marks */}
-        <text x="18" y="24" fill="#0E7490" fontSize="9" fontFamily="monospace">CAN-FD PHY · ISO 11898-2</text>
-        <text x="18" y="38" fill="#144B5B" fontSize="8" fontFamily="monospace">LAYER 1: DIFF MICROSTRIP</text>
-        <text x="18" y="196" fill="#144B5B" fontSize="8" fontFamily="monospace">Z0_DIFF: 120Ω ± 1%</text>
+        <text x="18" y="24" fill="var(--text-muted)" fontSize="9" fontFamily="monospace">CAN-FD PHY · ISO 11898-2</text>
+        <text x="18" y="38" fill="var(--text-muted)" fontSize="8" fontFamily="monospace">LAYER 1: DIFF MICROSTRIP</text>
+        <text x="18" y="196" fill="var(--text-muted)" fontSize="8" fontFamily="monospace">Z0_DIFF: 120Ω ± 1%</text>
 
         {/* 45-degree angle copper bus traces */}
-        <g stroke="#0E7490" strokeWidth="1.2" fill="none">
+        <g stroke="var(--border-strong)" strokeWidth="1.2" fill="none">
           <path d="M 0 60 L 140 60 L 180 100 L 250 100" />
           <path d="M 0 74 L 135 74 L 175 114 L 250 114" />
           <path d="M 520 100 L 600 100 L 640 60 L 900 60" />
@@ -446,7 +410,7 @@ const ConceptSiliconEcu: React.FC<ConceptSiliconEcuProps> = ({ replayNonce }) =>
         <g fill="none">
           <path
             d="M 0 60 L 140 60 L 180 100 L 250 100"
-            stroke="#00D8FF"
+            stroke="var(--status-focus)"
             strokeWidth="1.8"
             pathLength={100}
             strokeDasharray="12 36"
@@ -454,7 +418,7 @@ const ConceptSiliconEcu: React.FC<ConceptSiliconEcuProps> = ({ replayNonce }) =>
           />
           <path
             d="M 0 74 L 135 74 L 175 114 L 250 114"
-            stroke="#10E88A"
+            stroke="var(--status-nominal)"
             strokeWidth="1.8"
             pathLength={100}
             strokeDasharray="12 36"
@@ -462,7 +426,7 @@ const ConceptSiliconEcu: React.FC<ConceptSiliconEcuProps> = ({ replayNonce }) =>
           />
           <path
             d="M 520 100 L 600 100 L 640 60 L 900 60"
-            stroke="#00D8FF"
+            stroke="var(--status-focus)"
             strokeWidth="1.8"
             pathLength={100}
             strokeDasharray="12 36"
@@ -470,7 +434,7 @@ const ConceptSiliconEcu: React.FC<ConceptSiliconEcuProps> = ({ replayNonce }) =>
           />
           <path
             d="M 520 114 L 595 114 L 635 74 L 900 74"
-            stroke="#10E88A"
+            stroke="var(--status-nominal)"
             strokeWidth="1.8"
             pathLength={100}
             strokeDasharray="12 36"
@@ -479,25 +443,25 @@ const ConceptSiliconEcu: React.FC<ConceptSiliconEcuProps> = ({ replayNonce }) =>
         </g>
 
         {/* Via drill holes */}
-        <circle cx="180" cy="100" r="3.2" stroke="#00D8FF" strokeWidth="1" fill="#0B0F17" />
-        <circle cx="175" cy="114" r="3.2" stroke="#10E88A" strokeWidth="1" fill="#0B0F17" />
-        <circle cx="640" cy="60" r="3.2" stroke="#00D8FF" strokeWidth="1" fill="#0B0F17" />
-        <circle cx="635" cy="74" r="3.2" stroke="#10E88A" strokeWidth="1" fill="#0B0F17" />
+        <circle cx="180" cy="100" r="3.2" stroke="var(--status-focus)" strokeWidth="1" fill="var(--bg-canvas)" />
+        <circle cx="175" cy="114" r="3.2" stroke="var(--status-nominal)" strokeWidth="1" fill="var(--bg-canvas)" />
+        <circle cx="640" cy="60" r="3.2" stroke="var(--status-focus)" strokeWidth="1" fill="var(--bg-canvas)" />
+        <circle cx="635" cy="74" r="3.2" stroke="var(--status-nominal)" strokeWidth="1" fill="var(--bg-canvas)" />
       </svg>
 
       {/* Top Header: Automotive Spec Badges */}
-      <div className="relative z-20 flex items-center justify-between text-[10px] font-mono pb-1 border-b border-[#0E7490]/30">
+      <div className="relative z-20 flex items-center justify-between text-[10px] font-mono pb-1 border-b border-hairline">
         <div className="flex items-center gap-2">
-          <span className="px-1.5 py-0.5 rounded bg-[#10151E] border border-cyan-500/40 text-cyan-300 font-bold">
+          <span className="px-1.5 py-0.5 rounded bg-panel border border-[var(--status-focus-border)] text-focus font-bold">
             AEC-Q100 GRADE 0
           </span>
-          <span className="text-[#9099A6] hidden sm:inline">
+          <span className="text-secondary hidden sm:inline">
             AUTOMOTIVE MULTI-BUS CAN / CAN-FD TRANSCEIVER
           </span>
         </div>
-        <div className="flex items-center gap-3 text-[#9099A6]">
+        <div className="flex items-center gap-3 text-secondary">
           <span>Z0: 120Ω TERMINATED</span>
-          <span className="text-emerald-400 font-bold">PASSIVE DIN-ISO</span>
+          <span className="text-nominal font-bold">PASSIVE DIN-ISO</span>
         </div>
       </div>
 
@@ -505,63 +469,63 @@ const ConceptSiliconEcu: React.FC<ConceptSiliconEcuProps> = ({ replayNonce }) =>
       <div className="relative z-20 flex items-center justify-between gap-6 my-auto">
         {/* Left: Microstrip Differential Input */}
         <div className="flex-1 hidden sm:flex flex-col gap-2">
-          <div className="flex items-center justify-between text-[10px] font-mono text-[#9099A6]">
+          <div className="flex items-center justify-between text-[10px] font-mono text-secondary">
             <span>BUS 1..8 HAL</span>
-            <span className="text-cyan-400 font-bold">gs_usb / SocketCAN</span>
+            <span className="text-focus font-bold">gs_usb / SocketCAN</span>
           </div>
-          <div className="p-2 rounded bg-[#0A0E14] border border-[#0E7490]/30 font-mono text-[10px] text-[#D8DEE6] space-y-1">
+          <div className="p-2 rounded bg-panel border border-hairline font-mono text-[10px] text-primary space-y-1">
             <div className="flex justify-between">
-              <span className="text-slate-400">Payload:</span>
-              <span className="text-cyan-300 font-bold">0..64 Bytes (CAN-FD)</span>
+              <span className="text-secondary">Payload:</span>
+              <span className="text-focus font-bold">0..64 Bytes (CAN-FD)</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">Bitrate:</span>
-              <span className="text-emerald-300 font-bold">500k Nom / 2M Data</span>
+              <span className="text-secondary">Bitrate:</span>
+              <span className="text-nominal font-bold">500k Nom / 2M Data</span>
             </div>
           </div>
         </div>
 
         {/* Center: QFN-32 Micro-Transceiver Chip with NexusCAN Vector Logo */}
         <div className="relative shrink-0 flex flex-col items-center">
-          <div className="p-3 rounded-lg bg-[#070B10] border-2 border-cyan-500/50 shadow-[0_0_28px_rgba(0,216,255,0.22)]">
+          <div className="p-3 rounded-lg bg-panel border-2 border-[var(--status-focus-border)]">
             <NexusCanVectorLogo size={84} chipPins={true} glow={true} replayNonce={replayNonce} animated={true} />
           </div>
-          <span className="text-[9px] font-mono tracking-widest text-cyan-400 mt-1 font-bold">
+          <span className="text-[9px] font-mono tracking-widest text-focus mt-1 font-bold">
             NEXUS-PHY · QFN-32
           </span>
         </div>
 
         {/* Right: Strict Engineering Invariants */}
         <div className="flex-1 flex flex-col gap-1.5 font-mono text-[11px]">
-          <div className="p-1.5 rounded bg-cyan-950/30 border border-cyan-500/30 flex items-center justify-between">
-            <span className="text-cyan-300 font-bold">80B ZERO-ALLOC</span>
-            <span className="text-[10px] text-cyan-400/80">Stack RawCanFrame</span>
+          <div className="p-1.5 rounded bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] flex items-center justify-between">
+            <span className="text-focus font-bold">80B ZERO-ALLOC</span>
+            <span className="text-[10px] text-focus">Stack RawCanFrame</span>
           </div>
-          <div className="p-1.5 rounded bg-emerald-950/30 border border-emerald-500/30 flex items-center justify-between">
-            <span className="text-emerald-300 font-bold">&lt;1µs HW JITTER</span>
-            <span className="text-[10px] text-emerald-400/80">SO_TIMESTAMPING</span>
+          <div className="p-1.5 rounded bg-[var(--status-nominal-bg)] border border-[var(--status-nominal-border)] flex items-center justify-between">
+            <span className="text-nominal font-bold">&lt;1µs HW JITTER</span>
+            <span className="text-[10px] text-nominal">SO_TIMESTAMPING</span>
           </div>
-          <div className="p-1.5 rounded bg-slate-900/60 border border-slate-700 flex items-center justify-between">
-            <span className="text-slate-200 font-bold">LISTEN-ONLY SAFE</span>
-            <span className="text-[10px] text-emerald-400 font-bold">Default Passive</span>
+          <div className="p-1.5 rounded bg-panel border border-strong flex items-center justify-between">
+            <span className="text-primary font-bold">LISTEN-ONLY SAFE</span>
+            <span className="text-[10px] text-nominal font-bold">Default Passive</span>
           </div>
         </div>
       </div>
 
       {/* Bottom Brand Bar */}
-      <div className="relative z-20 flex items-center justify-between pt-2 border-t border-[#0E7490]/30 text-[11px]">
+      <div className="relative z-20 flex items-center justify-between pt-2 border-t border-hairline text-[11px]">
         <div className="flex items-center gap-2.5">
-          <h1 className="text-[17px] font-bold tracking-tight text-[#E6EDF5] font-sans">
+          <h1 className="text-[17px] font-bold tracking-tight text-primary font-sans">
             NexusCAN
           </h1>
-          <span className="px-2 py-0.5 border border-cyan-500/40 bg-cyan-950/40 text-cyan-300 font-mono text-[10px] font-bold rounded-sm">
+          <span className="px-2 py-0.5 border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] text-focus font-mono text-[10px] font-bold rounded-sm">
             HARDWARE LEVEL
           </span>
-          <span className="text-[11px] text-[#9099A6] hidden md:inline">
+          <span className="text-[11px] text-secondary hidden md:inline">
             Universal Hardware Abstraction Layer for Automotive & Embedded Bus Interfaces
           </span>
         </div>
-        <span className="font-mono text-[10px] text-[#9099A6]">
+        <span className="font-mono text-[10px] text-secondary">
           CLK: 80 MHz CRYSTAL
         </span>
       </div>
@@ -694,7 +658,7 @@ const ConceptEyeDiagram: React.FC<ConceptEyeDiagramProps> = ({ replayNonce }) =>
   }, [replayNonce]);
 
   return (
-    <div className="relative w-full h-[220px] rounded-lg overflow-hidden border border-[#0E7490]/50 bg-[#070A0F] flex flex-col justify-between p-4 select-none">
+    <div className="relative w-full h-[220px] rounded-lg overflow-hidden border border-strong bg-canvas flex flex-col justify-between p-4 select-none">
       {/* 60 FPS HTML5 Canvas Eye Diagram */}
       <canvas
         ref={canvasRef}
@@ -704,32 +668,32 @@ const ConceptEyeDiagram: React.FC<ConceptEyeDiagramProps> = ({ replayNonce }) =>
       />
 
       {/* Top Eye Diagram HUD */}
-      <div className="relative z-20 flex items-center justify-between text-[10px] font-mono pb-1 border-b border-[#0E7490]/30">
+      <div className="relative z-20 flex items-center justify-between text-[10px] font-mono pb-1 border-b border-hairline">
         <div className="flex items-center gap-2">
-          <span className="px-1.5 py-0.5 rounded bg-emerald-950/60 border border-emerald-500/40 text-emerald-400 font-bold">
+          <span className="px-1.5 py-0.5 rounded bg-[var(--status-nominal-bg)] border border-[var(--status-nominal-border)] text-nominal font-bold">
             MASK TEST: PASS (0 VIOLATIONS)
           </span>
-          <span className="text-[#9099A6] hidden sm:inline">
+          <span className="text-secondary hidden sm:inline">
             CAN-FD PHYSICAL LAYER EYE CONVERGENCE
           </span>
         </div>
-        <div className="flex items-center gap-3 text-[#9099A6]">
-          <span>SAMPLE POINT: <strong className="text-emerald-400">80.0%</strong></span>
-          <span>JITTER RMS: <strong className="text-cyan-300">3.8 ns</strong></span>
+        <div className="flex items-center gap-3 text-secondary">
+          <span>SAMPLE POINT: <strong className="text-nominal">80.0%</strong></span>
+          <span>JITTER RMS: <strong className="text-focus">3.8 ns</strong></span>
         </div>
       </div>
 
       {/* Center Hero Overlay: Official Vector Logo + High-Impact Telemetry Metrics */}
       <div className="relative z-20 flex items-center justify-between gap-6 my-auto">
         <div className="flex items-center gap-4">
-          <div className="p-2 rounded-lg bg-[#0B0F17]/90 border border-cyan-500/40 shadow-[0_0_24px_rgba(6,182,212,0.2)]">
+          <div className="p-2 rounded-lg bg-panel border border-[var(--status-focus-border)]">
             <NexusCanVectorLogo size={84} glow={true} replayNonce={replayNonce} animated={true} />
           </div>
           <div>
-            <h1 className="text-[20px] font-bold text-[#E6EDF5] tracking-tight font-sans">
+            <h1 className="text-[20px] font-bold text-primary tracking-tight font-sans">
               NexusCAN
             </h1>
-            <p className="text-[11px] text-[#9099A6] font-mono mt-0.5">
+            <p className="text-[11px] text-secondary font-mono mt-0.5">
               Deterministic 60 FPS Canvas Telemetry Engine
             </p>
           </div>
@@ -737,30 +701,30 @@ const ConceptEyeDiagram: React.FC<ConceptEyeDiagramProps> = ({ replayNonce }) =>
 
         {/* Eye Quality Readout Cards */}
         <div className="hidden sm:flex items-center gap-2 font-mono text-[10px]">
-          <div className="p-2 rounded bg-[#090D14]/90 border border-[#0E7490]/40 flex flex-col items-center w-24">
-            <span className="text-[#9099A6]">EYE HEIGHT</span>
-            <span className="text-cyan-300 font-bold text-[13px] mt-0.5">1.85 V</span>
-            <span className="text-emerald-400 text-[9px] mt-0.5">NOMINAL &gt;1.5V</span>
+          <div className="p-2 rounded bg-panel border border-strong flex flex-col items-center w-24">
+            <span className="text-secondary">EYE HEIGHT</span>
+            <span className="text-focus font-bold text-[13px] mt-0.5">1.85 V</span>
+            <span className="text-nominal text-[9px] mt-0.5">NOMINAL &gt;1.5V</span>
           </div>
-          <div className="p-2 rounded bg-[#090D14]/90 border border-[#0E7490]/40 flex flex-col items-center w-24">
-            <span className="text-[#9099A6]">EYE WIDTH</span>
-            <span className="text-emerald-300 font-bold text-[13px] mt-0.5">420 ns</span>
-            <span className="text-cyan-400 text-[9px] mt-0.5">84% UI TIME</span>
+          <div className="p-2 rounded bg-panel border border-strong flex flex-col items-center w-24">
+            <span className="text-secondary">EYE WIDTH</span>
+            <span className="text-nominal font-bold text-[13px] mt-0.5">420 ns</span>
+            <span className="text-focus text-[9px] mt-0.5">84% UI TIME</span>
           </div>
         </div>
       </div>
 
       {/* Bottom Brand Bar */}
-      <div className="relative z-20 flex items-center justify-between pt-2 border-t border-[#0E7490]/30 text-[11px]">
+      <div className="relative z-20 flex items-center justify-between pt-2 border-t border-hairline text-[11px]">
         <div className="flex items-center gap-2.5">
-          <span className="px-2 py-0.5 border border-emerald-500/40 bg-emerald-950/40 text-emerald-400 font-mono text-[10px] font-bold rounded-sm">
+          <span className="px-2 py-0.5 border border-[var(--status-nominal-border)] bg-[var(--status-nominal-bg)] text-nominal font-mono text-[10px] font-bold rounded-sm">
             BIT-TIMING CERTIFIED
           </span>
-          <span className="text-[11px] text-[#9099A6] hidden md:inline">
+          <span className="text-[11px] text-secondary hidden md:inline">
             Zero WebGL / Canvas CPU Leaks — Guaranteed 60 FPS Render Pipeline
           </span>
         </div>
-        <span className="font-mono text-[10px] text-cyan-400/90">
+        <span className="font-mono text-[10px] text-focus">
           60.0 FPS LOCKED
         </span>
       </div>
@@ -791,29 +755,29 @@ const ConceptTacticalBoot: React.FC<ConceptTacticalBootProps> = ({ replayNonce }
   }, [replayNonce]);
 
   return (
-    <div className="relative w-full h-[220px] rounded-lg overflow-hidden border border-[#0E7490]/50 bg-[#06090E] flex flex-col justify-between p-4 select-none">
+    <div className="relative w-full h-[220px] rounded-lg overflow-hidden border border-strong bg-canvas flex flex-col justify-between p-4 select-none">
       {/* Aerospace Precision Corner Brackets */}
-      <div className="absolute top-2 left-2 text-[#00D8FF] font-mono text-[12px] pointer-events-none select-none">┌</div>
-      <div className="absolute top-2 right-2 text-[#00D8FF] font-mono text-[12px] pointer-events-none select-none">┐</div>
-      <div className="absolute bottom-2 left-2 text-[#00D8FF] font-mono text-[12px] pointer-events-none select-none">└</div>
-      <div className="absolute bottom-2 right-2 text-[#00D8FF] font-mono text-[12px] pointer-events-none select-none">┘</div>
+      <div className="absolute top-2 left-2 text-focus font-mono text-[12px] pointer-events-none select-none">┌</div>
+      <div className="absolute top-2 right-2 text-focus font-mono text-[12px] pointer-events-none select-none">┐</div>
+      <div className="absolute bottom-2 left-2 text-focus font-mono text-[12px] pointer-events-none select-none">└</div>
+      <div className="absolute bottom-2 right-2 text-focus font-mono text-[12px] pointer-events-none select-none">┘</div>
 
       {/* Laser Calibration Scan Line (Sweeps across the full 220px container height!) */}
       <div
         key={`laser-${replayNonce}`}
-        className="absolute left-0 right-0 h-[1.5px] bg-gradient-to-r from-transparent via-[#00D8FF] to-transparent pointer-events-none opacity-80 animate-[nexusLaserSweep_1.8s_var(--ease-out)_infinite]"
+        className="absolute left-0 right-0 h-[1.5px] bg-focus pointer-events-none opacity-80 animate-[nexusLaserSweep_1.8s_var(--ease-out)_infinite]"
       />
 
       {/* Top Header: Mission Critical Ready State */}
-      <div className="relative z-20 flex items-center justify-between text-[10px] font-mono pb-1 border-b border-[#0E7490]/30">
+      <div className="relative z-20 flex items-center justify-between text-[10px] font-mono pb-1 border-b border-hairline">
         <div className="flex items-center gap-2">
-          <span className="text-cyan-400 font-bold">[SYS_INIT: OK]</span>
-          <span className="text-[#9099A6]">
+          <span className="text-focus font-bold">[SYS_INIT: OK]</span>
+          <span className="text-secondary">
             PALANTIR & MOTORSPORT TELEMETRY ARCHITECTURE
           </span>
         </div>
-        <div className="flex items-center gap-2 text-emerald-400 font-bold">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
+        <div className="flex items-center gap-2 text-nominal font-bold">
+          <span className="w-1.5 h-1.5 rounded-full bg-nominal animate-ping inline-block" />
           <span>ALL CHANNELS NOMINAL</span>
         </div>
       </div>
@@ -821,22 +785,22 @@ const ConceptTacticalBoot: React.FC<ConceptTacticalBootProps> = ({ replayNonce }
       {/* Center Layout: Laser-Scanned Logo + Staggered Subsystem Verification Ticker */}
       <div className="relative z-20 flex items-center justify-between gap-6 my-auto">
         <div className="flex items-center gap-4">
-          <div className="p-2 rounded-lg bg-[#0A0E15] border border-cyan-500/40 shadow-[0_0_24px_rgba(6,182,212,0.18)]">
+          <div className="p-2 rounded-lg bg-panel border border-[var(--status-focus-border)]">
             <NexusCanVectorLogo size={84} glow={true} replayNonce={replayNonce} animated={true} />
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h1
                 key={`title-${replayNonce}`}
-                className="text-[20px] font-bold text-[#E6EDF5] tracking-tight font-sans animate-[nexusShimmerSweep_0.6s_var(--ease-out)_forwards]"
+                className="text-[20px] font-bold text-primary tracking-tight font-sans animate-[nexusShimmerSweep_0.6s_var(--ease-out)_forwards]"
               >
                 NexusCAN
               </h1>
-              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-cyan-950/60 border border-cyan-500/40 text-cyan-300 font-bold">
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-focus font-bold">
                 CORE v1.0
               </span>
             </div>
-            <p className="text-[11px] text-[#9099A6] font-mono mt-0.5">
+            <p className="text-[11px] text-secondary font-mono mt-0.5">
               Deterministic Multi-Bus CAN / CAN-FD Industrial Telemetry
             </p>
           </div>
@@ -847,8 +811,8 @@ const ConceptTacticalBoot: React.FC<ConceptTacticalBootProps> = ({ replayNonce }
           <div
             className={`px-2 py-1 rounded border transition-all duration-200 ${
               bootStep >= 1
-                ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
-                : 'bg-slate-900 border-slate-800 text-slate-500'
+                ? 'bg-[var(--status-nominal-bg)] border-[var(--status-nominal-border)] text-nominal'
+                : 'bg-panel border-strong text-muted'
             }`}
           >
             [OK] 01 · NETDB COMPILER: DBC / KCD MATRIX MOUNTED
@@ -856,8 +820,8 @@ const ConceptTacticalBoot: React.FC<ConceptTacticalBootProps> = ({ replayNonce }
           <div
             className={`px-2 py-1 rounded border transition-all duration-200 ${
               bootStep >= 2
-                ? 'bg-cyan-950/40 border-cyan-500/40 text-cyan-300'
-                : 'bg-slate-900 border-slate-800 text-slate-500'
+                ? 'bg-[var(--status-focus-bg)] border-[var(--status-focus-border)] text-focus'
+                : 'bg-panel border-strong text-muted'
             }`}
           >
             [OK] 02 · 60HZ TELEMETRY ENGINE: TWO-PLANE IPC LOCKED
@@ -865,8 +829,8 @@ const ConceptTacticalBoot: React.FC<ConceptTacticalBootProps> = ({ replayNonce }
           <div
             className={`px-2 py-1 rounded border transition-all duration-200 ${
               bootStep >= 3
-                ? 'bg-amber-950/40 border-amber-500/40 text-amber-300'
-                : 'bg-slate-900 border-slate-800 text-slate-500'
+                ? 'bg-[var(--status-warn-bg)] border-[var(--status-warn-border)] text-warn'
+                : 'bg-panel border-strong text-muted'
             }`}
           >
             [OK] 03 · LISTEN-ONLY SAFETY GUARD: ACTIVE BUS ARMED
@@ -875,12 +839,12 @@ const ConceptTacticalBoot: React.FC<ConceptTacticalBootProps> = ({ replayNonce }
       </div>
 
       {/* Bottom Brand Bar */}
-      <div className="relative z-20 flex items-center justify-between pt-2 border-t border-[#0E7490]/30 text-[11px]">
+      <div className="relative z-20 flex items-center justify-between pt-2 border-t border-hairline text-[11px]">
         <div className="flex items-center gap-2">
-          <span className="text-[10px] font-mono text-cyan-400 font-bold">CALIBRATION ID:</span>
-          <span className="text-[10px] font-mono text-slate-400">0xDEAD_BEEF_CAN_FD</span>
+          <span className="text-[10px] font-mono text-focus font-bold">CALIBRATION ID:</span>
+          <span className="text-[10px] font-mono text-secondary">0xDEAD_BEEF_CAN_FD</span>
         </div>
-        <span className="font-mono text-[10px] text-emerald-400">
+        <span className="font-mono text-[10px] text-nominal">
           READY FOR LIVE INGESTION
         </span>
       </div>
@@ -952,7 +916,7 @@ export const StartHeroShowcase: React.FC = () => {
       {/* Top Concept Switcher Toolbar */}
       <div className="flex items-center justify-between gap-2 text-[11px]">
         <div className="flex items-center gap-1 text-[var(--text-secondary)]">
-          <span className="font-mono text-[10px] text-cyan-400 uppercase tracking-wider font-semibold">
+          <span className="font-mono text-[10px] text-focus uppercase tracking-wider font-semibold">
             {t('shell.hero.conceptLabel')}
           </span>
           <span className="font-medium text-[var(--text-primary)]">
@@ -971,12 +935,12 @@ export const StartHeroShowcase: React.FC = () => {
                 onClick={() => handleSelectConcept(c.id)}
                 title={c.description}
                 style={{
-                  backgroundColor: isSelected ? 'rgba(6, 182, 212, 0.16)' : 'var(--bg-panel)',
-                  borderColor: isSelected ? '#00D8FF' : 'var(--border-strong)',
-                  color: isSelected ? '#00D8FF' : 'var(--text-secondary)',
+                  backgroundColor: isSelected ? 'var(--status-focus-bg)' : 'var(--bg-panel)',
+                  borderColor: isSelected ? 'var(--status-focus)' : 'var(--border-strong)',
+                  color: isSelected ? 'var(--status-focus)' : 'var(--text-secondary)',
                 }}
                 className={`h-[22px] px-2 border rounded font-mono text-[10px] font-bold cursor-pointer transition-colors duration-150 ${
-                  isSelected ? 'shadow-[0_0_8px_rgba(6,182,212,0.25)]' : 'hover:text-[var(--text-primary)]'
+                  isSelected ? '' : 'hover:text-[var(--text-primary)]'
                 }`}
               >
                 {c.id}
@@ -996,9 +960,9 @@ export const StartHeroShowcase: React.FC = () => {
               borderColor: 'var(--border-strong)',
               color: 'var(--text-primary)',
             }}
-            className="h-[22px] px-2 border rounded flex items-center gap-1 text-[10px] font-mono font-medium hover:border-cyan-400 cursor-pointer transition-colors"
+            className="h-[22px] px-2 border rounded flex items-center gap-1 text-[10px] font-mono font-medium hover:border-focus cursor-pointer transition-colors"
           >
-            <RotateCcw className="w-3 h-3 text-cyan-400" />
+            <RotateCcw className="w-3 h-3 text-focus" />
             <span>{t('shell.hero.replayBtn')}</span>
           </button>
         </div>
