@@ -358,16 +358,16 @@ const OS_DRIVER_REFERENCE: Record<
     },
     macos: {
       sourceLocations: [
-        'libcanlib.dylib (MacCAN-KvaserCAN via dlopen)',
-        '/opt/homebrew/lib/libcanlib.dylib, /usr/local/lib/libcanlib.dylib',
+        'KvaserUSB user-space driver (libusb)',
+        '/opt/homebrew/lib/libKvaserUSB.dylib or /usr/local/lib/libKvaserUSB.dylib',
       ],
       setupSteps: [
         {
-          title: 'Install MacCAN KvaserCAN library',
+          title: 'Install KvaserUSB library',
           description:
-            'MacCAN driver wrapper for Kvaser Leaf / Memorator USB devices on macOS.',
-          commandOrAction: 'brew install mac-can/maccan/kvasercan',
-          docUrl: 'https://www.mac-can.com/',
+            'Kvaser USB driver for Leaf v3 and other supported USB interfaces on macOS.',
+          commandOrAction: 'See README.md, Kvaser USB on macOS.',
+          docUrl: 'https://github.com/cliffrubio/macOS-CAN-Drivers/tree/main/KvaserUSB',
         },
       ],
     },

@@ -1746,38 +1746,49 @@ fn probe_kvaser_family_with_usb(usb_devices: &[UsbCanDeviceDto]) -> DriverFamily
             doc_url: Some("https://kvaser.com/download/".to_string()),
         });
     } else if cfg!(target_os = "macos") {
-        os_source_locations
-            .push("/usr/local/lib/libcanlib.dylib & /opt/homebrew/lib/libcanlib.dylib".to_string());
-        for p in [
-            "/opt/homebrew/lib/libcanlib.dylib",
-            "/usr/local/lib/libcanlib.dylib",
-        ] {
-            searched.push(p.to_string());
-            if detected_lib.is_none() && Path::new(p).exists() {
-                detected_lib = Some(p.to_string());
+        #[cfg(target_os = "macos")]
+        {
+            use crate::drivers::kvaser_usb_drv::{
+                enumerate, installed_library_path, LIBRARY_PATHS,
+            };
+            let library_path = LIBRARY_PATHS.iter().find(|path| Path::new(path).exists());
+            searched.extend(LIBRARY_PATHS.iter().map(|path| path.to_string()));
+            os_source_locations.extend(LIBRARY_PATHS.iter().map(|path| path.to_string()));
+            setup_steps.push(OsSetupStepDto {
+                title: "Install KvaserUSB library".to_string(),
+                description: "Kvaser USB user-space driver with Leaf v3 support.".to_string(),
+                command_or_action: Some("See README.md, Kvaser USB on macOS.".to_string()),
+                doc_url: Some(
+                    "https://github.com/cliffrubio/macOS-CAN-Drivers/tree/main/KvaserUSB"
+                        .to_string(),
+                ),
+            });
+            if library_path.is_some() {
+                let loaded_path = installed_library_path();
+                detected_lib = loaded_path.as_ref().ok().map(|path| path.to_string());
+                match enumerate() {
+                    Ok(channels) => {
+                        for (index, channel) in channels.iter().enumerate() {
+                            let id = index.to_string();
+                            detected_channels.push(id.clone());
+                            channel_details.push(DetectedChannelDetailDto {
+                                channel_id: id.clone(),
+                                device_id: format!("kvaser:{id}"),
+                                label: channel.name(),
+                                state: "ready".to_string(),
+                                supports_fd: channel.fd_capable != 0,
+                                mtu: Some(if channel.fd_capable != 0 { 72 } else { 16 }),
+                                kernel_or_usb_driver: Some("libKvaserUSB.dylib".to_string()),
+                                source_path: detected_lib.clone().unwrap_or_default(),
+                                hardware_id: kvaser_usb.first().map(|u| u.vid_pid.clone()),
+                                hint_command: None,
+                            });
+                        }
+                    }
+                    Err(error) => architecture_note = Some(error.to_string()),
+                }
             }
         }
-        if let Some(ref lib) = detected_lib {
-            detected_channels.push("0".to_string());
-            channel_details.push(DetectedChannelDetailDto {
-                channel_id: "0".to_string(),
-                device_id: "kvaser:0".to_string(),
-                label: "Kvaser Channel 0".to_string(),
-                state: "ready".to_string(),
-                supports_fd: true,
-                mtu: Some(72),
-                kernel_or_usb_driver: Some("libcanlib.dylib".to_string()),
-                source_path: lib.clone(),
-                hardware_id: kvaser_usb.first().map(|u| u.vid_pid.clone()),
-                hint_command: None,
-            });
-        }
-        setup_steps.push(OsSetupStepDto {
-            title: "macOS Kvaser Support Note".to_string(),
-            description: "Official Kvaser CANlib primarily targets Windows and Linux; on macOS, check third-party MacCAN Kvaser drivers or use gs_usb / PCAN.".to_string(),
-            command_or_action: None,
-            doc_url: Some("https://mac-can.com/".to_string()),
-        });
     } else {
         os_source_locations.push(
             "Linux Mainline SocketCAN (/sys/module/kvaser_usb, /sys/module/kvaser_pciefd)"
@@ -1855,9 +1866,12 @@ fn probe_kvaser_family_with_usb(usb_devices: &[UsbCanDeviceDto]) -> DriverFamily
         detected_channels,
         channel_details,
         setup_steps,
-        install_hint:
-            "Install Kvaser CANlib SDK (64-bit canlib32.dll / linuxcan libcanlib.so) or load Linux 'sudo modprobe kvaser_usb'."
-                .to_string(),
+        install_hint: if cfg!(target_os = "macos") {
+            "Install libKvaserUSB.dylib in /opt/homebrew/lib or /usr/local/lib (see README.md)."
+                .to_string()
+        } else {
+            "Install Kvaser CANlib SDK (64-bit canlib32.dll / linuxcan libcanlib.so) or load Linux 'sudo modprobe kvaser_usb'.".to_string()
+        },
     }
 }
 
@@ -2404,6 +2418,15 @@ impl AdapterDriver for KvaserDriver {
                 }
             });
 
+        #[cfg(target_os = "macos")]
+        {
+            let index = requested_ch.parse::<usize>().map_err(|_| {
+                AdapterError::DeviceNotFound(format!("Invalid Kvaser channel '{requested_ch}'"))
+            })?;
+            crate::drivers::kvaser_usb_drv::open(index, device, config)
+        }
+
+        #[cfg(not(target_os = "macos"))]
         let status = probe_kvaser_family();
 
         #[cfg(target_os = "linux")]
@@ -2422,26 +2445,29 @@ impl AdapterDriver for KvaserDriver {
             }
         }
 
-        if !status.installed {
-            let arch_extra = status
-                .architecture_note
-                .as_deref()
-                .map(|n| format!(" [{n}]"))
-                .unwrap_or_default();
-            return Err(AdapterError::Driver(format!(
+        #[cfg(not(target_os = "macos"))]
+        {
+            if !status.installed {
+                let arch_extra = status
+                    .architecture_note
+                    .as_deref()
+                    .map(|n| format!(" [{n}]"))
+                    .unwrap_or_default();
+                return Err(AdapterError::Driver(format!(
                 "Kvaser CANlib driver is not installed on this host{arch_extra} (checked: {}). {}",
                 status.searched_paths.join(", "),
                 status.install_hint
             )));
-        }
+            }
 
-        Err(AdapterError::DeviceNotFound(format!(
+            Err(AdapterError::DeviceNotFound(format!(
             "Kvaser CANlib driver is installed ({}), but hardware channel '{requested_ch}' is not attached or active",
             status
                 .detected_library_or_module
                 .as_deref()
                 .unwrap_or("CANlib")
         )))
+        }
     }
 }
 
