@@ -71,8 +71,15 @@ jobs:
       - name: Clippy (workspace, -D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test workspace
-        run: cargo test --workspace --no-fail-fast
+      # nexus-hal tests spawn real-time threads (mock generators, 60 Hz aggregator) and assert on
+      # wall-clock bounds (Panic Stop barrier, cycle health, shutdown <25 ms). Run in parallel on the
+      # 3-vCPU macOS VM they starve each other and fail at random, so they run one at a time
+      # (~10 s). Failures are never retried: a real regression still fails deterministically.
+      - name: Test workspace (except nexus-hal)
+        run: cargo test --workspace --no-fail-fast --exclude nexus-hal
+
+      - name: Test nexus-hal (serial, timing-sensitive)
+        run: cargo test -p nexus-hal --no-fail-fast -- --test-threads=1
 
       - name: Test diag tap allocation (test-hooks feature)
         run: cargo test -p nexus-hal --features test-hooks --test diag_tap_alloc
