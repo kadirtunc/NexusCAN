@@ -340,10 +340,15 @@ mod tests {
     /// the server context (e.g. lingering sessions) are still alive.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stop_releases_trace_cache() {
+        // Nanos, not `{:?}` of SystemTime: its Debug output contains `{`, `:` and spaces, which
+        // are invalid in Windows file names (os error 123).
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         let root = DataRoot::under(std::env::temp_dir().join(format!(
-            "nexus-mcp-unit-stop-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
+            "nexus-mcp-unit-stop-{}-{nanos}",
+            std::process::id()
         )));
         root.ensure_dirs().unwrap();
         let engine = Arc::new(PipelineEngine::with_data_root(DriverRegistry::new(), root));
