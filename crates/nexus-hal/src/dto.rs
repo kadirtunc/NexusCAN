@@ -55,6 +55,18 @@ pub struct ChannelConfigDto {
     /// falling back to the software TX lock. Virtual channels are unaffected.
     #[serde(default)]
     pub require_hardware_listen_only: bool,
+    /// Network adapters (CSS Electronics CANsub): manually entered host / IP (`name[:port]`,
+    /// `ipv4[:port]`, `[ipv6]:port`) used when mDNS cannot see the device (VPN, other subnet).
+    #[serde(default)]
+    pub network_host: Option<String>,
+    /// Network adapters: expected Device ID (8 hex). The TLS certificate must carry the SAN
+    /// `<id>-usb.local` / `<id>-eth.local`, so `network_host` may be an IP (cansub-v1 §2.6 rule 1).
+    #[serde(default)]
+    pub network_device_id: Option<String>,
+    /// Network adapters: without a Device ID, accept any certificate chaining to the vendor root
+    /// (cansub-v1 §2.6 rule 2). The UI must show this choice with a warning.
+    #[serde(default)]
+    pub network_accept_any_device: bool,
 }
 
 impl ChannelConfigDto {
@@ -81,6 +93,9 @@ impl Default for ChannelConfigDto {
             serial_dtr_rts: None,
             adapter_channel: None,
             require_hardware_listen_only: false,
+            network_host: None,
+            network_device_id: None,
+            network_accept_any_device: false,
         }
     }
 }

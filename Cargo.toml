@@ -21,6 +21,8 @@ nexus-cloud = { path = "crates/nexus-cloud" }
 nexus-protocols = { path = "crates/nexus-protocols" }
 nexus-seedkey-native = { path = "crates/nexus-seedkey-native" }
 nexus-seedkey-host = { path = "crates/nexus-seedkey-host" }
+# CSS Electronics CANsub SDK (package `cansub-rs`, lib `cansub`; contract cansub-v1).
+cansub-rs = { path = "crates/cansub" }
 
 # Serialization & Core Utilities
 serde = { version = "1.0", features = ["derive"] }
@@ -63,6 +65,17 @@ quick-xml = "0.42"
 rhai = { version = "1", default-features = false, features = ["std", "sync", "no_module", "no_custom_syntax"] }
 libloading = "0.8"
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+
+# CSS Electronics CANsub SDK (crates/cansub, contract cansub-v1 §3.5). rustls uses the same `ring`
+# provider as `ureq`; tungstenite gets our own TLS stream, so no tungstenite TLS feature.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+rustls-pki-types = { version = "1.12", features = ["std"] }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# Same `bytes` 1.x tungstenite uses for `Message` payloads (cansub reuses one `BytesMut` for TX).
+bytes = { version = "1.12", default-features = false, features = ["std"] }
+mdns-sd = { version = "0.22", default-features = false }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+proptest = "1.6"
 
 # UDS client core (D-003): ISO-TP + UDS framing only; NexusCAN HAL provides CAN access. Pinned.
 automotive = { version = "=0.6.0", default-features = false }

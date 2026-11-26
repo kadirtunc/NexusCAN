@@ -611,7 +611,7 @@ async fn e2e_tools_list_and_call_over_streamable_http() {
             && !M3_TOOLS.contains(&n.as_str())
             && n != "debug_events_query"
     });
-    assert_eq!(names.len(), 19, "M1 + M1.1 db tools + 7 ui tools");
+    assert_eq!(names.len(), 20, "M1 + M1.1 db tools + 8 ui tools");
     names.retain(|n| {
         !n.starts_with("ui_")
             && !["db_list", "db_get_ecu", "db_diagnostics", "db_encode_frame"].contains(&n.as_str())

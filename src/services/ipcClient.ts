@@ -429,6 +429,17 @@ export function apiListDevices(): Promise<DeviceDescriptorDto[]> {
   return invokeCmd<DeviceDescriptorDto[]>('cmd_list_devices', {});
 }
 
+export interface CansubProbeArgs {
+  host: string;
+  deviceId: string | null;
+  acceptAny: boolean;
+}
+
+/** Probe a CANsub host (mDNS-less path). Resolves with its channels; rejects with a readable string/Error. */
+export function cansubProbeHost(args: CansubProbeArgs): Promise<DeviceDescriptorDto[]> {
+  return invokeCmd<DeviceDescriptorDto[]>('cmd_cansub_probe_host', { ...args });
+}
+
 export function apiProbeDrivers(): Promise<DriverProbeReportDto> {
   return invokeCmd<DriverProbeReportDto>('cmd_probe_drivers', {});
 }

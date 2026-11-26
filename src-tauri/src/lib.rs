@@ -58,8 +58,10 @@ pub fn run() {
                                 state.stop_mcp();
                                 state.ui_bridge.detach();
                             }
-                            if let Some(dbg_win) = app_handle.get_webview_window("debug-console") {
-                                let _ = dbg_win.close();
+                            for (label, window) in app_handle.webview_windows() {
+                                if label == "debug-console" || label.starts_with("trace-view-") {
+                                    let _ = window.close();
+                                }
                             }
                         }
                     });
@@ -70,6 +72,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::cmd_list_devices,
             commands::cmd_probe_drivers,
+            commands::cmd_cansub_probe_host,
             commands::cmd_subscribe_hardware_changes,
             commands::cmd_connect_bus,
             commands::cmd_disconnect_bus,
@@ -131,6 +134,7 @@ pub fn run() {
             commands::cmd_clear_debug_events,
             commands::cmd_export_debug_events,
             commands::cmd_set_debug_window_open,
+            commands::cmd_trace_window,
             commands::cmd_flowlib_list,
             commands::cmd_flowlib_revisions,
             commands::cmd_flowlib_load,

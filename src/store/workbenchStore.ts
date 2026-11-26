@@ -209,16 +209,19 @@ export const workbenchStore = {
   },
 
   addWatchSignal(item: WatchSignalItem): void {
-    if (state.watchSignals.some((w) => w.key === item.key)) {
-      setState({ ...state, bottomTab: 'watch', dockOpen: true });
-      return;
+    workbenchStore.addWatchSignals([item]);
+  },
+
+  addWatchSignals(items: readonly WatchSignalItem[]): void {
+    if (items.length === 0) return;
+    const watchSignals = [...state.watchSignals];
+    const keys = new Set(watchSignals.map(({ key }) => key));
+    for (const item of items) {
+      if (keys.has(item.key)) continue;
+      keys.add(item.key);
+      watchSignals.push(item);
     }
-    setState({
-      ...state,
-      watchSignals: [...state.watchSignals, item],
-      bottomTab: 'watch',
-      dockOpen: true,
-    });
+    setState({ ...state, watchSignals, bottomTab: 'watch', dockOpen: true });
   },
 
   toggleWatchSignal(item: WatchSignalItem): void {

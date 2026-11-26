@@ -1,8 +1,6 @@
 //! UI Bridge (co-pilot): MCP `ui_*` tools forward view/navigation requests to the NexusCAN
-//! frontend, which applies them and replies. Nothing here can touch a bus: the request kinds are
-//! a fixed whitelist (`get_state`, `navigate`, `select_message`, `trace_filter`,
-//! `plot_signals`, `notify`, `confirm`) and every argument is validated and clipped here
-//! before it is forwarded.
+//! frontend, which replies through a fixed set of request kinds. View tools validate their
+//! arguments here. The server builds the dedicated Active Bus prompt from the engine connection.
 //!
 //! `nexus-mcp` stays Tauri-free: the host (src-tauri) implements [`UiBridge`].
 

@@ -144,7 +144,7 @@ impl McpServerHandle {
                 0
             },
             total_calls: self.ctx.total_calls.load(Ordering::Relaxed),
-            read_only: true,
+            read_only: self.ctx.ui.is_none(),
             ui_attached: self.ctx.ui_attached(),
             last_error: self.task_error.lock().clone(),
         }

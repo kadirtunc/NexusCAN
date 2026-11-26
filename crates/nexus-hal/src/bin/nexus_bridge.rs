@@ -394,6 +394,16 @@ struct ConnectBusArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CansubProbeHostArgs {
+    host: String,
+    #[serde(default, alias = "device_id")]
+    device_id: Option<String>,
+    #[serde(default, alias = "accept_any")]
+    accept_any: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DisconnectBusArgs {
     #[serde(alias = "bus_id")]
     bus_id: u8,
@@ -1632,6 +1642,25 @@ async fn handle_invoke(
     match cmd.as_str() {
         "cmd_list_devices" => ok_json(engine.cmd_list_devices()),
         "cmd_probe_drivers" => ok_json(engine.cmd_probe_drivers()),
+        "cmd_cansub_probe_host" => {
+            let args: CansubProbeHostArgs = match serde_json::from_value(payload) {
+                Ok(a) => a,
+                Err(e) => {
+                    return bad_request(format!("Invalid arguments for cmd_cansub_probe_host: {e}"))
+                }
+            };
+            // Network connect (TLS + REST, up to the SDK timeout): blocking pool.
+            let engine = Arc::clone(&engine);
+            match tokio::task::spawn_blocking(move || {
+                engine.cmd_cansub_probe_host(args.host, args.device_id, args.accept_any)
+            })
+            .await
+            {
+                Ok(Ok(devs)) => ok_json(devs),
+                Ok(Err(e)) => bad_request(e.to_string()),
+                Err(e) => bad_request(format!("cmd_cansub_probe_host worker failed: {e}")),
+            }
+        }
         "cmd_subscribe_hardware_changes" => ok_json(json!({
             "subscribed": true,
             "wsPath": "/ws/hardware",

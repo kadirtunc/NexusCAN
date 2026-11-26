@@ -1,4 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { findFilteredFrame, TraceFilterIndex } from '../utils/traceFilterIndex';
+import type { TraceRecordingAction } from '../services/traceWindow';
+import type { TraceSession } from '../store/traceSessionsStore';
+import { copyMenuText, openContextMenu } from './ContextMenu';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -112,19 +116,6 @@ type VirtualRowItem =
       childIdx: number;
     };
 
-function binarySearchInt32(arr: Int32Array, target: number): number {
-  let lo = 0;
-  let hi = arr.length - 1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >>> 1;
-    const v = arr[mid];
-    if (v === target) return mid;
-    if (v < target) lo = mid + 1;
-    else hi = mid - 1;
-  }
-  return -1;
-}
-
 function formatFilterMessageKey(arbId: number, isExtended: boolean): string {
   const prefix = isExtended ? 'EXT:0x' : 'STD:0x';
   const width = isExtended ? 8 : 3;
@@ -172,18 +163,27 @@ function formatReplayTime(us: number): string {
   return `${String(mm).padStart(2, '0')}:${ss}`;
 }
 
+const EMPTY_RESTBUS_MESSAGES: readonly RestbusMessageItem[] = [];
+
 export interface TraceViewProps {
+  detached?: {
+    session: TraceSession;
+    onRecordingAction: (action: TraceRecordingAction) => void;
+    onDock: () => void;
+  };
   sessionId?: string;
   onStatusMessage?: (msg: StatusBanner) => void;
 }
 
-export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage }) => {
+export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage, detached }) => {
   const { t } = useI18n();
   const dbState = useDatabaseStore();
   const connState = useConnectionStore();
   const header = useTelemetryHeader();
   const traceState = useTraceSessionsStore();
-  const sess = traceSessionsStore.getSession(sessionId);
+  const sess = detached?.session ?? traceSessionsStore.getSession(sessionId);
+  const record = () => detached ? detached.onRecordingAction('record') : traceSessionsStore.startRecording(sess.id, false);
+  const stop = () => detached ? detached.onRecordingAction('stop') : traceSessionsStore.stopRecording(sess.id);
   const idFilter = useTraceIdFilter(sess.id);
 
   const availableBusIds = useMemo(() => {
@@ -250,6 +250,19 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
   const [scrollTop, setScrollTop] = useState<number>(0);
   const [viewportHeight, setViewportHeight] = useState<number>(600);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const lastScrollTop = useRef(0);
+  const pendingPause = useRef<{ sessionId: string; scrollTop: number } | null>(null);
+  const previousTrace = useRef({ id: sess.id, state: sess.state });
+
+  const pause = (): void => {
+    pendingPause.current = {
+      sessionId: sess.id,
+      scrollTop: containerRef.current?.scrollTop ?? lastScrollTop.current,
+    };
+    if (detached) detached.onRecordingAction('pause');
+    else traceSessionsStore.pauseRecording(sess.id);
+  };
+
 
   useEffect(() => {
     setExpandedUids(new Set());
@@ -261,6 +274,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
   }, [sess.maxBufferRows]);
 
   const replay = header.replay;
+  const showReplayTransport =
+    (sess.count > 0 && sess.state !== 'recording') || replay.state !== 'idle';
+  const needsRestbusMessages = !detached && showReplayTransport && restbusFilterOpen;
   const isThisSessionReplaying =
     replay.state !== 'idle' &&
     (replay.sourceName === sess.name || traceState.replayingSessionId === sess.id);
@@ -277,7 +293,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
 
   // Auto-scroll to follow cursor during active replay
   useEffect(() => {
-    if (!followCursor || !isThisSessionReplaying) return;
+    if (!followCursor || !isThisSessionReplaying || sess.state === 'paused' || pendingPause.current?.sessionId === sess.id) return;
     const currentIdx = replay.currentIndex;
     if (currentIdx < 0) return;
     const el = containerRef.current;
@@ -285,8 +301,10 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
     const targetScrollTop = Math.max(0, currentIdx * ROW_HEIGHT - viewportHeight / 2);
     if (Math.abs(el.scrollTop - targetScrollTop) > ROW_HEIGHT * 6) {
       el.scrollTop = targetScrollTop;
+      lastScrollTop.current = el.scrollTop;
+      setScrollTop(el.scrollTop);
     }
-  }, [followCursor, isThisSessionReplaying, replay.currentIndex, viewportHeight]);
+  }, [followCursor, isThisSessionReplaying, replay.currentIndex, sess.id, sess.state, viewportHeight]);
 
   // Restbus & Replay Filter computations
   const filterMode = traceState.replayFilterMode;
@@ -308,6 +326,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
 
   // Compute unique messages appearing in active trace or DBC schema
   const restbusTraceMessages = useMemo(() => {
+    if (!needsRestbusMessages) return EMPTY_RESTBUS_MESSAGES;
     const map = new Map<string, RestbusMessageItem>();
     const ring = sess.displayRing;
     const len = ring.length;
@@ -368,7 +387,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
     }
 
     return Array.from(map.values()).sort((a, b) => a.arbId - b.arbId);
-  }, [sess.displayRing, sess.version, dbState.schema, traceState.replayFilterKeys, t]);
+  }, [needsRestbusMessages, sess.displayRing, sess.version, dbState.schema, dbState.busSchemas, traceState.replayFilterKeys, t]);
 
   // Extract distinct ECU nodes
   const availableEcus = useMemo(() => {
@@ -497,81 +516,38 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
     [idFilter],
   );
 
-  // When unfiltered (99% case): ZERO array allocation! When filtered: compact Int32Array of ring indices.
-  const filteredIndices: Int32Array | null = useMemo(() => {
+  const filterIndex = useMemo(() => {
     if (isUnfiltered) return null;
 
-    const matches: number[] = [];
-    const len = sess.count;
-    for (let i = 0; i < len; i++) {
-      const row = sess.displayRing.getAt(i);
-      if (!row) continue;
-      if (dirFilter === 'RX' && (row.isTx || row.isError)) continue;
-      if (dirFilter === 'TX' && (!row.isTx || row.isError)) continue;
-      if (dirFilter === 'ERR' && !row.isError) continue;
-      if (idFilterSet !== null && (row.isError || !idFilterSet.has(traceIdKey(row.arbId, row.isExtended)))) continue;
+    return new TraceFilterIndex((row) => {
+      if (dirFilter === 'RX' && (row.isTx || row.isError)) return false;
+      if (dirFilter === 'TX' && (!row.isTx || row.isError)) return false;
+      if (dirFilter === 'ERR' && !row.isError) return false;
+      if (idFilterSet !== null && (row.isError || !idFilterSet.has(traceIdKey(row.arbId, row.isExtended)))) return false;
+      if (!q) return true;
 
-      if (q.length > 0) {
-        if (row.isError) {
-          const errTitle = formatErrorFrameShortTitle(
-            row.arbId,
-            row.rawBytes,
-            row.errorSummary,
-          ).toLowerCase();
-          const idHex = (row.arbId & CAN_ERR_MASK).toString(16).toLowerCase();
-          if (!errTitle.includes(q) && !idHex.includes(q) && !q.includes('err')) {
-            continue;
-          }
-        } else {
-          const msg = databaseStore.getMessageForBus(
-            row.busId,
-            row.messageKey,
-            row.arbId,
-            row.isExtended,
-          );
-          const signalsById = databaseStore.getBusSignals(row.busId);
-          const muxSym = resolveTraceFrameSymbol(row.rawBytes, msg, signalsById);
-          const idHex = formatPcanIdHex(row.arbId, row.isExtended).toLowerCase();
-          const sym = (msg?.name ?? '').toLowerCase();
-          const fullMuxSym = muxSym.fullSymbol.toLowerCase();
-          let sigMatch = false;
-          if (msg) {
-            for (const sigId of msg.signalIds) {
-              const s = databaseStore.getSignalForBus(row.busId, sigId);
-              if (s && s.name.toLowerCase().includes(q)) {
-                sigMatch = true;
-                break;
-              }
-            }
-          }
-          if (
-            !idHex.includes(q) &&
-            !sym.includes(q) &&
-            !fullMuxSym.includes(q) &&
-            !sigMatch
-          ) {
-            continue;
-          }
-        }
+      if (row.isError) {
+        const errTitle = formatErrorFrameShortTitle(row.arbId, row.rawBytes, row.errorSummary).toLowerCase();
+        const idHex = (row.arbId & CAN_ERR_MASK).toString(16).toLowerCase();
+        return errTitle.includes(q) || idHex.includes(q) || q.includes('err');
       }
-      matches.push(i);
-    }
 
-    return Int32Array.from(matches);
-  }, [
-    isUnfiltered,
-    sess.version,
-    sess.count,
-    sess.displayRing,
-    dirFilter,
-    q,
-    idFilterSet,
-    dbState.busSchemas,
-  ]);
+      const idHex = formatPcanIdHex(row.arbId, row.isExtended).toLowerCase();
+      if (idHex.includes(q)) return true;
+      const msg = databaseStore.getMessageForBus(row.busId, row.messageKey, row.arbId, row.isExtended);
+      if (!msg) return '—'.includes(q);
+      if (msg.name.toLowerCase().includes(q)) return true;
+      const signals = databaseStore.getBusSignals(row.busId);
+      if (msg.signalIds.some((id) => signals[id]?.name.toLowerCase().includes(q))) return true;
+      return resolveTraceFrameSymbol(row.rawBytes, msg, signals).fullSymbol.toLowerCase().includes(q);
+    });
+  }, [isUnfiltered, dirFilter, q, idFilterSet, dbState.busSchemas]);
 
-  const baseFrameCount = isUnfiltered
-    ? sess.count
-    : (filteredIndices?.length ?? 0);
+  const filtered = useMemo(
+    () => filterIndex?.update(sess.displayRing) ?? null,
+    [filterIndex, sess.displayRing, sess.version],
+  );
+  const baseFrameCount = filtered ? filtered.end - filtered.start : sess.count;
 
   // Build O(K) sorted expanded anchors ONLY for frames the user actually expanded!
   const { expandedAnchors, totalExtraRows } = useMemo(() => {
@@ -588,14 +564,8 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
       const ringIdx = uid - baseSeq;
       if (ringIdx < 0 || ringIdx >= ringLen) continue;
 
-      if (isUnfiltered) {
-        resolvedPairs.push({ baseIdx: ringIdx, frameUid: uid, ringIdx });
-      } else if (filteredIndices) {
-        const foundPos = binarySearchInt32(filteredIndices, ringIdx);
-        if (foundPos >= 0) {
-          resolvedPairs.push({ baseIdx: foundPos, frameUid: uid, ringIdx });
-        }
-      }
+      const baseIdx = filtered ? findFilteredFrame(filtered, uid) : ringIdx;
+      if (baseIdx >= 0) resolvedPairs.push({ baseIdx, frameUid: uid, ringIdx });
     }
 
     resolvedPairs.sort((a, b) => a.baseIdx - b.baseIdx);
@@ -646,8 +616,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
   }, [
     expandedUids,
     baseFrameCount,
-    isUnfiltered,
-    filteredIndices,
+    filtered,
     sess.version,
     sess.count,
     sess.displayRing,
@@ -666,12 +635,24 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
     return () => ro.disconnect();
   }, []);
 
-  useEffect(() => {
-    if (!autoScroll || sess.state !== 'recording') return;
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    el.scrollTop = Math.max(0, totalVirtualRows * ROW_HEIGHT - el.clientHeight);
-  }, [totalVirtualRows, autoScroll, sess.state]);
+    const previous = previousTrace.current;
+    previousTrace.current = { id: sess.id, state: sess.state };
+
+    const keepPosition = sess.state === 'paused' && previous.id === sess.id && previous.state !== 'paused';
+    const pausePosition = pendingPause.current?.sessionId === sess.id ? pendingPause.current : null;
+    if (sess.state !== 'recording' || previous.id !== sess.id) pendingPause.current = null;
+
+    if (keepPosition) {
+      el.scrollTop = pausePosition?.scrollTop ?? lastScrollTop.current;
+    } else if (autoScroll && sess.state === 'recording' && !pausePosition && !isThisSessionReplaying) {
+      el.scrollTop = Math.max(0, totalVirtualRows * ROW_HEIGHT - el.clientHeight);
+    }
+    lastScrollTop.current = el.scrollTop;
+    setScrollTop(el.scrollTop);
+  }, [totalVirtualRows, viewportHeight, autoScroll, sess.id, sess.state, isThisSessionReplaying]);
 
   const totalHeight = totalVirtualRows * ROW_HEIGHT;
   const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
@@ -689,9 +670,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
     const getFrameByBaseIdx = (
       bIdx: number,
     ): { frame: ChronologicalFrameDto; frameUid: number } | null => {
-      const ringIdx = isUnfiltered
-        ? bIdx
-        : (filteredIndices?.[bIdx] ?? -1);
+      const ringIdx = filtered
+        ? filtered.ids[filtered.start + bIdx] - sess.displayRing.baseSeq
+        : bIdx;
       if (ringIdx < 0) return null;
       const frame = sess.displayRing.getAt(ringIdx);
       if (!frame) return null;
@@ -793,8 +774,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
     startIndex,
     endIndex,
     expandedAnchors,
-    isUnfiltered,
-    filteredIndices,
+    filtered,
     sess.version,
     sess.displayRing,
   ]);
@@ -956,9 +936,6 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
     ? 'grid-cols-[26px_96px_42px_46px_84px_175px_46px_44px_225px_1fr]'
     : 'grid-cols-[26px_96px_42px_46px_84px_190px_46px_48px_1fr]';
 
-  const showReplayTransport =
-    (sess.count > 0 && sess.state !== 'recording') || replay.state !== 'idle';
-
   // Static constants for virtual row hot path (60 FPS discipline)
   const strNoDecodedSignals = t('trace.table.noDecodedSignals');
   const strOutOfRange = t('trace.table.outOfRange');
@@ -968,7 +945,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
       style={{ backgroundColor: 'var(--bg-panel)' }}
       className="flex flex-col flex-1 min-h-0 select-none"
     >
-      <GuideStrip pageId="trace" />
+      {!detached && <GuideStrip pageId="trace" />}
       {/* Hidden file input for opening .trc / .asc / .log / .csv / .blf from disk */}
       <input
         ref={fileInputRef}
@@ -989,7 +966,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
         {/* Sol Grup: Oturum, Kayıt Butonları, Temizle, Dosya Aç/Kaydet & Plotter */}
         <div data-tour="trace.toolbar-left" className="flex items-center gap-1.5 shrink-0">
           {/* Multi-Session Selector or Name Badge */}
-          {traceState.sessions.length > 1 ? (
+          {!detached && traceState.sessions.length > 1 ? (
             <select
               aria-label={t('trace.toolbar.sessionAria')}
               value={sess.id}
@@ -1034,7 +1011,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
             <>
               <button
                 type="button"
-                onClick={() => traceSessionsStore.pauseRecording(sess.id)}
+                onClick={pause}
                 style={{
                   backgroundColor: 'var(--status-warn-bg)',
                   borderColor: 'var(--status-warn-border)',
@@ -1048,7 +1025,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
               </button>
               <button
                 type="button"
-                onClick={() => traceSessionsStore.stopRecording(sess.id)}
+                onClick={stop}
                 style={{
                   backgroundColor: 'var(--status-critical-bg)',
                   borderColor: 'var(--status-critical-border)',
@@ -1064,7 +1041,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
           ) : (
             <button
               type="button"
-              onClick={() => traceSessionsStore.startRecording(sess.id, false)}
+              onClick={record}
               style={{
                 backgroundColor: 'var(--status-critical-bg)',
                 borderColor: 'var(--status-critical-border)',
@@ -1079,6 +1056,16 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
           )}
 
           {/* Temizle Button */}
+          {detached ? (
+            <button
+              type="button"
+              onClick={detached.onDock}
+              className="h-[28px] px-2 border border-strong bg-panel text-[var(--text-primary)] cursor-pointer"
+            >
+              {t('trace.window.dock')}
+            </button>
+          ) : (
+            <>
           <button
             type="button"
             onClick={() => {
@@ -1159,6 +1146,8 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
             <Activity className="w-3.5 h-3.5 text-[var(--status-focus)]" />
             <span>{t('trace.toolbar.plotter')}</span>
           </button>
+            </>
+          )}
         </div>
 
         {/* Orta Grup: Hızlı Arama & Hat/Yön Filtresi */}
@@ -1203,6 +1192,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
           {/* Bus Filter */}
           <select
             aria-label="Bus Filter"
+            disabled={Boolean(detached)}
             value={sess.busFilter ?? 'ALL'}
             onChange={(e) => {
               const val = e.target.value === 'ALL' ? null : Number(e.target.value);
@@ -1273,6 +1263,12 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
         </div>
 
         {/* Sağ Grup: Ayarlar ▾ ve Dışa Aktar ▾ Popover Menüleri */}
+        {detached ? (
+          <label className="flex shrink-0 items-center gap-1.5 text-[var(--text-secondary)]">
+            <input type="checkbox" checked={autoScroll} onChange={(event) => setAutoScroll(event.target.checked)} />
+            {t('trace.settings.autoScroll')}
+          </label>
+        ) : (
         <div className="flex items-center gap-1.5 shrink-0 relative">
           {/* Settings Popover Button */}
           <div ref={settingsMenuRef} data-tour="trace.settings" className="relative">
@@ -1541,10 +1537,11 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
           <GuideTourButton pageId="trace" />
           <GuideInfoButton pageId="trace" tourAnchor="trace.info" />
         </div>
+        )}
       </div>
 
       {/* PCAN-Style Trace Replay Transport Bar — Responsive min-h-[40px], flex-wrap, zero-overflow */}
-      {showReplayTransport && (
+      {!detached && showReplayTransport && (
         <div
           data-tour="trace.replay"
           style={{
@@ -1846,7 +1843,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
       )}
 
       {/* Restbus ID & ECU Filter Console Panel (Industrial Drawer) */}
-      {showReplayTransport && restbusFilterOpen && (
+      {needsRestbusMessages && (
         <div
           style={{
             backgroundColor: 'var(--bg-panel)',
@@ -2141,6 +2138,9 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
       {/* Fixed Header Industrial Trace Window */}
       <div
         data-tour="trace.table"
+        onContextMenu={(event) => openContextMenu(event, [
+          { label: t('context.toggleDecodedColumn'), run: () => setShowDecodedCol((visible) => !visible) },
+        ])}
         style={{
           backgroundColor: 'var(--bg-header)',
           borderBottom: '1px solid var(--border-strong)',
@@ -2187,7 +2187,20 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
       {/* Virtualized O(1) Chronological Rows + Expandable 28px-Locked Decoded Signal Rows */}
       <div
         ref={containerRef}
-        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+        onContextMenu={(event) => openContextMenu(event, [
+          ...(detached ? [] : [{ label: t('trace.empty.openFileBtn'), run: () => fileInputRef.current?.click() }]),
+          { label: t('context.clearCanFilter'), run: () => traceIdFilterStore.set(sess.id, null), disabled: !traceIdFilterStore.get(sess.id) },
+        ])}
+        onScroll={(event) => {
+          const { scrollTop: top, scrollHeight, clientHeight } = event.currentTarget;
+          if (autoScroll && sess.state === 'recording' && !isThisSessionReplaying
+            && top < lastScrollTop.current && scrollHeight - clientHeight - top > ROW_HEIGHT) {
+            setAutoScroll(false);
+          }
+          lastScrollTop.current = top;
+          setScrollTop(top);
+        }}
+        style={{ overflowAnchor: 'none' }}
         className="flex-1 min-h-0 overflow-y-auto font-mono tabular-nums text-[12px]"
       >
         {totalVirtualRows === 0 ? (
@@ -2212,7 +2225,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => traceSessionsStore.startRecording(sess.id, false)}
+                    onClick={record}
                     style={{
                       backgroundColor: '#DC2626',
                       color: '#FFFFFF',
@@ -2223,19 +2236,21 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                     <span>{t('trace.empty.startBtn')}</span>
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    style={{
-                      backgroundColor: 'var(--bg-panel)',
-                      borderColor: 'var(--border-strong)',
-                      color: 'var(--text-primary)',
-                    }}
-                    className="h-[28px] px-3 font-semibold text-[11px] border rounded-xs flex items-center gap-1.5 hover:border-amber-400 cursor-pointer transition-colors"
-                  >
-                    <FolderOpen className="w-3.5 h-3.5 text-amber-400" />
-                    <span>{t('trace.empty.openFileBtn')}</span>
-                  </button>
+                  {!detached && (
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      style={{
+                        backgroundColor: 'var(--bg-panel)',
+                        borderColor: 'var(--border-strong)',
+                        color: 'var(--text-primary)',
+                      }}
+                      className="h-[28px] px-3 font-semibold text-[11px] border rounded-xs flex items-center gap-1.5 hover:border-amber-400 cursor-pointer transition-colors"
+                    >
+                      <FolderOpen className="w-3.5 h-3.5 text-amber-400" />
+                      <span>{t('trace.empty.openFileBtn')}</span>
+                    </button>
+                  )}
                 </div>
               </div>
             ) : sess.state === 'paused' ? (
@@ -2308,6 +2323,13 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                   return (
                     <div
                       key={`sig-${item.frameUid}-${item.childIdx}`}
+                      onContextMenu={(event) => {
+                        if (!d) return;
+                        openContextMenu(event, [{
+                          label: t('plotter.quickPlot.addTitle'),
+                          run: () => plotStore.addSignal(item.frame.busId, d.signal),
+                        }]);
+                      }}
                       style={{
                         height: `${ROW_HEIGHT}px`,
                         minHeight: `${ROW_HEIGHT}px`,
@@ -2477,6 +2499,15 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
                 return (
                   <div
                     key={`frm-${item.frameUid}`}
+                    onContextMenu={(event) => {
+                      const { arbId, isExtended } = row;
+                      const payload = Array.from(row.rawBytes.slice(0, byteLen), (byte) => formatByteHex(byte)).join(' ');
+                      openContextMenu(event, [
+                        { label: t('context.copyCanId'), run: () => copyMenuText(formatPcanIdHex(arbId, isExtended)) },
+                        { label: t('context.copyPayload'), run: () => copyMenuText(payload) },
+                        { label: t('context.filterCanId'), run: () => traceIdFilterStore.set(sess.id, [{ arbId, isExtended }]) },
+                      ]);
+                    }}
                     onClick={() => toggleExpandFrame(item.frameUid)}
                     style={{
                       height: `${ROW_HEIGHT}px`,

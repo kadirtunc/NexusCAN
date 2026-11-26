@@ -1,3 +1,4 @@
+import { openContextMenu } from './ContextMenu';
 import React, { useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Plus, Unplug } from 'lucide-react';
 import { BusStateBadge } from './BusStateBadge';
@@ -16,7 +17,7 @@ import {
   connectionStore,
   useConnectionStore,
 } from '../store/connectionStore';
-import { telemetryStore, useTelemetryHeader } from '../store/telemetryStore';
+import { telemetryStore, useTelemetryHeader, useTelemetryIndicators } from '../store/telemetryStore';
 import { workbenchStore, useWorkbenchStore } from '../store/workbenchStore';
 import { ensureMockPresetDatabasesLoaded, syncAllBusDatabasesWithBackend } from '../utils/busDatabaseSync';
 import type { BusHealthDto, DeviceDescriptorDto } from '../types/hal';
@@ -37,6 +38,7 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
 }) => {
   const { t } = useI18n();
   const header = useTelemetryHeader();
+  const { estimatedBusLoadPct } = useTelemetryIndicators();
   const connState = useConnectionStore();
   const workbench = useWorkbenchStore();
 
@@ -393,12 +395,20 @@ export const BottomConnectionsDock: React.FC<BottomConnectionsDockProps> = ({
                   ? `${prof.driverFamily.toUpperCase()} · ${prof.adapterChannel || prof.serialPort || 'Ch0'}`
                   : bus?.channelName ?? 'CAN Channel';
 
-                const busLoadPct = row.isConnected ? header.estimatedBusLoadPct : 0;
+                const busLoadPct = row.isConnected && header.transportConnected ? estimatedBusLoadPct : 0;
                 const dbCount = prof?.databaseIds.length ?? 0;
 
                 return (
                   <tr
                     key={row.key}
+                    onContextMenu={(event) => openContextMenu(event, [{
+                      label: t(row.isConnected ? 'conn.btn.disconnect' : 'conn.btn.connect'),
+                      run: () => {
+                        if (row.isConnected) void handleDisconnectBus(row.busId);
+                        else if (prof) void handleConnectProfile(prof);
+                      },
+                      disabled: isBusy || (!row.isConnected && !prof),
+                    }])}
                     onClick={() => {
                       if (prof) {
                         connectionStore.selectProfile(prof.id);

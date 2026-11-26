@@ -5,6 +5,7 @@
 use nexus_hal::pipeline::PipelineEngine;
 use nexus_hal::registry::DriverRegistry;
 use nexus_hal::storage::DataRoot;
+use nexus_hal::MOCK0_DEVICE_ID;
 use nexus_mcp::{McpConfig, UiBridge, UiFuture, UI_NOT_ATTACHED, UI_TIMEOUT};
 use parking_lot::Mutex;
 use rmcp::model::{CallToolRequestParams, ClientConfig};
@@ -63,7 +64,10 @@ fn engine(tag: &str) -> Arc<PipelineEngine> {
         std::env::temp_dir().join(format!("nexus-mcp-ui-{tag}-{}-{nanos}", std::process::id())),
     );
     root.ensure_dirs().unwrap();
-    Arc::new(PipelineEngine::with_data_root(DriverRegistry::new(), root))
+    Arc::new(PipelineEngine::with_data_root(
+        DriverRegistry::with_builtin_drivers(),
+        root,
+    ))
 }
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ClientConfig>;
@@ -311,7 +315,7 @@ async fn ui_calls_are_rate_limited_and_audited() {
 async fn tool_list_annotations_and_schemas() {
     let (_e, handle, client) = setup("list", None).await;
     let tools = client.list_all_tools().await.unwrap();
-    assert_eq!(tools.len(), 46);
+    assert_eq!(tools.len(), 47);
     let get = |n: &str| tools.iter().find(|t| t.name == n).unwrap();
     let ann = |n: &str| get(n).annotations.clone().unwrap();
     assert_eq!(ann("ui_get_state").read_only_hint, Some(true));
@@ -322,6 +326,7 @@ async fn tool_list_annotations_and_schemas() {
         "ui_plot_signals",
         "ui_notify",
         "ui_confirm",
+        "ui_request_bus_arm",
     ] {
         assert_eq!(ann(n).read_only_hint, Some(false), "{n}");
         assert_eq!(ann(n).destructive_hint, Some(false), "{n}");
@@ -344,5 +349,120 @@ async fn tool_list_annotations_and_schemas() {
         .unwrap()
         .contains("does NOT transmit"));
     let _ = client.cancel().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bus_arm_requires_its_own_desktop_approval() {
+    let approved = Arc::new(AtomicBool::new(false));
+    let answer = Arc::clone(&approved);
+    let ui = FakeUi::new(move |kind, _, _| match kind {
+        "confirm" => Ok(json!({"confirmed":true})),
+        "confirm_bus_arm" => Ok(json!({"confirmed":answer.load(Ordering::SeqCst)})),
+        _ => panic!("unexpected UI request: {kind}"),
+    });
+    let (e, handle, client) = setup("arm", Some(Arc::clone(&ui))).await;
+    e.cmd_connect_bus(MOCK0_DEVICE_ID.to_string(), Default::default())
+        .unwrap();
+
+    assert!(
+        call(
+            &client,
+            "ui_request_bus_arm",
+            json!({"bus_id":0,"approved":true})
+        )
+        .await
+        .0
+    );
+    assert!(
+        !call(
+            &client,
+            "ui_confirm",
+            json!({"title":"Confirm","message":"OK?"})
+        )
+        .await
+        .0
+    );
+    let (err, declined) = call(&client, "ui_request_bus_arm", json!({"bus_id":0})).await;
+    assert!(!err);
+    assert_eq!(declined["approved"], false);
+    assert!(
+        e.capture_bus_arm_target(0, Duration::ZERO)
+            .unwrap()
+            .1
+            .listen_only
+    );
+    assert_eq!(ui.calls()[1].0, "confirm_bus_arm");
+    assert_eq!(ui.calls()[1].1["busId"], 0);
+
+    approved.store(true, Ordering::SeqCst);
+    let (err, armed) = call(&client, "ui_request_bus_arm", json!({"bus_id":0})).await;
+    assert!(!err, "{armed}");
+    assert_eq!(armed["armed"], true);
+    assert_eq!(armed["listenOnly"], false);
+    let (_, unchanged) = call(&client, "ui_request_bus_arm", json!({"bus_id":0})).await;
+    assert_eq!(unchanged["alreadyArmed"], true);
+    assert_eq!(ui.calls().len(), 3);
+    client.cancel().await.ok();
+    handle.shutdown().await;
+}
+
+#[test]
+fn bus_arm_target_rejects_timeout_reconnect_and_panic_even_after_clear() {
+    let e = engine("arm-stale");
+    let connect = || {
+        e.cmd_connect_bus(MOCK0_DEVICE_ID.to_string(), Default::default())
+            .unwrap()
+    };
+    connect();
+    let (expired, _) = e.capture_bus_arm_target(0, Duration::ZERO).unwrap();
+    assert!(e.arm_confirmed_bus(expired).is_err());
+
+    let (stale, _) = e
+        .capture_bus_arm_target(0, Duration::from_secs(60))
+        .unwrap();
+    e.cmd_disconnect_bus(0).unwrap();
+    connect();
+    assert!(e.arm_confirmed_bus(stale).is_err());
+
+    let (stale, _) = e
+        .capture_bus_arm_target(0, Duration::from_secs(60))
+        .unwrap();
+    e.cmd_panic_stop_tx();
+    assert!(e
+        .capture_bus_arm_target(0, Duration::from_secs(60))
+        .is_err());
+    e.cmd_clear_panic_latch();
+    assert!(e.arm_confirmed_bus(stale).is_err());
+    assert!(
+        e.capture_bus_arm_target(0, Duration::ZERO)
+            .unwrap()
+            .1
+            .listen_only
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bus_arm_fails_closed_without_a_desktop_and_on_bridge_timeout() {
+    let ui = FakeUi::new(|_, _, _| Err(UI_TIMEOUT.into()));
+    let (e, handle, client) = setup("arm-timeout", Some(Arc::clone(&ui))).await;
+    e.cmd_connect_bus(MOCK0_DEVICE_ID.to_string(), Default::default())
+        .unwrap();
+    let (err, timeout) = call(&client, "ui_request_bus_arm", json!({"bus_id":0})).await;
+    assert!(!err);
+    assert_eq!(timeout["timedOut"], true);
+    ui.attached.store(false, Ordering::SeqCst);
+    assert!(
+        call(&client, "ui_request_bus_arm", json!({"bus_id":0}))
+            .await
+            .0
+    );
+    assert!(
+        e.capture_bus_arm_target(0, Duration::ZERO)
+            .unwrap()
+            .1
+            .listen_only
+    );
+    client.cancel().await.ok();
     handle.shutdown().await;
 }

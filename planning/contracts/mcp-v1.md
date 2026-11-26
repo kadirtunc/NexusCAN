@@ -1,6 +1,6 @@
 # MCP v1 — In-App Model Context Protocol Server (team-lead contract)
 
-Status: M1, M1.1, UI Bridge, M2, M3 DONE (46 tools, M3 full gate PASS). Next: M3.5. Later phases: see §7.
+Status: M1, M1.1, UI Bridge, M2, M3 DONE (46 baseline tools). M4-ARM adds the 47th tool. Next: M3.5. Later phases: see §7.
 Out of scope forever: `crates/nexus-cli/` is NOT touched by MCP work.
 
 ## 1. Architecture
@@ -12,7 +12,7 @@ Out of scope forever: `crates/nexus-cli/` is NOT touched by MCP work.
 - Browser mode (Vite + `nexus_bridge`): MCP unavailable; UI shows "desktop app only" and never invokes `cmd_mcp_*`.
 
 ## 2. Safety invariants
-- Read-only + view-only. No MCP path may TX, arm, change bus mode, run UDS, flash, seed-key, start replay, or write/delete files.
+- Analysis and UI tools are available alongside the single operator-approved bus mode change specified in §10.
 - Future bus-affecting tools (M4) require: bus already Armed by the user + `ui_confirm` approval + clamp + rate limit; Panic Stop always wins. Flash/seed-key stay closed permanently.
 - Every tool call is audited to the Debug Console (category `MCP`, source `mcp`), rate-limited (≤10 individual events/s, rest summarised).
 
@@ -69,6 +69,8 @@ Windows: `npm run tauri build -- --runner cargo-xwin --target x86_64-pc-windows-
 | M2 | `app_status`, `project_list/get`, `device_list`, `driver_probe`, `bus_status`, `live_message_table`, `live_signal_values`, `periodic_tx_list`, `signal_stats`, `trace_compare`, `live_trace_window`, `debug_events_query` (live data read from snapshots only) |
 | M3 | Read-only diagnostics, RE and workspace-history tools — see §9 (UDS reads 0x22/0x19, `re_session`, `re_scan` moved to M4: they transmit or mutate user state) |
 | M3.5 | UI-state tools for frontend-only data (simulation panels, ECU registry, UDS panel) via UI Bridge |
+| M4-ARM | Operator-approved Arm Active Bus for one connected bus, see §10. |
+| M4-RE | `re_hunt` / `re_labels_get` over recorded traces, every run behind `ui_confirm` — see `re-hunt-v1.md` §6 |
 | M4 | Gated actions with Armed + `ui_confirm`: bus (`tx_send`, active ECU discovery, UDS reads 0x22/0x19 on a user-opened session) and user-state (`re_session` start/stop/phase/mark, `re_scan` first/next/undo/reset, passive discovery start/stop) |
 Target total ≈ 45–50 tools; group related operations behind an `op` parameter instead of adding tools.
 
@@ -109,3 +111,16 @@ M3 safety additions to §5 checklist:
 - [ ] MCP never cancels or overrides user-started work (e.g. use `cmd_re_correlate_observer`, not `cmd_re_correlate`); user actions always win over MCP calls.
 
 M3 implementation notes (team-lead): 46 tools. Deviations accepted: `re_dbc_generate` rejects `base_db_id` (no engine IR accessor — backlog `PipelineEngine::database_ir`); `re_series` max 4 candidates + 1 reference (engine limit); nexus-mcp reads session DTOs via serde (no `nexus-protocols` dep).
+
+
+## 10. M4-ARM — Operator-approved Arm Active Bus
+
+Goal: let an MCP assistant request Active Bus during a reverse-engineering session. The desktop operator approves each transition for a single currently connected bus. Opening and inspecting a passive RE session remains independent of arming.
+
+- The `ui_request_bus_arm` tool takes an explicit zero-based `bus_id`. The backend resolves the current adapter, channel and connection instance and builds the confirmation from those values. The dialog states that active mode can acknowledge CAN frames and enables transmission from the application.
+- Use a dedicated, action-bound confirmation through the desktop UI Bridge. The generic `ui_confirm` response is insufficient. Approval is single-use, expires after at most 60 seconds, and is bound to the originating request, the connection instance and the exact action. Cancelled calls, rejected or expired prompts, and a detached UI leave the bus unchanged.
+- Immediately before applying the mode change, the backend validates the connection instance and the Panic Stop state in the same synchronization boundary as the transition. A disconnect/reconnect, changed operating state, or Panic Stop after the prompt invalidates the approval. MCP never clears the Panic Stop latch.
+- Apply the existing HAL mode transition and publish the resulting bus state through the normal telemetry path. Arming via MCP is session-only and leaves the saved profile's Listen-Only setting intact. An approval authorizes only this mode transition. TX tools require their own authorization.
+- Audit the request, operator decision and transition result. Rate-limit prompts and allow a single pending Active Bus request per MCP server. An already armed bus returns its current state without another transition.
+
+Acceptance: exercise approval, rejection, expiry, cancellation, replayed approval, a missing UI, reconnect on the same bus ID and Panic Stop during confirmation. Verify that only explicit approval arms the original connection, that arming sends no application frame and that saved profile settings remain intact. Start with `mock0` and run the confirmation flow through the Tauri desktop application.

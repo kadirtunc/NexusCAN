@@ -4,7 +4,7 @@ import type { GuideInfoItem } from './types';
 /**
  * Catalog of the in-app MCP server tools (crates/nexus-mcp). Must match the Rust `#[tool(name = ...)]`
  * registrations one-to-one (compare with `grep -ohE 'name = "[a-z_0-9]+",'` over server.rs + server/*.rs);
- * onboarding.test.ts checks duplicates and translations. `ui_confirm` is the only tool that asks the user a question.
+ * onboarding.test.ts checks duplicates and translations.
  */
 export type McpToolCategoryId = 'workspace' | 'live' | 'trace' | 'db' | 'diag' | 're' | 'runs' | 'ui';
 
@@ -113,6 +113,7 @@ export const MCP_TOOL_CATALOG: readonly McpToolCategory[] = [
       tool('ui_plot_signals'),
       tool('ui_notify'),
       tool('ui_confirm', 'confirm'),
+      tool('ui_request_bus_arm', 'confirm'),
     ],
   },
 ];

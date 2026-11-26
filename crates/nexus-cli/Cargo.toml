@@ -28,6 +28,12 @@ thiserror = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["io-util"] }
 axum = { workspace = true }
+# CSS Electronics CANsub SDK: `nexuscan cansub-selftest` (contract cansub-v1 §6).
+cansub-rs = { workspace = true, features = ["blocking"] }
+
+[dev-dependencies]
+# In-process device emulator + `Device::connect_with_root` for the selftest integration test.
+cansub-rs = { workspace = true, features = ["blocking", "sim"] }
 
 [lints]
 workspace = true

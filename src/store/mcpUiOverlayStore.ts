@@ -50,14 +50,19 @@ export const mcpUiOverlayStore = {
     set({ toasts: state.toasts.filter((t) => t.id !== id) });
   },
   /** Opens the Yes/No dialog; a previous pending dialog is resolved as `false`. */
-  askConfirm(title: string, message: string, confirmLabel: string | null): Promise<boolean> {
+  askConfirm(title: string, message: string, confirmLabel: string | null, timeoutMs?: number): Promise<boolean> {
     if (confirmResolver) confirmResolver(false);
     return new Promise<boolean>((resolve) => {
       confirmResolver = resolve;
-      set({ confirm: { id: nextId++, title, message, confirmLabel } });
+      const id = nextId++;
+      set({ confirm: { id, title, message, confirmLabel } });
+      if (timeoutMs !== undefined) {
+        globalThis.setTimeout(() => mcpUiOverlayStore.answerConfirm(false, id), timeoutMs);
+      }
     });
   },
-  answerConfirm(confirmed: boolean): void {
+  answerConfirm(confirmed: boolean, id?: number): void {
+    if (id !== undefined && state.confirm?.id !== id) return;
     const r = confirmResolver;
     confirmResolver = null;
     set({ confirm: null });

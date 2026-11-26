@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type { UiRequestDto, UiStateSnapshot } from '../types/mcp';
 import type { MessageSchemaDto, SignalSchemaDto } from '../types/netdb';
@@ -169,6 +170,15 @@ export const realUiHost: UiHost = {
 
   notify(level, text): void {
     mcpUiOverlayStore.pushToast(level, text);
+  },
+
+  confirmBusArm(busId, device, channel) {
+    return mcpUiOverlayStore.askConfirm(
+      t('onb.mcp.arm.title'),
+      t('onb.mcp.arm.message', { bus: busId + 1, device, channel }),
+      t('onb.mcp.arm.confirm'),
+      60_000,
+    );
   },
 
   confirm(title, message, confirmLabel) {

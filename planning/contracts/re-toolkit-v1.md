@@ -5,6 +5,8 @@ Audience: car-hacking / CAN reverse-engineering users (SavvyCAN, CANalyzat0r, ca
 NexusCAN must beat them on determinism (50k fps zero-loss), CAN-FD 512-bit coverage and safety.
 
 ## 0. Roadmap
+> 2026-11-23: labelled-state hunt (offline-first, R2d–R2f) lives in `re-hunt-v1.md`.
+
 | Phase | Scope | Bus impact |
 | :--- | :--- | :--- |
 | **R1 (this file)** | Sniffer: bit-level toggle heatmap, baseline → action diff, noise mute, event markers; field classifier (constant / counter / checksum / flag / physical, per-bit entropy) | **passive only** (no TX code paths touched) |

@@ -19,4 +19,5 @@ permissions = [
   "allow-cmd-append-debug-event",
   "allow-cmd-clear-debug-events",
   "allow-cmd-set-debug-window-open",
+  "allow-cmd-trace-window",
 ]

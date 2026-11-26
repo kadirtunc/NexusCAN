@@ -184,9 +184,15 @@ export const transmitStore = {
   },
 
   addEntry(entry: TxListEntry): void {
+    transmitStore.addEntries([entry]);
+  },
+
+  addEntries(entries: readonly TxListEntry[]): void {
+    const last = entries.at(-1);
+    if (!last) return;
     currentState = {
-      entries: [...currentState.entries, entry],
-      selectedEntryId: entry.id,
+      entries: [...currentState.entries, ...entries],
+      selectedEntryId: last.id,
       configRevision: currentState.configRevision + 1,
     };
     emitChange();
@@ -194,9 +200,13 @@ export const transmitStore = {
       severity: 'info',
       category: 'TX',
       action: 'tx.entry.add',
-      busId: entry.busId,
-      title: `TX Entry Added: ${entry.symbolName || `0x${entry.arbId.toString(16).toUpperCase()}`}`,
-      details: `Bus: ${entry.busId + 1}, Mode: ${entry.mode}, DLC: ${entry.dlc}, Cycle: ${entry.cycleTimeMs}ms`,
+      busId: entries.length === 1 ? last.busId : undefined,
+      title: entries.length === 1
+        ? `TX Entry Added: ${last.symbolName || `0x${last.arbId.toString(16).toUpperCase()}`}`
+        : `${entries.length} TX entries added`,
+      details: entries.length === 1
+        ? `Bus: ${last.busId + 1}, Mode: ${last.mode}, DLC: ${last.dlc}, Cycle: ${last.cycleTimeMs}ms`
+        : undefined,
     });
   },
 

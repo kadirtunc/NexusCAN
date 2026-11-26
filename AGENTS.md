@@ -1,5 +1,12 @@
 # NexusCAN — Industrial Engineering & Multi-Agent Constitution
 
+## Codex çalışma akışı
+
+1. Her NexusCAN görevinde önce [nexus-can becerisini](.agents/skills/nexus-can/SKILL.md) oku. Yönlendirme tablosundan göreve uygun becerileri seç ve ilgili `SKILL.md` dosyalarını `.agents/skills/` içinden yükle.
+2. [CLAUDE.md](CLAUDE.md) dosyasının göreve ilişkin proje kurallarını da uygula. Özellikle §5'teki Graphify ile kod keşfi, aktif iş kontratı ve görevin kapsamına uygun doğrulama kurallarını izle.
+3. Bir uzmanlık alanına giren işlerde `.agents/agents/<rol>.md` ve `.claude/agents/<rol>.md` dosyalarını birlikte oku. Sorumluluk sınırlarını, veri kontratlarını, beceri listesini ve doğrulama adımlarını göreve taşı. Alt ajan kullanıldığında bu kaynakları ve görev kontratını alt ajanın talimatına ekle.
+4. Seçilen becerinin `.claude/skills/<beceri>/SKILL.md` sürümü varsa görevle ilgili farkları kontrol et. Ortak kuralları ve uyumlu ek teknik ayrıntıları uygula. Proje kuralları çelişirse Codex için önce bu dosyayı, ardından `.agents` sürümünü esas al. Araç çağrılarını ve model seçimlerini oturumun desteklediği Codex özelliklerine göre karşıla.
+
 NexusCAN, Tauri v2 (Modüler Rust Workspace + React/TypeScript) üzerine inşa edilen; **BUSMASTER, PCAN-Explorer ve SavvyCAN'i aşmayı hedefleyen, platform-bağımsız (Linux / Windows / macOS) ve donanım-bağımsız endüstriyel CAN / CAN-FD Bus Analizörü, Sinyal Veritabanı Motoru ve Telemetri Platformudur**.
 
 > **TEMEL İLKE:** Bu projede tüketici tipi "vibe-coding SaaS" yaklaşımları kesinlikle yasaktır. Yazılan her satır kod deterministik bellek kullanımına, çoklu işletim sistemi taşınabilirliğine, donanım güvenliğine (`Listen-Only` varsayılanı), mikrosaniye hassasiyetine ve 60 FPS kilitli endüstriyel HMI ergonomisine uymak zorundadır.

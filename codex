@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! codex_cli=$(type -P codex) || [[ "$codex_cli" -ef "${BASH_SOURCE[0]}" ]]; then
+    printf '%s\n' 'Put the installed Codex CLI on PATH and invoke this project launcher as ./codex.' >&2
+    exit 127
+fi
+
+if [[ ${1:-} != --agent ]]; then
+    exec "$codex_cli" "$@"
+fi
+
+role=${2:-}
+case "$role" in
+    team-lead|protocol-specialist|backend-dev|frontend-dev|qa-hil-verifier) ;;
+    *)
+        printf '%s\n' 'Usage: ./codex --agent {team-lead|protocol-specialist|backend-dev|frontend-dev|qa-hil-verifier} [Codex options] [prompt]' >&2
+        exit 2
+        ;;
+esac
+shift 2
+
+project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+for source in AGENTS.md CLAUDE.md ".agents/agents/$role.md" ".claude/agents/$role.md" .agents/skills/nexus-can/SKILL.md; do
+    if [[ ! -r "$project_dir/$source" ]]; then
+        printf 'NexusCAN agent source is missing or unreadable: %s\n' "$source" >&2
+        exit 1
+    fi
+done
+
+role_instructions="Bu ana Codex oturumunda NexusCAN $role rolünü üstlen. İlk görevden önce AGENTS.md, CLAUDE.md, .agents/agents/$role.md, .claude/agents/$role.md ve .agents/skills/nexus-can/SKILL.md dosyalarını oku. AGENTS.md içindeki Codex iş akışına göre rolün sorumluluklarını uygula ve göreve uygun becerileri yükle."
+exec "$codex_cli" --cd "$project_dir" --config "developer_instructions='$role_instructions'" "$@"

@@ -59,7 +59,8 @@ for (const cat of MCP_TOOL_CATALOG) {
     assert(trDictionary[tl.descKey] !== undefined && enDictionary[tl.descKey].length > 0, `tool desc TR/EN: ${tl.name}`);
   }
 }
-assert(MCP_TOOL_CATALOG.flatMap((c) => c.tools).filter((x) => x.badge === 'confirm').length === 1, 'exactly one confirm tool');
+const confirmationTools = MCP_TOOL_CATALOG.flatMap((c) => c.tools).filter((tool) => tool.badge === 'confirm');
+assert(confirmationTools.map((tool) => tool.name).sort().join(',') === 'ui_confirm,ui_request_bus_arm', 'confirmation tools match approval actions');
 assert(GUIDE_PAGES.start.info.some((i) => i.id === 'txSafety'), 'start has txSafety section');
 assert(GUIDE_PAGES.start.tour.length >= 4 && GUIDE_PAGES.start.tour.length <= 6, 'start tour 4-6 steps');
 

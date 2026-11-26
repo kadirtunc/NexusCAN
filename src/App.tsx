@@ -3,6 +3,7 @@ import { useI18n } from './i18n';
 import { CloudWorkspaceView } from './components/CloudWorkspaceView';
 import { SimulationWorkbenchView } from './components/simulation/SimulationWorkbenchView';
 import { CloudPushPromptModal } from './components/CloudPushPromptModal';
+import { ContextMenu, openContextMenu, showContextMenu, type ContextMenuItem } from './components/ContextMenu';
 import { ConnectionsView } from './components/ConnectionsView';
 import { NewConnectionModal } from './components/NewConnectionModal';
 import { PlotterView } from './components/PlotterView';
@@ -25,6 +26,7 @@ import { mcpStore } from './store/mcpStore';
 import { DiagnosticsView } from './components/diagnostics/DiagnosticsView';
 import { type StatusBanner, TopBar } from './components/TopBar';
 import { TraceView } from './components/TraceView';
+import { openTraceWindow, type TraceWindowHandle } from './services/traceWindow';
 import {
   apiClearDatabase,
   apiListDevices,
@@ -47,7 +49,7 @@ import {
   useProjectStore,
 } from './store/projectStore';
 import { isToolpackEnabled } from './types/toolpacks';
-import { telemetryStore, useTelemetryHeader } from './store/telemetryStore';
+import { telemetryStore, useTelemetryHeader, useTelemetryIndicators } from './store/telemetryStore';
 import { transmitStore, useTransmitStore } from './store/transmitStore';
 import { ImportedProjectNotice } from './components/ImportedProjectNotice';
 import { panicInFlightBuses, performPanicStop } from './store/panicStop';
@@ -61,16 +63,18 @@ import {
 } from './store/debugConsoleStore';
 import type { DeviceDescriptorDto } from './types/hal';
 import { installBusDatabaseAutoSync } from './utils/busDatabaseSync';
-import { Plus, X } from 'lucide-react';
+import { Compass, Plus, X } from 'lucide-react';
 import { TabStripScroller } from './components/TabStripScroller';
 import { FlowPromptHost } from './components/flow/FlowPromptHost';
 
-installBusDatabaseAutoSync();
+const QUICK_NAVIGATION_ENABLED = false;
 
 export const App: React.FC = () => {
   const { t } = useI18n();
+  useEffect(installBusDatabaseAutoSync, []);
   const dbState = useDatabaseStore();
   const header = useTelemetryHeader();
+  const { fpsRx, estimatedBusLoadPct } = useTelemetryIndicators();
   const projState = useProjectStore();
   const connState = useConnectionStore();
   const txState = useTransmitStore();
@@ -92,11 +96,53 @@ export const App: React.FC = () => {
   const [statusBanner, setStatusBanner] = useState<StatusBanner | null>(null);
   const [panicCounter, setPanicCounter] = useState<number>(0);
 
+  const detachedTraceWindows = useRef(new Map<string, TraceWindowHandle>());
+  const [detachedTraceIds, setDetachedTraceIds] = useState<ReadonlySet<string>>(() => new Set());
+
+  useEffect(() => {
+    const windows = detachedTraceWindows.current;
+    return () => { for (const traceWindow of windows.values()) traceWindow.close(); };
+  }, []);
+
+  const handleOpenTraceWindow = async (sessionId: string): Promise<void> => {
+    const windows = detachedTraceWindows.current;
+    const existing = windows.get(sessionId);
+    if (existing) {
+      existing.focus();
+      return;
+    }
+
+    let handle: TraceWindowHandle | undefined;
+    try {
+      handle = openTraceWindow(sessionId, () => {
+        if (windows.get(sessionId) !== handle) return;
+        windows.delete(sessionId);
+        setDetachedTraceIds((previous) => {
+          const next = new Set(previous);
+          next.delete(sessionId);
+          return next;
+        });
+      });
+      windows.set(sessionId, handle);
+      await handle.ready;
+      if (windows.get(sessionId) === handle) {
+        setDetachedTraceIds((previous) => new Set(previous).add(sessionId));
+      }
+    } catch (error) {
+      if (windows.get(sessionId) === handle) windows.delete(sessionId);
+      setStatusBanner({
+        kind: 'error',
+        message: t('trace.window.openFailed', { error: error instanceof Error ? error.message : String(error) }),
+      });
+    }
+  };
+
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const [isDraggingSplit, setIsDraggingSplit] = useState<boolean>(false);
 
   const connectedBuses = header.buses.filter((b) => b.connected);
   const connectedBusCount = connectedBuses.length;
+  const hasLiveBus = header.transportConnected && connectedBusCount > 0;
 
   const quickBarState: QuickBarConnectionState = useMemo(
     () => ({
@@ -440,6 +486,38 @@ export const App: React.FC = () => {
 
   const isSimEnabled = isToolpackEnabled(projState.enabledToolpacks, 'simulation_replay');
   const isDiagEnabled = isToolpackEnabled(projState.enabledToolpacks, 'automotive_diagnostics');
+  const navItems: ContextMenuItem[] = [];
+  const addNavItem = (tab: ActiveDocumentTab, label: string): void => {
+    navItems.push({
+      label,
+      run: () => databaseStore.setActiveDocTab(tab),
+      disabled: dbState.activeDocTab === tab,
+    });
+  };
+  addNavItem('start', t('shell.tab.workspace'));
+  addNavItem('rxtx', t('shell.tab.rxtx'));
+  addNavItem('trace', t('shell.tab.trace'));
+  addNavItem('plotter', t('shell.tab.plotter'));
+  addNavItem('symbols', t('shell.tab.dbcStudio'));
+  addNavItem('connections', t('shell.tab.connections'));
+  if (isSimEnabled) addNavItem('panels', t('shell.tab.panels'));
+  if (isDiagEnabled) addNavItem('diagnostics', t('shell.tab.diagnostics'));
+  addNavItem('re', t('re.tab.title'));
+  if (cloudOn) addNavItem('cloud', t('shell.tab.cloud'));
+
+  const openQuickNavigation = (event: React.MouseEvent<HTMLElement>): void => {
+    event.preventDefault();
+    const anchor = event.currentTarget;
+    const rect = anchor.getBoundingClientRect();
+    showContextMenu({
+      x: event.clientX || rect.left,
+      y: event.clientY || rect.bottom,
+      anchor,
+      items: navItems,
+      navigation: true,
+    });
+  };
+
 
   useEffect(() => {
     if (!isSimEnabled && dbState.activeDocTab === 'panels') {
@@ -525,13 +603,33 @@ export const App: React.FC = () => {
         );
       case 'plotter':
         return <PlotterView />;
-      case 'trace':
-        return (
-          <TraceView
-            sessionId={overrideTraceSessionId ?? traceState.activeSessionId}
-            onStatusMessage={setStatusBanner}
-          />
-        );
+      case 'trace': {
+        const sessionId = overrideTraceSessionId ?? traceState.activeSessionId;
+        if (detachedTraceIds.has(sessionId)) {
+          return (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 text-[12px] text-[var(--text-secondary)]">
+              <div>{t('trace.window.detached')}</div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => detachedTraceWindows.current.get(sessionId)?.focus()}
+                  className="h-[28px] px-2 border border-strong bg-panel text-[var(--text-primary)] cursor-pointer"
+                >
+                  {t('trace.window.focus')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => detachedTraceWindows.current.get(sessionId)?.close()}
+                  className="h-[28px] px-2 border border-strong bg-panel text-[var(--text-primary)] cursor-pointer"
+                >
+                  {t('trace.window.dock')}
+                </button>
+              </div>
+            </div>
+          );
+        }
+        return <TraceView sessionId={sessionId} onStatusMessage={setStatusBanner} />;
+      }
       case 'symbols':
         return <SymbolsLayoutView />;
       case 'panels':
@@ -678,6 +776,17 @@ export const App: React.FC = () => {
         <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
           {/* 1. Document Tab Bar (40px) */}
           <nav
+            onContextMenu={(event) => openContextMenu(event, navItems)}
+            onMouseDown={QUICK_NAVIGATION_ENABLED ? (event) => {
+              if (event.button === 1 && event.target instanceof Element && !event.target.closest('button, a')) {
+                event.preventDefault();
+              }
+            } : undefined}
+            onAuxClick={QUICK_NAVIGATION_ENABLED ? (event) => {
+              if (event.button === 1 && event.target instanceof Element && !event.target.closest('button, a')) {
+                openQuickNavigation(event);
+              }
+            } : undefined}
             style={{
               backgroundColor: 'var(--bg-header)',
               borderBottom: '1px solid var(--border-strong)',
@@ -733,6 +842,16 @@ export const App: React.FC = () => {
                   <div
                     key={sess.id}
                     data-tab-active={isActive ? 'true' : undefined}
+                    onContextMenu={(event) => openContextMenu(event, [
+                      {
+                        label: t(detachedTraceIds.has(sess.id) ? 'trace.window.focus' : 'trace.window.open'),
+                        run: () => void handleOpenTraceWindow(sess.id),
+                      },
+                      ...(detachedTraceIds.has(sess.id) ? [{
+                        label: t('trace.window.dock'),
+                        run: () => detachedTraceWindows.current.get(sess.id)?.close(),
+                      }] : []),
+                    ])}
                     onClick={() => {
                       traceSessionsStore.setActiveSession(sess.id);
                       databaseStore.setActiveDocTab('trace');
@@ -921,6 +1040,20 @@ export const App: React.FC = () => {
 
             {/* Right side: Split Indicator + Telemetry FPS */}
             <div className="flex items-center gap-2 pb-1 shrink-0">
+              {QUICK_NAVIGATION_ENABLED && (
+                <button
+                  type="button"
+                  aria-label={t('context.navigate')}
+                  aria-haspopup="menu"
+                  title={t('context.navigateHint')}
+                  onClick={openQuickNavigation}
+                  onMouseDown={(event) => { if (event.button === 1) event.preventDefault(); }}
+                  onAuxClick={(event) => { if (event.button === 1) openQuickNavigation(event); }}
+                  className="h-[26px] w-[28px] grid place-items-center border border-strong bg-panel text-[var(--text-secondary)] hover:bg-[var(--bg-row-hover)] cursor-pointer"
+                >
+                  <Compass className="size-4" />
+                </button>
+              )}
               {isSplitActive && (
                 <button
                   type="button"
@@ -938,30 +1071,26 @@ export const App: React.FC = () => {
                 </button>
               )}
 
-              {(connectedBusCount > 0 ||
-                (header.replay && header.replay.state === 'playing') ||
-                header.fpsRx > 0) && (
-                <div className="hidden lg:flex items-center text-[12px] font-mono tabular-nums text-[var(--text-secondary)] shrink-0">
-                  <div className="inline-flex items-center gap-1 px-2">
-                    <span className="text-[var(--text-muted)]">{t('shell.app.telemetryRx')}</span>
-                    <span className="inline-block w-[9ch] text-right font-mono tabular-nums text-[var(--text-primary)]">
-                      {Math.round(header.fpsRx).toLocaleString('en-US')}/s
-                    </span>
-                  </div>
-                  <div className="inline-flex items-center gap-1 px-2 border-l border-[var(--border-grid)]">
-                    <span className="text-[var(--text-muted)]">{t('shell.app.telemetryTx')}</span>
-                    <span className="inline-block w-[9ch] text-right font-mono tabular-nums text-[var(--text-primary)]">
-                      {Math.round(header.fpsTx).toLocaleString('en-US')}/s
-                    </span>
-                  </div>
-                  <div className="inline-flex items-center gap-1 pl-2 border-l border-[var(--border-grid)]">
-                    <span className="text-[var(--text-muted)]">{t('shell.app.busLoad')}</span>
-                    <span className="inline-block w-[6ch] text-right font-mono tabular-nums text-[var(--text-primary)]">
-                      {header.estimatedBusLoadPct.toFixed(1)}%
-                    </span>
-                  </div>
+              <div className="hidden lg:flex items-center text-[12px] font-mono tabular-nums text-[var(--text-secondary)] shrink-0">
+                <div className="inline-flex items-center gap-1 px-2">
+                  <span className="text-[var(--text-muted)]">{t('shell.app.telemetryRx')}</span>
+                  <span className="inline-block w-[9ch] text-right font-mono tabular-nums text-[var(--text-primary)]">
+                    {Math.round(hasLiveBus ? fpsRx : 0).toLocaleString('en-US')}/s
+                  </span>
                 </div>
-              )}
+                <div className="inline-flex items-center gap-1 px-2 border-l border-[var(--border-grid)]">
+                  <span className="text-[var(--text-muted)]">{t('shell.app.telemetryTx')}</span>
+                  <span className="inline-block w-[9ch] text-right font-mono tabular-nums text-[var(--text-primary)]">
+                    {Math.round(hasLiveBus ? header.fpsTx : 0).toLocaleString('en-US')}/s
+                  </span>
+                </div>
+                <div className="inline-flex items-center gap-1 pl-2 border-l border-[var(--border-grid)]">
+                  <span className="text-[var(--text-muted)]">{t('shell.app.busLoad')}</span>
+                  <span className="inline-block w-[6ch] text-right font-mono tabular-nums text-[var(--text-primary)]">
+                    {(hasLiveBus ? estimatedBusLoadPct : 0).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
             </div>
           </nav>
 
@@ -1295,7 +1424,8 @@ export const App: React.FC = () => {
       <UpdateNotice />
       <ChangelogDialog />
       <McpServerPanel />
-      <McpUiOverlay />
+      <McpUiOverlay onPanicStop={handlePanicStop} />
+      <ContextMenu />
 
       {/* Operator prompts of any flow run (Flow Editor / Diagnostics Workbench): one host for every tab. */}
       <FlowPromptHost />

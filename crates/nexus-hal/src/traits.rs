@@ -178,4 +178,30 @@ pub trait CanChannel: Send {
     fn listen_only_enforcement(&self) -> ListenOnlyEnforcement {
         ListenOnlyEnforcement::SoftwareOnly
     }
+
+    /// Panic Stop hook: discards TX work queued **inside the adapter** (device-side TX queue,
+    /// device-resident periodic transmit jobs) and returns the controller to listen-only where
+    /// the adapter supports it. Called by the bus-io thread (the channel owner) exactly once per
+    /// Panic Stop, after the software TX gate is already latched.
+    ///
+    /// The default is a no-op: drivers whose TX path ends at the host (`send_frame` returns once
+    /// the frame left NexusCAN) have nothing to discard. Must be bounded (≤ 100 ms) and must not
+    /// panic; errors are logged by the pipeline, never escalated.
+    fn abort_pending_tx(&mut self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    /// Cumulative number of received frames the driver itself had to discard (e.g. its bounded
+    /// RX overflow ring was full). Polled by the bus-io thread on its health tick and added to
+    /// the pipeline's `dropped_frames`, so driver-side loss is never silent. Must not block or
+    /// allocate. Default: drivers without an internal RX buffer never drop.
+    fn driver_dropped_frames(&self) -> u64 {
+        0
+    }
+
+    /// Human-readable summary of the bit timing the driver actually programmed (e.g. a sample
+    /// point chosen by search), logged once on connect. Cold path. Default: nothing to report.
+    fn bit_timing_note(&self) -> Option<String> {
+        None
+    }
 }

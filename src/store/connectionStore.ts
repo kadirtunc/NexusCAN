@@ -41,6 +41,10 @@ export interface SavedConnectionProfile {
   serialPort: string;
   serialBaudRate: number;
   serialDtrRts: boolean;
+  /** CANsub only (optional, absent on older saved profiles). */
+  networkHost?: string | null;
+  networkDeviceId?: string | null;
+  networkAcceptAnyDevice?: boolean;
   bitrateProfileId: string;
   bitrate: number;
   enableFd: boolean;
@@ -89,6 +93,45 @@ export const DATA_BITRATES_FD: readonly { value: number; label: string }[] = [
   { value: 5_000_000, label: '5 Mbit/s' },
   { value: 8_000_000, label: '8 Mbit/s' },
 ];
+
+/**
+ * CANsub (80 MHz clock, one shared BRP 1..32 for nominal and data phase) cannot open every
+ * nominal/data pair. Mirrors nexus-hal cansub_drv select_fd_timing bitrate-matrix test; keep in sync.
+ * Classic CAN: all nominal rates open. CAN-FD: 10k/20k nominal never open (no FD at all);
+ * 50k/100k nominal fail at 4M/5M/8M data; 125k nominal fails at 8M data.
+ * Use only when driverFamily === 'cansub'; other families are unaffected.
+ */
+const CANSUB_FD_UNSUPPORTED: ReadonlySet<string> = new Set<string>([
+  ...[10_000, 20_000].flatMap((n) =>
+    [1_000_000, 2_000_000, 4_000_000, 5_000_000, 8_000_000].map((d) => `${n}:${d}`),
+  ),
+  ...[50_000, 100_000].flatMap((n) => [4_000_000, 5_000_000, 8_000_000].map((d) => `${n}:${d}`)),
+  '125000:8000000',
+]);
+
+/** True when CANsub can open the nominal (and, for FD, data) bitrate combination. */
+export function isCansubBitrateSupported(
+  nominal: number,
+  data: number | null,
+  fd: boolean,
+): boolean {
+  if (!fd) return true;
+  if (data === null) return false;
+  return !CANSUB_FD_UNSUPPORTED.has(`${nominal}:${data}`);
+}
+
+/** CANsub can run CAN-FD at this nominal bitrate with at least one data bitrate. */
+export function isCansubFdAvailable(nominal: number): boolean {
+  return DATA_BITRATES_FD.some((d) => isCansubBitrateSupported(nominal, d.value, true));
+}
+
+/** Nearest supported data bitrate at or below `data` (null when none exists). */
+export function nearestCansubDataBitrate(nominal: number, data: number): number | null {
+  const below = DATA_BITRATES_FD.map((d) => d.value)
+    .filter((v) => v <= data && isCansubBitrateSupported(nominal, v, true))
+    .sort((a, b) => b - a);
+  return below.length > 0 ? below[0] : null;
+}
 
 /** Default PCAN channel text when nothing is detected. Never presented as detected hardware. */
 export const PCAN_DEFAULT_CHANNEL = 'PCAN_USBBUS1';
@@ -243,6 +286,11 @@ export function resolveDeviceIdForProfile(profile: SavedConnectionProfile): stri
       const iface = profile.adapterChannel.trim() || 'vcan0';
       return iface.startsWith('socketcan:') ? iface : `socketcan:${iface}`;
     }
+    case 'cansub': {
+      // adapterChannel carries the full descriptor id "cansub:<devid>@<ch>".
+      const ch = profile.adapterChannel.trim();
+      return ch.startsWith('cansub:') ? ch : `cansub:${ch}`;
+    }
     case 'gs_usb': {
       const ch = profile.adapterChannel.trim() || '0';
       return ch.startsWith('gs_usb:') ? ch : `gs_usb:${ch}`;
@@ -287,6 +335,11 @@ export function buildChannelConfigForProfile(
     serialDtrRts: profile.driverFamily === 'slcan' ? profile.serialDtrRts : null,
     adapterChannel: profile.adapterChannel.trim() || null,
   };
+  if (profile.driverFamily === 'cansub') {
+    config.networkHost = profile.networkHost?.trim() || null;
+    config.networkDeviceId = profile.networkDeviceId?.trim() || null;
+    config.networkAcceptAnyDevice = profile.networkAcceptAnyDevice === true;
+  }
 
   return { deviceId, config };
 }

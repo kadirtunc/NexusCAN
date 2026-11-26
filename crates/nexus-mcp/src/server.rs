@@ -30,6 +30,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 /// Shared state of one running MCP server (all sessions).
 pub struct Ctx {
@@ -46,6 +47,7 @@ pub struct Ctx {
     /// Optional frontend bridge for the `ui_*` co-pilot tools.
     pub ui: Option<Arc<dyn UiBridge>>,
     ui_limiter: Mutex<UiRateLimiter>,
+    arm_prompt: tokio::sync::Mutex<()>,
 }
 
 impl Ctx {
@@ -64,6 +66,7 @@ impl Ctx {
             audit_limiter: Mutex::new(AuditLimiter::new(Instant::now())),
             ui,
             ui_limiter: Mutex::new(UiRateLimiter::new(Instant::now())),
+            arm_prompt: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -150,8 +153,9 @@ re_row_detail, re_series and re_correlate (targets must already be focused by th
 re_dbc_generate (returns DBC text, saves nothing). UI CO-PILOT (needs the desktop window open): ui_get_state reads what the user sees; \
 ui_navigate, ui_select_message, ui_trace_filter and ui_plot_signals change only what is displayed; \
 ui_notify shows a short message; ui_confirm asks the user a yes/no question - use it before any \
-multi-step UI change the user did not explicitly request. SAFETY: no tool can transmit frames, arm a \
-bus, change bus modes, run UDS/diagnostic requests, flash ECUs, start replays or load databases. \
+multi-step UI change the user did not explicitly request. ui_request_bus_arm asks the desktop operator \
+to arm one connected bus for this session. SAFETY: no tool can transmit frames, run UDS/diagnostic \
+requests, flash ECUs, start replays or load databases. \
 Responses are capped at ~16 KB; when \"truncated\" is true, narrow the request.";
 
 // ─── Tool input schemas ─────────────────────────────────────────────────────
@@ -414,7 +418,7 @@ async fn ui_outcome(ctx: &Ctx, request: Result<UiRequest, ToolError>) -> ToolRes
     let Some(ui) = ctx.ui.as_ref().filter(|u| u.attached()).cloned() else {
         return Err(ToolError::new(UI_NOT_ATTACHED));
     };
-    let is_confirm = r.kind == "confirm";
+    let is_confirm = matches!(r.kind, "confirm" | "confirm_bus_arm");
     let fut = ui.call(r.kind, r.args, r.timeout);
     // Hard upper bound in case a bridge ignores its timeout.
     let res = match tokio::time::timeout(r.timeout + Duration::from_secs(1), fut).await {
@@ -429,6 +433,71 @@ async fn ui_outcome(ctx: &Ctx, request: Result<UiRequest, ToolError>) -> ToolRes
         }
         Err(e) => Err(ToolError::new(e)),
     }
+}
+
+async fn request_bus_arm(ctx: &Arc<Ctx>, bus_id: u8, cancel: CancellationToken) -> ToolResult {
+    let _prompt = ctx
+        .arm_prompt
+        .try_lock()
+        .map_err(|_| ToolError::new("An Active Bus request is already pending"))?;
+    let (target, health) = ctx
+        .engine
+        .capture_bus_arm_target(bus_id, ui::UI_CONFIRM_TIMEOUT)
+        .map_err(|e| ToolError::new(e.to_string()))?;
+    if health.tx_armed {
+        return Ok(json!({ "busId": bus_id, "armed": true, "alreadyArmed": true }));
+    }
+
+    let prompt = ui_outcome(
+        ctx,
+        Ok(UiRequest {
+            kind: "confirm_bus_arm",
+            args: json!({
+                "busId": bus_id,
+                "device": s64(&health.device_id),
+                "channel": s64(&health.channel_name),
+            }),
+            timeout: ui::UI_CONFIRM_TIMEOUT,
+        }),
+    );
+    let decision = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(ToolError::new("Active Bus request cancelled")),
+        result = prompt => result?,
+    };
+    if decision["confirmed"].as_bool() != Some(true) {
+        return Ok(json!({
+            "busId": bus_id,
+            "approved": false,
+            "timedOut": decision["timedOut"].as_bool().unwrap_or(false),
+        }));
+    }
+
+    let ctx = Arc::clone(ctx);
+    tokio::task::spawn_blocking(move || {
+        if cancel.is_cancelled() || ctx.stop.load(Ordering::Acquire) || !ctx.ui_attached() {
+            return Err(ToolError::new("Active Bus request cancelled"));
+        }
+        let health = ctx
+            .engine
+            .arm_confirmed_bus(target)
+            .map_err(|e| ToolError::new(e.to_string()))?;
+        Ok(json!({
+            "busId": bus_id,
+            "approved": true,
+            "armed": health.tx_armed,
+            "listenOnly": health.listen_only,
+        }))
+    })
+    .await
+    .map_err(|e| ToolError::new(format!("Active Bus worker failed: {e}")))?
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct BusArmArgs {
+    /// Logical bus ID, zero-based. Bus 1 in the UI is 0.
+    bus_id: u8,
 }
 
 /// JSON text result; errors as `{ "error": ... }` tool errors. Both paths are size-capped.
@@ -873,6 +942,40 @@ impl NexusMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let summary = format!("level={:?} chars={}", a.level, a.text.chars().count());
         self.run_ui("ui_notify", summary, ui::notify(&a)).await
+    }
+
+    #[tool(
+        name = "ui_request_bus_arm",
+        description = "Ask the desktop operator to enter Active Bus mode for one connected bus. Requires a fresh, bus-specific approval. Sends no CAN application frames, never clears Panic Stop, and leaves the saved profile untouched.",
+        annotations(
+            title = "Request Arm Active Bus",
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn ui_request_bus_arm(
+        &self,
+        Parameters(args): Parameters<BusArmArgs>,
+        cancel: CancellationToken,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = &self.ctx;
+        let call_no = ctx.total_calls.fetch_add(1, Ordering::Relaxed) + 1;
+        let outcome = request_bus_arm(ctx, args.bus_id, cancel).await;
+        let decision = match &outcome {
+            Ok(result) if result["alreadyArmed"] == true => "already armed",
+            Ok(result) if result["approved"] == true => "approved",
+            Ok(result) if result["timedOut"] == true => "timed out",
+            Ok(_) => "declined",
+            Err(_) => "failed",
+        };
+        ctx.audit(
+            call_no,
+            "ui_request_bus_arm",
+            &format!("bus_id={}, decision={decision}", args.bus_id),
+            outcome.as_ref().map(|_| ()).map_err(|e| e.0.as_str()),
+        );
+        Ok(to_call_result(outcome))
     }
 
     #[tool(

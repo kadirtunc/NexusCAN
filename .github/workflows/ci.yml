@@ -49,6 +49,7 @@ jobs:
           (cd src-tauri && cargo fmt --check)
           (cd crates/nexus-hal/fuzz && cargo fmt --check)
           (cd crates/nexus-netdb/fuzz && cargo fmt --check)
+          (cd crates/cansub/fuzz && cargo fmt --check)
 
       # Real SocketCAN HIL (vcan0): Panic Stop wire race, diag HIL. Best effort — if the
       # runner kernel has no vcan module the HIL tests print SKIP instead of failing.
@@ -91,6 +92,20 @@ jobs:
 
       - name: Test diag tap allocation (test-hooks feature)
         run: cargo test -p nexus-hal --features test-hooks --test diag_tap_alloc
+
+      # cansub-rs is a publishable SDK: its `proto` core must stay no_std / alloc-free and its docs
+      # warning-free (contract cansub-v1 §8).
+      - name: cansub-rs no_std (thumbv7em-none-eabihf)
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add thumbv7em-none-eabihf
+          cargo check -p cansub-rs --no-default-features --target thumbv7em-none-eabihf
+
+      - name: cansub-rs docs (-D warnings)
+        if: runner.os == 'Linux'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p cansub-rs --all-features --no-deps
 
   tauri:
     name: tauri (${{ matrix.os }})

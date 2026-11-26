@@ -24,7 +24,6 @@ import {
   ScrollText,
   Square,
   Sun,
-  Terminal,
   Unplug,
   UploadCloud,
 } from 'lucide-react';
@@ -42,7 +41,6 @@ import { telemetryStore, useTelemetryHeader } from '../store/telemetryStore';
 import { traceSessionsStore, useTraceSessionsStore } from '../store/traceSessionsStore';
 import { transmitStore } from '../store/transmitStore';
 import { workbenchStore, useWorkbenchStore } from '../store/workbenchStore';
-import { debugConsoleStore, useDebugConsoleStore } from '../store/debugConsoleStore';
 import { mcpStore, useMcpStore } from '../store/mcpStore';
 import { UI_SCALE_OPTIONS, uiScaleStore, useUiScale } from '../store/uiScaleStore';
 import { onboardingStore } from '../store/onboardingStore';
@@ -137,7 +135,6 @@ export const TopBar: React.FC<TopBarProps> = ({
   const cloudHeader = useCloudBridgeHeader();
   const cloudOn = useExperimentalCloud();
   const workbench = useWorkbenchStore();
-  const debugConsole = useDebugConsoleStore();
   const mcp = useMcpStore();
   const traceState = useTraceSessionsStore();
   const activeTrace = traceSessionsStore.getSession(traceState.activeSessionId);
@@ -1069,16 +1066,6 @@ export const TopBar: React.FC<TopBarProps> = ({
                   >
                     {workbench.dockPosition === 'right' ? t('shell.menu.view.moveDockLeft') : t('shell.menu.view.moveDockRight')}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOpenMenu(null);
-                      mcpStore.setPanelOpen(true);
-                    }}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-[var(--text-secondary)]"
-                  >
-                    {t('mcp.menu.item')}
-                  </button>
                   <div className="my-1.5 border-t border-[var(--border-grid)]" />
                   <div className="px-3.5 py-1 text-[11px] font-mono text-[var(--text-muted)] uppercase">
                     {t('shell.menu.view.splitViewHeader')}
@@ -1212,19 +1199,6 @@ export const TopBar: React.FC<TopBarProps> = ({
                   }}
                   className="absolute left-0 top-[34px] z-50 border shadow-2xl py-1.5 rounded-[3px] min-w-[270px] text-[12.5px]"
                 >
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOpenMenu(null);
-                      projectStore.setToolpacksModalOpen(true);
-                    }}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)] flex items-center justify-between"
-                  >
-                    <span>{t('shell.menu.help.toolpacks')}</span>
-                    <span className="font-mono text-[10.5px] px-1.5 py-0.5 rounded bg-[var(--status-focus-bg)] text-focus border border-[var(--status-focus-border)]">
-                      {projState.enabledToolpacks.length}/7
-                    </span>
-                  </button>
                   {guidePage !== null && (
                     <button
                       type="button"
@@ -1260,23 +1234,13 @@ export const TopBar: React.FC<TopBarProps> = ({
                   >
                     {t('upd.menu.changelog')}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOpenMenu(null);
-                      projectStore.setAcknowledgmentsModalOpen(true);
-                    }}
-                    className="w-full text-left px-3.5 py-2 hover:bg-[var(--bg-row-hover)] text-[var(--text-primary)]"
-                  >
-                    {t('shell.menu.help.about')}
-                  </button>
                 </div>
               )}
             </div>
           </nav>
         </div>
 
-        {/* Right Corner of Menu Bar: Fixed Organization & Cloud Identity & Language Switcher */}
+        {/* Right corner of the menu bar */}
         <div className="flex flex-nowrap items-center gap-2 shrink-0 text-[12px] font-mono tabular-nums">
           {!cloudOn ? null : cloudHeader.isAuthenticated ? (
             <>
@@ -1376,42 +1340,71 @@ export const TopBar: React.FC<TopBarProps> = ({
             </button>
           )}
 
-          {/* Segmented Language Selector (TR | EN) */}
-          <div
+          <button
+            type="button"
+            onClick={() => projectStore.setToolpacksModalOpen(true)}
+            title={t('shell.toolbar.toolpacksTooltip', { count: projState.enabledToolpacks.length })}
+            aria-label={t('shell.toolbar.toolpacksLabel')}
+            className="h-[28px] shrink-0 px-2 border border-strong bg-panel flex items-center gap-1.5 rounded-[3px] text-[11px] hover:border-[var(--status-focus-border)] cursor-pointer"
+          >
+            <Boxes className="size-3.5 text-focus" />
+            <span className="@max-[1100px]:hidden text-[var(--text-primary)]">{t('shell.toolbar.toolpacksLabel')}</span>
+            <span className="text-focus">{projState.enabledToolpacks.length}/7</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => mcpStore.setPanelOpen(true)}
+            title={mcp.activity ?? (mcp.available ? t('mcp.statusbar.tooltip') : t('mcp.unavailable'))}
+            aria-label={t('mcp.menu.item')}
+            className="h-[28px] shrink-0 px-2 border border-strong bg-panel flex items-center gap-1.5 rounded-[3px] text-[11px] text-[var(--text-primary)] hover:border-[var(--status-focus-border)] cursor-pointer"
+          >
+            <span
+              className={`size-1.5 rounded-full ${mcp.activity !== null ? 'bg-focus' : mcp.status?.running ? 'bg-nominal' : 'bg-muted'}`}
+            />
+            <span>{t('mcp.statusbar.label')}</span>
+            {mcp.status?.running && <span className="@max-[1100px]:hidden text-nominal">:{mcp.status.port ?? ''} · {mcp.status.connectedClients}</span>}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => projectStore.setAcknowledgmentsModalOpen(true)}
+            title={t('shell.toolbar.aboutTooltip')}
+            aria-label={t('modal.ack.title')}
+            className="h-[28px] w-[28px] shrink-0 border border-strong bg-panel grid place-items-center rounded-[3px] text-warn hover:border-[var(--status-warn-border)] cursor-pointer"
+          >
+            <Award className="size-4" />
+          </button>
+
+          <select
+            value={locale}
+            onChange={(event) => setLocale(event.target.value === 'tr' ? 'tr' : 'en')}
+            title={t('shell.lang.switchTitle')}
+            aria-label={t('shell.lang.switchTitle')}
+            className="h-[28px] shrink-0 px-1.5 border border-strong bg-panel rounded-[3px] text-[11px] text-[var(--text-primary)] cursor-pointer"
+          >
+            <option value="tr">{t('shell.lang.tr')}</option>
+            <option value="en">{t('shell.lang.en')}</option>
+          </select>
+
+          <button
+            type="button"
+            onClick={() => databaseStore.toggleTheme()}
             style={{
               backgroundColor: 'var(--bg-panel)',
               borderColor: 'var(--border-strong)',
+              color: 'var(--text-secondary)',
             }}
-            className="h-[28px] border flex items-center p-0.5 rounded-[3px] shrink-0 font-mono text-[11px]"
-            title={t('shell.lang.switchTitle')}
+            className="h-[28px] w-[28px] shrink-0 border flex items-center justify-center hover:border-[var(--text-secondary)] cursor-pointer rounded-[3px]"
+            title={dbState.theme === 'dark' ? t('shell.toolbar.themeLight') : t('shell.toolbar.themeDark')}
+            aria-label={dbState.theme === 'dark' ? t('shell.toolbar.themeLight') : t('shell.toolbar.themeDark')}
           >
-            <button
-              type="button"
-              onClick={() => setLocale('tr')}
-              style={{
-                backgroundColor: locale === 'tr' ? 'var(--bg-row-selected)' : 'transparent',
-                color: locale === 'tr' ? 'var(--status-focus)' : 'var(--text-muted)',
-              }}
-              className={`h-full px-2 rounded-[2px] font-semibold cursor-pointer transition-colors ${
-                locale === 'tr' ? 'border border-[var(--status-focus-border)]' : 'hover:text-[var(--text-primary)]'
-              }`}
-            >
-              {t('shell.lang.tr')}
-            </button>
-            <button
-              type="button"
-              onClick={() => setLocale('en')}
-              style={{
-                backgroundColor: locale === 'en' ? 'var(--bg-row-selected)' : 'transparent',
-                color: locale === 'en' ? 'var(--status-focus)' : 'var(--text-muted)',
-              }}
-              className={`h-full px-2 rounded-[2px] font-semibold cursor-pointer transition-colors ${
-                locale === 'en' ? 'border border-[var(--status-focus-border)]' : 'hover:text-[var(--text-primary)]'
-              }`}
-            >
-              {t('shell.lang.en')}
-            </button>
-          </div>
+            {dbState.theme === 'dark' ? (
+              <Sun className="w-4 h-4 text-warn" />
+            ) : (
+              <Moon className="w-4 h-4 text-focus" />
+            )}
+          </button>
         </div>
       </div>
 
@@ -1740,24 +1733,6 @@ export const TopBar: React.FC<TopBarProps> = ({
 
           <button
             type="button"
-            onClick={() => databaseStore.toggleTheme()}
-            style={{
-              backgroundColor: 'var(--bg-panel)',
-              borderColor: 'var(--border-strong)',
-              color: 'var(--text-secondary)',
-            }}
-            className="h-[32px] w-[34px] border flex items-center justify-center hover:text-[var(--text-primary)] cursor-pointer rounded-[3px]"
-            title={dbState.theme === 'dark' ? t('shell.toolbar.themeLight') : t('shell.toolbar.themeDark')}
-          >
-            {dbState.theme === 'dark' ? (
-              <Sun className="w-4 h-4 text-warn" />
-            ) : (
-              <Moon className="w-4 h-4 text-focus" />
-            )}
-          </button>
-
-          <button
-            type="button"
             onClick={() => workbenchStore.toggleDock()}
             style={{
               backgroundColor: workbench.dockOpen
@@ -1777,102 +1752,6 @@ export const TopBar: React.FC<TopBarProps> = ({
 
           </div>
 
-          {/* TIER 2 (<1900px container): moves to the overflow menu */}
-          <div className="flex flex-nowrap items-center gap-1.5 @max-[1900px]:hidden">
-          <button
-            type="button"
-            onClick={() => projectStore.setToolpacksModalOpen(true)}
-            style={{
-              backgroundColor: 'var(--bg-panel)',
-              borderColor: 'var(--border-strong)',
-              color: 'var(--text-secondary)',
-            }}
-            className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12.5px] font-medium hover:text-focus hover:border-[var(--status-focus-border)] cursor-pointer rounded-[3px]"
-            title={t('shell.toolbar.toolpacksTooltip', { count: projState.enabledToolpacks.length })}
-          >
-            <Boxes className="w-4 h-4 text-focus" />
-            <span className="@max-[2100px]:hidden text-[12px] font-mono">{t('shell.toolbar.toolpacksLabel')}</span>
-            <span className="px-1.5 py-0.5 rounded bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-focus font-mono text-[11px]">
-              {projState.enabledToolpacks.length}/7
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => projectStore.setAcknowledgmentsModalOpen(true)}
-            style={{
-              backgroundColor: 'var(--bg-panel)',
-              borderColor: 'var(--border-strong)',
-              color: 'var(--text-secondary)',
-            }}
-            className="h-[32px] w-[34px] border flex items-center justify-center hover:text-warn hover:border-[var(--status-warn-border)] cursor-pointer rounded-[3px]"
-            title={t('shell.toolbar.aboutTooltip')}
-          >
-            <Award className="w-4 h-4 text-warn" />
-          </button>
-
-          {/* MCP Server indicator */}
-          <button
-            type="button"
-            onClick={() => mcpStore.setPanelOpen(true)}
-            style={{
-              backgroundColor: mcp.activity !== null ? 'var(--status-focus-bg)' : mcp.status?.running ? 'var(--status-nominal-bg)' : 'var(--bg-panel)',
-              borderColor: mcp.activity !== null ? 'var(--status-focus-border)' : mcp.status?.running ? 'var(--status-nominal-border)' : 'var(--border-strong)',
-              color: mcp.activity !== null ? 'var(--status-focus)' : mcp.status?.running ? 'var(--status-nominal)' : 'var(--text-muted)',
-            }}
-            className={`h-[32px] px-2.5 border flex items-center text-[12px] font-mono tabular-nums cursor-pointer rounded-[3px] hover:text-nominal transition-colors ${
-              mcp.status?.running || mcp.activity !== null ? 'font-semibold' : 'opacity-60'
-            }`}
-            title={mcp.available ? t('mcp.statusbar.tooltip') : t('mcp.unavailable')}
-          >
-            {mcp.activity !== null
-              ? mcp.activity
-              : mcp.status?.running
-                ? `${t('mcp.statusbar.label')} :${mcp.status.port ?? ''} · ${mcp.status.connectedClients}`
-                : t('mcp.statusbar.label')}
-          </button>
-
-          {/* Global Debug & Audit Console Toggle */}
-          <button
-            type="button"
-            onClick={() => debugConsoleStore.toggleDockOpen()}
-            style={{
-              backgroundColor: debugConsole.detachedOpen
-                ? 'var(--status-focus-bg)'
-                : debugConsole.dockOpen
-                  ? 'var(--bg-row-selected)'
-                  : 'var(--bg-panel)',
-              borderColor: debugConsole.detachedOpen
-                ? 'var(--status-focus-border)'
-                : debugConsole.dockOpen
-                  ? 'var(--border-strong)'
-                  : 'var(--border-strong)',
-              color: debugConsole.detachedOpen
-                ? 'var(--status-focus)'
-                : debugConsole.dockOpen
-                  ? 'var(--status-focus)'
-                  : 'var(--text-secondary)',
-            }}
-            className="h-[32px] px-2.5 border flex items-center gap-1.5 text-[12px] font-mono cursor-pointer rounded-[3px] hover:text-focus transition-colors"
-            title={t('debug.console.statusTooltip')}
-          >
-            <Terminal className="w-3.5 h-3.5 text-focus" />
-            <span className="font-semibold @max-[2100px]:hidden">&gt;_ {t('debug.console.statusBtn')}</span>
-            {debugConsole.detachedOpen ? (
-              <span className="px-1 py-0.2 rounded-xs bg-[var(--status-focus-bg)] border border-[var(--status-focus-border)] text-[10px] text-focus">
-                ↗ {t('debug.console.undockedBadge')}
-              </span>
-            ) : debugConsole.unreadErrorCount > 0 ? (
-              <span className="px-1 py-0.2 rounded-xs bg-[var(--status-critical-bg)] border border-critical text-[10px] text-critical font-bold animate-pulse">
-                {debugConsole.unreadErrorCount}
-              </span>
-            ) : debugConsole.unreadWarnCount > 0 ? (
-              <span className="px-1 py-0.2 rounded-xs bg-[var(--status-warn-bg)] border border-warn text-[10px] text-warn font-bold">
-                {debugConsole.unreadWarnCount}
-              </span>
-            ) : null}
-          </button>
-          </div>
         </div>
 
         {/* Right Corner: overflow menu + fixed Panic / Emergency Stop Safety Switch (never hidden) */}
@@ -1894,13 +1773,6 @@ export const TopBar: React.FC<TopBarProps> = ({
               aria-expanded={openMenu === 'overflow'}
             >
               <Ellipsis className="w-4 h-4" />
-              {(debugConsole.unreadErrorCount > 0 || debugConsole.unreadWarnCount > 0) && (
-                <span
-                  className={`absolute top-0.5 right-0.5 w-2 h-2 rounded-full ${
-                    debugConsole.unreadErrorCount > 0 ? 'bg-critical' : 'bg-warn'
-                  }`}
-                />
-              )}
             </button>
             {openMenu === 'overflow' && (
               <div
@@ -1981,26 +1853,6 @@ export const TopBar: React.FC<TopBarProps> = ({
                     role="menuitem"
                     onClick={() => {
                       setOpenMenu(null);
-                      databaseStore.toggleTheme();
-                    }}
-                    className={OVERFLOW_ITEM_CLS}
-                  >
-                    {dbState.theme === 'dark' ? (
-                      <Sun className="w-4 h-4 text-warn" />
-                    ) : (
-                      <Moon className="w-4 h-4 text-focus" />
-                    )}
-                    <span>
-                      {dbState.theme === 'dark'
-                        ? t('shell.menu.view.switchToLight')
-                        : t('shell.menu.view.switchToDark')}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setOpenMenu(null);
                       workbenchStore.toggleDock();
                     }}
                     className={OVERFLOW_ITEM_CLS}
@@ -2011,67 +1863,6 @@ export const TopBar: React.FC<TopBarProps> = ({
                   <div className="my-1.5 border-t border-[var(--border-grid)]" />
                 </div>
 
-                {/* Tier 2 items */}
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setOpenMenu(null);
-                    projectStore.setToolpacksModalOpen(true);
-                  }}
-                  className={OVERFLOW_ITEM_CLS}
-                  title={t('shell.toolbar.toolpacksTooltip', { count: projState.enabledToolpacks.length })}
-                >
-                  <Boxes className="w-4 h-4 text-focus" />
-                  <span className="flex-1">{t('shell.toolbar.toolpacksLabel')}</span>
-                  <span className="font-mono tabular-nums text-[11px] text-focus">
-                    {projState.enabledToolpacks.length}/7
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setOpenMenu(null);
-                    mcpStore.setPanelOpen(true);
-                  }}
-                  className={OVERFLOW_ITEM_CLS}
-                  title={mcp.available ? t('mcp.statusbar.tooltip') : t('mcp.unavailable')}
-                >
-                  <span
-                    className={`w-2 h-2 rounded-full shrink-0 ${
-                      mcp.activity !== null ? 'bg-focus' : mcp.status?.running ? 'bg-nominal' : 'bg-muted'
-                    }`}
-                  />
-                  <span className="flex-1">{t('mcp.menu.item')}</span>
-                  {mcp.status?.running && (
-                    <span className="font-mono tabular-nums text-[11px] text-nominal">
-                      :{mcp.status.port ?? ''} · {mcp.status.connectedClients}
-                    </span>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setOpenMenu(null);
-                    debugConsoleStore.toggleDockOpen();
-                  }}
-                  className={OVERFLOW_ITEM_CLS}
-                  title={t('debug.console.statusTooltip')}
-                >
-                  <Terminal className="w-4 h-4 text-focus" />
-                  <span className="flex-1 font-mono">&gt;_ {t('debug.console.statusBtn')}</span>
-                  {debugConsole.unreadErrorCount > 0 ? (
-                    <span className="font-mono tabular-nums text-[11px] text-critical font-bold">
-                      {debugConsole.unreadErrorCount}
-                    </span>
-                  ) : debugConsole.unreadWarnCount > 0 ? (
-                    <span className="font-mono tabular-nums text-[11px] text-warn font-bold">
-                      {debugConsole.unreadWarnCount}
-                    </span>
-                  ) : null}
-                </button>
                 {isTauri && (
                   <button
                     type="button"
@@ -2097,19 +1888,6 @@ export const TopBar: React.FC<TopBarProps> = ({
                 >
                   <ScrollText className="w-4 h-4 text-secondary" />
                   <span>{t('upd.menu.changelog')}</span>
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setOpenMenu(null);
-                    projectStore.setAcknowledgmentsModalOpen(true);
-                  }}
-                  className={OVERFLOW_ITEM_CLS}
-                  title={t('shell.toolbar.aboutTooltip')}
-                >
-                  <Award className="w-4 h-4 text-warn" />
-                  <span>{t('shell.menu.help.about')}</span>
                 </button>
               </div>
             )}
