@@ -40,8 +40,13 @@ Thumbs.db
 !.vscode/settings.json
 
 # Copyrighted standards / third-party reference documents (never redistribute)
-/template-app-images/*.pdf
+/template-app-images/
 *.PDF.pdf
+
+# Private project planning and local helpers
+/planning/
+/codex
+/agent_tools.py
 
 # Claude Code local state (machine-specific)
 .claude/settings.local.json
