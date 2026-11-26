@@ -83,6 +83,8 @@ Builds are not code-signed yet. On Windows, SmartScreen asks you to confirm ("Ru
 
 **Trace and Receive / Transmit.** Choose **Open in new window** to detach a Trace session while it records, then **Return to main window** to redock it. Pause keeps the current viewport, and scrolling back disengages auto-scroll. In Receive / Transmit, right-click to add a TX draft, copy selected RX frames, add signals to Watch, or open a message in DBC Studio.
 
+**MF4 import.** Use **Trace → Open** to load raw CAN and CAN FD data frames from an ASAM MDF4 (`.mf4`) recording. Trace keeps the recorded bus channels, relative timing, frame flags and payload. Each import supports up to 100,000 frames.
+
 ### DBC editor
 
 In DBC Studio, choose **Edit DB** on a database row to edit messages, signals, ECUs and value tables. **Save** writes to the current file and **Save As** creates a copy. Drag a signal in the Bit Matrix to change its start bit, and select the active page for each multiplexer, including cascaded switches. Use the Communication Matrix to inspect message relationships and the Network Nodes graph to explore TX/RX connections between ECUs.
@@ -256,7 +258,7 @@ NexusCAN is a **v0.1 preview**. What is real today and what is next, without mar
 | Adapters | SocketCAN (Linux), SLCAN (serial, all OS), mock0/mock1 simulators, file replay; **gs_usb / candleLight in pure Rust** (`nusb`, no driver install), **PCAN-Basic** (runtime-loaded), and **CANsub.2 / CANsub.4** | Hardware reports for gs_usb and PCAN on Windows / macOS, Kvaser, Vector XL |
 | Safety | Listen-Only default (shown per bus as HW / SW / virtual), opt-in fail-closed hardware Listen-Only, confirmed Arm, Stop All TX that waits for in-flight writes, explicit Clear Panic, TX gate on every path | Hardware listen-only verified on every adapter family |
 | Diagnostics | UDS client, ECU graph, passive discovery, physical sweep, traffic dock, DID / `0x19` DTC reports / console, OBD-II Mode 01, flashing (`34/36/37`), seed/key providers, ECU registry, Flow Editor, Workbench (single-cell runs), Diagnostic Simulation panels | Workbench queues and report export, multi-ECU procedures, ODX/CDD |
-| Recording | Trace capture and replay, BLF/ASC/TRC/CSV/candump | Lossless backend recorder with triggers, ASAM MF4 |
+| Recording | Trace capture and replay, BLF/ASC/TRC/CSV/candump, ASAM MF4 import | Lossless backend recorder with triggers, ASAM MF4 export |
 | Reverse engineering | Sniffer heatmap, baseline/action diff, field classifier, Signal Inspector, correlation search, save to DBC, Value Scan | Offline analysis of recorded logs, two-log diff, selective replay, active scanners (gated) |
 | Protocols | UDS (ISO 14229), ISO-TP (ISO 15765-2 incl. addressing formats), SAE J1939 (PGN codec, BAM/CMDT transport, address claim, DM1/DM2) | J1939 UI, CANopen, XCP |
 | Platforms | Linux (verified), browser mode; Windows, Linux and macOS (Apple Silicon) desktop builds published automatically from CI | Code signing / notarization, Intel macOS build |

@@ -87,6 +87,8 @@ Dosyalar henüz imzalı değil. Windows'ta SmartScreen uyarısında "Yine de ça
 
 **Trace ve Receive / Transmit.** Kayıt sürerken Trace oturumunu **Open in new window** ile ayrı pencereye taşıyabilir, **Return to main window** ile geri alabilirsiniz. Pause görünümü yerinde tutar ve kayıt sırasında yukarı kaydırmak otomatik kaydırmayı durdurur. Receive / Transmit sağ tık menüsünden TX taslağı ekleyebilir, seçili RX frame'lerini kopyalayabilir, sinyalleri Watch'a ekleyebilir veya mesajı DBC Studio'da açabilirsiniz.
 
+**MF4 içe aktarma.** ASAM MDF4 (`.mf4`) kaydındaki ham CAN ve CAN FD frame’lerini **Trace → Aç** ile yükleyin. Trace, kayıttaki kanalları, göreli zamanlamayı, frame bayraklarını ve payload’ı korur. Bir dosyadan en fazla 100.000 frame içe aktarılabilir.
+
 ### DBC Editor
 
 DBC Studio'da veritabanı satırındaki **Edit DB** ile mesajları, sinyalleri, ECU'ları ve değer tablolarını düzenleyin. **Save** mevcut dosyaya yazar, **Save As** yeni bir kopya oluşturur. Bit Matrix'te sinyali sürükleyerek başlangıç bitini değiştirin ve kademeli multiplexer'larda etkin sayfayı seçin. Communication Matrix ile mesaj ilişkilerini, Network Nodes grafiğiyle ECU'lar arasındaki TX/RX bağlantılarını inceleyin.
@@ -252,7 +254,7 @@ NexusCAN şu an **v0.1 önizleme** aşamasında. Neyin hazır, neyin yolda oldu�
 | Adapters | SocketCAN (Linux), SLCAN (tüm işletim sistemleri), mock simülatörler, dosyadan oynatma. **gs_usb / candleLight** (sürücü kurulumu gerektirmez), **PCAN-Basic** ve **CANsub.2 / CANsub.4** sürücüleri yazıldı. | gs_usb ve PCAN için gerçek donanım testleri, Kvaser, Vector XL |
 | Safety | Varsayılan Listen-Only, opsiyonel Hardware Listen-Only, onaylı Arm, Stop All TX | Tüm adaptörlerde donanım Listen-Only doğrulaması |
 | Diagnostics | UDS client, ECU Graph, Passive Discovery, Physical Sweep, Traffic Dock, DID / DTC / UDS Console, OBD-II, flash, seed/key, ECU kayıtları, Flow Editor, Workbench, Diagnostic Simulation | Workbench'te toplu çalıştırma ve rapor, çok ECU'lu akışlar, ODX/CDD |
-| Recording | Trace kaydı ve replay, BLF/ASC/TRC/CSV/candump | Tetiklemeli kayıt, ASAM MF4 |
+| Recording | Trace kaydı ve replay, BLF/ASC/TRC/CSV/candump, ASAM MF4 içe aktarma | Tetiklemeli kayıt, ASAM MF4 dışa aktarma |
 | Reverse Engineering | Heatmap, Baseline/Action, Field Classifier, Signal Inspector, Correlation, Save to DBC, Value Scan | Kayıtlı log üzerinde analiz, iki log karşılaştırma, seçici replay, aktif tarayıcılar |
 | Protocols | UDS (ISO 14229), ISO-TP (ISO 15765-2), SAE J1939 | J1939 arayüzü, CANopen, XCP |
 | Platforms | Linux (test edildi), tarayıcı modu; Windows, Linux ve macOS (Apple Silicon) kurulum dosyaları | Kod imzalama, Intel Mac sürümü |

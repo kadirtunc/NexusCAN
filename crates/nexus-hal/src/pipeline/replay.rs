@@ -1,8 +1,8 @@
 //! Persistent `./traces/` file storage, multi-format CAN / CAN-FD trace parser
-//! (`.trc` v1.1/v2.1, Vector `.asc`, Vector `.blf` binary, Linux `candump .log`, NexusCAN `.csv`),
+//! (`.trc` v1.1/v2.1, Vector `.asc`, Vector `.blf`, ASAM `.mf4`, Linux `candump .log`, NexusCAN `.csv`),
 //! and deterministic zero-allocation ID-filtered Restbus `nexus-trace-replay` worker engine.
 
-use super::{blf, ConnectedBusHandle, TxDispatchRequest};
+use super::{blf, mf4, ConnectedBusHandle, TxDispatchRequest};
 use crate::dto::{
     ChronologicalFrameDto, LoadedTraceFileDto, StartTraceReplayArgsDto, TraceFileSummaryDto,
     TraceReplayControlArgsDto, TraceReplayStatusDto, TraceStorageInfoDto,
@@ -51,7 +51,7 @@ const fn _assert_replay_entry_traits<T: Copy + Clone + Send + Sync + Sized>() {}
 const _: () = _assert_replay_entry_traits::<CompiledReplayEntry>();
 
 /// Validates and normalizes a user-supplied trace file name, preserving `.trc`, `.asc`,
-/// `.log`, `.csv`, or `.blf` extensions (defaulting to `.trc`; extension lower-cased).
+/// `.log`, `.csv`, `.blf`, or `.mf4` extensions (defaulting to `.trc`; extension lower-cased).
 ///
 /// WP-8 / HIGH-09: path-like input (separators, `..`, leading `.`, `:`, control characters)
 /// and names that normalize to nothing or to a Windows reserved device name are **errors**;
@@ -114,7 +114,7 @@ fn trace_display_name(raw: &str) -> String {
         .unwrap_or_else(|_| format!("untitled_trace.{}", trace_format_from_filename(raw)))
 }
 
-/// Returns the canonical format tag (`"trc"`, `"asc"`, `"log"`, `"csv"`, or `"blf"`) for a trace file name.
+/// Returns the canonical format tag (`"trc"`, `"asc"`, `"log"`, `"csv"`, `"blf"`, or `"mf4"`) for a trace file name.
 pub fn trace_format_from_filename(file_name: &str) -> &'static str {
     split_supported_trace_ext(file_name).1
 }
@@ -137,6 +137,9 @@ fn split_supported_trace_ext(segment: &str) -> (&str, &'static str) {
         if ext_raw.eq_ignore_ascii_case("blf") {
             return (stem, "blf");
         }
+        if ext_raw.eq_ignore_ascii_case("mf4") {
+            return (stem, "mf4");
+        }
     }
     (s, "trc")
 }
@@ -148,6 +151,7 @@ fn is_supported_trace_file(file_name: &str) -> bool {
             || ext_raw.eq_ignore_ascii_case("log")
             || ext_raw.eq_ignore_ascii_case("csv")
             || ext_raw.eq_ignore_ascii_case("blf")
+            || ext_raw.eq_ignore_ascii_case("mf4")
     } else {
         false
     }
@@ -157,22 +161,25 @@ fn is_supported_trace_file(file_name: &str) -> bool {
 fn effective_trace_format(file_name: &str, raw_bytes: &[u8]) -> &'static str {
     if blf::is_blf_bytes(raw_bytes) {
         "blf"
+    } else if mf4::is_mf4_bytes(raw_bytes) {
+        "mf4"
     } else {
         trace_format_from_filename(file_name)
     }
 }
 
-/// Binary-aware trace entry parser: routes `.blf` / `LOGG` streams directly to [`blf::parse_blf_bytes`]
-/// without ever running UTF-8 lossy conversion, and text formats to [`parse_trace_text`].
+/// Routes BLF and MF4 to binary readers and text formats to [`parse_trace_text`].
 pub fn parse_trace_entries_from_bytes(
     file_name: &str,
     raw_bytes: &[u8],
 ) -> Result<Vec<CompiledReplayEntry>, HalError> {
-    if trace_format_from_filename(file_name) == "blf" || blf::is_blf_bytes(raw_bytes) {
-        blf::parse_blf_bytes(raw_bytes)
-    } else {
-        let content = String::from_utf8_lossy(raw_bytes);
-        parse_trace_text(file_name, &content)
+    match effective_trace_format(file_name, raw_bytes) {
+        "blf" => blf::parse_blf_bytes(raw_bytes),
+        "mf4" => mf4::parse_mf4_bytes(raw_bytes),
+        _ => {
+            let content = String::from_utf8_lossy(raw_bytes);
+            parse_trace_text(file_name, &content)
+        }
     }
 }
 
@@ -261,7 +268,7 @@ impl TraceStatsCache {
     }
 }
 
-/// Lists all persistent `.trc`, `.asc`, `.log`, `.csv`, and `.blf` trace files in `traces_dir`
+/// Lists all persistent `.trc`, `.asc`, `.log`, `.csv`, `.blf`, and `.mf4` trace files in `traces_dir`
 /// (creating `traces_dir` if absent), sorted newest-first.
 ///
 /// WP-8 / HIGH-10: metadata only (name, size, mtime, format from the extension + a BLF header
@@ -340,7 +347,7 @@ pub fn list_trace_files(
     })
 }
 
-/// Sanitizes `file_name`, validates binary `.blf` or text trace `raw_bytes`, writes them
+/// Sanitizes `file_name`, validates binary `.blf` / `.mf4` or text trace `raw_bytes`, writes them
 /// (temp file + rename, symlinks refused) to `traces_dir/<safe_name>`, and returns its
 /// [`TraceFileSummaryDto`].
 pub fn save_trace_file_bytes(
@@ -411,7 +418,7 @@ pub(crate) fn read_trace_file_bytes(
     Ok((safe_name, target_path, raw_bytes))
 }
 
-/// Loads and parses `traces_dir/<safe_name>` (binary `.blf` or text trace) into a [`LoadedTraceFileDto`].
+/// Loads and parses `traces_dir/<safe_name>` (binary `.blf` / `.mf4` or text trace) into a [`LoadedTraceFileDto`].
 pub fn load_trace_file(traces_dir: &Path, file_name: &str) -> Result<LoadedTraceFileDto, HalError> {
     load_trace_file_cached(traces_dir, file_name, None)
 }
@@ -461,7 +468,7 @@ pub fn delete_trace_file(traces_dir: &Path, file_name: &str) -> Result<(), HalEr
     crate::storage::remove_regular_file(&target_path)
 }
 
-/// Statelessly parses binary `.blf` or text (`.trc`, `.asc`, `.log`, `.csv`) bytes without writing to disk.
+/// Statelessly parses binary `.blf` / `.mf4` or text (`.trc`, `.asc`, `.log`, `.csv`) bytes without writing to disk.
 pub fn parse_trace_bytes(
     file_name: &str,
     raw_bytes: &[u8],

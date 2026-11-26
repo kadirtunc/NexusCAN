@@ -950,7 +950,7 @@ export const TraceView: React.FC<TraceViewProps> = ({ sessionId, onStatusMessage
       <input
         ref={fileInputRef}
         type="file"
-        accept=".trc,.asc,.log,.csv,.blf"
+        accept=".trc,.asc,.log,.csv,.blf,.mf4"
         onChange={(e) => void handleOpenLocalTraceFile(e)}
         className="hidden"
       />

@@ -413,7 +413,7 @@ export const TopBar: React.FC<TopBarProps> = ({
       <input
         ref={topBarTraceFileInputRef}
         type="file"
-        accept=".trc,.asc,.log,.csv,.blf"
+        accept=".trc,.asc,.log,.csv,.blf,.mf4"
         onChange={(e) => void handleOpenTraceFromFile(e)}
         className="hidden"
       />

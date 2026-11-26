@@ -7,6 +7,7 @@ release and the app shows this file under **Help → Changelog**.
 ## [Unreleased]
 
 ### Added
+- **Trace: ASAM MDF4 import.** Open `.mf4` recordings with up to 100,000 raw CAN/CAN FD data frames. Trace preserves recorded bus channels, relative timestamps, frame flags and payloads.
 - **Trace: Open in new window.** Move a Trace session into its own viewer while it records. Close the viewer or choose Return to main window to redock.
 - **Receive/Transmit context menus.** Add or edit TX drafts, copy received frames, add decoded signals to Watch, hide live rows, and edit or delete the TX entry under the pointer.
 - **Context menus.** Right-click Trace, RX/TX, Connections and Plotter for local actions or a one-time browser menu.

@@ -873,7 +873,7 @@ export const traceSessionsStore = {
         });
       }
     }
-    const baseStem = sess.fileName.replace(/\.(trc|asc|csv|log|blf)$/i, '');
+    const baseStem = sess.fileName.replace(/\.(trc|asc|csv|log|blf|mf4)$/i, '');
     const outFileName = `${baseStem}.blf`;
     const base64 = await apiExportTraceBlf(outFileName, frames);
     const uint8 = base64ToUint8Array(base64);
@@ -936,7 +936,7 @@ export const traceSessionsStore = {
       targetSession.lastTimestampUs = loaded.frames[loaded.frames.length - 1]?.timestampUs ?? 0;
       targetSession.lastSeenMaxTs = loaded.frames[loaded.frames.length - 1]?.timestampUs ?? -1;
       targetSession.state = 'stopped';
-      targetSession.name = loaded.summary.fileName.replace(/\.(trc|asc|log|csv|blf)$/i, '');
+      targetSession.name = loaded.summary.fileName.replace(/\.(trc|asc|log|csv|blf|mf4)$/i, '');
       targetSession.fileName = loaded.summary.fileName;
       targetSession.savedFilePath = loaded.summary.filePath;
       targetSession.savedAtIso = loaded.summary.updatedAt;
@@ -958,7 +958,7 @@ export const traceSessionsStore = {
       session = {
         id: `trace-${idx}-${now.getTime()}`,
         index: idx,
-        name: loaded.summary.fileName.replace(/\.(trc|asc|log|csv|blf)$/i, ''),
+        name: loaded.summary.fileName.replace(/\.(trc|asc|log|csv|blf|mf4)$/i, ''),
         fileName: loaded.summary.fileName,
         createdAtIso: loaded.summary.updatedAt || now.toISOString(),
         state: 'stopped',
@@ -988,7 +988,7 @@ export const traceSessionsStore = {
   },
 
   /**
-   * Imports a trace file from user's computer (.trc, .asc, .log, .csv, .blf), parses it via backend,
+   * Imports a trace file from user's computer (.trc, .asc, .log, .csv, .blf, .mf4), parses it via backend,
    * opens it in a new Trace tab.
    * If `contentBase64` is provided, passes binary base64 payload to preserve binary integrity.
    */
@@ -1063,7 +1063,7 @@ export const traceSessionsStore = {
       targetSession.lastSeenMaxTs =
         loaded.frames[loaded.frames.length - 1]?.timestampUs ?? -1;
       targetSession.state = 'stopped';
-      targetSession.name = fileName.replace(/\.(trc|asc|log|csv|blf)$/i, '');
+      targetSession.name = fileName.replace(/\.(trc|asc|log|csv|blf|mf4)$/i, '');
       targetSession.fileName = fileName;
       targetSession.savedFilePath = diskSummary?.filePath ?? null;
       targetSession.savedAtIso = diskSummary?.updatedAt ?? now.toISOString();
@@ -1084,7 +1084,7 @@ export const traceSessionsStore = {
       session = {
         id: `trace-${idx}-${now.getTime()}`,
         index: idx,
-        name: fileName.replace(/\.(trc|asc|log|csv|blf)$/i, ''),
+        name: fileName.replace(/\.(trc|asc|log|csv|blf|mf4)$/i, ''),
         fileName,
         createdAtIso: now.toISOString(),
         state: 'stopped',
@@ -1116,7 +1116,7 @@ export const traceSessionsStore = {
 
   /**
    * Automatically inspects a File object:
-   * - If Vector BLF (.blf or 'LOGG' magic), reads as binary ArrayBuffer -> Base64 without UTF-8 corruption.
+   * - For BLF and ASAM MDF4, reads as binary ArrayBuffer -> Base64 without UTF-8 corruption.
    * - Otherwise reads as UTF-8 text (.trc, .asc, .log, .csv).
    * Opens the trace in a tab and persists to `traces/` ONLY if `alsoSaveToDisk` is explicitly true (default false; saving is an explicit user action).
    */
@@ -1124,11 +1124,14 @@ export const traceSessionsStore = {
     file: File,
     alsoSaveToDisk = false,
   ): Promise<TraceSession> {
-    const slice = await file.slice(0, 4).arrayBuffer();
+    const slice = await file.slice(0, 8).arrayBuffer();
     const magic = new Uint8Array(slice);
-    const isBlf = isBlfFile(file.name, magic);
+    const isBinary =
+      isBlfFile(file.name, magic) ||
+      file.name.toLowerCase().endsWith('.mf4') ||
+      ['MDF     ', 'UnFinMF '].includes(new TextDecoder().decode(magic));
 
-    if (isBlf) {
+    if (isBinary) {
       const buf = await file.arrayBuffer();
       const contentBase64 = arrayBufferToBase64(buf);
       return traceSessionsStore.importLocalTraceFile(

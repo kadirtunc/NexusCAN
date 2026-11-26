@@ -12,6 +12,7 @@ pub mod diag_sweep;
 pub mod diag_tap;
 pub mod diag_workspace;
 mod echo_suppress;
+mod mf4;
 pub mod re_analyzer;
 pub mod replay;
 pub mod state_table;
