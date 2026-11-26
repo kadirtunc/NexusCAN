@@ -85,6 +85,18 @@ Dosyalar henüz imzalı değil. Windows'ta SmartScreen uyarısında "Yine de ça
 - **Debug Console**: Backend ve arayüz olaylarını kategorilere ayırarak gösteren, ayrı pencereye alınabilen bir konsol.
 - **Simulation Panels**: DBC sinyallerine bağlanan sürükle-bırak göstergeler (ibre, LED, grafik, buton, slider). İsterseniz veritabanından otomatik taslak da oluşturabilirsiniz.
 
+**Trace ve Receive / Transmit.** Kayıt sürerken Trace oturumunu **Open in new window** ile ayrı pencereye taşıyabilir, **Return to main window** ile geri alabilirsiniz. Pause görünümü yerinde tutar ve kayıt sırasında yukarı kaydırmak otomatik kaydırmayı durdurur. Receive / Transmit sağ tık menüsünden TX taslağı ekleyebilir, seçili RX frame'lerini kopyalayabilir, sinyalleri Watch'a ekleyebilir veya mesajı DBC Studio'da açabilirsiniz.
+
+### DBC Editor
+
+DBC Studio'da veritabanı satırındaki **Edit DB** ile mesajları, sinyalleri, ECU'ları ve değer tablolarını düzenleyin. **Save** mevcut dosyaya yazar, **Save As** yeni bir kopya oluşturur. Bit Matrix'te sinyali sürükleyerek başlangıç bitini değiştirin ve kademeli multiplexer'larda etkin sayfayı seçin. Communication Matrix ile mesaj ilişkilerini, Network Nodes grafiğiyle ECU'lar arasındaki TX/RX bağlantılarını inceleyin.
+
+### CANsub bağlantıları
+
+**CSS Electronics CANsub.2 / CANsub.4** adaptörlerini Windows, macOS ve Linux'ta USB veya Ethernet üzerinden bağlayabilirsiniz. Connection Profile Editor'da **CSS Electronics CANsub** seçin ve mDNS ile bulunan bir cihazı ya da host/IP ve Device ID ile eklediğiniz cihazı seçin. Sürücü donanım zaman damgalarını kullanır ve Listen-Only modunu cihazda uygular. Panic Stop, cihazdaki TX kuyruğunu ve periyodik gönderimleri de temizler.
+
+`nexuscan cansub-selftest <host>` komutu Listen-Only alım istatistiklerini, saat farkını ve error frame'leri JSON olarak raporlar. İsteğe bağlı iki kanallı TX loopback testi de desteklenir.
+
 ### Safety
 
 <img src="docs/assets/tx_control.png" alt="TX modu: bus bazında Listen-Only, Active ve tümünü Disarm" width="62%"/>
@@ -149,7 +161,7 @@ claude mcp add --transport http nexuscan http://127.0.0.1:17800/mcp \
   --header "Authorization: Bearer <TOKEN>"
 ```
 
-Sekiz grupta **46 salt-okunur araç** var:
+Sekiz grupta **47 araç** var:
 
 | Grup | Araç | Asistan ne yapabiliyor |
 | :--- | :---: | :--- |
@@ -160,9 +172,9 @@ Sekiz grupta **46 salt-okunur araç** var:
 | Reverse Engineering | 6 | Heatmap durumu, bit serileri, korelasyon, Value Scan sonuçları, DBC taslağı üretme |
 | Workspace | 4 | Projeler, trace karşılaştırma, Debug Console olayları |
 | Runs & Flows | 4 | Workbench çalıştırma geçmişi, flow kütüphanesi |
-| UI Co-pilot | 7 | Arayüz durumunu okuma, sekme değiştirme, mesaj seçme, Trace filtresi, Plotter'a sinyal ekleme, bildirim gösterme, size evet/hayır sorusu sorma |
+| UI Co-pilot | 8 | Arayüz durumunu okuma, sekme değiştirme, mesaj seçme, Trace filtresi, Plotter'a sinyal ekleme, bildirim gösterme, size evet/hayır sorusu sorma, Active Bus onayı isteme |
 
-**Güvenlik.** Hiçbir MCP aracı hatta veri gönderemiyor, bus'ı arm edemiyor, bus modunu değiştiremiyor, UDS servisi çalıştıramıyor, flash yapamıyor, seed/key hesaplayamıyor, replay başlatamıyor veya dosya yazamıyor. Listen-Only ve Panic Stop'a dokunulmuyor. Sunucu yalnızca `127.0.0.1`'i dinliyor, her başlatmada yeni ve rastgele bir token istiyor, loopback olmayan `Host`/`Origin` başlıklarını reddediyor. Her çağrı Debug Console'a (`MCP` kategorisi) yazılıyor, SecurityAccess / Authentication verisi gizleniyor. Ana pencere kapanınca sunucu da duruyor. Açıklamalarıyla tam araç listesi için MCP panelindeki ⓘ butonuna tıklayın.
+**Güvenlik.** MCP, bağlı tek bir kanal için **Arm Active Bus** isteği gönderebilir. Her istek için masaüstü uygulamasında yeniden onay gerekir ve kayıtlı bağlantı profili korunur. MCP araçları CAN frame'i gönderemez, UDS servisi çalıştıramaz, flash yapamaz, seed/key hesaplayamaz, replay başlatamaz veya dosya yazamaz. Sunucu yalnızca `127.0.0.1`'i dinliyor, her başlatmada yeni ve rastgele bir token istiyor, loopback olmayan `Host`/`Origin` başlıklarını reddediyor. Her çağrı Debug Console'a (`MCP` kategorisi) yazılıyor, SecurityAccess / Authentication verisi gizleniyor. Ana pencere kapanınca sunucu da duruyor. Açıklamalarıyla tam araç listesi için MCP panelindeki ⓘ butonuna tıklayın.
 
 ---
 
@@ -237,7 +249,7 @@ NexusCAN şu an **v0.1 önizleme** aşamasında. Neyin hazır, neyin yolda oldu�
 
 | Alan | Hazır | Sırada |
 |---|---|---|
-| Adapters | SocketCAN (Linux), SLCAN (tüm işletim sistemleri), mock simülatörler, dosyadan oynatma. **gs_usb / candleLight** (sürücü kurulumu gerektirmez) ve **PCAN-Basic** sürücüleri yazıldı. | gs_usb ve PCAN için gerçek donanım testleri, Kvaser, Vector XL |
+| Adapters | SocketCAN (Linux), SLCAN (tüm işletim sistemleri), mock simülatörler, dosyadan oynatma. **gs_usb / candleLight** (sürücü kurulumu gerektirmez), **PCAN-Basic** ve **CANsub.2 / CANsub.4** sürücüleri yazıldı. | gs_usb ve PCAN için gerçek donanım testleri, Kvaser, Vector XL |
 | Safety | Varsayılan Listen-Only, opsiyonel Hardware Listen-Only, onaylı Arm, Stop All TX | Tüm adaptörlerde donanım Listen-Only doğrulaması |
 | Diagnostics | UDS client, ECU Graph, Passive Discovery, Physical Sweep, Traffic Dock, DID / DTC / UDS Console, OBD-II, flash, seed/key, ECU kayıtları, Flow Editor, Workbench, Diagnostic Simulation | Workbench'te toplu çalıştırma ve rapor, çok ECU'lu akışlar, ODX/CDD |
 | Recording | Trace kaydı ve replay, BLF/ASC/TRC/CSV/candump | Tetiklemeli kayıt, ASAM MF4 |

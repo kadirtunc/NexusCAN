@@ -81,6 +81,18 @@ Builds are not code-signed yet. On Windows, SmartScreen asks you to confirm ("Ru
 
 **Receive / Transmit** (top of this page) — per-ID overwrite view with live decoding and cycle times; periodic and one-shot TX of raw or signal-encoded frames, values clamped to their DBC range. **Simulation panels** — drag-and-drop instrument panels (gauges, LEDs, plots, buttons, sliders) bound to DBC signals, or generated as a draft straight from a database.
 
+**Trace and Receive / Transmit.** Choose **Open in new window** to detach a Trace session while it records, then **Return to main window** to redock it. Pause keeps the current viewport, and scrolling back disengages auto-scroll. In Receive / Transmit, right-click to add a TX draft, copy selected RX frames, add signals to Watch, or open a message in DBC Studio.
+
+### DBC editor
+
+In DBC Studio, choose **Edit DB** on a database row to edit messages, signals, ECUs and value tables. **Save** writes to the current file and **Save As** creates a copy. Drag a signal in the Bit Matrix to change its start bit, and select the active page for each multiplexer, including cascaded switches. Use the Communication Matrix to inspect message relationships and the Network Nodes graph to explore TX/RX connections between ECUs.
+
+### CANsub connections
+
+Connect **CSS Electronics CANsub.2 / CANsub.4** adapters over USB or Ethernet on Windows, macOS and Linux. Choose **CSS Electronics CANsub** in the Connection Profile Editor and select a device discovered via mDNS or add it by host/IP and Device ID. The driver uses hardware timestamps and device-enforced Listen-Only. Panic Stop also clears the device's TX queue and periodic jobs.
+
+Run `nexuscan cansub-selftest <host>` for a JSON report with Listen-Only receive statistics, clock offset and error frames. The command also supports an optional two-channel TX loopback test.
+
 ### Safety model
 
 <img src="docs/assets/tx_control.png" alt="TX mode popover: per-bus Listen-Only, Active and Disarm all" width="62%"/>
@@ -152,7 +164,7 @@ claude mcp add --transport http nexuscan http://127.0.0.1:17800/mcp \
   --header "Authorization: Bearer <TOKEN>"
 ```
 
-**46 read-only tools** in eight groups:
+**47 tools** across eight groups.
 
 | Group | Tools | What the assistant can do |
 | :--- | :---: | :--- |
@@ -163,9 +175,9 @@ claude mcp add --transport http nexuscan http://127.0.0.1:17800/mcp \
 | Reverse engineering | 6 | Heatmap status, bit series, correlation, Value Scan results, generate a DBC draft |
 | Workspace | 4 | Projects, trace comparison, Debug Console events |
 | Runs & flows | 4 | Workbench run history, flow library |
-| UI co-pilot | 7 | Read the UI state, switch tabs, select a message, set the Trace filter, add signals to the Plotter, show a notification, ask you a yes/no question |
+| UI co-pilot | 8 | Read the UI state, switch tabs, select a message, set the Trace filter, add signals to the Plotter, show a notification, ask you a yes/no question, request Active Bus approval |
 
-**Safety.** No MCP tool can transmit, arm a bus, change the bus mode, run UDS services, flash, compute seed/keys, start a replay or write files; Listen-Only and Panic Stop are untouched. The server binds to `127.0.0.1` only, requires a fresh random token on every start, rejects non-loopback `Host`/`Origin`, logs every call to the Debug Console (category `MCP`) and redacts SecurityAccess / Authentication data. It stops when the main window closes. Click ⓘ in the MCP panel for the full tool list with descriptions.
+**Safety.** MCP can request **Arm Active Bus** for one connected channel. Each request requires fresh approval in the desktop app and preserves the saved connection profile. MCP tools cannot transmit CAN frames, run UDS services, flash, compute seed/keys, start a replay or write files. The server binds to `127.0.0.1` only, requires a fresh random token on every start, rejects non-loopback `Host`/`Origin`, logs every call to the Debug Console (category `MCP`) and redacts SecurityAccess / Authentication data. It stops when the main window closes. Click ⓘ in the MCP panel for the full tool list with descriptions.
 
 ---
 
@@ -241,7 +253,7 @@ NexusCAN is a **v0.1 preview**. What is real today and what is next, without mar
 
 | Area | Available | Next |
 |---|---|---|
-| Adapters | SocketCAN (Linux), SLCAN (serial, all OS), mock0/mock1 simulators, file replay; **gs_usb / candleLight in pure Rust** (`nusb`, no driver install) and **PCAN-Basic** (runtime-loaded, app starts without it) drivers in the tree | Hardware reports for gs_usb and PCAN on Windows / macOS, Kvaser, Vector XL |
+| Adapters | SocketCAN (Linux), SLCAN (serial, all OS), mock0/mock1 simulators, file replay; **gs_usb / candleLight in pure Rust** (`nusb`, no driver install), **PCAN-Basic** (runtime-loaded), and **CANsub.2 / CANsub.4** | Hardware reports for gs_usb and PCAN on Windows / macOS, Kvaser, Vector XL |
 | Safety | Listen-Only default (shown per bus as HW / SW / virtual), opt-in fail-closed hardware Listen-Only, confirmed Arm, Stop All TX that waits for in-flight writes, explicit Clear Panic, TX gate on every path | Hardware listen-only verified on every adapter family |
 | Diagnostics | UDS client, ECU graph, passive discovery, physical sweep, traffic dock, DID / `0x19` DTC reports / console, OBD-II Mode 01, flashing (`34/36/37`), seed/key providers, ECU registry, Flow Editor, Workbench (single-cell runs), Diagnostic Simulation panels | Workbench queues and report export, multi-ECU procedures, ODX/CDD |
 | Recording | Trace capture and replay, BLF/ASC/TRC/CSV/candump | Lossless backend recorder with triggers, ASAM MF4 |
