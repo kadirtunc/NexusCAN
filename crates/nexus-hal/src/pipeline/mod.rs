@@ -1087,7 +1087,9 @@ impl PipelineEngine {
         if self.is_panic_latched() {
             return Err(panic_latched_error());
         }
-        let bus = buses.get(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?;
+        let bus = buses
+            .get(&bus_id)
+            .ok_or(HalError::BusNotConnected(bus_id))?;
         let health = bus.to_health_dto();
         if !health.connected {
             return Err(HalError::BusNotConnected(bus_id));
@@ -1174,10 +1176,14 @@ impl PipelineEngine {
             let mut old_handle = {
                 let mut buses = self.buses.lock();
                 if let Some(target) = &approval {
-                    let bus = buses.get(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?;
+                    let bus = buses
+                        .get(&bus_id)
+                        .ok_or(HalError::BusNotConnected(bus_id))?;
                     self.validate_bus_arm_target(bus, target)?;
                 }
-                buses.remove(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?
+                buses
+                    .remove(&bus_id)
+                    .ok_or(HalError::BusNotConnected(bus_id))?
             };
             self.tx_scheduler.lock().remove_jobs_for_bus(bus_id);
 

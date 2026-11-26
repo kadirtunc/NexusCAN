@@ -281,7 +281,9 @@ pub struct CansubDriver {
 }
 
 #[cfg(all(feature = "cansub-dev-root", not(debug_assertions)))]
-compile_error!("`cansub-dev-root` is a development-only feature and must not be used in release builds");
+compile_error!(
+    "`cansub-dev-root` is a development-only feature and must not be used in release builds"
+);
 
 #[cfg(not(feature = "cansub-dev-root"))]
 fn default_connector() -> Arc<CansubConnector> {

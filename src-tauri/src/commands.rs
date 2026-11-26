@@ -1055,14 +1055,21 @@ pub async fn cmd_trace_window(
     match action.as_str() {
         "exists" => Ok(existing.is_some()),
         "focus" | "close" => {
-            let Some(view) = existing else { return Ok(false) };
-            let result = if action == "focus" { view.set_focus() } else { view.close() };
+            let Some(view) = existing else {
+                return Ok(false);
+            };
+            let result = if action == "focus" {
+                view.set_focus()
+            } else {
+                view.close()
+            };
             result.map_err(|error| AppError::Ipc(error.to_string()))?;
             Ok(true)
         }
         "open" => {
             if let Some(view) = existing {
-                view.set_focus().map_err(|error| AppError::Ipc(error.to_string()))?;
+                view.set_focus()
+                    .map_err(|error| AppError::Ipc(error.to_string()))?;
                 return Ok(true);
             }
             tauri::WebviewWindowBuilder::new(
