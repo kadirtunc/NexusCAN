@@ -4,8 +4,8 @@
 //! Linux native `SocketCAN` (`can*`, `vcan*`, `slcan*`), cross-OS synthetic multi-mux `mock0`,
 //! and lock-free 60Hz `StateTable` Telemetry Pipeline for NexusCAN.
 
-// `deny` (not `forbid`) so that `drivers::pcan_drv` alone can opt in to the runtime FFI it
-// needs for PEAK PCAN-Basic (`#![allow(unsafe_code)]` there). Every other module stays safe.
+// Vendor driver modules opt in locally to the runtime FFI needed for PCAN-Basic and
+// KvaserUSB. All other modules retain the crate-wide unsafe-code denial.
 #![deny(unsafe_code)]
 
 pub mod debug_log;
@@ -1109,8 +1109,11 @@ mod tests {
                 .cmd_connect_bus("kvaser:0".to_string(), ChannelConfigDto::default())
                 .expect_err("uninstalled Kvaser must return diagnostic error");
             assert!(
-                err.to_string()
-                    .contains("Kvaser CANlib driver is not installed"),
+                err.to_string().contains(if cfg!(target_os = "macos") {
+                    "Kvaser USB driver is not installed"
+                } else {
+                    "Kvaser CANlib driver is not installed"
+                }),
                 "unexpected Kvaser error: {err}"
             );
         }

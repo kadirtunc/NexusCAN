@@ -58,6 +58,27 @@ Builds are not code-signed yet. On Windows, SmartScreen asks you to confirm ("Ru
 
 ---
 
+### Kvaser USB on macOS
+
+Kvaser USB adapters use the runtime-loaded [KvaserUSB driver](https://github.com/cliffrubio/macOS-CAN-Drivers/tree/main/KvaserUSB).
+Install its dependencies with Homebrew, then build and install the library matching the app's CPU architecture.
+
+```sh
+brew install libusb pkg-config
+git clone https://github.com/cliffrubio/macOS-CAN-Drivers.git
+make -C macOS-CAN-Drivers/KvaserUSB
+make -C macOS-CAN-Drivers/KvaserUSB install PREFIX="$(brew --prefix)"
+```
+
+NexusCAN searches `/opt/homebrew/lib/libKvaserUSB.dylib` and `/usr/local/lib/libKvaserUSB.dylib`.
+In Connections, select the Kvaser family and the enumerated channel number, then set the bus bitrate and CAN FD settings.
+Listen-Only requests hardware silent mode and requires firmware confirmation before the connection is accepted.
+Vendor error-frame payloads are skipped, while controller state and TEC/REC are available through bus health.
+
+A Leaf v3 has been verified to open in hardware Listen-Only mode at 500 kbit/s on Apple Silicon.
+Live frame reception, transmission and CAN FD still need hardware validation.
+
+
 ## Tour
 
 ### Bus analysis

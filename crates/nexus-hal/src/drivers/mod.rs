@@ -8,3 +8,6 @@ pub mod probe;
 pub mod slcan_drv;
 #[cfg(target_os = "linux")]
 pub mod socketcan_drv;
+
+#[cfg(target_os = "macos")]
+pub mod kvaser_usb_drv;
