@@ -20,6 +20,10 @@ required-features = ["test-hooks"]
 default = []
 # Test-only instrumentation hooks (bus-io thread start hook). Never enable for shipping builds.
 test-hooks = []
+# Development only (simulator testing): the CANsub driver also trusts the PEM root CA named by
+# `NEXUSCAN_CANSUB_DEV_ROOT` (e.g. `cansub-sim --ca-out`). A compile_error! rejects it without
+# debug_assertions, so it can never reach a release build.
+cansub-dev-root = ["cansub-rs/dev-root"]
 
 [dependencies]
 nexus-core = { workspace = true }
@@ -46,6 +50,12 @@ nusb = { workspace = true }
 futures-lite = { workspace = true }
 # PEAK PCAN-Basic is loaded at runtime (missing DLL/SO never prevents startup).
 libloading = { workspace = true }
+# CSS Electronics CANsub (TLS + REST + WSS, mDNS discovery) — all platforms (contract cansub-v1 §3.4).
+cansub-rs = { workspace = true, features = ["blocking", "discovery"] }
+
+[dev-dependencies]
+# `sim`: in-process CANsub emulator (`cansub::sim::SimHandle`) + `Device::connect_with_root` for tests.
+cansub-rs = { workspace = true, features = ["blocking", "discovery", "sim"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 socketcan = { workspace = true }

@@ -9,6 +9,7 @@ import {
   FileCode2,
   Layers,
   Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -41,6 +42,7 @@ import { useI18n } from '../i18n';
 import type { DeviceDescriptorDto } from '../types/hal';
 import { BitLayoutMatrix } from './BitLayoutMatrix';
 import { DatabaseExplorer } from './DatabaseExplorer';
+import { DbcEditorWorkbench } from './dbc-editor';
 import { NewConnectionModal } from './NewConnectionModal';
 import { GuideInfoButton, GuideTourButton } from '../onboarding/GuideButtons';
 import { GuideStrip } from '../onboarding/GuideStrip';
@@ -83,7 +85,8 @@ export const SymbolsLayoutView: React.FC = () => {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [mode, setMode] = useState<'list' | 'inspect'>('list');
+  const [mode, setMode] = useState<'list' | 'inspect' | 'edit'>('list');
+  const [editingDbId, setEditingDbId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [formatFilter, setFormatFilter] = useState<FormatFilter>('all');
   const [busy, setBusy] = useState<boolean>(false);
@@ -268,6 +271,11 @@ export const SymbolsLayoutView: React.FC = () => {
     setMode('inspect');
   };
 
+  const openEditor = (dbId: string): void => {
+    setEditingDbId(dbId);
+    setMode('edit');
+  };
+
   const handleOpenNewConnectionModal = async () => {
     try {
       const list = await apiListDevices();
@@ -333,6 +341,20 @@ export const SymbolsLayoutView: React.FC = () => {
   // ==========================================================================
   // LEVEL 2 — Symbol tree & bit matrix of ONE explicitly chosen database
   // ==========================================================================
+  if (mode === 'edit' && editingDbId) {
+    return (
+      <div className="flex flex-1 min-h-0 flex-col overflow-hidden bg-canvas">
+        <DbcEditorWorkbench
+          databaseId={editingDbId}
+          onClose={() => {
+            setMode('list');
+            setEditingDbId(null);
+          }}
+        />
+      </div>
+    );
+  }
+
   if (mode === 'inspect' && inspected) {
     return (
       <div className="flex flex-1 min-h-0 flex-col overflow-hidden bg-canvas">
@@ -728,6 +750,14 @@ export const SymbolsLayoutView: React.FC = () => {
                             >
                               <Layers className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
                               {t('netdb.symbols.inspectBitMatrix')}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openEditor(db.id)}
+                              className="inline-flex h-[28px] cursor-pointer items-center gap-1.5 rounded-[2px] border border-hairline bg-elevated px-2.5 font-mono text-[11.5px] font-semibold text-ink hover:border-strong"
+                            >
+                              <Pencil className="h-3.5 w-3.5 text-focus" aria-hidden="true" />
+                              {t('netdb.symbols.editDb')}
                             </button>
                             <button
                               type="button"

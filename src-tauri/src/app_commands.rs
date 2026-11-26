@@ -10,6 +10,7 @@
 pub const APP_COMMANDS: &[&str] = &[
     "cmd_list_devices",
     "cmd_probe_drivers",
+    "cmd_cansub_probe_host",
     "cmd_subscribe_hardware_changes",
     "cmd_connect_bus",
     "cmd_disconnect_bus",
@@ -71,6 +72,7 @@ pub const APP_COMMANDS: &[&str] = &[
     "cmd_clear_debug_events",
     "cmd_export_debug_events",
     "cmd_set_debug_window_open",
+    "cmd_trace_window",
     "cmd_flowlib_list",
     "cmd_flowlib_revisions",
     "cmd_flowlib_load",

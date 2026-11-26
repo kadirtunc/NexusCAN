@@ -1026,11 +1026,12 @@ async fn qa_curl_raw_jsonrpc_smoke() {
             "ui_navigate",
             "ui_notify",
             "ui_plot_signals",
+            "ui_request_bus_arm",
             "ui_select_message",
             "ui_trace_filter",
         ]
     );
-    assert_eq!(names.len(), 46);
+    assert_eq!(names.len(), 47);
     for (n, read_only, not_destructive) in &ro {
         if n.starts_with("ui_") && n != "ui_get_state" {
             assert!(!read_only, "{n}: readOnlyHint must be false");

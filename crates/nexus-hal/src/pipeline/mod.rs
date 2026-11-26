@@ -11,6 +11,7 @@ pub mod diag_session;
 pub mod diag_sweep;
 pub mod diag_tap;
 pub mod diag_workspace;
+mod echo_suppress;
 pub mod re_analyzer;
 pub mod replay;
 pub mod state_table;
@@ -230,6 +231,16 @@ impl HwWatchShutdown {
     }
 }
 
+/// Identity and safety state captured before asking the operator to arm a bus.
+pub struct BusArmTarget {
+    bus_id: BusId,
+    connection: Arc<AtomicBool>,
+    epoch: u64,
+    listen_only: bool,
+    armed: bool,
+    deadline: Instant,
+}
+
 /// Core NexusCAN multi-bus pipeline engine shared by both `src-tauri` and `nexus_bridge`.
 pub struct PipelineEngine {
     registry: Arc<DriverRegistry>,
@@ -284,6 +295,41 @@ pub struct PipelineEngine {
     re: Arc<ReShared>,
     /// Active 10 Hz RE binary snapshot subscription (single subscriber, latest wins).
     re_sub: Mutex<Option<ReSubscription>>,
+}
+
+/// Longest DNS host name (RFC 1035); also bounds IPv4 / `[ipv6]:port` literals.
+pub const CANSUB_MAX_HOST_LEN: usize = 253;
+
+/// Validates `cmd_cansub_probe_host` arguments: `host` is trimmed, non-empty and at most
+/// [`CANSUB_MAX_HOST_LEN`] characters; a non-blank `device_id` must be exactly 8 hex digits and is
+/// normalized to lower case (blank -> `None`). Errors are [`HalError::InvalidInput`].
+pub fn validate_cansub_probe_args(
+    host: &str,
+    device_id: Option<String>,
+) -> Result<(String, Option<String>), HalError> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(HalError::InvalidInput(
+            "CANsub: host / IP address must not be empty".into(),
+        ));
+    }
+    if host.chars().count() > CANSUB_MAX_HOST_LEN {
+        return Err(HalError::InvalidInput(format!(
+            "CANsub: host is longer than {CANSUB_MAX_HOST_LEN} characters"
+        )));
+    }
+    let device_id = match device_id.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(id) if id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            Some(id.to_ascii_lowercase())
+        }
+        Some(id) => {
+            return Err(HalError::InvalidInput(format!(
+                "CANsub: Device ID '{id}' must be exactly 8 hex digits (e.g. 1a2b3c4d)"
+            )))
+        }
+    };
+    Ok((host.to_string(), device_id))
 }
 
 impl Default for PipelineEngine {
@@ -628,6 +674,7 @@ impl PipelineEngine {
         let io_epoch = Arc::clone(&self.tx_epoch);
         let tx_in_flight = Arc::new(AtomicU32::new(0));
         let io_in_flight = Arc::clone(&tx_in_flight);
+        let io_debug = Arc::clone(&self.debug_hub);
 
         let io_join = thread::Builder::new()
             .name(format!("nexus-bus-io-{bus_id}"))
@@ -649,6 +696,7 @@ impl PipelineEngine {
                     io_tx_err,
                     io_rx_err,
                     diag_ctl_rx,
+                    io_debug,
                 );
             })
             .map_err(|e| HalError::Adapter(AdapterError::Io(e)))?;
@@ -755,6 +803,32 @@ impl PipelineEngine {
         self.registry.discover_all()
     }
 
+    /// The registered CSS Electronics CANsub driver (for `CansubDriver::add_known_host`, used by
+    /// the Tauri `cmd_cansub_probe_host` command). `None` only for custom registries without it.
+    pub fn cansub_driver(&self) -> Option<Arc<crate::drivers::cansub_drv::CansubDriver>> {
+        self.registry.cansub()
+    }
+
+    /// `cmd_cansub_probe_host` -> Validates the arguments ([`validate_cansub_probe_args`]),
+    /// connects to a manually entered CANsub host (TLS rules from `device_id` / `accept_any`),
+    /// remembers it for discovery / open and returns one descriptor per channel. Blocking
+    /// network I/O (≤ ~3 s connect timeout): call from a blocking worker, never a UI thread.
+    /// SDK / driver error messages (e.g. the "enter the Device ID" hint) pass through verbatim.
+    pub fn cmd_cansub_probe_host(
+        &self,
+        host: String,
+        device_id: Option<String>,
+        accept_any: bool,
+    ) -> Result<Vec<DeviceDescriptorDto>, HalError> {
+        let (host, device_id) = validate_cansub_probe_args(&host, device_id)?;
+        let driver = self.cansub_driver().ok_or_else(|| {
+            HalError::Adapter(AdapterError::Driver(
+                "CANsub driver is not available in this build".into(),
+            ))
+        })?;
+        Ok(driver.add_known_host(&host, device_id, accept_any)?)
+    }
+
     /// Side-effect-free device discovery (no dead-bus reaping, no lock on `buses`): same list as
     /// [`Self::cmd_list_devices`]. Used by read-only consumers such as the MCP server.
     pub fn discover_devices(&self) -> Vec<DeviceDescriptorDto> {
@@ -785,33 +859,35 @@ impl PipelineEngine {
         // an adapter never hits a zombie `BusAlreadyConnected` error!
         self.reap_dead_buses();
 
-        let result = (|| -> Result<(BusHealthDto, String, ChannelConfigDto), HalError> {
-            {
-                let guard = self.buses.lock();
-                if guard.contains_key(&bus_id) {
-                    return Err(HalError::BusAlreadyConnected(bus_id));
+        let result =
+            (|| -> Result<(BusHealthDto, String, ChannelConfigDto, Option<String>), HalError> {
+                {
+                    let guard = self.buses.lock();
+                    if guard.contains_key(&bus_id) {
+                        return Err(HalError::BusAlreadyConnected(bus_id));
+                    }
                 }
-            }
 
-            let (descriptor, channel) = self
-                .registry
-                .open_by_device_id(&device_id, &config)
-                .map_err(HalError::from_channel_open)?;
-            let driver_id = descriptor.driver_id.clone();
-            if descriptor.driver_id == "gs_usb" && config.adapter_channel.is_some() {
-                config.adapter_channel = Some(descriptor.channel_name.clone());
-            }
-            let cfg_snap = config.clone();
-            let handle =
-                self.spawn_connected_bus_handle(bus_id, descriptor, config, channel, false)?;
+                let (descriptor, channel) = self
+                    .registry
+                    .open_by_device_id(&device_id, &config)
+                    .map_err(HalError::from_channel_open)?;
+                let driver_id = descriptor.driver_id.clone();
+                if descriptor.driver_id == "gs_usb" && config.adapter_channel.is_some() {
+                    config.adapter_channel = Some(descriptor.channel_name.clone());
+                }
+                let cfg_snap = config.clone();
+                let timing_note = channel.bit_timing_note();
+                let handle =
+                    self.spawn_connected_bus_handle(bus_id, descriptor, config, channel, false)?;
 
-            let dto = handle.to_health_dto();
-            self.buses.lock().insert(bus_id, handle);
-            Ok((dto, driver_id, cfg_snap))
-        })();
+                let dto = handle.to_health_dto();
+                self.buses.lock().insert(bus_id, handle);
+                Ok((dto, driver_id, cfg_snap, timing_note))
+            })();
 
         match result {
-            Ok((dto, driver_id, cfg_snap)) => {
+            Ok((dto, driver_id, cfg_snap, timing_note)) => {
                 let bitrate_desc = if cfg_snap.enable_fd {
                     format!(
                         "{} / {} bps (CAN-FD)",
@@ -833,9 +909,13 @@ impl PipelineEngine {
                         dto.channel_name
                     ),
                     Some(format!(
-                        "driver={driver_id}, bitrate={bitrate_desc}, listenOnly={}, enforcement={}",
+                        "driver={driver_id}, bitrate={bitrate_desc}, listenOnly={}, \
+                         enforcement={}{}",
                         dto.listen_only,
-                        dto.listen_only_enforcement.as_deref().unwrap_or("none")
+                        dto.listen_only_enforcement.as_deref().unwrap_or("none"),
+                        timing_note
+                            .map(|n| format!(", timing={n}"))
+                            .unwrap_or_default()
                     )),
                 );
                 Ok(dto)
@@ -994,6 +1074,68 @@ impl PipelineEngine {
         listen_only: bool,
         arm_tx: bool,
     ) -> Result<BusHealthDto, HalError> {
+        self.set_bus_mode(bus_id, listen_only, arm_tx, None)
+    }
+
+    pub fn capture_bus_arm_target(
+        &self,
+        bus_id: BusId,
+        timeout: Duration,
+    ) -> Result<(BusArmTarget, BusHealthDto), HalError> {
+        let buses = self.buses.lock();
+        let epoch = self.tx_epoch.load(Ordering::SeqCst);
+        if self.is_panic_latched() {
+            return Err(panic_latched_error());
+        }
+        let bus = buses.get(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?;
+        let health = bus.to_health_dto();
+        if !health.connected {
+            return Err(HalError::BusNotConnected(bus_id));
+        }
+        Ok((
+            BusArmTarget {
+                bus_id,
+                connection: Arc::clone(&bus.tx_armed),
+                epoch,
+                listen_only: health.listen_only,
+                armed: health.tx_armed,
+                deadline: Instant::now() + timeout.min(Duration::from_secs(60)),
+            },
+            health,
+        ))
+    }
+
+    pub fn arm_confirmed_bus(&self, target: BusArmTarget) -> Result<BusHealthDto, HalError> {
+        self.set_bus_mode(target.bus_id, false, true, Some(target))
+    }
+
+    fn validate_bus_arm_target(
+        &self,
+        bus: &ConnectedBusHandle,
+        target: &BusArmTarget,
+    ) -> Result<(), HalError> {
+        if Instant::now() >= target.deadline
+            || self.tx_epoch.load(Ordering::SeqCst) != target.epoch
+            || self.is_panic_latched()
+            || !Arc::ptr_eq(&bus.tx_armed, &target.connection)
+            || !bus.to_health_dto().connected
+            || bus.listen_only != target.listen_only
+            || bus.tx_armed.load(Ordering::SeqCst) != target.armed
+        {
+            return Err(HalError::SafetyLock(
+                "Arm Active Bus approval expired or the target bus changed".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn set_bus_mode(
+        &self,
+        bus_id: u8,
+        listen_only: bool,
+        arm_tx: bool,
+        approval: Option<BusArmTarget>,
+    ) -> Result<BusHealthDto, HalError> {
         let res = (|| -> Result<BusHealthDto, HalError> {
             let target_armed = arm_tx && !listen_only;
             // A Panic Stop / reset that lands while the channel is reopened bumps the epoch.
@@ -1004,6 +1146,9 @@ impl PipelineEngine {
                 let bus = guard
                     .get(&bus_id)
                     .ok_or(HalError::BusNotConnected(bus_id))?;
+                if let Some(target) = &approval {
+                    self.validate_bus_arm_target(bus, target)?;
+                }
                 if target_armed && self.tx_panic_latched.load(Ordering::SeqCst) {
                     return Err(panic_latched_error());
                 }
@@ -1026,13 +1171,15 @@ impl PipelineEngine {
             }
 
             // Mode change (`listen_only` toggled): stop periodic TX jobs for this bus first.
+            let mut old_handle = {
+                let mut buses = self.buses.lock();
+                if let Some(target) = &approval {
+                    let bus = buses.get(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?;
+                    self.validate_bus_arm_target(bus, target)?;
+                }
+                buses.remove(&bus_id).ok_or(HalError::BusNotConnected(bus_id))?
+            };
             self.tx_scheduler.lock().remove_jobs_for_bus(bus_id);
-
-            let mut old_handle = self
-                .buses
-                .lock()
-                .remove(&bus_id)
-                .ok_or(HalError::BusNotConnected(bus_id))?;
 
             let exact_device_id = old_handle.descriptor.device_id.clone();
             let mut updated_config = old_handle.config.clone();
@@ -1042,6 +1189,12 @@ impl PipelineEngine {
             // Cleanly close the existing handle WITHOUT sending AggregatorControl::ClearBus(bus_id)
             // so captured RX frames on this bus remain visible in StateTable!
             old_handle.shutdown();
+            if approval.is_some()
+                && (self.tx_epoch.load(Ordering::SeqCst) != epoch_at_start
+                    || self.is_panic_latched())
+            {
+                return Err(panic_latched_error());
+            }
 
             let (descriptor, channel) = self
                 .registry
@@ -1052,7 +1205,7 @@ impl PipelineEngine {
             // armed in that case (the bus is reconnected disarmed instead).
             let target_armed = target_armed && !self.tx_panic_latched.load(Ordering::SeqCst);
 
-            let new_handle = self.spawn_connected_bus_handle(
+            let mut new_handle = self.spawn_connected_bus_handle(
                 bus_id,
                 descriptor,
                 updated_config,
@@ -1064,9 +1217,16 @@ impl PipelineEngine {
             // that lock): either we see the bump here, or Panic sees the inserted bus. Nobody can
             // enqueue TX before the insert (its `tx_sender` is not published yet).
             let mut guard = self.buses.lock();
-            if self.tx_epoch.load(Ordering::SeqCst) != epoch_at_start
-                || self.tx_panic_latched.load(Ordering::SeqCst)
-            {
+            let stopped = self.tx_epoch.load(Ordering::SeqCst) != epoch_at_start
+                || self.tx_panic_latched.load(Ordering::SeqCst);
+            if approval.is_some() && (stopped || guard.contains_key(&bus_id)) {
+                drop(guard);
+                new_handle.shutdown();
+                return Err(HalError::SafetyLock(
+                    "Bus changed or Panic Stop interrupted arming".into(),
+                ));
+            }
+            if stopped {
                 new_handle.tx_armed.store(false, Ordering::SeqCst);
             }
             let dto = new_handle.to_health_dto();
@@ -3055,6 +3215,109 @@ fn report_quiesce_timeout(op: &str, buses: &[u8]) {
     );
 }
 
+/// Bus-io side edge detector for Panic Stop -> [`CanChannel::abort_pending_tx`].
+///
+/// Fires when the latch is set and either it was clear on the previous poll (rising edge) or
+/// the epoch moved while it stayed set (a second Panic Stop without Clear). The latch is loaded
+/// BEFORE the epoch: `cmd_panic_stop_tx` bumps the epoch before storing the latch (SeqCst), so a
+/// latch observed as set implies the epoch load already sees that panic's value; one Panic Stop
+/// therefore fires exactly once. (A `cmd_reset_session` while still latched also moves the epoch
+/// and fires once more right before the bus is disconnected; harmless.)
+pub(crate) struct PanicAbortWatch {
+    latched: bool,
+    epoch: u64,
+}
+
+impl PanicAbortWatch {
+    /// Starts from the current state, so a bus opened while latched does not fire.
+    pub(crate) fn new(latch: &AtomicBool, epoch: &AtomicU64) -> Self {
+        let latched = latch.load(Ordering::SeqCst);
+        Self {
+            latched,
+            epoch: epoch.load(Ordering::SeqCst),
+        }
+    }
+
+    /// `true` when `abort_pending_tx` must be called now.
+    #[inline]
+    pub(crate) fn poll(&mut self, latch: &AtomicBool, epoch: &AtomicU64) -> bool {
+        let latched = latch.load(Ordering::SeqCst);
+        let e = epoch.load(Ordering::SeqCst);
+        let fire = latched && (!self.latched || e != self.epoch);
+        self.latched = latched;
+        self.epoch = e;
+        fire
+    }
+}
+
+#[cold]
+fn report_abort_pending_tx_error(debug_hub: &DebugEventHub, bus_id: BusId, err: &AdapterError) {
+    eprintln!(
+        "nexus-hal: WARN panic stop: bus {bus_id}: adapter-side TX abort failed: {err} \
+         (software TX gate is latched regardless)"
+    );
+    debug_hub.record(
+        "error",
+        "SAFETY",
+        "backend",
+        Some(bus_id),
+        "panic_stop.adapter_abort_failed",
+        format!(
+            "Panic Stop: adapter-side TX abort failed on Bus {}",
+            u16::from(bus_id) + 1
+        ),
+        Some(format!("{err} (software TX gate is latched regardless)")),
+    );
+}
+
+/// Minimum spacing of the bus-io thread's cold-path counter reports to the debug console.
+const BUS_IO_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Cold path: driver-side RX drops and pending-echo evictions since the last report
+/// (rate-limited to [`BUS_IO_REPORT_INTERVAL`] by the caller).
+#[cold]
+fn report_bus_io_counters(
+    debug_hub: &DebugEventHub,
+    bus_id: BusId,
+    driver_dropped: u64,
+    echo_evicted: u64,
+) {
+    if driver_dropped > 0 {
+        debug_hub.record(
+            "warning",
+            "TRACE",
+            "backend",
+            Some(bus_id),
+            "bus.driver_rx_overflow",
+            format!(
+                "Adapter RX overflow on Bus {}: frames dropped",
+                u16::from(bus_id) + 1
+            ),
+            Some(format!(
+                "{driver_dropped} frame(s) dropped by the driver RX ring"
+            )),
+        );
+    }
+    if echo_evicted > 0 {
+        debug_hub.record(
+            "warning",
+            "TX",
+            "backend",
+            Some(bus_id),
+            "bus.echo_suppress_overflow",
+            format!(
+                "Bus {}: too many unacknowledged suppressed TX echoes",
+                u16::from(bus_id) + 1
+            ),
+            Some(format!(
+                "{echo_evicted} pending echo(es) evicted (capacity {}); their late TX-acks may \
+                 appear in the trace",
+                echo_suppress::PENDING_ECHO_CAPACITY
+            )),
+        );
+    }
+}
+
 #[cold]
 fn panic_latched_error() -> HalError {
     HalError::SafetyLock(format!(
@@ -3109,6 +3372,7 @@ fn run_bus_io_loop(
     tx_errors: Arc<AtomicU32>,
     rx_errors: Arc<AtomicU32>,
     diag_ctl_rx: Receiver<TapCtl>,
+    debug_hub: Arc<DebugEventHub>,
 ) {
     #[cfg(any(test, feature = "test-hooks"))]
     {
@@ -3118,6 +3382,7 @@ fn run_bus_io_loop(
         }
     }
 
+    let mut panic_watch = PanicAbortWatch::new(&tx_panic_latched, &tx_epoch);
     let gate = GateRefs {
         listen_only,
         tx_armed: Arc::clone(&tx_armed),
@@ -3127,12 +3392,33 @@ fn run_bus_io_loop(
     let mut rx_batch = [RawCanFrame::zeroed(); 256];
     let mut taps = TapTable::new();
     let mut tick_counter = 0u32;
-    let driver_has_self_loopback = channel.descriptor().driver_id == "mock";
-    let mut pending_suppressed_mock_echoes = 0usize;
+    // Drivers that deliver our own TX back as RX (mock0 loopback, CANsub `tx_ack_frames` TX-ack
+    // with `FLAG_TX`): no synthesized echo, otherwise every TX would appear twice in the trace.
+    let driver_has_self_loopback = matches!(
+        channel.descriptor().driver_id.as_str(),
+        "mock" | crate::drivers::cansub_drv::CANSUB_DRIVER_ID
+    );
+    // Suppressed (restbus/replay) TX whose loopback echo is still expected: matched by identity
+    // with a timeout, so an echo that never comes (no ACK on the bus) cannot eat a later TX-ack.
+    let mut pending_echoes = echo_suppress::PendingEchoes::new();
+    // Cold-path counter reporting (driver RX drops, pending-echo evictions).
+    let mut driver_dropped_seen = channel.driver_dropped_frames();
+    let mut reported_driver_dropped = driver_dropped_seen;
+    let mut reported_echo_evicted = 0u64;
+    let mut last_report = Instant::now();
 
     while !bus_stop.load(Ordering::Acquire) && !engine_stop.load(Ordering::Acquire) {
         // 0. Cold path: diag tap add/remove.
         taps.apply_ctl(&diag_ctl_rx);
+
+        // 0b. Panic Stop: discard adapter-side TX work exactly once per Panic (this thread owns
+        //     the channel, so the call is serialized with `send_frame`). Read-only on the latch
+        //     and epoch: the WP-4 SeqCst handshake in `cmd_panic_stop_tx` is unchanged.
+        if panic_watch.poll(&gate.panic_latched, &gate.tx_epoch) {
+            if let Err(e) = channel.abort_pending_tx() {
+                report_abort_pending_tx_error(&debug_hub, bus_id, &e);
+            }
+        }
 
         // 1. Drain outbound TX requests immediately
         while let Ok(req) = tx_rx.try_recv() {
@@ -3181,8 +3467,7 @@ fn run_bus_io_loop(
                         tx_echo.timestamp_us = now_monotonic_us().max(1);
                     }
                     if driver_has_self_loopback && req.suppress_echo {
-                        pending_suppressed_mock_echoes =
-                            pending_suppressed_mock_echoes.saturating_add(1);
+                        pending_echoes.push(&req.frame, now_monotonic_us());
                     } else if !driver_has_self_loopback && !req.suppress_echo {
                         // Synthesized TX echo for Trace / StateTable (diag frames included).
                         if let Err(TrySendError::Full(_)) = frame_tx.try_send(tx_echo) {
@@ -3223,8 +3508,10 @@ fn run_bus_io_loop(
         match channel.recv_batch(&mut rx_batch, 1) {
             Ok(count) => {
                 for frame in &mut rx_batch[..count] {
-                    if pending_suppressed_mock_echoes > 0 && frame.is_tx() {
-                        pending_suppressed_mock_echoes -= 1;
+                    if frame.is_tx()
+                        && !pending_echoes.is_empty()
+                        && pending_echoes.take_match(frame, now_monotonic_us())
+                    {
                         continue;
                     }
                     frame.bus_id = bus_id;
@@ -3253,6 +3540,26 @@ fn run_bus_io_loop(
             bus_state.store(h.state.to_u8(), Ordering::Release);
             tx_errors.store(h.tx_error_count, Ordering::Relaxed);
             rx_errors.store(h.rx_error_count, Ordering::Relaxed);
+            // Frames the driver had to drop before they reached us count as pipeline drops.
+            let drv_dropped = channel.driver_dropped_frames();
+            if drv_dropped > driver_dropped_seen {
+                dropped_frames.fetch_add(drv_dropped - driver_dropped_seen, Ordering::Relaxed);
+                driver_dropped_seen = drv_dropped;
+            }
+            if (driver_dropped_seen != reported_driver_dropped
+                || pending_echoes.evicted_full() != reported_echo_evicted)
+                && last_report.elapsed() >= BUS_IO_REPORT_INTERVAL
+            {
+                report_bus_io_counters(
+                    &debug_hub,
+                    bus_id,
+                    driver_dropped_seen - reported_driver_dropped,
+                    pending_echoes.evicted_full() - reported_echo_evicted,
+                );
+                reported_driver_dropped = driver_dropped_seen;
+                reported_echo_evicted = pending_echoes.evicted_full();
+                last_report = Instant::now();
+            }
             if h.state == BusState::Disconnected {
                 tx_armed.store(false, Ordering::SeqCst);
                 break;
@@ -4850,4 +5157,373 @@ fn compute_lightweight_topology_fingerprint() -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod panic_abort_pending_tx_tests {
+    use super::*;
+    use crate::drivers::mock_drv::MOCK0_DEVICE_ID;
+    use crate::traits::{AdapterCapabilities, BusHealthSnapshot, CanFilter};
+
+    /// mock0 wrapper counting `abort_pending_tx` calls (and the calling thread).
+    struct AbortCountingChannel {
+        inner: Box<dyn CanChannel>,
+        aborts: Arc<AtomicU32>,
+        threads: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CanChannel for AbortCountingChannel {
+        fn descriptor(&self) -> &DeviceDescriptor {
+            self.inner.descriptor()
+        }
+        fn capabilities(&self) -> &AdapterCapabilities {
+            self.inner.capabilities()
+        }
+        fn close(&mut self) -> Result<(), AdapterError> {
+            self.inner.close()
+        }
+        fn recv_batch(
+            &mut self,
+            out_batch: &mut [RawCanFrame],
+            timeout_ms: u32,
+        ) -> Result<usize, AdapterError> {
+            self.inner.recv_batch(out_batch, timeout_ms)
+        }
+        fn send_frame(&mut self, frame: &RawCanFrame) -> Result<(), AdapterError> {
+            self.inner.send_frame(frame)
+        }
+        fn set_filters(&mut self, filters: &[CanFilter]) -> Result<(), AdapterError> {
+            self.inner.set_filters(filters)
+        }
+        fn health(&self) -> BusHealthSnapshot {
+            self.inner.health()
+        }
+        fn abort_pending_tx(&mut self) -> Result<(), AdapterError> {
+            self.aborts.fetch_add(1, Ordering::SeqCst);
+            self.threads
+                .lock()
+                .push(thread::current().name().unwrap_or("").to_string());
+            Ok(())
+        }
+    }
+
+    fn wait_count(c: &AtomicU32, want: u32) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while c.load(Ordering::SeqCst) < want && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+        // Settle: a double call would show up within a few loop iterations.
+        thread::sleep(Duration::from_millis(60));
+        c.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn panic_stop_calls_abort_pending_tx_exactly_once_per_panic() {
+        let engine = PipelineEngine::new();
+        let cfg = ChannelConfigDto {
+            bus_id: 0,
+            listen_only: false,
+            mock_fps_preset: Some(500),
+            ..ChannelConfigDto::default()
+        };
+        let (descriptor, inner) = engine
+            .registry
+            .open_by_device_id(MOCK0_DEVICE_ID, &cfg)
+            .expect("open mock0");
+        let aborts = Arc::new(AtomicU32::new(0));
+        let threads = Arc::new(Mutex::new(Vec::new()));
+        let chan = AbortCountingChannel {
+            inner,
+            aborts: Arc::clone(&aborts),
+            threads: Arc::clone(&threads),
+        };
+        let handle = engine
+            .spawn_connected_bus_handle(0, descriptor, cfg, Box::new(chan), true)
+            .expect("spawn bus");
+        engine.buses.lock().insert(0, handle);
+
+        // No panic yet -> no call.
+        assert_eq!(wait_count(&aborts, 1), 0);
+
+        engine.cmd_panic_stop_tx();
+        assert_eq!(wait_count(&aborts, 1), 1, "first Panic Stop");
+
+        // Second Panic Stop while still latched -> one more call.
+        engine.cmd_panic_stop_tx();
+        assert_eq!(wait_count(&aborts, 2), 2, "second Panic Stop");
+
+        // Clearing the latch never calls it.
+        engine.cmd_clear_panic_latch();
+        assert_eq!(wait_count(&aborts, 3), 2, "clear latch");
+
+        // Latch again after a clear -> rising edge -> one call.
+        engine.cmd_panic_stop_tx();
+        assert_eq!(wait_count(&aborts, 3), 3, "panic after clear");
+
+        // Always on the bus-io thread (the channel owner), never the command thread.
+        let me = thread::current().name().unwrap_or("").to_string();
+        assert!(
+            threads.lock().iter().all(|t| *t != me),
+            "{:?}",
+            threads.lock()
+        );
+        engine.cmd_disconnect_all_buses();
+    }
+
+    #[test]
+    fn watch_fires_once_even_if_epoch_seen_before_latch() {
+        let latch = AtomicBool::new(false);
+        let epoch = AtomicU64::new(0);
+        let mut w = PanicAbortWatch::new(&latch, &epoch);
+        assert!(!w.poll(&latch, &epoch));
+        // Panic half-done (epoch bumped, latch not yet stored) observed by the io thread.
+        epoch.fetch_add(1, Ordering::SeqCst);
+        assert!(!w.poll(&latch, &epoch));
+        latch.store(true, Ordering::SeqCst);
+        assert!(w.poll(&latch, &epoch));
+        assert!(!w.poll(&latch, &epoch));
+        // Opened while latched: no spurious call.
+        let w2 = &mut PanicAbortWatch::new(&latch, &epoch);
+        assert!(!w2.poll(&latch, &epoch));
+    }
+}
+
+/// C7: identity-matched TX-echo suppression in `run_bus_io_loop` (CANsub TX-ack / mock0 loopback).
+#[cfg(test)]
+mod echo_suppress_pipeline_tests {
+    use super::echo_suppress::SUPPRESSED_ECHO_TIMEOUT_US;
+    use super::*;
+    use crate::drivers::cansub_drv::cansub_descriptor;
+    use crate::drivers::mock_drv::MOCK0_DEVICE_ID;
+    use crate::traits::{AdapterCapabilities, BusHealthSnapshot, CanFilter};
+    use nexus_core::{FLAG_HW_TIMESTAMP, FLAG_TX};
+    use std::collections::VecDeque;
+
+    /// CANsub-like channel: TX succeeds, TX-acks are delivered only when the test injects them
+    /// (a frame nobody ACKs on the bus never comes back).
+    struct AckScriptChannel {
+        desc: DeviceDescriptor,
+        acks: Arc<Mutex<VecDeque<RawCanFrame>>>,
+    }
+
+    impl CanChannel for AckScriptChannel {
+        fn descriptor(&self) -> &DeviceDescriptor {
+            &self.desc
+        }
+        fn capabilities(&self) -> &AdapterCapabilities {
+            &self.desc.capabilities
+        }
+        fn close(&mut self) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        fn recv_batch(
+            &mut self,
+            out: &mut [RawCanFrame],
+            timeout_ms: u32,
+        ) -> Result<usize, AdapterError> {
+            let mut q = self.acks.lock();
+            let mut n = 0;
+            while n < out.len() {
+                match q.pop_front() {
+                    Some(f) => {
+                        out[n] = f;
+                        n += 1;
+                    }
+                    None => break,
+                }
+            }
+            drop(q);
+            if n == 0 {
+                thread::sleep(Duration::from_millis(u64::from(timeout_ms)));
+            }
+            Ok(n)
+        }
+        fn send_frame(&mut self, _frame: &RawCanFrame) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        fn set_filters(&mut self, _filters: &[CanFilter]) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        fn health(&self) -> BusHealthSnapshot {
+            BusHealthSnapshot::default()
+        }
+    }
+
+    struct Harness {
+        tx: Sender<TxDispatchRequest>,
+        frames: Receiver<RawCanFrame>,
+        stop: Arc<AtomicBool>,
+        join: Option<JoinHandle<()>>,
+        acks: Option<Arc<Mutex<VecDeque<RawCanFrame>>>>,
+    }
+
+    impl Harness {
+        fn start(
+            channel: Box<dyn CanChannel>,
+            acks: Option<Arc<Mutex<VecDeque<RawCanFrame>>>>,
+        ) -> Self {
+            let (tx, tx_rx) = bounded::<TxDispatchRequest>(64);
+            let (frame_tx, frames) = bounded::<RawCanFrame>(65_536);
+            let stop = Arc::new(AtomicBool::new(false));
+            let (_diag, diag_ctl_rx) = DiagBusShared::new();
+            let s = Arc::clone(&stop);
+            let join = thread::spawn(move || {
+                let _diag = _diag;
+                run_bus_io_loop(
+                    0,
+                    false,
+                    channel,
+                    tx_rx,
+                    frame_tx,
+                    Arc::new(AtomicU64::new(0)),
+                    s,
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(AtomicBool::new(true)),
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(AtomicU64::new(0)),
+                    Arc::new(AtomicU32::new(0)),
+                    Arc::new(AtomicU8::new(0)),
+                    Arc::new(AtomicU32::new(0)),
+                    Arc::new(AtomicU32::new(0)),
+                    diag_ctl_rx,
+                    Arc::new(DebugEventHub::new_in_memory()),
+                );
+            });
+            Self {
+                tx,
+                frames,
+                stop,
+                join: Some(join),
+                acks,
+            }
+        }
+
+        fn cansub() -> Self {
+            let acks = Arc::new(Mutex::new(VecDeque::new()));
+            let chan = AckScriptChannel {
+                desc: cansub_descriptor("0123456789ab", "sim", 1, 1),
+                acks: Arc::clone(&acks),
+            };
+            Self::start(Box::new(chan), Some(acks))
+        }
+
+        /// Sends through the io thread and waits until it was written (and echo bookkeeping done).
+        fn send(&self, frame: RawCanFrame, suppress_echo: bool) {
+            let (ack_tx, ack_rx) = bounded(1);
+            self.tx
+                .send(TxDispatchRequest {
+                    frame,
+                    ack: Some(ack_tx),
+                    suppress_echo,
+                    hw_tx_counter: None,
+                    origin: TxOrigin::Other,
+                    epoch: 0,
+                })
+                .expect("queue tx");
+            ack_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("tx processed")
+                .expect("tx ok");
+        }
+
+        /// Adapter delivers the TX-ack of `frame` (as CANsub does: `FLAG_TX | FLAG_HW_TIMESTAMP`).
+        fn ack(&self, frame: RawCanFrame) {
+            let mut echo = frame.with_flags(FLAG_TX | FLAG_HW_TIMESTAMP);
+            echo.timestamp_us = now_monotonic_us().max(1);
+            self.acks.as_ref().expect("scripted").lock().push_back(echo);
+        }
+
+        /// TX frames that reached the trace within `window`.
+        fn trace_tx(&self, window: Duration) -> Vec<RawCanFrame> {
+            let deadline = Instant::now() + window;
+            let mut out = Vec::new();
+            while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+                match self.frames.recv_timeout(left) {
+                    Ok(f) if f.is_tx() => out.push(f),
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            out
+        }
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(j) = self.join.take() {
+                let _ = j.join();
+            }
+        }
+    }
+
+    fn frame(id: u32, data: &[u8]) -> RawCanFrame {
+        let mut f = RawCanFrame::zeroed();
+        f.arb_id = id;
+        f.dlc = data.len() as u8;
+        f.data[..data.len()].copy_from_slice(data);
+        f
+    }
+
+    #[test]
+    fn unacked_suppressed_frame_does_not_swallow_next_tx_ack() {
+        let h = Harness::cansub();
+        let replay = frame(0x100, &[1, 2, 3, 4]);
+        let real = frame(0x200, &[9, 9]);
+        h.send(replay, true); // never ACKed on the bus
+        h.send(real, false);
+        h.ack(real);
+        let got = h.trace_tx(Duration::from_millis(150));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].arb_id, 0x200);
+    }
+
+    #[test]
+    fn same_frame_sent_twice_both_acks_suppressed() {
+        let h = Harness::cansub();
+        let replay = frame(0x123, &[0xAA; 8]);
+        h.send(replay, true);
+        h.send(replay, true);
+        h.ack(replay);
+        h.ack(replay);
+        let marker = frame(0x7FF, &[0x55]);
+        h.send(marker, false);
+        h.ack(marker);
+        let got = h.trace_tx(Duration::from_millis(150));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].arb_id, 0x7FF);
+    }
+
+    #[test]
+    fn late_ack_after_timeout_appears_once() {
+        let h = Harness::cansub();
+        let replay = frame(0x321, &[7; 3]);
+        h.send(replay, true);
+        thread::sleep(Duration::from_micros(SUPPRESSED_ECHO_TIMEOUT_US + 100_000));
+        h.ack(replay);
+        let got = h.trace_tx(Duration::from_millis(150));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].arb_id, 0x321);
+    }
+
+    /// mock0 behaviour unchanged: suppressed loopback hidden, normal loopback shown exactly once.
+    #[test]
+    fn mock_loopback_suppression_unchanged() {
+        let registry = DriverRegistry::new();
+        let cfg = ChannelConfigDto {
+            bus_id: 0,
+            listen_only: false,
+            mock_fps_preset: Some(100),
+            ..ChannelConfigDto::default()
+        };
+        let (_d, chan) = registry
+            .open_by_device_id(MOCK0_DEVICE_ID, &cfg)
+            .expect("open mock0");
+        let h = Harness::start(chan, None);
+        h.send(frame(0x5A0, &[1]), true);
+        h.send(frame(0x5A1, &[2]), false);
+        let got = h.trace_tx(Duration::from_millis(150));
+        let ids: Vec<u32> = got.iter().map(|f| f.arb_id).collect();
+        assert_eq!(ids, vec![0x5A1]);
+    }
 }

@@ -57,3 +57,10 @@ Thumbs.db
 !/.agents/skills/nexuscan-*/
 __pycache__/
 *.pyc
+
+# graphify knowledge graph (local)
+graphify-out/
+
+# Local video render outputs
+/brag-output/
+/brag-output-*/

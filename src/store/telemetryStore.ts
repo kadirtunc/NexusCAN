@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { BusHealthDto } from '../types/hal';
 import type {
   ChronologicalFrameDto,
@@ -24,9 +24,11 @@ export class ChronoRingBuffer {
   private cap: number;
   private head = 0;
   private len = 0;
-  private evicted = 0;
+  private evicted: number;
+  private resetCount = 0;
 
-  constructor(capacity: number) {
+  constructor(capacity: number, baseSeq = 0) {
+    this.evicted = baseSeq;
     this.cap = Math.max(
       MIN_CHRONO_BUFFER_ROWS,
       Math.min(MAX_CHRONO_BUFFER_ROWS, Math.floor(capacity)),
@@ -45,6 +47,10 @@ export class ChronoRingBuffer {
   /** Monotonic sequence ID of logical index 0 (`frameUid = baseSeq + logicalIndex`). */
   get baseSeq(): number {
     return this.evicted;
+  }
+
+  get generation(): number {
+    return this.resetCount;
   }
 
   push(item: ChronologicalFrameDto): void {
@@ -67,6 +73,7 @@ export class ChronoRingBuffer {
   }
 
   clear(): void {
+    this.resetCount += 1;
     this.buf = new Array<ChronologicalFrameDto | undefined>(this.cap);
     this.head = 0;
     this.len = 0;
@@ -577,6 +584,32 @@ export function useTelemetryHeader(): TelemetryHeaderSlice {
     telemetryStore.getHeaderSlice,
     telemetryStore.getHeaderSlice,
   );
+}
+
+const TELEMETRY_INDICATOR_INTERVAL_MS = 500;
+
+function readTelemetryIndicators() {
+  const { fpsRx, estimatedBusLoadPct } = telemetryStore.getHeaderSlice();
+  return { fpsRx, estimatedBusLoadPct };
+}
+
+/** Samples display indicators independently of the live telemetry subscription. */
+export function useTelemetryIndicators() {
+  const [indicators, setIndicators] = useState(readTelemetryIndicators);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const next = readTelemetryIndicators();
+      setIndicators((previous) =>
+        previous.fpsRx === next.fpsRx && previous.estimatedBusLoadPct === next.estimatedBusLoadPct
+          ? previous
+          : next,
+      );
+    }, TELEMETRY_INDICATOR_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return indicators;
 }
 
 export function useTelemetryFrames(): TelemetryFramesSlice {

@@ -39,7 +39,7 @@ Commercial CAN tools are powerful, expensive and closed. Open-source ones are gr
 - **Your database, fully understood.** A 3-stage `.dbc` / `.kcd` compiler: Intel and Motorola bit layouts, signed and IEEE-754 signals, cascaded multiplexers, CAN-FD 64-byte payloads, J1939 PGNs.
 - **Safe by default.** Channels open **Listen-Only**. Transmitting needs an explicit, confirmed **Arm**, and **Stop All TX** is one click away on every screen.
 - **Diagnostics you can see.** Discover the ECUs on the bus, put them on a map, click one, and every request, response, NRC and ISO-TP frame lines up underneath, each frame tagged by the backend with the exact transaction it belongs to.
-- **Reverse engineering built in.** Bit-level toggle heatmaps, baseline → action diffs, a field classifier, signal correlation against OBD-II and a Cheat-Engine-style value scan. Every signal you find can be saved straight to a DBC.
+- **Reverse engineering built in.** Bit-level toggle heatmaps, baseline → action diffs, a field classifier, signal correlation against OBD-II and an iterative value scan. Every signal you find can be saved straight to a DBC.
 - **Real data or nothing.** Outside the clearly badged Demo mode, no view ever fabricates a value.
 
 ---
@@ -129,7 +129,7 @@ TX state is always visible in the top bar. Disarming is instant; arming a bus ta
 
 Also in the box: OBD-II Mode 01 live PIDs (labelled as OBD, not UDS) and the UDS Console.
 
-### Reverse engineering (car hacking)
+### Reverse engineering
 
 A dedicated **Reverse Engineering** tab for finding undocumented signals. It is passive only: nothing here transmits, and it runs on live buses (SocketCAN, adapters, the bridge) as well as on the clearly badged Demo source.
 
@@ -139,7 +139,7 @@ A dedicated **Reverse Engineering** tab for finding undocumented signals. It is 
 - **Signal Inspector** — select bits on a byte × bit grid and see up to four candidate interpretations (length, byte order, signed, float32/64, factor/offset) plotted live. All bit math comes from the same compiled-DBC engine used everywhere else.
 - **Correlation search** — against an OBD-II PID decoded from responses on the bus, numeric values at your markers, or another candidate. An exhaustive sweep (every start bit × length × byte order × sign, about 6 200 candidates for a classic frame in about 0.1 s) ranks fields by |r|, fits factor/offset by least squares and finds time lags of up to ±500 ms.
 - **Save to DBC** — a found signal becomes a draft (name, scaling, range, unit, value table, plus provenance such as `RE: r=0.998 lag=+120ms ref=OBD 0x0D`) kept in the project. *Apply to bus* loads all drafts as `RE_found.dbc` so the trace, inspector and plots decode them immediately. *Export .dbc* writes a standalone file, and *Merge into DBC…* adds them to an existing database as a new file. Every generated DBC is re-parsed and verified bit-for-bit before it is offered.
-- **Value Scan** — Cheat Engine for CAN: scan for an exact, physical (with scale presets such as ×0.01 or −40 offset), range or unknown value, change something on the vehicle, then narrow with *changed / unchanged / increased / decreased / increased by N / stable for T ms* until the signal is left. Values can be typed in decimal or `0x` hex. Undo goes back up to eight steps, and identically moving nested fields are grouped. A million candidates are scanned in about 50 ms; any result opens in the Signal Inspector or saves to DBC.
+- **Value Scan** — iterative narrowing: scan for an exact, physical (with scale presets such as ×0.01 or −40 offset), range or unknown value, change something on the vehicle, then narrow with *changed / unchanged / increased / decreased / increased by N / stable for T ms* until the signal is left. Values can be typed in decimal or `0x` hex. Undo goes back up to eight steps, and identically moving nested fields are grouped. A million candidates are scanned in about 50 ms; any result opens in the Signal Inspector or saves to DBC.
 
 ### AI co-pilot (MCP server)
 

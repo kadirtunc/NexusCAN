@@ -10,14 +10,18 @@ const LEVEL_CLASS: Record<UiNotifyLevel, string> = {
 };
 
 /** Toasts and Yes/No dialog requested by Claude through the MCP UI bridge. */
-export const McpUiOverlay: React.FC = () => {
+interface McpUiOverlayProps {
+  onPanicStop: () => Promise<void>;
+}
+
+export const McpUiOverlay: React.FC<McpUiOverlayProps> = ({ onPanicStop }) => {
   const { t } = useI18n();
   const { toasts, confirm } = useMcpUiOverlay();
 
   useEffect(() => {
     if (!confirm) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') mcpUiOverlayStore.answerConfirm(false);
+      if (e.key === 'Escape') mcpUiOverlayStore.answerConfirm(false, confirm.id);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -44,7 +48,7 @@ export const McpUiOverlay: React.FC = () => {
       )}
       {confirm && (
         <div
-          onClick={() => mcpUiOverlayStore.answerConfirm(false)}
+          onClick={() => mcpUiOverlayStore.answerConfirm(false, confirm.id)}
           className="fixed inset-0 z-[70] bg-[var(--bg-scrim)] flex items-center justify-center p-4 select-none"
         >
           <div
@@ -73,14 +77,24 @@ export const McpUiOverlay: React.FC = () => {
             <div className="px-5 pb-4 flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => mcpUiOverlayStore.answerConfirm(false)}
+                onClick={() => {
+                  mcpUiOverlayStore.answerConfirm(false, confirm.id);
+                  void onPanicStop();
+                }}
+                className="mr-auto px-3 h-[28px] border border-[var(--status-critical-border)] bg-[var(--status-critical-bg)] text-critical cursor-pointer text-[12px]"
+              >
+                {t('shell.toolbar.stopAllTx')}
+              </button>
+              <button
+                type="button"
+                onClick={() => mcpUiOverlayStore.answerConfirm(false, confirm.id)}
                 className="px-3 h-[28px] border border-[var(--border-strong)] bg-[var(--bg-toolbar)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer text-[12px]"
               >
                 {t('mcp.ui.no')}
               </button>
               <button
                 type="button"
-                onClick={() => mcpUiOverlayStore.answerConfirm(true)}
+                onClick={() => mcpUiOverlayStore.answerConfirm(true, confirm.id)}
                 className="px-3 h-[28px] border border-[var(--status-focus-border)] bg-[var(--status-focus-bg)] text-focus hover:bg-hover cursor-pointer text-[12px] font-semibold"
               >
                 {confirm.confirmLabel ?? t('mcp.ui.yes')}

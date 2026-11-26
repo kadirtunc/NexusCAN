@@ -92,7 +92,7 @@ export interface TraceSession {
   createdAtIso: string;
   state: TraceRecordingState;
   ring: ChronoRingBuffer;
-  /** Snapshot clone used while `state === 'paused'` so live capture can optionally continue or freeze cleanly */
+  /** The displayed ring stays fixed while capture is paused. */
   displayRing: ChronoRingBuffer;
   version: number;
   count: number;
@@ -458,14 +458,8 @@ export const traceSessionsStore = {
     const target = traceSessionsStore.getSession(sessionId);
     const nextSessions = storeState.sessions.map((s) => {
       if (s.id !== target.id || s.state !== 'recording') return s;
-      const snapClone = s.ring.cloneSnapshot();
-      return {
-        ...s,
-        state: 'paused' as const,
-        displayRing: snapClone,
-        version: s.version + 1,
-        count: snapClone.length,
-      };
+      // Incoming telemetry only appends to recording sessions.
+      return { ...s, state: 'paused' as const, version: s.version + 1 };
     });
     recomputeAndEmit(nextSessions);
     logUiDebugEvent({
@@ -594,9 +588,6 @@ export const traceSessionsStore = {
     const nextSessions = storeState.sessions.map((s) => {
       if (s.id !== sessionId) return s;
       s.ring.resize(clamped);
-      if (s.displayRing !== s.ring) {
-        s.displayRing.resize(clamped);
-      }
       return {
         ...s,
         maxBufferRows: clamped,
@@ -620,12 +611,9 @@ export const traceSessionsStore = {
     const nextSessions = storeState.sessions.map((s) => {
       if (s.id !== target.id) return s;
       s.ring.clear();
-      if (s.displayRing !== s.ring) {
-        s.displayRing.clear();
-      }
       return {
         ...s,
-        displayRing: s.state === 'paused' ? s.ring.cloneSnapshot() : s.ring,
+        displayRing: s.ring,
         version: s.version + 1,
         count: 0,
         totalCaptured: 0,

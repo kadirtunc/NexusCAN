@@ -1,3 +1,4 @@
+import { openContextMenu } from './ContextMenu';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BookOpen,
@@ -43,6 +44,9 @@ import {
   pickNextUnusedSerialPort,
   type SavedConnectionProfile,
   buildChannelConfigForProfile,
+  isCansubBitrateSupported,
+  isCansubFdAvailable,
+  nearestCansubDataBitrate,
   clampBusId,
   connectionStore,
   findNextFreeBusId,
@@ -69,6 +73,7 @@ import type {
   UsbCanDeviceDto,
 } from '../types/hal';
 import { BusStateBadge } from './BusStateBadge';
+import { CansubFields } from './connection/CansubFields';
 import { EnforcementBadge } from './EnforcementBadge';
 import type { StatusBanner } from './TopBar';
 import { DatabaseBindingPicker } from './DatabaseBindingPicker';
@@ -93,6 +98,7 @@ const DRIVER_FAMILY_OPTIONS: readonly {
   { id: 'pcan', labelKey: 'conn.driver.pcan', shortTag: 'PCAN' },
   { id: 'kvaser', labelKey: 'conn.driver.kvaser', shortTag: 'KVASER' },
   { id: 'vector_xl', labelKey: 'conn.driver.vector_xl', shortTag: 'VECTOR_XL' },
+  { id: 'cansub', labelKey: 'conn.driver.cansub', shortTag: 'CANSUB' },
   { id: 'mock', labelKey: 'conn.driver.mock', shortTag: 'MOCK' },
 ];
 
@@ -101,10 +107,24 @@ interface OsDriverRefData {
   setupSteps: OsSetupStepDto[];
 }
 
+const CANSUB_OS_REF: OsDriverRefData = {
+  sourceLocations: ['mDNS (_http._tcp, <id>-usb.local / <id>-eth.local) + manually added hosts'],
+  setupSteps: [
+    {
+      title: 'CSS Electronics CANsub (USB / Ethernet)',
+      description:
+        'Network device: no driver needed. Connect via USB (virtual Ethernet) or Ethernet; add the host manually if mDNS cannot see it.',
+      commandOrAction: null,
+      docUrl: 'https://canlogger.csselectronics.com/cansub-docs/cansub4/llms.txt',
+    },
+  ],
+};
+
 const OS_DRIVER_REFERENCE: Record<
   DriverFamilyId,
   Record<'linux' | 'windows' | 'macos', OsDriverRefData>
 > = {
+  cansub: { linux: CANSUB_OS_REF, windows: CANSUB_OS_REF, macos: CANSUB_OS_REF },
   socketcan: {
     linux: {
       sourceLocations: [
@@ -900,6 +920,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
     return map;
   }, [connState.probeReport]);
 
+  const cansubFdBlocked = draft.driverFamily === 'cansub' && !isCansubFdAvailable(draft.bitrate);
   const draftDriverStatus = familyStatusMap.get(draft.driverFamily);
 
   const maxUsedBusId = useMemo(
@@ -980,6 +1001,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           '0',
         );
         enableFd = true;
+      } else if (family === 'cansub') {
+        adapterChannel = devices.find((d) => d.driverId === 'cansub')?.deviceId ?? '';
+        enableFd = isCansubFdAvailable(prev.bitrate);
       } else if (family === 'slcan') {
         const serialCandidates = serialPorts.map((s) => s.portName);
         serialPort = pickNextUnusedSerialPort(
@@ -999,6 +1023,13 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
         serialPort,
         enableFd,
       };
+      if (family === 'cansub') {
+        updated.networkHost = null;
+        updated.networkDeviceId = null;
+        updated.networkAcceptAnyDevice = false;
+        updated.dataBitrate = nearestCansubDataBitrate(updated.bitrate, updated.dataBitrate)
+          ?? updated.dataBitrate;
+      }
       updated.deviceId = resolveDeviceIdForProfile(updated);
       return updated;
     });
@@ -1332,6 +1363,17 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
       return null;
     }
 
+    if (draft.driverFamily === 'cansub') {
+      if (!draft.adapterChannel.trim()) {
+        onStatusMessage({ kind: 'error', message: t('conn.cansub.channelRequired') });
+        return null;
+      }
+      if (!isCansubBitrateSupported(draft.bitrate, draft.dataBitrate, draft.enableFd)) {
+        onStatusMessage({ kind: 'error', message: t('conn.modal.cansubDataUnsupported') });
+        return null;
+      }
+    }
+
     const normalized: SavedConnectionProfile = {
       ...draft,
       name: draft.name.trim() || `Bus ${draft.busId + 1} (${draft.driverFamily})`,
@@ -1355,7 +1397,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   const handleConnectOrDisconnectProfile = async (
     profile: SavedConnectionProfile,
   ): Promise<void> => {
-    const liveBus = header.buses.find(
+    const liveBus = telemetryStore.getHeaderSlice().buses.find(
       (b) => b.busId === profile.busId && b.connected,
     );
     setBusyProfileId(profile.id);
@@ -1402,6 +1444,31 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           }),
         });
       }
+    } catch (err) {
+      onStatusMessage({
+        kind: 'error',
+        message: t('conn.status.connFailed', {
+          name: profile.name,
+          err: describeTxError(err),
+        }),
+      });
+    } finally {
+      setBusyProfileId(null);
+    }
+  };
+
+  const handleDeleteProfile = async (profile: SavedConnectionProfile): Promise<void> => {
+    const liveBus = telemetryStore.getHeaderSlice().buses.find(
+      (bus) => bus.busId === profile.busId && bus.connected,
+    );
+    setBusyProfileId(profile.id);
+    try {
+      if (liveBus) {
+        await apiDisconnectBus(profile.busId);
+        telemetryStore.removeBusHealth(profile.busId);
+      }
+      connectionStore.removeProfile(profile.id);
+      if (draft.id === profile.id) setEditorOpen(false);
     } catch (err) {
       onStatusMessage({
         kind: 'error',
@@ -1608,6 +1675,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
 
   return (
     <div
+      onContextMenu={(event) => openContextMenu(event, [
+        { label: t('conn.btn.newProfile'), run: handleCreateNewProfile },
+        { label: t('conn.btn.addSimulator'), run: () => void handleAddMockProfile() },
+        { label: t('netdb.symbols.refresh'), run: () => void runDriverProbe(false) },
+      ])}
       style={{ backgroundColor: 'var(--bg-panel)' }}
       className="flex flex-col flex-1 min-h-0 overflow-hidden select-none"
     >
@@ -2354,6 +2426,27 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                     return (
                       <tr
                         key={prof.id}
+                        onContextMenu={(event) => openContextMenu(event, [
+                          {
+                            label: t(liveBus ? 'conn.btn.disconnect' : 'conn.btn.connect'),
+                            run: () => void handleConnectOrDisconnectProfile(prof),
+                            disabled: busyProfileId !== null,
+                          },
+                          {
+                            label: t('conn.btn.editTitle'),
+                            run: () => {
+                              connectionStore.selectProfile(prof.id);
+                              setDraft({ ...prof });
+                              setEditorOpen(true);
+                            },
+                          },
+                          { label: t('conn.btn.duplicateTitle'), run: () => handleDuplicateProfile(prof) },
+                          {
+                            label: t('conn.btn.deleteTitle'),
+                            run: () => void handleDeleteProfile(prof),
+                            disabled: busyProfileId !== null,
+                          },
+                        ])}
                         onClick={() => {
                           connectionStore.selectProfile(prof.id);
                           setDraft({ ...prof });
@@ -2376,7 +2469,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                             <input
                               type="checkbox"
                               checked={Boolean(liveBus)}
-                              disabled={busyProfileId === prof.id}
+                              disabled={busyProfileId !== null}
                               onChange={() =>
                                 void handleConnectOrDisconnectProfile(prof)
                               }
@@ -2517,7 +2610,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                           <div className="pcan-cell gap-1.5 font-sans">
                             <button
                               type="button"
-                              disabled={busyProfileId === prof.id}
+                              disabled={busyProfileId !== null}
                               onClick={() =>
                                 void handleConnectOrDisconnectProfile(prof)
                               }
@@ -2591,9 +2684,8 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                             {connState.profiles.length > 0 && (
                               <button
                                 type="button"
-                                onClick={() =>
-                                  connectionStore.removeProfile(prof.id)
-                                }
+                                disabled={busyProfileId !== null}
+                                onClick={() => void handleDeleteProfile(prof)}
                                 style={{
                                   backgroundColor: 'var(--bg-toolbar)',
                                   borderColor: 'var(--border-strong)',
@@ -3264,6 +3356,38 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               </div>
             )}
 
+            {draft.driverFamily === 'cansub' && (
+              <div className="space-y-1">
+                {draft.adapterChannel && (
+                  <div className="text-[var(--text-secondary)]">
+                    {t('conn.modal.channelCansub')} <span className="font-mono tabular-nums">{draft.adapterChannel}</span>
+                  </div>
+                )}
+                <CansubFields
+                  key={draft.id}
+                  discovered={devices}
+                  selectedDeviceId={draft.deviceId}
+                  initialNetwork={{
+                    host: draft.networkHost ?? null,
+                    deviceId: draft.networkDeviceId ?? null,
+                    acceptAny: draft.networkAcceptAnyDevice === true,
+                  }}
+                  onSelect={(device, net) => setDraft((prev) =>
+                    prev.id === draft.id && prev.driverFamily === 'cansub'
+                      ? {
+                          ...prev,
+                          deviceId: device.deviceId,
+                          adapterChannel: device.deviceId,
+                          networkHost: net.host,
+                          networkDeviceId: net.deviceId,
+                          networkAcceptAnyDevice: net.acceptAny,
+                        }
+                      : prev,
+                  )}
+                />
+              </div>
+            )}
+
             {draft.driverFamily === 'mock' && (
               <div className="grid grid-cols-2 gap-2.5">
                 <div>
@@ -3340,7 +3464,17 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   aria-label={t('conn.editor.nominalBitrate')}
                   value={draft.bitrate}
                   onChange={(e) =>
-                    setDraft((p) => ({ ...p, bitrate: Number(e.target.value) }))
+                    setDraft((p) => {
+                      const bitrate = Number(e.target.value);
+                      if (p.driverFamily !== 'cansub') return { ...p, bitrate };
+                      const dataBitrate = nearestCansubDataBitrate(bitrate, p.dataBitrate);
+                      return {
+                        ...p,
+                        bitrate,
+                        enableFd: p.enableFd && isCansubFdAvailable(bitrate),
+                        dataBitrate: dataBitrate ?? p.dataBitrate,
+                      };
+                    })
                   }
                   style={{
                     backgroundColor: 'var(--bg-input)',
@@ -3363,7 +3497,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                 </label>
                 <select
                   aria-label={t('conn.editor.fdDataBitrate')}
-                  disabled={!draft.enableFd || draft.driverFamily === 'slcan'}
+                  disabled={!draft.enableFd || draft.driverFamily === 'slcan' || cansubFdBlocked}
                   value={draft.dataBitrate}
                   onChange={(e) =>
                     setDraft((p) => ({
@@ -3378,11 +3512,15 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   }}
                   className="w-full h-[30px] px-2 border font-mono tabular-nums text-[12px] disabled:opacity-50"
                 >
-                  {DATA_BITRATES_FD.map((b) => (
-                    <option key={b.value} value={b.value}>
-                      {b.label}
-                    </option>
-                  ))}
+                  {DATA_BITRATES_FD.map((b) => {
+                    const unsupported = draft.driverFamily === 'cansub'
+                      && !isCansubBitrateSupported(draft.bitrate, b.value, true);
+                    return (
+                      <option key={b.value} value={b.value} disabled={unsupported}>
+                        {unsupported ? `${b.label} - ${t('conn.modal.cansubDataUnsupported')}` : b.label}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
             </div>
@@ -3391,7 +3529,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               <label className="flex items-center gap-2 cursor-pointer text-[12px]">
                 <input
                   type="checkbox"
-                  checked={draft.enableFd}
+                  checked={draft.enableFd && !cansubFdBlocked}
+                  disabled={cansubFdBlocked}
+                  title={cansubFdBlocked ? t('conn.modal.cansubFdUnavailable') : undefined}
                   onChange={(e) =>
                     setDraft((p) => ({ ...p, enableFd: e.target.checked }))
                   }

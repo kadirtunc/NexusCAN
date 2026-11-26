@@ -62,6 +62,7 @@ import {
 import {
   telemetryStore,
   useTelemetryHeader,
+  useTelemetryIndicators,
   useTelemetryFrames,
 } from '../store/telemetryStore';
 import {
@@ -105,6 +106,10 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
   const dbState = useDatabaseStore();
   const simPanels = useSimulationPanelStore();
   const header = useTelemetryHeader();
+  const { estimatedBusLoadPct } = useTelemetryIndicators();
+  const busLoadPct = header.transportConnected && header.buses.some((bus) => bus.connected)
+    ? estimatedBusLoadPct
+    : 0;
   const framesSlice = useTelemetryFrames();
   const cloudHeader = useCloudBridgeHeader();
   const cloudOn = useExperimentalCloud();
@@ -2035,16 +2040,16 @@ export const ProjectExplorerDock: React.FC<ProjectExplorerDockProps> = ({
                   {t('shell.dock.watchBusLoad')}
                 </span>
                 <span className="text-right pr-2 text-[var(--text-primary)] font-semibold font-mono tabular-nums">
-                  {header.estimatedBusLoadPct.toFixed(1)} %
+                  {busLoadPct.toFixed(1)} %
                 </span>
                 <div className="w-full bg-elevated h-2.5 rounded-xs overflow-hidden">
                   <div
                     style={{
-                      width: `${Math.min(100, Math.max(0, header.estimatedBusLoadPct))}%`,
+                      width: `${Math.min(100, Math.max(0, busLoadPct))}%`,
                       backgroundColor:
-                        header.estimatedBusLoadPct > 85
+                        busLoadPct > 85
                           ? 'var(--status-critical)'
-                          : header.estimatedBusLoadPct > 70
+                          : busLoadPct > 70
                             ? 'var(--status-warn)'
                             : 'var(--status-nominal)',
                     }}

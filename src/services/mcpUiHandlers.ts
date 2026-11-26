@@ -26,6 +26,7 @@ export interface UiHost {
   plotSignals(add: string[], remove: string[], clear: boolean): { plotSignals: string[]; unknown: string[] };
   notify(level: UiNotifyLevel, text: string): void;
   confirm(title: string, message: string, confirmLabel: string | null): Promise<boolean>;
+  confirmBusArm?(busId: number, device: string, channel: string): Promise<boolean>;
 }
 
 export interface UiResponse {
@@ -156,6 +157,8 @@ export function describeUiAction(kind: string, args: unknown): { label: string; 
     }
     case 'notify':
       return { label: 'Claude → notify', summary: 'notify' };
+    case 'confirm_bus_arm':
+      return { label: 'MCP → Arm Active Bus', summary: 'bus approval' };
     case 'confirm':
       return { label: 'Claude → confirm', summary: 'confirm' };
     default:
@@ -208,6 +211,15 @@ async function run(host: UiHost, kind: string, args: unknown): Promise<unknown> 
       if (!isStr(o.text) || o.text.trim().length === 0) throw new Error("'text' must be a non-empty string");
       host.notify(o.level, o.text);
       return {};
+    }
+    case 'confirm_bus_arm': {
+      const o = argObj(args);
+      const { busId, device, channel } = o;
+      if (typeof busId !== 'number' || !Number.isInteger(busId) || busId < 0 || busId > 255
+        || !isStr(device) || !isStr(channel) || !host.confirmBusArm) {
+        throw new Error('Invalid Active Bus approval request');
+      }
+      return { confirmed: await host.confirmBusArm(busId, device, channel) };
     }
     case 'confirm': {
       const o = argObj(args);

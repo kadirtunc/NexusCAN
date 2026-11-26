@@ -1,3 +1,4 @@
+import { nativeContextMenuPending, openContextMenu, showContextMenu } from './ContextMenu';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
@@ -1520,7 +1521,14 @@ export const PlotterView: React.FC = () => {
 
           {/* Oscilloscope Canvas Workspace */}
           {plotState.series.length === 0 ? (
-            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center gap-2">
+            <div
+              onContextMenu={(event) => openContextMenu(event, [{
+                label: t('plotter.empty.loadSamples'),
+                run: handleAddQuickDemoSignals,
+                disabled: !signalTreeBundle.hasAnySchema,
+              }])}
+              className="flex-1 flex flex-col items-center justify-center p-6 text-center gap-2"
+            >
               <Activity className="w-8 h-8 text-[var(--text-muted)]" />
               <div className="text-[13px] font-semibold text-[var(--text-primary)]">
                 {t('plotter.empty.title')}
@@ -1844,6 +1852,47 @@ interface CompactStackedScopeCanvasProps {
   spaceUsedForDragRef: React.MutableRefObject<boolean>;
 }
 
+function usePlotContextMenu() {
+  const { t } = useI18n();
+  const gesture = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const items = () => [
+    { label: t('plotter.zoom.reset'), run: () => plotStore.resetFullView() },
+    { label: t('context.followLive'), run: () => plotStore.setLiveFollow(true) },
+  ];
+
+  return {
+    onContextMenu(event: React.MouseEvent<HTMLCanvasElement>) {
+      if (event.button === 2) event.preventDefault();
+      else openContextMenu(event, items());
+    },
+    start(event: React.PointerEvent<HTMLCanvasElement>): boolean {
+      if (event.button !== 2) return true;
+      if (nativeContextMenuPending()) return false;
+      gesture.current = { x: event.clientX, y: event.clientY, moved: false };
+      return true;
+    },
+    move(event: React.PointerEvent<HTMLCanvasElement>) {
+      const start = gesture.current;
+      if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 6) {
+        start.moved = true;
+      }
+    },
+    finish(event: React.PointerEvent<HTMLCanvasElement>) {
+      const start = gesture.current;
+      gesture.current = null;
+      if (event.type === 'pointerup' && event.button === 2 && start && !start.moved
+        && Math.hypot(event.clientX - start.x, event.clientY - start.y) < 6) {
+        showContextMenu({
+          x: event.clientX,
+          y: event.clientY,
+          anchor: event.currentTarget,
+          items: items(),
+        });
+      }
+    },
+  };
+}
+
 const CompactStackedScopeCanvas: React.FC<CompactStackedScopeCanvasProps> = ({
   entries,
   dragTool,
@@ -1853,6 +1902,7 @@ const CompactStackedScopeCanvas: React.FC<CompactStackedScopeCanvasProps> = ({
   spaceHeldRef,
   spaceUsedForDragRef,
 }) => {
+  const contextMenu = usePlotContextMenu();
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sizeRef = useRef<{ w: number; h: number }>({ w: 800, h: 400 });
@@ -2653,9 +2703,12 @@ const CompactStackedScopeCanvas: React.FC<CompactStackedScopeCanvasProps> = ({
     >
       <canvas
         ref={canvasRef}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
+        tabIndex={0}
+        onContextMenu={contextMenu.onContextMenu}
+        onPointerDown={(event) => { if (contextMenu.start(event)) onPointerDown(event); }}
+        onPointerMove={(event) => { contextMenu.move(event); onPointerMove(event); }}
+        onPointerUp={(event) => { onPointerUp(event); contextMenu.finish(event); }}
+        onPointerCancel={(event) => { onPointerUp(event); contextMenu.finish(event); }}
         onDoubleClick={onDoubleClick}
         onPointerLeave={() => {
           localHoverRef.current = null;
@@ -2693,6 +2746,7 @@ const ScopeCanvas: React.FC<ScopeCanvasProps> = ({
   spaceUsedForDragRef,
   title,
 }) => {
+  const contextMenu = usePlotContextMenu();
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sizeRef = useRef<{ w: number; h: number }>({ w: 800, h: 300 });
@@ -4003,11 +4057,12 @@ const ScopeCanvas: React.FC<ScopeCanvasProps> = ({
       <canvas
         ref={canvasRef}
         style={{ cursor: cursorCss }}
-        onContextMenu={(e) => e.preventDefault()}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
+        tabIndex={0}
+        onContextMenu={contextMenu.onContextMenu}
+        onPointerDown={(event) => { if (contextMenu.start(event)) handlePointerDown(event); }}
+        onPointerMove={(event) => { contextMenu.move(event); handlePointerMove(event); }}
+        onPointerUp={(event) => { handlePointerUp(event); contextMenu.finish(event); }}
+        onPointerCancel={(event) => { handlePointerUp(event); contextMenu.finish(event); }}
         onDoubleClick={handleDoubleClick}
         onPointerLeave={() => {
           localHoverRef.current = null;

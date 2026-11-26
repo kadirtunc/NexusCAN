@@ -1,0 +1,36 @@
+# cargo-fuzz harness for cansub-rs (contract cansub-v1 §4 L2b). NOT part of the stable workspace
+# build: this directory has its own `[workspace]` and requires a nightly toolchain.
+#   cd crates/cansub && cargo +nightly fuzz run decoder_push -- -max_total_time=600
+[package]
+name = "cansub-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cansub-rs = { path = "..", default-features = false }
+
+# Standalone workspace so the root `crates/*` workspace never builds (or locks) this crate.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decoder_push"
+path = "fuzz_targets/decoder_push.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
+test = false
+doc = false
+bench = false

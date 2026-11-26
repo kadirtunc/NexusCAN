@@ -1,5 +1,6 @@
 export type DriverFamilyId =
   | 'mock'
+  | 'cansub'
   | 'socketcan'
   | 'slcan'
   | 'pcan'
@@ -32,11 +33,17 @@ export interface ChannelConfigDto {
   /** Opt-in fail-closed: refuse to connect when hardware Listen-Only cannot be enforced (physical adapters only). */
   requireHardwareListenOnly?: boolean;
   mockFpsPreset: number | null;
-  driverFamily?: string | null; // 'mock' | 'socketcan' | 'slcan' | 'pcan' | 'kvaser' | 'gs_usb' | 'vector_xl'
+  driverFamily?: string | null; // 'mock' | 'socketcan' | 'slcan' | 'pcan' | 'kvaser' | 'gs_usb' | 'vector_xl' | 'cansub'
   serialPort?: string | null; // e.g. 'COM3', '/dev/ttyUSB0', '/dev/ttyACM0', '/dev/cu.usbmodem...'
   serialBaudRate?: number | null; // e.g. 115200, 230400, 460800, 921600, 1000000, 2000000
   serialDtrRts?: boolean | null; // USB-CDC DTR/RTS assertion
   adapterChannel?: string | null; // e.g. 'PCAN_USBBUS1', '0', 'can0', 'vcan0'
+  /** CANsub: manual host/IP, e.g. "aabbccdd-usb.local" | "192.168.1.50" | "10.0.0.5:443". */
+  networkHost?: string | null;
+  /** CANsub: 8-hex device identity used for TLS verification. */
+  networkDeviceId?: string | null;
+  /** CANsub: chain-only TLS verification (no device identity check). */
+  networkAcceptAnyDevice?: boolean;
 }
 
 export type BusStateKind = 'active' | 'warning' | 'passive' | 'busOff' | 'disconnected';

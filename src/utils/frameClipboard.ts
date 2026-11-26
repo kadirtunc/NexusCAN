@@ -49,8 +49,9 @@ export function formatFrameLine(f: ClipboardFrame): string {
 
 /** Parses a frame line; returns null when invalid. Lenient on case and optional flags. */
 export function parseFrameLine(text: string): ClipboardFrame | null {
-  const firstLine = text.trim().split(/\r?\n/)[0] ?? '';
-  const tok = firstLine.trim().split(/\s+/);
+  const line = text.trim();
+  if (/\r|\n/.test(line)) return null;
+  const tok = line.split(/\s+/);
   if (tok.length < 3) return null;
 
   const idTok = tok[0].replace(/^0x/i, '');
@@ -96,14 +97,31 @@ export function parseFrameLine(text: string): ClipboardFrame | null {
   return { busId: null, arbId, isExtended, isFd, isBrs, len, bytes, symbolName: '' };
 }
 
-// ── Module-level in-app frame clipboard ──────────────────────────────────────
-let clipboardFrame: ClipboardFrame | null = null;
+export function formatFrameLines(frames: readonly ClipboardFrame[]): string {
+  return frames.map(formatFrameLine).join('\n');
+}
+
+export function parseFrameLines(text: string): ClipboardFrame[] | null {
+  const frames: ClipboardFrame[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const frame = parseFrameLine(line);
+    if (!frame) return null;
+    frames.push(frame);
+  }
+  return frames.length > 0 ? frames : null;
+}
+
+let clipboard = { frames: [] as readonly ClipboardFrame[], systemSynced: false };
 
 export const frameClipboard = {
-  get(): ClipboardFrame | null {
-    return clipboardFrame;
+  get() {
+    return clipboard;
   },
-  set(frame: ClipboardFrame | null): void {
-    clipboardFrame = frame;
+  set(frames: readonly ClipboardFrame[]): void {
+    clipboard = { frames, systemSynced: false };
+  },
+  markSystemSynced(frames: readonly ClipboardFrame[]): void {
+    if (clipboard.frames === frames) clipboard = { frames, systemSynced: true };
   },
 };

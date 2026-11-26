@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use nexus_netdb::{parse_and_compile, DiagnosticSeverity, ParseDiagnostic, ParseOptions};
 use thiserror::Error;
 
+pub use crate::cansub_selftest::CansubSelftestArgs;
+
 /// Exact version string emitted by `nexuscan agent version` and `nexuscan --version`.
 pub const CLI_VERSION: &str = "0.1.0-cli";
 
@@ -18,6 +20,7 @@ pub enum HelpTopic {
     AgentRun,
     Dbc,
     DbcLint,
+    CansubSelftest,
 }
 
 impl HelpTopic {
@@ -33,6 +36,7 @@ impl HelpTopic {
                  \x20 agent run [FLAGS]       Start Listen-Only CAN/CAN-FD to NexusCANCloud telemetry bridge\n\
                  \x20 agent version           Print exact agent CLI version (0.1.0-cli)\n\
                  \x20 dbc lint <file.dbc|kcd> Parse, compile, and validate a Vector .dbc or Kayak .kcd file\n\
+                 \x20 cansub-selftest <host>  CSS Electronics CANsub device acceptance test (JSON report)\n\
                  \n\
                  OPTIONS:\n\
                  \x20 -h, --help              Print help information\n\
@@ -109,6 +113,31 @@ impl HelpTopic {
                  \x20 0   Database parsed and compiled cleanly with zero error-severity diagnostics\n\
                  \x20 1   File I/O error, fatal parse/compile error, or any [ERROR] diagnostic\n"
             }
+            Self::CansubSelftest => {
+                "CSS Electronics CANsub.2 / CANsub.4 device acceptance test (JSON report on stdout)\n\
+                 \n\
+                 USAGE:\n\
+                 \x20 nexuscan cansub-selftest <host> [FLAGS]\n\
+                 \x20 nexuscan cansub-selftest 10.123.45.1 --device-id 1a2b3c4d --ch 1 --duration-s 30\n\
+                 \n\
+                 FLAGS:\n\
+                 \x20     --device-id <8 hex>      Device ID; verified against the TLS certificate (host may be an IP)\n\
+                 \x20     --accept-any             Without a Device ID: accept any genuine CANsub (CSS root)\n\
+                 \x20     --ch <n>                 Channel under test, 1-based (default: 1)\n\
+                 \x20     --duration-s <s>         Listen-only RX duration in seconds (default: 30)\n\
+                 \x20     --bitrate <bps>          Nominal bitrate (default: 500000)\n\
+                 \x20     --data-bitrate <bps>     CAN-FD data bitrate (default: 2000000)\n\
+                 \x20     --fd                     Configure CAN-FD timing\n\
+                 \x20     --tx-loopback <rx_ch>    ACTIVE TX: switch <ch> out of listen-only, send 100 frames\n\
+                 \x20                              (ID 0x7E0..0x7FF) and receive them on <rx_ch> (same bus).\n\
+                 \x20                              <ch> is returned to listen-only afterwards.\n\
+                 \x20 -h, --help                   Print help information\n\
+                 \n\
+                 EXIT CODES:\n\
+                 \x20 0   All checks passed\n\
+                 \x20 1   A check failed (RX error, loopback loss, invalid timing, ...)\n\
+                 \x20 2   Connection / TLS / API version failure\n"
+            }
         }
     }
 }
@@ -145,6 +174,7 @@ pub enum CliCommand {
     Help(HelpTopic),
     DbcLint { path: PathBuf },
     AgentRun(AgentRunArgs),
+    CansubSelftest(CansubSelftestArgs),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -199,6 +229,7 @@ where
         "-V" | "--version" | "version" => Ok(CliCommand::Version),
         "agent" => parse_agent_subcommand(&tokens[1..]),
         "dbc" => parse_dbc_subcommand(&tokens[1..]),
+        "cansub-selftest" => parse_cansub_selftest_args(&tokens[1..]),
         other if other.starts_with('-') => Err(CliError::UnknownFlag {
             flag: other.to_string(),
             help_cmd: "nexuscan --help",
@@ -438,6 +469,116 @@ fn parse_agent_run_flags(tokens: &[String]) -> Result<CliCommand, CliError> {
     }
 
     Ok(CliCommand::AgentRun(out))
+}
+
+fn parse_u32_flag(flag: &str, val: &str, expected: &'static str) -> Result<u32, CliError> {
+    val.parse::<u32>().map_err(|_| CliError::InvalidFlagValue {
+        flag: flag.to_string(),
+        value: val.to_string(),
+        expected,
+    })
+}
+
+fn parse_channel_flag(flag: &str, val: &str) -> Result<u8, CliError> {
+    val.parse::<u8>()
+        .ok()
+        .filter(|c| (1..=4).contains(c))
+        .ok_or_else(|| CliError::InvalidFlagValue {
+            flag: flag.to_string(),
+            value: val.to_string(),
+            expected: "channel number 1..=4",
+        })
+}
+
+fn parse_cansub_selftest_args(tokens: &[String]) -> Result<CliCommand, CliError> {
+    const HELP: &str = "nexuscan cansub-selftest --help";
+    let mut out = CansubSelftestArgs::default();
+    let mut host: Option<String> = None;
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        let raw = &tokens[idx];
+        idx += 1;
+        if raw == "-h" || raw == "--help" {
+            return Ok(CliCommand::Help(HelpTopic::CansubSelftest));
+        }
+        if !raw.starts_with('-') {
+            if host.is_some() {
+                return Err(CliError::PositionalArgumentError(format!(
+                    "Unexpected extra positional argument '{raw}' in 'nexuscan cansub-selftest'"
+                )));
+            }
+            host = Some(raw.clone());
+            continue;
+        }
+        let (flag, inline_val) = match raw.split_once('=') {
+            Some((f, v)) => (f, Some(v)),
+            None => (raw.as_str(), None),
+        };
+        match flag {
+            "--device-id" => {
+                let v = take_required_value(flag, inline_val, tokens, &mut idx)?;
+                let v = v.trim().to_ascii_lowercase();
+                if v.len() != 8 || !v.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(CliError::InvalidFlagValue {
+                        flag: flag.to_string(),
+                        value: v,
+                        expected: "8 hex digits (e.g. 1a2b3c4d)",
+                    });
+                }
+                out.device_id = Some(v);
+            }
+            "--accept-any" => out.accept_any = true,
+            "--fd" => out.fd = true,
+            "--ch" => {
+                let v = take_required_value(flag, inline_val, tokens, &mut idx)?;
+                out.channel = parse_channel_flag(flag, &v)?;
+            }
+            "--tx-loopback" => {
+                let v = take_required_value(flag, inline_val, tokens, &mut idx)?;
+                out.tx_loopback = Some(parse_channel_flag(flag, &v)?);
+            }
+            "--duration-s" => {
+                let v = take_required_value(flag, inline_val, tokens, &mut idx)?;
+                let d = parse_u32_flag(flag, &v, "seconds 1..=86400")?;
+                if !(1..=86_400).contains(&d) {
+                    return Err(CliError::InvalidFlagValue {
+                        flag: flag.to_string(),
+                        value: v,
+                        expected: "seconds 1..=86400",
+                    });
+                }
+                out.duration_s = d;
+            }
+            "--bitrate" => {
+                let v = take_required_value(flag, inline_val, tokens, &mut idx)?;
+                out.bitrate = parse_u32_flag(flag, &v, "bitrate in bit/s (e.g. 500000)")?;
+            }
+            "--data-bitrate" | "--dbitrate" => {
+                let v = take_required_value(flag, inline_val, tokens, &mut idx)?;
+                out.data_bitrate = parse_u32_flag(flag, &v, "bitrate in bit/s (e.g. 2000000)")?;
+            }
+            _ => {
+                return Err(CliError::UnknownFlag {
+                    flag: flag.to_string(),
+                    help_cmd: HELP,
+                })
+            }
+        }
+    }
+    out.host = host.ok_or_else(|| {
+        CliError::PositionalArgumentError(
+            "Missing <host> for 'nexuscan cansub-selftest' (e.g. 10.123.45.1 or 1a2b3c4d-usb.local)"
+                .to_string(),
+        )
+    })?;
+    if out.tx_loopback == Some(out.channel) {
+        return Err(CliError::InvalidFlagValue {
+            flag: "--tx-loopback".to_string(),
+            value: out.channel.to_string(),
+            expected: "an RX channel different from --ch",
+        });
+    }
+    Ok(CliCommand::CansubSelftest(out))
 }
 
 fn take_required_value(

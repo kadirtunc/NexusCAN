@@ -1,0 +1,91 @@
+[package]
+name = "cansub-rs"
+version = "0.1.0"
+edition = "2021"
+# tungstenite 0.30 requires 1.85. The `sim` feature and dev-dependencies (rcgen, proptest)
+# require 1.88; the no_std `proto` core builds on 1.85 without them.
+rust-version = "1.85"
+# Deliberately NOT `license.workspace = true`: the SDK is dual-licensed for crates.io.
+license = "MIT OR Apache-2.0"
+authors = ["NexusCAN Engineering Team"]
+repository = "https://github.com/NexusCAN/NexusCAN"
+description = "Rust SDK for CSS Electronics CANsub.2 / CANsub.4 CAN / CAN-FD interfaces (HDLC wire codec, REST + WebSocket client, mDNS discovery, device emulator)"
+readme = "README.md"
+keywords = ["can", "can-fd", "cansub", "automotive", "no-std"]
+categories = ["hardware-support", "embedded", "no-std", "network-programming"]
+# Stays false until CSS Electronics approves the crate name (contract cansub-v1 §7 C9).
+publish = false
+include = ["src/**", "certs/**", "examples/**", "README.md", "CHANGELOG.md", "LICENSE-MIT", "LICENSE-APACHE"]
+
+[lib]
+name = "cansub"
+
+[features]
+default = []
+# Internal: everything except the `proto` / `timing` / `certs` core needs std.
+std = []
+# serde derives on public value types (works in no_std).
+serde = ["dep:serde"]
+# Blocking REST + WSS client (contract §3.3).
+blocking = ["std", "dep:rustls", "dep:rustls-pki-types", "dep:tungstenite", "dep:bytes", "dep:thiserror", "dep:serde", "dep:serde_json"]
+# Development only: exposes `Device::connect_with_root` (trust an extra root CA, e.g. the
+# `cansub-sim` run-time root) without pulling in the emulator. Never enable in shipping builds.
+dev-root = ["blocking"]
+# Reserved: async mirror of the blocking surface (v1 optional, not used by NexusCAN).
+tokio = ["std"]
+# mDNS `_cansub._tcp` discovery.
+discovery = ["std", "dep:mdns-sd"]
+# Device emulator server + `cansub-sim` binary (contract §5).
+sim = ["blocking", "dep:rcgen"]
+
+[dependencies]
+serde = { version = "1.0", default-features = false, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+# Same crypto provider (ring) as the workspace `ureq`. REST is a small hand-written HTTP/1.1 client on
+# our own rustls stream: ureq 3 has no hook for the custom §2.6 `ServerCertVerifier` (contract §3.5 C3).
+rustls = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
+# TLS stream is built by us (pinned CSS root, custom SAN verifier) and handed to tungstenite,
+# so no tungstenite TLS feature (`rustls-tls-native-roots` is explicitly forbidden, §3.5).
+tungstenite = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+mdns-sd = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+hex = "0.4"
+sha2 = "0.11"
+base64 = { workspace = true }
+
+[[example]]
+name = "list_devices"
+required-features = ["blocking"]
+
+[[example]]
+name = "candump"
+required-features = ["blocking"]
+
+[[example]]
+name = "send_frame"
+required-features = ["blocking"]
+
+[[test]]
+name = "client_sim"
+required-features = ["sim"]
+
+[[test]]
+name = "client_alloc"
+required-features = ["sim"]
+
+[[bin]]
+name = "cansub-sim"
+path = "src/bin/cansub-sim.rs"
+required-features = ["sim"]
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

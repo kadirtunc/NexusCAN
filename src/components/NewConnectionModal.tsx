@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Plug, Save, X } from 'lucide-react';
 import {
   DATA_BITRATES_FD,
+  isCansubBitrateSupported,
+  isCansubFdAvailable,
+  nearestCansubDataBitrate,
   KVASER_ADAPTER_CHANNELS,
   MAX_BUS_ID,
   NOMINAL_BITRATES,
@@ -27,6 +30,7 @@ import { telemetryStore } from '../store/telemetryStore';
 import { useI18n, type TranslationKey } from '../i18n';
 import type { DeviceDescriptorDto, DriverFamilyId } from '../types/hal';
 import type { StatusBanner } from './TopBar';
+import { CansubFields, type CansubNetworkConfig } from './connection/CansubFields';
 import { DatabaseBindingPicker } from './DatabaseBindingPicker';
 import { databaseStore } from '../store/databaseStore';
 import { ensureMockPresetDatabasesLoaded, syncAllBusDatabasesWithBackend } from '../utils/busDatabaseSync';
@@ -44,6 +48,7 @@ const DRIVER_OPTIONS: readonly { id: DriverFamilyId; labelKey: TranslationKey }[
   { id: 'pcan', labelKey: 'conn.driver.pcan' },
   { id: 'kvaser', labelKey: 'conn.driver.kvaser' },
   { id: 'vector_xl', labelKey: 'conn.driver.vector_xl' },
+  { id: 'cansub', labelKey: 'conn.driver.cansub' },
   { id: 'mock', labelKey: 'conn.driver.mock' },
 ];
 
@@ -191,6 +196,11 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
   const [databaseIds, setDatabaseIds] = useState<string[]>(() =>
     databaseStore.getState().databases.map((d) => d.id),
   );
+  const [cansubNet, setCansubNet] = useState<CansubNetworkConfig>({
+    host: null,
+    deviceId: null,
+    acceptAny: false,
+  });
   const [busy, setBusy] = useState<boolean>(false);
 
   const handleFamilyChange = (fam: DriverFamilyId): void => {
@@ -301,6 +311,12 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
       setAdapterChannel(ch);
       setName(`Vector XL (ch${ch})`);
       setEnableFd(true);
+    } else if (fam === 'cansub') {
+      const first = devices.find((d) => d.driverId === 'cansub');
+      setAdapterChannel(first?.deviceId ?? '');
+      setName(first?.displayName ?? 'CANsub');
+      setCansubNet({ host: null, deviceId: null, acceptAny: false });
+      setEnableFd(true);
     } else if (fam === 'mock') {
       const ch = pickNextUnusedChannel(
         'mock',
@@ -318,6 +334,18 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
     }
   };
 
+  // CANsub: keep nominal/data selection on a combination the device can open.
+  const cansubFdBlocked = driverFamily === 'cansub' && !isCansubFdAvailable(bitrate);
+  const cansubComboInvalid =
+    driverFamily === 'cansub' && !isCansubBitrateSupported(bitrate, dataBitrate, enableFd);
+  useEffect(() => {
+    if (driverFamily !== 'cansub' || !enableFd) return;
+    if (isCansubBitrateSupported(bitrate, dataBitrate, true)) return;
+    const next = nearestCansubDataBitrate(bitrate, dataBitrate);
+    if (next === null) setEnableFd(false);
+    else setDataBitrate(next);
+  }, [driverFamily, enableFd, bitrate, dataBitrate]);
+
   const buildProfile = (explicitDbIds?: string[]): SavedConnectionProfile => {
     const raw: SavedConnectionProfile = {
       id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -329,6 +357,9 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
       serialPort: serialPort.trim(),
       serialBaudRate,
       serialDtrRts: true,
+      networkHost: driverFamily === 'cansub' ? cansubNet.host : null,
+      networkDeviceId: driverFamily === 'cansub' ? cansubNet.deviceId : null,
+      networkAcceptAnyDevice: driverFamily === 'cansub' ? cansubNet.acceptAny : false,
       bitrateProfileId: enableFd ? 'fd_500k_2m' : 'can_500k',
       bitrate,
       enableFd: driverFamily === 'slcan' ? false : enableFd,
@@ -344,6 +375,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
   };
 
   const handleSaveOnly = async (): Promise<void> => {
+    if (cansubComboInvalid) return;
     let effectiveDbIds = [...databaseIds];
     if (driverFamily === 'mock' && effectiveDbIds.length === 0) {
       effectiveDbIds = await ensureMockPresetDatabasesLoaded();
@@ -359,6 +391,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
   };
 
   const handleSaveAndConnect = async (): Promise<void> => {
+    if (cansubComboInvalid) return;
     setBusy(true);
     try {
       let effectiveDbIds = [...databaseIds];
@@ -548,6 +581,8 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                       ? t('conn.modal.channelKvaser')
                       : driverFamily === 'socketcan'
                         ? t('conn.modal.channelInterface')
+                        : driverFamily === 'cansub'
+                          ? t('conn.modal.channelCansub')
                         : t('conn.modal.channelDevice')}
               </label>
 
@@ -638,6 +673,19 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                     </option>
                   ))}
                 </select>
+              ) : driverFamily === 'cansub' ? (
+                <input
+                  type="text"
+                  value={adapterChannel}
+                  readOnly
+                  placeholder="cansub:aabbccdd@1"
+                  style={{
+                    backgroundColor: 'var(--bg-input)',
+                    borderColor: 'var(--border-strong)',
+                    color: 'var(--text-primary)',
+                  }}
+                  className="w-full h-[26px] px-2 border text-[11px] font-mono tabular-nums focus:outline-none"
+                />
               ) : driverFamily === 'vector_xl' ? (
                 <select
                   value={adapterChannel}
@@ -777,6 +825,18 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
             </div>
           </div>
 
+          {driverFamily === 'cansub' && (
+            <CansubFields
+              discovered={devices.filter((d) => d.driverId === 'cansub')}
+              selectedDeviceId={adapterChannel}
+              onSelect={(d, net) => {
+                setAdapterChannel(d.deviceId);
+                setName(d.displayName);
+                setCansubNet(net);
+              }}
+            />
+          )}
+
           {/* Row 3: Bitrate & CAN-FD settings */}
           <div className="grid grid-cols-2 gap-2.5">
             <div>
@@ -809,8 +869,9 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                 <label className="inline-flex items-center gap-1 text-[11px] cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={enableFd && driverFamily !== 'slcan'}
-                    disabled={driverFamily === 'slcan'}
+                    checked={enableFd && driverFamily !== 'slcan' && !cansubFdBlocked}
+                    disabled={driverFamily === 'slcan' || cansubFdBlocked}
+                    title={cansubFdBlocked ? t('conn.modal.cansubFdUnavailable') : undefined}
                     onChange={(e) => setEnableFd(e.target.checked)}
                     className="accent-nominal cursor-pointer"
                   />
@@ -818,7 +879,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                 </label>
                 <select
                   value={dataBitrate}
-                  disabled={!enableFd || driverFamily === 'slcan'}
+                  disabled={!enableFd || driverFamily === 'slcan' || cansubFdBlocked}
                   onChange={(e) => setDataBitrate(Number(e.target.value))}
                   style={{
                     backgroundColor: 'var(--bg-input)',
@@ -827,11 +888,15 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
                   }}
                   className="flex-1 h-[26px] px-2 border text-[11px] font-mono tabular-nums focus:outline-none disabled:opacity-50"
                 >
-                  {DATA_BITRATES_FD.map((db) => (
-                    <option key={db.value} value={db.value}>
-                      {db.label}
-                    </option>
-                  ))}
+                  {DATA_BITRATES_FD.map((db) => {
+                    const unsupported =
+                      driverFamily === 'cansub' && !isCansubBitrateSupported(bitrate, db.value, true);
+                    return (
+                      <option key={db.value} value={db.value} disabled={unsupported}>
+                        {unsupported ? `${db.label} - ${t('conn.modal.cansubDataUnsupported')}` : db.label}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
             </div>
@@ -951,7 +1016,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || cansubComboInvalid}
               onClick={handleSaveOnly}
               style={{
                 backgroundColor: 'var(--bg-panel)',
@@ -966,7 +1031,7 @@ export const NewConnectionModal: React.FC<NewConnectionModalProps> = ({
 
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || cansubComboInvalid}
               onClick={() => void handleSaveAndConnect()}
               style={{
                 backgroundColor: 'var(--status-nominal-bg)',

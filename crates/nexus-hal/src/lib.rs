@@ -23,6 +23,10 @@ pub mod traits;
 
 pub use debug_log::{DebugEventHub, BURST_COALESCE_WINDOW_MS, DEBUG_RING_CAPACITY};
 
+pub use drivers::cansub_drv::{
+    cansub_descriptor, parse_cansub_device_id, CansubChannel, CansubConnector, CansubDriver,
+    KnownHost, CANSUB_DRIVER_ID,
+};
 pub use drivers::gs_usb_drv::{
     compute_gs_usb_bittiming, decode_gs_host_frame, encode_gs_host_frame, resolve_gs_usb_candidate,
     usb_device_location_info, GsBtCapabilities, GsDecodedPacket, GsDeviceConfig, GsUsbBitTiming,

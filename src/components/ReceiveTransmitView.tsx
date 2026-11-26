@@ -1,3 +1,4 @@
+import { copyMenuText, openContextMenu } from './ContextMenu';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
@@ -30,6 +31,7 @@ import {
   apiTransmitRawFrame,
   apiTransmitSignalFrame,
 } from '../services/ipcClient';
+import { describeTxError } from '../store/busTxControl';
 import { databaseStore, useDatabaseStore } from '../store/databaseStore';
 import { plotStore } from '../store/plotStore';
 import { workbenchStore } from '../store/workbenchStore';
@@ -66,10 +68,11 @@ import {
 import {
   type ClipboardFrame,
   formatFrameLine,
+  formatFrameLines,
   frameClipboard,
   isValidFdLength,
   nextValidFdLength,
-  parseFrameLine,
+  parseFrameLines,
 } from '../utils/frameClipboard';
 import { QuickPlotButton } from './PlotterView';
 import type { StatusBanner } from './TopBar';
@@ -371,6 +374,27 @@ function buildActiveSignalTupleList(
   return tuples;
 }
 
+function updateExpandedRows(previous: Set<string>, keys: readonly string[], expanded: boolean): Set<string> {
+  const next = new Set(previous);
+  for (const key of keys) {
+    if (expanded) next.add(key);
+    else next.delete(key);
+  }
+  return next;
+}
+
+function getTxMessageSchema(entry: TxListEntry): MessageSchemaDto | undefined {
+  if (entry.mode !== 'symbolic') return undefined;
+  return databaseStore.getMessageForBus(entry.busId, entry.messageKey ?? '', entry.arbId, entry.isExtended);
+}
+
+function focusMessagePane(event: React.MouseEvent<HTMLElement>): void {
+  if (event.target instanceof Element && !event.target.closest('button, input, select, textarea, a, [contenteditable]')
+    && !window.getSelection()?.toString()) {
+    event.currentTarget.focus({ preventScroll: true });
+  }
+}
+
 export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
   bitrateProfileId: _bitrateProfileId,
   mockFpsPreset: _mockFpsPreset,
@@ -394,6 +418,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
   // Receive pane controls (expandedRxKeys persisted in databaseStore for Project save/restore)
   const [rxFilter, setRxFilter] = useState<string>('');
   const [rxErrorsOnly, setRxErrorsOnly] = useState<boolean>(false);
+  const [hiddenRxKeys, setHiddenRxKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [rxColumnMode, setRxColumnMode] = useState<RxColumnMode>('CAN');
   const expandedRxKeys = useMemo(
     () => new Set<string>(dbState.expandedRxKeys),
@@ -421,6 +446,47 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
   const [selectedRxKey, setSelectedRxKey] = useState<string | null>(null);
   const rxSectionRef = useRef<HTMLElement | null>(null);
   const txSectionRef = useRef<HTMLElement | null>(null);
+
+  const [selectedRxKeys, setSelectedRxKeys] = useState<ReadonlySet<string> | null>(null);
+  const [selectedTxIds, setSelectedTxIds] = useState<ReadonlySet<string> | null>(null);
+  const multipleTxSelected = (selectedTxIds?.size ?? 0) > 1;
+
+  useEffect(() => {
+    if (!selectedTxIds) return;
+    const current = txState.selectedEntryId;
+    if (current === null || !selectedTxIds.has(current)) {
+      setSelectedTxIds(null);
+      return;
+    }
+    const surviving = new Set(txState.entries.filter((entry) => selectedTxIds.has(entry.id)).map((entry) => entry.id));
+    if (surviving.size !== selectedTxIds.size) setSelectedTxIds(surviving.size > 1 ? surviving : null);
+  }, [selectedTxIds, txState.entries, txState.selectedEntryId]);
+
+  const selectRxRow = (key: string): void => {
+    setSelectedRxKey(key);
+    setSelectedRxKeys(null);
+  };
+
+  const selectTxRow = (id: string): void => {
+    transmitStore.selectEntry(id);
+    setSelectedTxIds(null);
+  };
+
+  const toggleRxRow = (key: string): void => {
+    setExpandedRxKeys((previous) => {
+      const next = new Set(previous);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+  };
+
+  const toggleTxRow = (id: string): void => {
+    setExpandedTxIds((previous) => {
+      const next = new Set(previous);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  };
 
   // Column layout state (order + widths) with localStorage persistence
   const [initialLayout] = useState(() => loadPersistedColumnLayout());
@@ -806,7 +872,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     const out: FrameTelemetryDto[] = [];
 
     for (const f of framesSlice.frames) {
-      if (rxErrorsOnly && !f.isError) {
+      if ((rxErrorsOnly && !f.isError) || (hiddenRxKeys.size > 0 && hiddenRxKeys.has(buildFrameInstanceKey(f)))) {
         continue;
       }
 
@@ -864,7 +930,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     });
 
     return out;
-  }, [framesSlice.frames, rxFilter, rxErrorsOnly, dbState.busSchemas]);
+  }, [framesSlice.frames, rxFilter, rxErrorsOnly, hiddenRxKeys, dbState.busSchemas]);
 
   // Transmit execution helper (single-shot or start periodic)
   const sendTxEntry = useCallback(
@@ -1019,22 +1085,51 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     });
   };
 
-  const handleDeleteSelectedTx = async (): Promise<void> => {
-    const sel = txState.entries.find((e) => e.id === txState.selectedEntryId);
-    if (!sel) return;
-    if (sel.periodicEnabled && sel.backendJobId !== null) {
-      try {
-        await apiStopPeriodicTx(sel.backendJobId);
-      } catch {
-        // Ignore
+  const handleDeleteTx = async (id: string): Promise<void> => {
+    const entry = transmitStore.getState().entries.find((item) => item.id === id);
+    if (!entry || busyTxIds.has(id)) return;
+    setBusyTxIds((previous) => new Set(previous).add(id));
+    try {
+      if (entry.backendJobId !== null) {
+        await apiStopPeriodicTx(entry.backendJobId);
       }
+      transmitStore.removeEntry(id);
+    } catch (error) {
+      onStatusMessage({
+        kind: 'error',
+        message: t('context.deleteTxFailed', { error: describeTxError(error) }),
+      });
+    } finally {
+      setBusyTxIds((previous) => {
+        const next = new Set(previous);
+        next.delete(id);
+        return next;
+      });
     }
-    transmitStore.removeEntry(sel.id);
+  };
+
+  const handleDeleteSelectedTx = async (): Promise<void> => {
+    const id = transmitStore.getState().selectedEntryId;
+    if (id !== null) await handleDeleteTx(id);
+  };
+
+  const hideRxRows = (keys: ReadonlySet<string>): void => {
+    if (keys.size === 0) return;
+    setHiddenRxKeys((previous) => new Set([...previous, ...keys]));
+    setSelectedRxKey((selected) => selected !== null && keys.has(selected) ? null : selected);
+    setSelectedRxKeys((selected) => {
+      if (!selected) return null;
+      const remaining = new Set([...selected].filter((key) => !keys.has(key)));
+      return remaining.size > 0 ? remaining : null;
+    });
   };
 
   const handleClearReceive = async (): Promise<void> => {
     await apiResetTelemetry().catch(() => undefined);
     telemetryStore.clearAllTelemetry();
+    setHiddenRxKeys(new Set());
+    setSelectedRxKeys(null);
+    setSelectedRxKey(null);
     transmitStore.resetCounters();
     onStatusMessage({
       kind: 'info',
@@ -1099,28 +1194,9 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     setModalState({ open: false, editing: null });
   };
 
-  // Spacebar single-shot trigger for selected TX row (Industrial CAN standard)
-  useEffect(() => {
-    const onKeyDown = (ev: KeyboardEvent): void => {
-      if (modalState.open) return;
-      if (ev.ctrlKey || ev.altKey || ev.metaKey || ev.shiftKey) return;
-      const tag = (ev.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
-
-      if (ev.code === 'Space' && txState.selectedEntryId) {
-        const selected = txState.entries.find((e) => e.id === txState.selectedEntryId);
-        if (selected) {
-          ev.preventDefault();
-          void sendTxEntry(selected, false);
-        }
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [modalState.open, txState.selectedEntryId, txState.entries, sendTxEntry]);
-
-  const selectedTxEntry =
-    txState.entries.find((e) => e.id === txState.selectedEntryId) ?? null;
+  const selectedTxEntry = multipleTxSelected
+    ? null
+    : txState.entries.find((entry) => entry.id === txState.selectedEntryId) ?? null;
 
   // ── Keyboard: RX frame clipboard, TX paste, list navigation ───────────────
   const buildClipFromRx = (f: FrameTelemetryDto): ClipboardFrame | 'invalid' | null => {
@@ -1151,47 +1227,58 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     };
   };
 
-  const findSelectedRxClip = (): ClipboardFrame | null => {
-    if (selectedRxKey === null) {
-      onStatusMessage({ kind: 'info', message: t('rxtx.status.rxCopyNone') });
-      return null;
+  const collectRxClips = (clickedRowKey?: string): { frames: ClipboardFrame[]; skipped: number } => {
+    const keys = clickedRowKey && !selectedRxKeys?.has(clickedRowKey)
+      ? new Set([clickedRowKey])
+      : selectedRxKeys ?? new Set(selectedRxKey === null ? [] : [selectedRxKey]);
+    const frames: ClipboardFrame[] = [];
+    let skipped = 0;
+    let hasInvalidPayload = false;
+    for (const frame of rxFrames) {
+      if (!keys.has(buildFrameInstanceKey(frame))) continue;
+      const clip = buildClipFromRx(frame);
+      if (!clip || clip === 'invalid') {
+        skipped += 1;
+        if (clip === 'invalid') hasInvalidPayload = true;
+      } else {
+        frames.push(clip);
+      }
     }
-    const frame = rxFrames.find((f) => buildFrameInstanceKey(f) === selectedRxKey);
-    if (!frame) {
-      onStatusMessage({ kind: 'info', message: t('rxtx.status.rxCopyNone') });
-      return null;
+    if (frames.length === 0) {
+      onStatusMessage({
+        kind: skipped > 0 ? 'error' : 'info',
+        message: t(skipped === 0 ? 'rxtx.status.rxCopyNone'
+          : hasInvalidPayload ? 'rxtx.status.rxCopyInvalid' : 'rxtx.status.rxCopyError'),
+      });
     }
-    const clip = buildClipFromRx(frame);
-    if (clip === null) {
-      onStatusMessage({ kind: 'error', message: t('rxtx.status.rxCopyError') });
-      return null;
-    }
-    if (clip === 'invalid') {
-      onStatusMessage({ kind: 'error', message: t('rxtx.status.rxCopyInvalid') });
-      return null;
-    }
-    return clip;
+    return { frames, skipped };
   };
 
-  const handleCopySelectedRx = async (): Promise<void> => {
-    const clip = findSelectedRxClip();
-    if (!clip) return;
-    frameClipboard.set(clip);
-    const line = formatFrameLine(clip);
+  const copySelectedRx = async (clickedRowKey?: string): Promise<void> => {
+    const { frames, skipped } = collectRxClips(clickedRowKey);
+    if (frames.length === 0) return;
+    frameClipboard.set(frames);
+    const text = formatFrameLines(frames);
     try {
-      await navigator.clipboard.writeText(line);
+      await navigator.clipboard.writeText(text);
+      frameClipboard.markSystemSynced(frames);
     } catch {
-      // System clipboard denied; the in-app frame clipboard is still set.
+      // The in-app clipboard preserves the batch when system clipboard access is denied.
     }
-    onStatusMessage({ kind: 'success', message: t('rxtx.status.rxCopied', { line }) });
+    onStatusMessage({
+      kind: 'success',
+      message: frames.length === 1 && skipped === 0
+        ? t('rxtx.status.rxCopied', { line: text })
+        : t('rxtx.status.rxCopiedBatch', { count: frames.length, skipped }),
+    });
   };
 
-  /** Creates a SAFE TX entry: raw mode, manual (cycle 0), periodic OFF, never sent. */
-  const addTxEntryFromClip = (clip: ClipboardFrame): void => {
+  /** Prepares a manual TX entry with periodic TX off. */
+  const makeTxEntryFromClip = (clip: ClipboardFrame): TxListEntry => {
     const selTx = txState.entries.find((e) => e.id === txState.selectedEntryId);
     const busId =
       clip.busId ?? selTx?.busId ?? header.buses.find((b) => b.connected)?.busId ?? 0;
-    const entry: TxListEntry = {
+    return {
       id: `tx-clip-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
       busId,
       mode: 'raw',
@@ -1212,35 +1299,114 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
       creator: 'Clipboard',
       comment: '',
     };
-    transmitStore.addEntry(entry);
+  };
+
+  const addTxEntriesFromClipboard = (frames: readonly ClipboardFrame[], skipped = 0): void => {
+    if (frames.length === 0) return;
+    transmitStore.addEntries(frames.map(makeTxEntryFromClip));
     onStatusMessage({
       kind: 'success',
-      message: t('rxtx.status.txAddedFromFrame', { line: formatFrameLine(clip) }),
+      message: frames.length === 1 && skipped === 0
+        ? t('rxtx.status.txAddedFromFrame', { line: formatFrameLine(frames[0]) })
+        : t('rxtx.status.txAddedFromFrames', { count: frames.length, skipped }),
     });
   };
 
-  const handleCopySelectedRxToTx = (): void => {
-    const clip = findSelectedRxClip();
-    if (clip) addTxEntryFromClip(clip);
+  const copySelectedRxToTx = (clickedRowKey?: string): void => {
+    const { frames, skipped } = collectRxClips(clickedRowKey);
+    addTxEntriesFromClipboard(frames, skipped);
   };
 
   const handlePasteToTx = async (): Promise<void> => {
-    let clip = frameClipboard.get();
-    if (!clip) {
-      let text: string;
-      try {
-        text = await navigator.clipboard.readText();
-      } catch {
-        onStatusMessage({ kind: 'error', message: t('rxtx.status.pasteUnavailable') });
-        return;
-      }
-      clip = parseFrameLine(text);
-      if (!clip) {
-        onStatusMessage({ kind: 'error', message: t('rxtx.status.pasteInvalid') });
-        return;
-      }
+    const { frames: localFrames, systemSynced } = frameClipboard.get();
+    if (localFrames.length > 0 && !systemSynced) {
+      addTxEntriesFromClipboard(localFrames);
+      return;
     }
-    addTxEntryFromClip(clip);
+    let text: string;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      if (localFrames.length > 0) addTxEntriesFromClipboard(localFrames);
+      else onStatusMessage({ kind: 'error', message: t('rxtx.status.pasteUnavailable') });
+      return;
+    }
+    const normalizedText = text.replace(/\r\n/g, '\n').trim();
+    const frames = localFrames.length > 0 &&
+      (!normalizedText || normalizedText === formatFrameLines(localFrames))
+      ? localFrames
+      : parseFrameLines(normalizedText);
+    if (!frames) {
+      onStatusMessage({ kind: 'error', message: t('rxtx.status.pasteInvalid') });
+      return;
+    }
+    addTxEntriesFromClipboard(frames);
+  };
+
+  const newTxMenuItem = {
+    label: t('rxtx.tx.newMessage'),
+    run: () => setModalState({ open: true, editing: null }),
+  };
+
+  const openRxRowMenu = (
+    event: React.MouseEvent<HTMLTableRowElement>,
+    frame: FrameTelemetryDto,
+    rowKey: string,
+    message: MessageSchemaDto | undefined,
+    signals: readonly (SignalSchemaDto | undefined)[],
+  ): void => {
+    const clip = buildClipFromRx(frame);
+    const canUseFrame = clip !== null && clip !== 'invalid';
+    const copiesSelection = (selectedRxKeys?.size ?? 0) > 1 && selectedRxKeys?.has(rowKey);
+    const watched = (message?.signalIds ?? []).flatMap((id) => {
+      const signal = signals[id];
+      return signal ? [makeWatchSignal(frame.busId, signal)] : [];
+    });
+    openContextMenu(event, [
+      newTxMenuItem,
+      {
+        label: t('context.editRxAsTx'),
+        run: () => {
+          if (canUseFrame) setModalState({ open: true, editing: makeTxEntryFromClip(clip) });
+        },
+        disabled: !canUseFrame,
+      },
+      {
+        label: t(copiesSelection ? 'context.copyRxSelection' : 'context.copyRxFrame'),
+        run: () => void copySelectedRx(rowKey),
+        disabled: !canUseFrame && !copiesSelection,
+      },
+      {
+        label: t(copiesSelection ? 'context.copyRxSelectionToTx' : 'rxtx.rx.copyToTx'),
+        run: () => copySelectedRxToTx(rowKey),
+        disabled: !canUseFrame && !copiesSelection,
+      },
+      {
+        label: t('context.copyCanId'),
+        run: () => copyMenuText(formatPcanIdHex(frame.arbId, frame.isExtended)),
+        disabled: frame.isError,
+      },
+      {
+        label: t('context.copyPayload'),
+        run: () => copyMenuText(frame.rawBytes.slice(0, frame.dlc).map(formatByteHex).join(' ')),
+      },
+      {
+        label: t('context.watchMessage'),
+        run: () => workbenchStore.addWatchSignals(watched),
+        disabled: watched.length === 0,
+      },
+      {
+        label: t('rxtx.rx.openInDbc'),
+        run: () => {
+          if (message) databaseStore.selectMessageInSymbolsTab(message.messageKey, undefined, frame.busId);
+        },
+        disabled: !message,
+      },
+      {
+        label: t(copiesSelection ? 'context.hideRxSelection' : 'context.hideRxRow'),
+        run: () => hideRxRows(copiesSelection && selectedRxKeys ? selectedRxKeys : new Set([rowKey])),
+      },
+    ]);
   };
 
   // Latest-closure holder so the window listener is bound once (not per 60 Hz render).
@@ -1251,11 +1417,19 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
     selectedRxKey: string | null;
     txEntries: readonly TxListEntry[];
     selectedTxId: string | null;
+    multipleTxSelected: boolean;
+    selectAll: () => void;
+    expandSelection: (expanded: boolean) => void;
+    selectRx: (key: string) => void;
+    selectTx: (id: string) => void;
+    sendTx: (entry: TxListEntry) => Promise<void>;
     copyRx: () => Promise<void>;
     rxToTx: () => void;
     paste: () => Promise<void>;
     editTx: (e: TxListEntry) => void;
     deleteTx: () => Promise<void>;
+    deleteRx: () => void;
+    hasRxSelection: boolean;
   } | null>(null);
   useEffect(() => {
     kbRef.current = {
@@ -1265,11 +1439,52 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
       selectedRxKey,
       txEntries: txState.entries,
       selectedTxId: txState.selectedEntryId,
-      copyRx: handleCopySelectedRx,
-      rxToTx: handleCopySelectedRxToTx,
+      multipleTxSelected,
+      selectAll: () => {
+        if (activePane === 'rx') {
+          const keys = new Set(rxFrames.map(buildFrameInstanceKey));
+          setSelectedRxKeys(keys.size ? keys : null);
+          if (selectedRxKey === null || !keys.has(selectedRxKey)) {
+            setSelectedRxKey(keys.values().next().value ?? null);
+          }
+        } else {
+          const ids = new Set(txState.entries.map((entry) => entry.id));
+          setSelectedTxIds(ids.size ? ids : null);
+          if (txState.selectedEntryId === null || !ids.has(txState.selectedEntryId)) {
+            transmitStore.selectEntry(ids.values().next().value ?? null);
+          }
+        }
+      },
+      expandSelection: (expanded) => {
+        if (activePane === 'rx') {
+          const keys = rxFrames.filter((frame) => {
+            const key = buildFrameInstanceKey(frame);
+            return (selectedRxKeys?.has(key) ?? (key === selectedRxKey)) &&
+              (!expanded || frame.isError || frame.signals.length > 0 || Boolean(databaseStore.getMessageForBus(
+                frame.busId, frame.messageKey, frame.arbId, frame.isExtended,
+              )));
+          }).map(buildFrameInstanceKey);
+          if (keys.length === 0) return;
+          setExpandedRxKeys((previous) => updateExpandedRows(previous, keys, expanded));
+        } else {
+          const ids = txState.entries.filter((entry) =>
+            (selectedTxIds?.has(entry.id) ?? (entry.id === txState.selectedEntryId)) &&
+            (!expanded || Boolean(getTxMessageSchema(entry)?.signalIds.length)),
+          ).map((entry) => entry.id);
+          if (ids.length === 0) return;
+          setExpandedTxIds((previous) => updateExpandedRows(previous, ids, expanded));
+        }
+      },
+      selectRx: selectRxRow,
+      selectTx: selectTxRow,
+      sendTx: (entry) => sendTxEntry(entry, false),
+      copyRx: copySelectedRx,
+      rxToTx: copySelectedRxToTx,
       paste: handlePasteToTx,
       editTx: (e) => setModalState({ open: true, editing: e }),
       deleteTx: handleDeleteSelectedTx,
+      deleteRx: () => hideRxRows(selectedRxKeys ?? new Set(selectedRxKey === null ? [] : [selectedRxKey])),
+      hasRxSelection: (selectedRxKeys?.size ?? 0) > 0 || selectedRxKey !== null,
     };
   });
 
@@ -1285,7 +1500,8 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
       if (!c || c.blocked || ev.defaultPrevented || !c.activePane) return;
       const target = ev.target as HTMLElement | null;
       const tag = target?.tagName;
-      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || target?.isContentEditable) {
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || target?.isContentEditable
+        || target?.closest('[role="menu"]')) {
         return;
       }
       if (
@@ -1295,15 +1511,20 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
         return;
       }
 
+      const pane = c.activePane === 'rx' ? rxSectionRef.current : txSectionRef.current;
+      if (!target || !pane?.contains(target)) return;
       const mod = ev.ctrlKey || ev.metaKey;
       if (mod) {
         if (ev.altKey || ev.shiftKey) return;
         const k = ev.key.toLowerCase();
-        if (k === 'c' && c.activePane === 'rx') {
-          if (c.selectedRxKey === null || (window.getSelection()?.toString() ?? '') !== '') return;
+        if (k === 'a') {
+          ev.preventDefault();
+          c.selectAll();
+        } else if (k === 'c' && c.activePane === 'rx') {
+          if (!c.hasRxSelection || (window.getSelection()?.toString() ?? '') !== '') return;
           ev.preventDefault();
           void c.copyRx();
-        } else if (k === 't' && c.selectedRxKey !== null) {
+        } else if (k === 't' && c.hasRxSelection) {
           ev.preventDefault();
           c.rxToTx();
         } else if (k === 'v' && c.activePane === 'tx') {
@@ -1315,6 +1536,11 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
       if (ev.altKey || ev.shiftKey) return;
 
       const key = ev.key;
+      if (key === 'ArrowRight' || key === 'ArrowLeft') {
+        ev.preventDefault();
+        c.expandSelection(key === 'ArrowRight');
+        return;
+      }
       const isNav = key === 'ArrowUp' || key === 'ArrowDown' || key === 'Home' || key === 'End';
       if (c.activePane === 'tx') {
         const n = c.txEntries.length;
@@ -1328,17 +1554,21 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
               break;
             }
           }
-          transmitStore.selectEntry(c.txEntries[step(key, cur, n)].id);
-        } else if (key === 'Enter' && tag !== 'BUTTON') {
-          const sel = c.txEntries.find((e) => e.id === c.selectedTxId);
-          if (sel) {
+          c.selectTx(c.txEntries[step(key, cur, n)].id);
+        } else if ((key === 'Enter' || key === ' ') && tag !== 'BUTTON' && !c.multipleTxSelected) {
+          const entry = c.txEntries.find((candidate) => candidate.id === c.selectedTxId);
+          if (entry) {
             ev.preventDefault();
-            c.editTx(sel);
+            if (key === 'Enter') c.editTx(entry);
+            else if (!ev.repeat) void c.sendTx(entry);
           }
-        } else if (key === 'Delete' && c.selectedTxId !== null) {
+        } else if (key === 'Delete' && c.selectedTxId !== null && !c.multipleTxSelected) {
           ev.preventDefault();
           void c.deleteTx();
         }
+      } else if (key === 'Delete' && c.hasRxSelection) {
+        ev.preventDefault();
+        c.deleteRx();
       } else if (isNav) {
         const n = c.rxFrames.length;
         if (n === 0) return;
@@ -1350,7 +1580,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
             break;
           }
         }
-        setSelectedRxKey(buildFrameInstanceKey(c.rxFrames[step(key, cur, n)]));
+        c.selectRx(buildFrameInstanceKey(c.rxFrames[step(key, cur, n)]));
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -1385,8 +1615,27 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
         <section
           ref={rxSectionRef}
           tabIndex={0}
+          onContextMenu={(event) => openContextMenu(event, [
+            newTxMenuItem,
+            {
+              label: t('context.restoreRxRows'),
+              run: () => setHiddenRxKeys(new Set()),
+              disabled: hiddenRxKeys.size === 0,
+            },
+            {
+              label: t('rxtx.rx.expandAll'),
+              run: () => setExpandedRxKeys(new Set(rxFrames.map(buildFrameInstanceKey))),
+              disabled: rxFrames.length === 0,
+            },
+            {
+              label: t('rxtx.rx.collapseAll'),
+              run: () => setExpandedRxKeys(new Set()),
+              disabled: expandedRxKeys.size === 0,
+            },
+          ])}
           onMouseDown={() => setActivePane('rx')}
           onFocus={() => setActivePane('rx')}
+          onClick={focusMessagePane}
           style={{
             height: `${rxHeightPct}%`,
             backgroundColor: 'var(--bg-panel)',
@@ -1557,8 +1806,8 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                 <div className="h-4 w-[1px] bg-[var(--border-strong)] mx-1" />
                 <button
                   type="button"
-                  disabled={selectedRxKey === null}
-                  onClick={handleCopySelectedRxToTx}
+                  disabled={selectedRxKey === null && !selectedRxKeys?.size}
+                  onClick={() => copySelectedRxToTx()}
                   style={{
                     backgroundColor: 'var(--bg-panel)',
                     borderColor: 'var(--border-strong)',
@@ -1632,6 +1881,7 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                   {rxFrames.map((frame, rowIdx) => {
                       const rowKey = buildFrameInstanceKey(frame);
                       const isExpanded = expandedRxKeys.has(rowKey);
+                      const isSelected = selectedRxKeys?.has(rowKey) ?? (rowKey === selectedRxKey);
                       const msgSchema = databaseStore.getMessageForBus(
                         frame.busId,
                         frame.messageKey,
@@ -1664,27 +1914,12 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                         <React.Fragment key={rowKey}>
                           <tr
                             data-rx-key={rowKey}
-                            onClick={() => {
-                              setSelectedRxKey(rowKey);
-                              setExpandedRxKeys((prev) => {
-                                const next = new Set(prev);
-                                if (next.has(rowKey)) next.delete(rowKey);
-                                else next.add(rowKey);
-                                return next;
-                              });
-                            }}
-                            onDoubleClick={() => {
-                              if (msgSchema) {
-                                databaseStore.selectMessageInSymbolsTab(
-                                  msgSchema.messageKey,
-                                  undefined,
-                                  frame.busId,
-                                );
-                              }
-                            }}
+                            aria-selected={isSelected}
+                            onContextMenu={(event) => openRxRowMenu(event, frame, rowKey, msgSchema, signalsById)}
+                            onClick={() => selectRxRow(rowKey)}
                             style={{
                               scrollMarginTop: '28px',
-                              backgroundColor: rowKey === selectedRxKey
+                              backgroundColor: isSelected
                                 ? 'var(--bg-row-selected)'
                                 : frame.isError
                                 ? isExpanded
@@ -1700,25 +1935,20 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                             {/* Expand Chevron */}
                             <td className="px-0">
                               <div className="pcan-cell pcan-cell-center">
-                                {frame.isError || frame.signals.length > 0 || msgSchema ? (
-                                  isExpanded ? (
-                                    <ChevronDown
-                                      className={`w-3.5 h-3.5 ${
-                                        frame.isError
-                                          ? 'text-[var(--status-critical)]'
-                                          : 'text-[var(--text-secondary)]'
-                                      } shrink-0`}
-                                    />
-                                  ) : (
-                                    <ChevronRight
-                                      className={`w-3.5 h-3.5 ${
-                                        frame.isError
-                                          ? 'text-[var(--status-critical)]'
-                                          : 'text-[var(--text-muted)]'
-                                      } shrink-0`}
-                                    />
-                                  )
-                                ) : null}
+                                {(frame.isError || frame.signals.length > 0 || msgSchema) && (
+                                  <button
+                                    type="button"
+                                    aria-label={t(isExpanded ? 'rxtx.row.collapse' : 'rxtx.row.expand')}
+                                    aria-expanded={isExpanded}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      toggleRxRow(rowKey);
+                                    }}
+                                    className={`grid size-6 place-items-center cursor-pointer ${frame.isError ? 'text-critical' : 'text-[var(--text-secondary)]'}`}
+                                  >
+                                    {isExpanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+                                  </button>
+                                )}
                               </div>
                             </td>
 
@@ -1965,8 +2195,13 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
         <section
           ref={txSectionRef}
           tabIndex={0}
+          onContextMenu={(event) => openContextMenu(event, [
+            newTxMenuItem,
+            { label: t('context.pasteTx'), run: () => void handlePasteToTx() },
+          ])}
           onMouseDown={() => setActivePane('tx')}
           onFocus={() => setActivePane('tx')}
+          onClick={focusMessagePane}
           style={{
             height: `${100 - rxHeightPct}%`,
             backgroundColor: 'var(--bg-panel)',
@@ -2254,17 +2489,9 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                     </tr>
                   ) : (
                     txState.entries.map((entry) => {
-                      const isSelected = entry.id === txState.selectedEntryId;
+                      const isSelected = selectedTxIds?.has(entry.id) ?? (entry.id === txState.selectedEntryId);
                       const isExpanded = expandedTxIds.has(entry.id);
-                      const msgSchema =
-                        entry.mode === 'symbolic'
-                          ? databaseStore.getMessageForBus(
-                              entry.busId,
-                              entry.messageKey ?? '',
-                              entry.arbId,
-                              entry.isExtended,
-                            )
-                          : undefined;
+                      const msgSchema = getTxMessageSchema(entry);
                       const signalsById = databaseStore.getBusSignals(entry.busId);
                       const txMuxInfo =
                         entry.mode === 'symbolic' && msgSchema
@@ -2284,7 +2511,24 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                         <React.Fragment key={entry.id}>
                           <tr
                             data-tx-id={entry.id}
-                            onClick={() => transmitStore.selectEntry(entry.id)}
+                            aria-selected={isSelected}
+                            onContextMenu={(event) => openContextMenu(event, [
+                              newTxMenuItem,
+                              {
+                                label: t('rxtx.tx.editMessage'),
+                                run: () => {
+                                  const current = transmitStore.getState().entries.find((item) => item.id === entry.id);
+                                  if (current) setModalState({ open: true, editing: current });
+                                },
+                                disabled: busyTxIds.has(entry.id),
+                              },
+                              {
+                                label: t('rxtx.tx.delete'),
+                                run: () => void handleDeleteTx(entry.id),
+                                disabled: busyTxIds.has(entry.id),
+                              },
+                            ])}
+                            onClick={() => selectTxRow(entry.id)}
                             onDoubleClick={() =>
                               setModalState({ open: true, editing: entry })
                             }
@@ -2317,14 +2561,9 @@ export const ReceiveTransmitView: React.FC<ReceiveTransmitViewProps> = ({
                                 {hasSignals && (
                                   <button
                                     type="button"
-                                    onClick={() =>
-                                      setExpandedTxIds((prev) => {
-                                        const next = new Set(prev);
-                                        if (next.has(entry.id)) next.delete(entry.id);
-                                        else next.add(entry.id);
-                                        return next;
-                                      })
-                                    }
+                                    aria-label={t(isExpanded ? 'rxtx.row.collapse' : 'rxtx.row.expand')}
+                                    aria-expanded={isExpanded}
+                                    onClick={() => toggleTxRow(entry.id)}
                                     className="text-[var(--text-secondary)] cursor-pointer shrink-0"
                                   >
                                     {isExpanded ? (
@@ -2869,6 +3108,18 @@ const RxErrorDetailRows: React.FC<RxErrorDetailRowsProps> = ({ frame, colSpan })
 // Clean Indented RX Signal Tree Rows (Locked 26px height, crisp 12px font)
 // ============================================================================
 
+function makeWatchSignal(busId: number, signal: SignalSchemaDto) {
+  return {
+    key: `${busId}:${signal.signalId}`,
+    busId,
+    signalId: signal.signalId,
+    name: signal.name,
+    unit: signal.unit,
+    min: signal.min,
+    max: signal.max,
+  };
+}
+
 interface RxSignalTreeRowsProps {
   rowKey: string;
   frame: FrameTelemetryDto;
@@ -2991,6 +3242,16 @@ const RxSignalTreeRows: React.FC<RxSignalTreeRowsProps> = ({
         return (
           <tr
             key={sig.signalId}
+            onContextMenu={(event) => openContextMenu(event, [
+              { label: t('context.copySignalValue'), run: () => copyMenuText(formattedVal) },
+              {
+                label: t('context.watchSignal'),
+                run: () => {
+                  if (sigSchema) workbenchStore.addWatchSignal(makeWatchSignal(frame.busId, sigSchema));
+                },
+                disabled: !sigSchema,
+              },
+            ])}
             style={{ backgroundColor: 'var(--bg-row-signal)' }}
             className="group text-[12px] hover:!bg-[var(--bg-row-hover)]"
           >
@@ -3160,6 +3421,8 @@ const ShortcutsHelp: React.FC = () => {
   }, [open]);
 
   const rows: readonly (readonly [string, string])[] = [
+    ['← / →', t('rxtx.kbd.expandCollapse')],
+    ['Ctrl+A / ⌘A', t('rxtx.kbd.selectAll')],
     ['\u2191 / \u2193', t('rxtx.kbd.txNav')],
     ['Home / End', t('rxtx.kbd.txJump')],
     ['Enter', t('rxtx.kbd.txEdit')],
@@ -3169,6 +3432,7 @@ const ShortcutsHelp: React.FC = () => {
     ['\u2191 / \u2193 / Home / End', t('rxtx.kbd.rxNav')],
     ['Ctrl+C', t('rxtx.kbd.rxCopy')],
     ['Ctrl+T', t('rxtx.kbd.rxToTx')],
+    ['Delete', t('rxtx.kbd.rxDelete')],
   ];
 
   return (

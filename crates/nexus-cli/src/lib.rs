@@ -13,11 +13,14 @@
 //!    (exit `EX_CONFIG` 78, no retry) instead of accepting the software-only TX lock.
 //! 3. **Read-Only Cloud Bridge:** Inbound actuation frames (`TX`, `CAN_TX`, `ARM_ACTIVE_BUS`, etc.)
 //!    are rejected and counted as security violations without ever touching `nexus-hal`.
+//! 4. **`cansub-selftest`** opens CANsub channels listen-only; the only TX path is the explicit
+//!    `--tx-loopback <rx_ch>` bench option (stderr warning, channel restored to listen-only after).
 
 #![forbid(unsafe_code)]
 
 use std::io::Write;
 
+pub mod cansub_selftest;
 pub mod cli;
 pub mod config;
 pub mod http_client;
@@ -25,6 +28,10 @@ pub mod runner;
 pub mod web_status;
 pub mod ws_bridge;
 
+pub use cansub_selftest::{
+    execute_cansub_selftest, run_cansub_selftest, CansubSelftestArgs, SelftestOutcome,
+    SelftestReport,
+};
 pub use cli::{
     execute_dbc_lint, lint_database_bytes, parse_cli_args, parse_env_args, AgentRunArgs,
     CliCommand, CliError, DbcLintReport, HelpTopic, CLI_VERSION,
@@ -52,7 +59,7 @@ pub use ws_bridge::{
 /// so `systemd` (`RestartPreventExitStatus=78`) stops restarting a revoked edge agent.
 pub const EXIT_CODE_EX_CONFIG: u8 = 78;
 
-/// Synchronous CLI dispatcher for `version`, `help`, and `dbc lint` commands, returning
+/// Synchronous CLI dispatcher for `version`, `help`, `dbc lint` and `cansub-selftest` commands, returning
 /// `Some(exit_code)` when handled synchronously or `None` when `agent run` needs the async Tokio runtime.
 pub fn dispatch_sync_command(
     cmd: &CliCommand,
@@ -69,6 +76,9 @@ pub fn dispatch_sync_command(
             Some(0)
         }
         CliCommand::DbcLint { path } => Some(execute_dbc_lint(path, stdout, stderr)),
+        CliCommand::CansubSelftest(args) => Some(cansub_selftest::execute_cansub_selftest(
+            args, stdout, stderr,
+        )),
         CliCommand::AgentRun(_) => None,
     }
 }

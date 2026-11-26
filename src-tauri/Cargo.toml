@@ -5,13 +5,18 @@ description = "NexusCAN — Industrial CAN / CAN-FD Bus Analyzer & Telemetry Pla
 authors = ["NexusCAN Engineering Team"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.85"
 
 [workspace]
 
 [lib]
 name = "nexuscan_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# Development only: CANsub simulator testing (`npm run tauri dev -- --features cansub-dev-root`,
+# root CA from `NEXUSCAN_CANSUB_DEV_ROOT`). Blocked in release builds by a compile_error!.
+cansub-dev-root = ["nexus-hal/cansub-dev-root"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

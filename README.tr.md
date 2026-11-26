@@ -41,7 +41,7 @@ Piyasadaki ticari CAN araçları iyi ama pahalı ve kapalı. Açık kaynak olanl
 - **DBC Support.** `.dbc` ve `.kcd` dosyaları üç aşamada derleniyor: Intel ve Motorola bit düzeni, signed ve float sinyaller, kademeli multiplexer, 64 baytlık CAN-FD mesajları, J1939 PGN'leri.
 - **Safety.** Kanallar varsayılan olarak **Listen-Only** açılıyor, yani hatta hiçbir şey göndermiyor. Göndermek için **Arm** edip onaylamak gerekiyor. **Stop All TX** butonu her ekranda var.
 - **Diagnostics.** Bus'taki ECU'ları bulup haritaya diziyor. Birine tıklayınca giden istekleri, gelen cevapları, NRC'leri ve ISO-TP frame'lerini hangi işleme ait olduklarıyla birlikte görüyorsunuz.
-- **Reverse Engineering.** Bit bazında Heatmap, Baseline/Action karşılaştırması, Field Classifier, OBD-II ile Correlation ve Cheat Engine mantığında Value Scan. Bulduğunuz sinyali direkt DBC'ye kaydedebiliyorsunuz.
+- **Reverse Engineering.** Bit bazında Heatmap, Baseline/Action karşılaştırması, Field Classifier, OBD-II ile Correlation ve adım adım daraltarak arama yapan Value Scan. Bulduğunuz sinyali direkt DBC'ye kaydedebiliyorsunuz.
 - **No fake data.** Demo modu açıkça işaretli. Onun dışında hiçbir ekran uydurma değer göstermiyor.
 
 ---
@@ -136,7 +136,7 @@ Dokümantasyonu olmayan sinyalleri bulmak için ayrı bir sekme. Tamamen pasif �
 - **Signal Inspector**: Izgarada bitleri seçiyorsunuz, farklı yorumlarını (uzunluk, Intel/Motorola, signed/unsigned, float, ölçek) aynı anda grafikte görüyorsunuz.
 - **Correlation**: Bus'tan okunan bir OBD-II PID'i (örneğin hız), koyduğunuz işaretler veya başka bir sinyal referans alınıyor. Frame'deki bütün olası bit kombinasyonları deneniyor (klasik bir frame için yaklaşık 6.200 aday, ~0,1 saniyede). En iyi eşleşmeler ölçek ve ofsetleriyle birlikte sıralanıyor. ±500 ms'ye kadar gecikme de tespit ediliyor.
 - **Save to DBC**: Bulduğunuz sinyali isim, ölçek, birim ve değer tablosuyla taslak olarak kaydediyorsunuz. *Apply to bus* ile taslaklar `RE_found.dbc` olarak yükleniyor, trace ve grafiklerde hemen çözümleniyor. Ayrı bir `.dbc` dosyası olarak dışa aktarabilir veya mevcut DBC'nize yeni dosya olarak ekleyebilirsiniz.
-- **Value Scan**: Cheat Engine'deki gibi çalışıyor. Bir değer arıyorsunuz (örneğin 80 km/h), araçta bir şeyi değiştiriyorsunuz, sonra *arttı / azaldı / değişti / değişmedi* diye daraltıyorsunuz. Birkaç adımda doğru sinyal kalıyor. Değerleri ondalık veya `0x` hex girebilirsiniz. Son sekiz adım geri alınabiliyor. Bir milyon aday yaklaşık 50 ms'de taranıyor.
+- **Value Scan**: Adım adım daraltarak çalışıyor. Bir değer arıyorsunuz (örneğin 80 km/h), araçta bir şeyi değiştiriyorsunuz, sonra *arttı / azaldı / değişti / değişmedi* diye daraltıyorsunuz. Birkaç adımda doğru sinyal kalıyor. Değerleri ondalık veya `0x` hex girebilirsiniz. Son sekiz adım geri alınabiliyor. Bir milyon aday yaklaşık 50 ms'de taranıyor.
 
 ### AI Co-pilot (MCP Server)
 

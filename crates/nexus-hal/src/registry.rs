@@ -1,5 +1,6 @@
 //! Multi-driver registry discovering and opening channels across all compiled backends.
 
+use crate::drivers::cansub_drv::{CansubDriver, CANSUB_DRIVER_ID};
 use crate::drivers::gs_usb_drv::GsUsbDriver;
 use crate::drivers::mock_drv::MockCanDriver;
 use crate::drivers::probe::{KvaserDriver, PcanDriver, VectorXlDriver};
@@ -17,6 +18,8 @@ use std::sync::Arc;
 #[derive(Clone, Default)]
 pub struct DriverRegistry {
     drivers: Vec<Arc<dyn AdapterDriver>>,
+    /// Concrete handle to the registered CANsub driver (manual host probing, `"cansub:"` routing).
+    cansub: Option<Arc<CansubDriver>>,
 }
 
 impl DriverRegistry {
@@ -24,6 +27,7 @@ impl DriverRegistry {
     pub fn new() -> Self {
         Self {
             drivers: Vec::new(),
+            cansub: None,
         }
     }
 
@@ -33,7 +37,8 @@ impl DriverRegistry {
     /// 1. `SocketCanDriver` (`can*`, `vcan*`, `slcan*` — Linux native)
     /// 2. `GsUsbDriver` (Cross-OS pure-Rust `nusb` `gs_usb` / `candleLight` + Linux smart router)
     /// 3. `SlcanDriver` (Cross-OS Lawicel Serial / USB-CDC via `serialport`)
-    /// 4. `PcanDriver`, `KvaserDriver`, `VectorXlDriver` (Cross-OS hardware & commercial SDK drivers)
+    /// 4. `PcanDriver`, `KvaserDriver`, `VectorXlDriver`, `CansubDriver` (Cross-OS hardware,
+    ///    commercial SDK and network (CSS Electronics CANsub, TLS/WSS) drivers)
     /// 5. `MockCanDriver` (`mock0` + `mock1` — virtual simulators always listed last)
     pub fn with_defaults() -> Self {
         let mut reg = Self::new();
@@ -46,6 +51,7 @@ impl DriverRegistry {
         reg.register(Arc::new(PcanDriver::new()));
         reg.register(Arc::new(KvaserDriver::new()));
         reg.register(Arc::new(VectorXlDriver::new()));
+        reg.register_cansub(Arc::new(CansubDriver::new()));
         reg.register(Arc::new(MockCanDriver::new()));
         reg
     }
@@ -58,6 +64,21 @@ impl DriverRegistry {
     /// Registers an [`AdapterDriver`] backend.
     pub fn register(&mut self, driver: Arc<dyn AdapterDriver>) {
         self.drivers.push(driver);
+    }
+
+    /// Registers the CANsub driver (also as a generic [`AdapterDriver`]) and keeps a concrete
+    /// handle for [`Self::cansub`] and `"cansub:"` device-id routing. Replaces a previous one.
+    pub fn register_cansub(&mut self, driver: Arc<CansubDriver>) {
+        self.drivers.retain(|d| d.driver_id() != CANSUB_DRIVER_ID);
+        self.drivers
+            .push(Arc::clone(&driver) as Arc<dyn AdapterDriver>);
+        self.cansub = Some(driver);
+    }
+
+    /// The registered CANsub driver, e.g. for `CansubDriver::add_known_host`
+    /// (Tauri `cmd_cansub_probe_host`).
+    pub fn cansub(&self) -> Option<Arc<CansubDriver>> {
+        self.cansub.clone()
     }
 
     /// Discovers all available devices across all registered drivers.
@@ -92,6 +113,7 @@ impl DriverRegistry {
     /// | `slcan` (serial Lawicel) | **Fails before the CAN channel is opened**: the input is drained until quiet after `C` and before `L`; a still-streaming line means `L` is not sent. `Hardware` only if every setup command (`C`, `Sx`, `Yx`) got `CR` and `L` got a bare `CR` (or the exact echo `L\r` then `CR`; at most 16 bytes scanned). Otherwise (`BEL`, no reply, any other line, or a refused / unanswered setup command) `C` is sent, the serial port is closed, and the error is returned; `O` is never sent. Without the flag the channel opens with `O` instead (Lawicel has no other receive mode), so the adapter ACKs, and it is reported `SoftwareOnly` with the software TX lock. Limit: `Hardware` here is the adapter's claim, not proof (Lawicel cannot read back the mode; some clone firmwares answer `CR` to every command). |
     /// | `pcan` native PCAN-Basic (`PCANBasic.dll` / `libpcanbasic.so` / `libPCBUSB.dylib`, loaded at runtime) | **Fails before open**: `PCAN_LISTEN_ONLY` is set before `CAN_Initialize*`; if PCAN-Basic refuses it the channel is never initialized. After init the parameter is read back: `Hardware` only if it reads ON (or the read is unsupported but the pre-init set succeeded); otherwise the channel is uninitialized and the error returned. Without the flag a refused pre-init set is retried after init, and an unconfirmed mode is reported `SoftwareOnly`. On Linux, `peak_usb` `can*` interfaces are routed to `socketcan` first. |
     /// | `kvaser` / `gs_usb` native SDK paths | n/a today: no native backend opens a channel yet (they error or route to SocketCAN). |
+    /// | `cansub` (CSS Electronics CANsub, TLS/WSS) | **Fails before open**: the full `PUT /api/can/{ch}/phy` with `listen_only = true` is applied before the channel WebSocket exists; any REST error aborts the open. Always `Hardware`. |
     /// | `mock` | n/a: `Virtual`, always allowed. |
     /// | any other / future driver keeping the trait default `SoftwareOnly` | **Closes after open**: this function calls [`CanChannel::close`] and drops the channel before returning, so it never reaches a bus-io thread. |
     pub fn open_by_device_id(
@@ -123,6 +145,18 @@ impl DriverRegistry {
     ) -> Result<(DeviceDescriptor, Box<dyn CanChannel>), AdapterError> {
         let trimmed_id = device_id.trim();
 
+        // 0. CANsub fast path: open directly (no discovery round / mDNS browse). Host resolution
+        //    lives in the driver; `config.adapter_channel` is ignored for this family.
+        if trimmed_id.starts_with("cansub:") {
+            let drv = self
+                .cansub
+                .clone()
+                .unwrap_or_else(|| Arc::new(CansubDriver::new()));
+            let ch = drv.open_by_device_id(trimmed_id, config)?;
+            let actual_desc = ch.descriptor().clone();
+            return Ok((actual_desc, ch));
+        }
+
         // 1. Check exact match among currently enumerated devices first (unless manual SLCAN port override is provided).
         let manual_serial_override = config
             .serial_port
@@ -135,6 +169,10 @@ impl DriverRegistry {
                 || config.driver_family.as_deref() == Some("slcan"))
         {
             for drv in &self.drivers {
+                // CANsub ids took the fast path above; skip its (network) discovery here.
+                if drv.driver_id() == CANSUB_DRIVER_ID {
+                    continue;
+                }
                 if let Ok(devs) = drv.discover_devices() {
                     if let Some(desc) = devs.into_iter().find(|d| d.device_id == trimmed_id) {
                         let ch = drv.open_channel(&desc, config)?;

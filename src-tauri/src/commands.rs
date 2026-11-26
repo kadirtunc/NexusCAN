@@ -17,7 +17,7 @@ use nexus_hal::pipeline::re_analyzer::{
 use nexus_hal::pipeline::re_analyzer::{
     ReScanFirstSpec, ReScanNextOp, ReScanResultsDto, ReScanSort, ReScanStatusDto,
 };
-use nexus_hal::pipeline::PipelineEngine;
+use nexus_hal::pipeline::{validate_cansub_probe_args, PipelineEngine};
 use nexus_hal::runstore::{RunQueryFilterDto, RunRecordV1, RunStoreError};
 use nexus_hal::seedkey::SeedKeyPolicy;
 use nexus_hal::{
@@ -119,6 +119,23 @@ pub async fn cmd_probe_drivers(
 ) -> Result<DriverProbeReportDto, AppError> {
     run_blocking(state, "cmd_probe_drivers", move |e| {
         Ok(e.cmd_probe_drivers())
+    })
+    .await
+}
+
+/// Verifies a manually entered CSS Electronics CANsub host (`deviceId` / `acceptAny` select the
+/// TLS rule, contract cansub-v1 §2.6) and lists its channels. Arguments are validated before any
+/// network I/O; the connect runs on the blocking pool. SDK / driver messages pass through verbatim.
+#[tauri::command]
+pub async fn cmd_cansub_probe_host(
+    state: State<'_, AppState>,
+    host: String,
+    device_id: Option<String>,
+    accept_any: bool,
+) -> Result<Vec<DeviceDescriptorDto>, AppError> {
+    let (host, device_id) = validate_cansub_probe_args(&host, device_id)?;
+    run_blocking(state, "cmd_cansub_probe_host", move |e| {
+        e.cmd_cansub_probe_host(host, device_id, accept_any)
     })
     .await
 }
@@ -1019,6 +1036,51 @@ pub async fn cmd_set_debug_window_open(
     }
 }
 
+/// Manages one local Trace viewer. Only the main analyzer can open or close it.
+#[tauri::command]
+pub async fn cmd_trace_window(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    channel_id: String,
+    action: String,
+) -> Result<bool, AppError> {
+    if window.label() != "main"
+        || channel_id.len() != 32
+        || !channel_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(AppError::Ipc("Invalid Trace window request".into()));
+    }
+    let label = format!("trace-view-{channel_id}");
+    let existing = app.get_webview_window(&label);
+    match action.as_str() {
+        "exists" => Ok(existing.is_some()),
+        "focus" | "close" => {
+            let Some(view) = existing else { return Ok(false) };
+            let result = if action == "focus" { view.set_focus() } else { view.close() };
+            result.map_err(|error| AppError::Ipc(error.to_string()))?;
+            Ok(true)
+        }
+        "open" => {
+            if let Some(view) = existing {
+                view.set_focus().map_err(|error| AppError::Ipc(error.to_string()))?;
+                return Ok(true);
+            }
+            tauri::WebviewWindowBuilder::new(
+                &app,
+                label,
+                tauri::WebviewUrl::App(format!("index.html?window=trace&key={channel_id}").into()),
+            )
+            .title("NexusCAN — Trace")
+            .inner_size(1200.0, 700.0)
+            .min_inner_size(720.0, 360.0)
+            .build()
+            .map_err(|error| AppError::Ipc(error.to_string()))?;
+            Ok(true)
+        }
+        _ => Err(AppError::Ipc("Unknown Trace window action".into())),
+    }
+}
+
 // ─── Diagnostics Workspace: flow library + run store (diag-workspace-v1 §9 / §10) ───
 // Same names/arguments as `nexus_bridge`, `FlowLibCommandMap` (src/types/flowLibrary.ts) and
 // `RunStoreCommandMap` (src/types/runRecord.ts). File I/O → blocking pool. Errors are
@@ -1556,5 +1618,38 @@ pub async fn cmd_open_release_page(
         Err(join_err) => Err(AppError::Ipc(format!(
             "cmd_open_release_page worker failed: {join_err}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `cmd_cansub_probe_host` argument validation runs before any network I/O.
+    #[test]
+    fn cansub_probe_host_rejects_invalid_arguments() {
+        for host in ["", "   "] {
+            let err = AppError::from(validate_cansub_probe_args(host, None).unwrap_err());
+            assert!(err.to_string().contains("must not be empty"), "{err}");
+        }
+        let long = "a".repeat(254);
+        assert!(validate_cansub_probe_args(&long, None).is_err());
+        assert!(validate_cansub_probe_args(&"a".repeat(253), None).is_ok());
+
+        for bad in ["1234567", "123456789", "1a2b3c4g", "12 34 56", "0x1a2b3c"] {
+            let err = validate_cansub_probe_args("10.0.0.1", Some(bad.into())).unwrap_err();
+            assert!(err.to_string().contains("8 hex digits"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn cansub_probe_host_normalizes_arguments() {
+        let (host, id) =
+            validate_cansub_probe_args(" 1a2b3c4d-usb.local ", Some(" 1A2B3C4D ".into())).unwrap();
+        assert_eq!(host, "1a2b3c4d-usb.local");
+        assert_eq!(id.as_deref(), Some("1a2b3c4d"));
+        let (_, id) = validate_cansub_probe_args("10.123.45.1", Some("  ".into())).unwrap();
+        assert_eq!(id, None);
+        assert!(crate::app_commands::APP_COMMANDS.contains(&"cmd_cansub_probe_host"));
     }
 }
